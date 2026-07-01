@@ -47,13 +47,21 @@ connection — no independent connection.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    has_current_money_risk_chain_state,
+)
 from src.strategy.family_rebalance import (
+    ActiveRebalanceLease,
     ShiftBinDecision,
     acquire_rebalance_lease,
+    active_rebalance_lease_for_family,
     advance_rebalance_lease,
     decide_shift_bin,
 )
@@ -61,11 +69,17 @@ from src.strategy.family_rebalance import (
 # Reuse the EXACT same live-committed/in-flight phase set + schema helpers the D1
 # fill-up wiring uses (no parallel exposure-phase truth).
 from src.strategy.fill_up_wiring import (
-    _FILL_UP_BLOCKING_PHASES as _BLOCKING_PHASES,
+    _LIVE_CHAIN_SHARE_EPSILON,
     _columns,
+    _live_position_phase_sql,
     _norm_metric,
+    _row_get,
     _table_exists,
 )
+
+
+_CHAIN_COLLATERAL_RESIDUAL_MAX_AGE_SECONDS = 180.0
+_CURRENT_MONEY_RISK_CHAIN_STATES = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
 
 
 @dataclass(frozen=True)
@@ -109,6 +123,20 @@ class ShiftBinPlan:
     reason: str = ""
 
 
+def active_shift_lease_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+) -> ActiveRebalanceLease | None:
+    """Return an active SHIFT_BIN lease for this family, if one exists."""
+
+    return active_rebalance_lease_for_family(
+        conn,
+        family_key=family_key,
+        operation="SHIFT_BIN",
+    )
+
+
 def read_held_sibling_exposure(
     conn: Optional[sqlite3.Connection],
     *,
@@ -124,10 +152,10 @@ def read_held_sibling_exposure(
     bin_label DIFFER from the fresh selection is the OLD leg to close. Returns None
     when the fresh selection is the SAME token (that is fill-up, not a shift) or when
     no different-bin family position is held. Reads canonical ``position_current``,
-    restricted to live/in-flight phases with positive committed cost. Fails CLOSED on
-    a malformed schema (returns None → the caller leaves the entry path untouched; a
-    missed shift degrades to the existing fresh-entry selection, never to an unsafe
-    double-open because the family-exclusive admission still gates a true fresh entry).
+    restricted to live/in-flight phases or chain-proven current money risk. Schema/read
+    ambiguity returns None, but the live adapter must pair that with independent
+    same-family truth and fail closed rather than treating None as proof there is no
+    old leg.
     """
     sel_token = str(selected_token_id or "").strip()
     sel_bin = str(selected_bin_label or "").strip()
@@ -149,19 +177,39 @@ def read_held_sibling_exposure(
     if not metric_col:
         return None
 
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
-    cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
-    if not cost_terms:
+    phase_sql, phase_params = _live_position_phase_sql(cols)
+    positive_terms = [
+        (f"COALESCE({c},0) > 0", ())
+        for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+        if c in cols
+    ]
+    if "chain_shares" in cols:
+        if "chain_state" in cols:
+            chain_state_placeholders = ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
+            positive_terms.append(
+                (
+                    f"(COALESCE(chain_shares,0) > ? AND chain_state IN ({chain_state_placeholders}))",
+                    (_LIVE_CHAIN_SHARE_EPSILON, *_CURRENT_MONEY_RISK_CHAIN_STATES),
+                )
+            )
+        else:
+            positive_terms.append(
+                ("COALESCE(chain_shares,0) > ?", (_LIVE_CHAIN_SHARE_EPSILON,))
+            )
+    if not positive_terms:
         return None
-    positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
+    positive_sql = " AND (" + " OR ".join(term for term, _ in positive_terms) + ")"
+    positive_params: list[object] = []
+    for _, params_for_term in positive_terms:
+        positive_params.extend(params_for_term)
 
+    selected_names = (
+        "position_id", "token_id", "no_token_id", "bin_label", "direction",
+        "chain_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_shares",
+        "chain_state", metric_col,
+    )
     select_cols = []
-    for name in ("position_id", "token_id", "no_token_id", "bin_label", "direction",
-                 "chain_cost_basis_usd", "cost_basis_usd", "size_usd", metric_col):
+    for name in selected_names:
         select_cols.append(name if name in cols else f"NULL AS {name}")
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -169,9 +217,9 @@ def read_held_sibling_exposure(
         f"WHERE {phase_sql} AND city = ? AND target_date = ?{positive_sql} {order_sql}"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend([str(city), str(target_date)])
+    params.extend(positive_params)
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()
     except sqlite3.Error:
@@ -180,10 +228,7 @@ def read_held_sibling_exposure(
     metric_norm = _norm_metric(temperature_metric)
     for row in rows:
         def _g(name: str):
-            try:
-                return row[name] if isinstance(row, sqlite3.Row) else None
-            except (IndexError, KeyError):
-                return None
+            return _row_get(row, selected_names, name)
 
         if _norm_metric(_g(metric_col)) != metric_norm:
             continue
@@ -207,6 +252,13 @@ def read_held_sibling_exposure(
             if v > 0.0:
                 current_live = v
                 break
+        if current_live <= 0.0:
+            try:
+                chain_shares = float(_g("chain_shares") or 0.0)
+            except (TypeError, ValueError):
+                chain_shares = 0.0
+            if chain_shares > _LIVE_CHAIN_SHARE_EPSILON:
+                current_live = chain_shares
         return HeldSiblingExposure(
             position_id=str(_g("position_id") or ""),
             token_id=tok,
@@ -215,6 +267,58 @@ def read_held_sibling_exposure(
             current_live_usd=current_live,
         )
     return None
+
+
+def _chain_collateral_available_shares(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+) -> float | None:
+    """Return fresh CHAIN collateral token shares, or None when unavailable/stale."""
+
+    token = str(token_id or "").strip()
+    if not token:
+        return None
+    try:
+        if not _table_exists(conn, "collateral_ledger_snapshots"):
+            return None
+        row = conn.execute(
+            """
+            SELECT ctf_token_balances_json, captured_at
+              FROM collateral_ledger_snapshots
+             WHERE authority_tier = 'CHAIN'
+             ORDER BY captured_at DESC, id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+
+    balances_raw = _row_get(row, ("ctf_token_balances_json", "captured_at"), "ctf_token_balances_json")
+    captured_raw = _row_get(row, ("ctf_token_balances_json", "captured_at"), "captured_at")
+    try:
+        captured_at = datetime.fromisoformat(str(captured_raw).replace("Z", "+00:00"))
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - captured_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age_seconds < 0.0 or age_seconds > _CHAIN_COLLATERAL_RESIDUAL_MAX_AGE_SECONDS:
+        return None
+
+    try:
+        balances = json.loads(str(balances_raw or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(balances, dict):
+        return None
+    try:
+        micro_shares = float(balances.get(token, 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, micro_shares / 1_000_000.0)
 
 
 def read_old_leg_residual_usd(
@@ -226,9 +330,11 @@ def read_old_leg_residual_usd(
 
     The CLOSE proof for close-before-open: when the old leg has been exited/voided to
     zero (or dust below min-order), no live ``position_current`` row remains for the
-    old token, so this returns 0.0 (== proven closed from canonical truth). A row with
-    positive committed cost in a blocking phase returns that USD (still live → exit
-    first). Chain cost basis is preferred over the projected cost basis (chain truth).
+    old token, or fresh CHAIN collateral proves the sellable token balance is zero, so
+    this returns 0.0 (== proven closed from canonical truth). A row with positive
+    committed cost in a blocking phase returns that USD (still live → exit first).
+    Chain collateral/cost basis is preferred over the projected cost basis (chain
+    truth).
     Fails CLOSED conservatively: a read/schema error returns +inf so the caller treats
     the old leg as STILL LIVE (exit first, never falsely enter) rather than 0.
     """
@@ -244,27 +350,49 @@ def read_old_leg_residual_usd(
     if "token_id" not in cols:
         return float("inf")
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
-    cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
-    if not cost_terms:
+    positive_terms = [
+        (f"COALESCE({c},0) > 0", ())
+        for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+        if c in cols
+    ]
+    if "chain_shares" in cols:
+        if "chain_state" in cols:
+            chain_state_placeholders = ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
+            positive_terms.append(
+                (
+                    f"(COALESCE(chain_shares,0) > ? AND chain_state IN ({chain_state_placeholders}))",
+                    (_LIVE_CHAIN_SHARE_EPSILON, *_CURRENT_MONEY_RISK_CHAIN_STATES),
+                )
+            )
+        else:
+            positive_terms.append(
+                ("COALESCE(chain_shares,0) > ?", (_LIVE_CHAIN_SHARE_EPSILON,))
+            )
+    if not positive_terms:
         return float("inf")
-    positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
-    select_cols = [c if c in cols else f"NULL AS {c}"
-                   for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")]
+    positive_sql = " AND (" + " OR ".join(term for term, _ in positive_terms) + ")"
+    positive_params: list[object] = []
+    for _, params_for_term in positive_terms:
+        positive_params.extend(params_for_term)
+    selected_names = (
+        "chain_cost_basis_usd",
+        "cost_basis_usd",
+        "size_usd",
+        "chain_shares",
+        "chain_state",
+    )
+    select_cols = [c if c in cols else f"NULL AS {c}" for c in selected_names]
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
         f"SELECT {', '.join(select_cols)} FROM position_current "
         f"WHERE {phase_sql} AND ({token_sql}){positive_sql} {order_sql} LIMIT 1"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend(token for _ in token_cols)
+    params.extend(positive_params)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
     except sqlite3.Error:
@@ -273,18 +401,49 @@ def read_old_leg_residual_usd(
         return 0.0  # no live row for the old token → proven closed
 
     def _g(name: str):
-        try:
-            return row[name] if isinstance(row, sqlite3.Row) else None
-        except (IndexError, KeyError):
-            return None
+        return _row_get(row, selected_names, name)
 
+    row_chain_shares = None
+    try:
+        row_chain_shares = float(_g("chain_shares")) if _g("chain_shares") is not None else None
+    except (TypeError, ValueError):
+        row_chain_shares = None
+
+    row_live_usd = 0.0
     for value in (_g("chain_cost_basis_usd"), _g("cost_basis_usd"), _g("size_usd")):
         try:
             v = float(value) if value is not None else 0.0
         except (TypeError, ValueError):
             v = 0.0
         if v > 0.0:
-            return v
+            row_live_usd = v
+            break
+
+    row_chain_state = _g("chain_state")
+    row_asserts_current_chain_risk = (
+        row_chain_shares is not None
+        and row_chain_shares > _LIVE_CHAIN_SHARE_EPSILON
+        and (
+            "chain_state" not in cols
+            or has_current_money_risk_chain_state(row_chain_state)
+        )
+    )
+    if row_asserts_current_chain_risk:
+        if row_live_usd > 0.0:
+            return row_live_usd
+        return float(row_chain_shares or 0.0)
+
+    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
+    if chain_available_shares == 0.0:
+        # A fresh CHAIN collateral snapshot is the venue-side sellability truth. A
+        # stale local position projection must not keep re-opening EXIT_OLD_LEG after
+        # the wallet has no old-leg collateral left. This may only override rows that
+        # do NOT still assert current chain risk in position_current; a synced positive
+        # chain_shares row is itself chain evidence and must stay live.
+        return 0.0
+
+    if row_live_usd > 0.0:
+        return row_live_usd
     return 0.0
 
 
@@ -410,6 +569,26 @@ def record_exit_submitted(
     advance_rebalance_lease(
         conn, intent_id, status=status, now_iso=now_iso,
         old_exit_command_id=old_exit_command_id,
+        abort_reason=reason,
+    )
+
+
+def record_entry_submitted(
+    conn: sqlite3.Connection,
+    intent_id: Optional[str],
+    *,
+    now_iso: str,
+    reason: Optional[str] = None,
+) -> None:
+    """Record that the old leg is closed and the counter-entry may be submitted."""
+
+    if not intent_id:
+        return
+    advance_rebalance_lease(
+        conn,
+        intent_id,
+        status="ENTRY_SUBMITTED",
+        now_iso=now_iso,
         abort_reason=reason,
     )
 

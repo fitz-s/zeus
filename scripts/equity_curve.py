@@ -113,6 +113,11 @@ def _single_exit_economics_cohort(rows: list[dict]) -> tuple[str, dict[str, int]
     return next(iter(counts), LEGACY_DIAGNOSTIC_COHORT), counts
 
 
+def require_single_exit_economics_cohort(rows: list[dict]) -> str:
+    cohort, _counts = _single_exit_economics_cohort(rows)
+    return cohort
+
+
 def build_equity_curve() -> dict:
     runtime_state = current_runtime_state()
     status, status_truth = read_runtime_truth_json("status_summary.json")

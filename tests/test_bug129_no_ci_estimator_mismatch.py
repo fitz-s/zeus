@@ -1,6 +1,6 @@
 # Created: 2026-06-02
 # Last reused/audited: 2026-06-02
-# Authority basis: BUG #129 (mandate-#2 SEV1) — docs/operations/PROBABILITY_INTEGRITY_AUDIT_2026-06-02.md LEG 1.
+# Authority basis: BUG #129 (mandate-#2 SEV1) — docs/archive/2026-Q2/operations_historical/PROBABILITY_INTEGRITY_AUDIT_2026-06-02.md LEG 1.
 #   The NO-direction CI lower bound (q_lcb) is computed by _bootstrap_bin_no using a DIFFERENT
 #   probability estimator (random HISTORICAL Platt params per sample) than the point q_live
 #   (current/MAP Platt). For high-q_no bins the historical-param distribution maps q_no systematically

@@ -17,7 +17,6 @@ CANONICAL_WRITE_HELPERS = (
     "append_many_and_project",
     "log_trade_entry",
     "log_settlement_event",
-    "log_shadow_signal",
     "store_artifact",
 )
 
@@ -258,7 +257,7 @@ def run_scripts(api: Any) -> Any:
         write_targets = set(effective.get("write_targets") or [])
         authority_scope = str(effective.get("authority_scope", ""))
         is_diagnostic_scope = authority_scope.startswith(
-            "diagnostic_non_promotion"
+            "offline_no_promotion"
         ) or authority_scope.startswith("report_artifact_non_promotion")
         if is_diagnostic_scope:
             forbidden_writes = sorted(

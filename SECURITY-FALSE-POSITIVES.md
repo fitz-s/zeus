@@ -103,7 +103,7 @@
 `selected=281357327553801178=yes_token_id, outcome_label=YES`
 ```
 
-**Location**: `docs/operations/POLARITY_TOKEN_2026-06-01.md` lines 71-72 (commit `1a25993e0f`). May recur in other `docs/operations/*.md` investigation files containing similar code examples.
+**Location**: `docs/archive/2026-Q2/operations_historical/POLARITY_TOKEN_2026-06-01.md` lines 71-72 (commit `1a25993e0f`). May recur in other `docs/operations/*.md` investigation files containing similar code examples.
 
 **Why scanners flag them**: gitleaks `generic-api-key` rule matches short `key=VALUE` constructs where the value has entropy ≥ 3.5. `outcome_label=NO` / `outcome_label=YES` both satisfy this heuristic.
 

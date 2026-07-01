@@ -30,6 +30,7 @@ class ReplacementForecastCurrentTargetPlanRow:
     readiness_count: int
     openmeteo_manifest_count: int
     baseline_source_run_id: str | None = None
+    baseline_source_cycle_time: str | None = None
     openmeteo_source_run_id: str | None = None
     day0_observed_extreme_required: bool = False
 
@@ -61,6 +62,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "readiness_count": self.readiness_count,
             "openmeteo_manifest_count": self.openmeteo_manifest_count,
             "baseline_source_run_id": self.baseline_source_run_id,
+            "baseline_source_cycle_time": self.baseline_source_cycle_time,
             "openmeteo_source_run_id": self.openmeteo_source_run_id,
             "day0_observed_extreme_required": self.day0_observed_extreme_required,
             "covered": self.covered,
@@ -121,7 +123,7 @@ def _raw_artifact_metadata_column(columns: set[str]) -> str | None:
 
 def _supports_source_run_targets(conn: sqlite3.Connection) -> bool:
     tables = _table_names(conn)
-    if "source_run_coverage" not in tables:
+    if "source_run_coverage" not in tables or "source_run" not in tables:
         return False
     required = {
         "source_run_id",
@@ -132,7 +134,10 @@ def _supports_source_run_targets(conn: sqlite3.Connection) -> bool:
         "data_version",
         "computed_at",
     }
-    return required.issubset(_columns(conn, "source_run_coverage"))
+    source_run_required = {"source_run_id", "source_cycle_time"}
+    return required.issubset(_columns(conn, "source_run_coverage")) and source_run_required.issubset(
+        _columns(conn, "source_run")
+    )
 
 
 def _json_object(text: object) -> dict[str, object]:
@@ -646,6 +651,7 @@ def build_replacement_forecast_current_target_plan(
                         c.target_local_date AS target_date,
                         c.temperature_metric,
                         c.source_run_id AS baseline_source_run_id,
+                        sr.source_cycle_time AS baseline_source_cycle_time,
                         c.computed_at,
                         c.recorded_at,
                         ROW_NUMBER() OVER (
@@ -657,6 +663,7 @@ def build_replacement_forecast_current_target_plan(
                                 c.recorded_at DESC
                         ) AS rn
                     FROM source_run_coverage c
+                    LEFT JOIN source_run sr ON sr.source_run_id = c.source_run_id
                     WHERE c.source_id = ?
                       AND c.target_local_date >= ?
                       AND (
@@ -681,6 +688,7 @@ def build_replacement_forecast_current_target_plan(
                         rc.target_date,
                         rc.temperature_metric,
                         rc.baseline_source_run_id,
+                        rc.baseline_source_cycle_time,
                         (
                             SELECT COUNT(*)
                             FROM market_events m
@@ -700,6 +708,7 @@ def build_replacement_forecast_current_target_plan(
                     targets.target_date,
                     targets.temperature_metric,
                     targets.baseline_source_run_id,
+                    targets.baseline_source_cycle_time,
                     targets.market_bin_count,
                     (
                         SELECT COUNT(*)
@@ -766,7 +775,7 @@ def build_replacement_forecast_current_target_plan(
                         COUNT(*) AS readiness_count
                     FROM readiness_state
                     WHERE strategy_key = ?
-                      {readiness_status_clause}
+                      {readiness_status_clause.replace("r.", "")}
                     GROUP BY 1, 2, 3
                 )
                 SELECT
@@ -774,6 +783,7 @@ def build_replacement_forecast_current_target_plan(
                     targets.target_date,
                     targets.temperature_metric,
                     NULL AS baseline_source_run_id,
+                    NULL AS baseline_source_cycle_time,
                     targets.market_bin_count,
                     COALESCE(posteriors.posterior_count, 0) AS posterior_count,
                     COALESCE(readiness.readiness_count, 0) AS readiness_count
@@ -798,6 +808,10 @@ def build_replacement_forecast_current_target_plan(
             city = str(row["city"])
             target_date = str(row["target_date"])
             baseline_source_run_id = row["baseline_source_run_id"]
+            baseline_source_cycle_time = row["baseline_source_cycle_time"]
+            required_openmeteo_cycle_for_row = str(
+                baseline_source_cycle_time or required_openmeteo_cycle_iso or ""
+            ).strip() or None
             day0_observed_extreme_required = _day0_observed_extreme_required(
                 city=city,
                 target_date=target_date,
@@ -816,7 +830,7 @@ def build_replacement_forecast_current_target_plan(
                     city=city,
                     target_date=target_date,
                     city_timezone=timezone_by_city.get(city),
-                    required_source_cycle_time=required_openmeteo_cycle_iso,
+                    required_source_cycle_time=required_openmeteo_cycle_for_row,
                 )
             elif not require_raw_artifacts:
                 openmeteo_count = 1
@@ -836,6 +850,9 @@ def build_replacement_forecast_current_target_plan(
             elif source_run_targets and metadata_column is not None:
                 posterior_count = 0
                 readiness_count = 0
+            elif required_openmeteo_cycle_for_row and metadata_column is not None and openmeteo_count <= 0:
+                posterior_count = 0
+                readiness_count = 0
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
                     city=city,
@@ -846,6 +863,7 @@ def build_replacement_forecast_current_target_plan(
                     readiness_count=readiness_count,
                     openmeteo_manifest_count=openmeteo_count,
                     baseline_source_run_id=baseline_source_run_id,
+                    baseline_source_cycle_time=baseline_source_cycle_time,
                     openmeteo_source_run_id=openmeteo_source_run_id,
                     day0_observed_extreme_required=day0_observed_extreme_required,
                 )

@@ -39,9 +39,12 @@ Mapped to spec §12.E + the S6 money-path invariants:
 """
 from __future__ import annotations
 
+import inspect
 import json as _json
 from dataclasses import replace as dataclass_replace
+from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -283,6 +286,7 @@ def test_edge_reversal_aborts_submit():
     )
     proof = _proof_from_row(direction="buy_no", row=row, token_id="no-1",
                             q_posterior=0.45, q_lcb_5pct=0.30, bin_obj=_BIN_X)
+    proof = dataclass_replace(proof, c_cost_95pct=0.56)
 
     decision, stake, price = _recapture(proof, (proof,))
 
@@ -291,6 +295,40 @@ def test_edge_reversal_aborts_submit():
     assert decision.reversal_reason is ReversalReason.EDGE
     assert stake == 0.0
     assert price is None
+
+
+def test_edge_reversed_abort_receipt_recomputes_nonpositive_economics():
+    """Abort receipts must not persist the stale pre-recapture positive score.
+
+    The live regret row is consumed by redecision/audit screens after the submit
+    gate has re-run economics on the fresh curve. When that gate says
+    EDGE_REVERSED, the queryable receipt score has to be the recaptured robust
+    score, not the admission-time selected-proof score.
+    """
+    row = _snapshot_row(
+        yes_asks=(("0.40", "100000"),), no_asks=(("0.55", "100000"),),
+    )
+    proof = _proof_from_row(direction="buy_no", row=row, token_id="no-1",
+                            q_posterior=0.45, q_lcb_5pct=0.30, bin_obj=_BIN_X)
+    proof = dataclass_replace(proof, c_cost_95pct=0.56)
+    assert proof.trade_score > 0.0
+
+    recaptured_score = era._robust_trade_score_from_generated_inputs(
+        q_posterior=proof.q_posterior,
+        q_lcb_5pct=proof.q_lcb_5pct,
+        execution_price=proof.execution_price,
+        c_cost_95pct=proof.c_cost_95pct,
+        p_fill_lcb=proof.p_fill_lcb,
+    )
+    assert recaptured_score < 0.0
+
+    source = inspect.getsource(era._build_event_bound_no_submit_receipt_core)
+    assert (
+        "_recapture.state is CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED"
+        in source
+    )
+    assert "trade_score=_abort_trade_score" in source
+    assert "min(0.0, float(_abort_trade_score))" in source
 
 
 def test_forecast_stale_aborts_submit_as_edge_reversed():
@@ -618,6 +656,7 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
             "candidate_id": "DIRECT_YES:cond-A@proof",
             "route_id": "DIRECT_YES:cond-A@proof",
             "side": "YES",
+            "payoff_q_point": 0.62,
             "payoff_q_lcb": 0.58,
             "edge_lcb": 0.08,
             "delta_u_at_min": 0.01,
@@ -636,6 +675,271 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
     assert era._family_rank_reversed_at_recapture(
         family_key="fam", selected_proof=qkernel_selected, all_proofs=(qkernel_selected, sibling),
     ) is False
+
+
+def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE risk_actions (
+            action_id TEXT,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO risk_actions (
+            action_id, strategy_key, action_type, value, issued_at, effective_until,
+            precedence, status
+        ) VALUES (
+            'riskguard:gate:opening_inertia', 'opening_inertia', 'gate', 'true',
+            '2026-06-30T00:00:00+00:00', NULL, 1, 'active'
+        )
+        """
+    )
+
+    no_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        no_asks=(("0.45", "1000000"),),
+        condition_id="cond-no",
+        yes_token_id="yes-no",
+        no_token_id="no-no",
+        snapshot_id="snap-no",
+    )
+    no_proof = _proof_from_row(
+        direction="buy_no",
+        row=no_row,
+        token_id="no-no",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_X,
+    )
+    yes_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        condition_id="cond-yes",
+        yes_token_id="yes-yes",
+        no_token_id="no-yes",
+        snapshot_id="snap-yes",
+    )
+    yes_proof = _proof_from_row(
+        direction="buy_yes",
+        row=yes_row,
+        token_id="yes-yes",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_Y,
+    )
+
+    scoped = era._selection_scoped_proofs(
+        proofs=(no_proof, yes_proof),
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert scoped == (yes_proof,)
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(no_proof,),
+        selected_proof=None,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+    )
+    reason = book.evaluations[0].missing_reason
+    assert reason is not None
+    assert reason.startswith("STRATEGY_POLICY_GATED:opening_inertia:")
+    family_reason = era._family_all_candidates_rejected_reason(book)
+    assert family_reason is not None
+    assert "strategy_policy=1" in family_reason
+
+
+def test_edli_selection_does_not_treat_global_pause_as_strategy_rejection(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    no_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        no_asks=(("0.45", "1000000"),),
+        condition_id="cond-no",
+        yes_token_id="yes-no",
+        no_token_id="no-no",
+        snapshot_id="snap-no",
+    )
+    no_proof = _proof_from_row(
+        direction="buy_no",
+        row=no_row,
+        token_id="no-no",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_X,
+    )
+    yes_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        condition_id="cond-yes",
+        yes_token_id="yes-yes",
+        no_token_id="no-yes",
+        snapshot_id="snap-yes",
+    )
+    yes_proof = _proof_from_row(
+        direction="buy_yes",
+        row=yes_row,
+        token_id="yes-yes",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_Y,
+    )
+
+    scoped = era._selection_scoped_proofs(
+        proofs=(no_proof, yes_proof),
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert scoped == (no_proof, yes_proof)
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(no_proof,),
+        selected_proof=None,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+    )
+    assert book.evaluations[0].missing_reason is None
+
+
+def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    low_floor_row = _snapshot_row(
+        yes_asks=(("0.005", "1000000"),),
+        min_order="5",
+        condition_id="cond-low",
+        yes_token_id="yes-low",
+        no_token_id="no-low",
+        snapshot_id="snap-low",
+    )
+    low_floor_proof = _proof_from_row(
+        direction="buy_yes",
+        row=low_floor_row,
+        token_id="yes-low",
+        q_posterior=0.12,
+        q_lcb_5pct=0.08,
+        bin_obj=_BIN_X,
+    )
+    live_floor_row = _snapshot_row(
+        yes_asks=(("0.20", "1000000"),),
+        condition_id="cond-live",
+        yes_token_id="yes-live",
+        no_token_id="no-live",
+        snapshot_id="snap-live",
+    )
+    live_floor_proof = _proof_from_row(
+        direction="buy_yes",
+        row=live_floor_row,
+        token_id="yes-live",
+        q_posterior=0.70,
+        q_lcb_5pct=0.50,
+        bin_obj=_BIN_Y,
+    )
+
+    def _cert(proof, *, cost: float, q_lcb: float, stake: float) -> dict:
+        bin_id = era._candidate_bin_id(proof)
+        return {
+            "source": "qkernel_spine",
+            "candidate_id": f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+            "bin_id": bin_id,
+            "route_id": f"DIRECT_YES:{bin_id}@proof",
+            "side": "YES",
+            "payoff_q_point": float(proof.q_posterior),
+            "payoff_q_lcb": q_lcb,
+            "edge_lcb": q_lcb - cost,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": stake,
+            "optimal_delta_u": 0.02,
+            "cost": cost,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
+        }
+
+    proofs = era._proofs_with_qkernel_candidate_economics(
+        proofs=(low_floor_proof, live_floor_proof),
+        qkernel_economics_by_bin_side={
+            (era._candidate_bin_id(low_floor_proof), "YES"): _cert(
+                low_floor_proof,
+                cost=0.005,
+                q_lcb=0.08,
+                stake=10.0,
+            ),
+            (era._candidate_bin_id(live_floor_proof), "YES"): _cert(
+                live_floor_proof,
+                cost=0.20,
+                q_lcb=0.50,
+                stake=10.0,
+            ),
+        },
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+    )
+
+    assert proofs[0].missing_reason is not None
+    assert proofs[0].missing_reason.startswith(
+        "QKERNEL_FINAL_SUBMIT_FLOOR:limit_price_below_strategy_entry_floor"
+    )
+    scoped = era._selection_scoped_proofs(
+        proofs=proofs,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert tuple(era._candidate_bin_id(proof) for proof in scoped) == (
+        era._candidate_bin_id(live_floor_proof),
+    )
 
 
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():
@@ -833,6 +1137,27 @@ def test_same_family_monitor_owned_scope_is_management_lane_only():
     assert era._event_allows_same_family_monitor_owned("FORECAST_SNAPSHOT_READY") is False
     assert era._event_allows_same_family_monitor_owned("EDLI_REDECISION_PENDING") is True
     assert era._event_allows_same_family_monitor_owned("DAY0_EXTREME_UPDATED") is True
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=False,
+            selection_exposure_by_outcome={},
+        )
+        is False
+    )
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=True,
+            selection_exposure_by_outcome={},
+        )
+        is True
+    )
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=False,
+            selection_exposure_by_outcome={"bin-A": 5.53},
+        )
+        is True
+    )
 
     import sqlite3
 
@@ -914,6 +1239,107 @@ def test_same_family_monitor_owned_scope_is_management_lane_only():
     # family-rebalance lease (one active rebalance per family) — NOT by excluding the
     # proof from selection. Both same-family (`a`) and same-token (`b`) are selectable.
     assert scoped_after_same_token == (a, b)
+
+
+def test_forecast_with_proven_family_exposure_ranks_management_scope():
+    """A fresh forecast trigger stays fresh-entry unless current position truth proves
+    this family is already held; then selection must expose the family-management
+    candidates so D1/D2 can decide fill-up, hold, shift, or no-trade."""
+
+    import sqlite3
+
+    row_a = _snapshot_row(
+        yes_asks=(("0.50", "1000000"),),
+        condition_id="cond-A",
+        yes_token_id="yes-A",
+        no_token_id="no-A",
+        snapshot_id="snapA",
+    )
+    row_b = _snapshot_row(
+        yes_asks=(("0.20", "1000000"),),
+        condition_id="cond-B",
+        yes_token_id="yes-B",
+        no_token_id="no-B",
+        snapshot_id="snapB",
+    )
+    a = _proof_from_row(
+        direction="buy_yes",
+        row=row_a,
+        token_id="yes-A",
+        q_posterior=0.62,
+        q_lcb_5pct=0.58,
+        bin_obj=_BIN_X,
+    )
+    b = _proof_from_row(
+        direction="buy_yes",
+        row=row_b,
+        token_id="yes-B",
+        q_posterior=0.62,
+        q_lcb_5pct=0.58,
+        bin_obj=_BIN_Y,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            bin_label TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            shares REAL,
+            cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            condition_id, bin_label, token_id, no_token_id, shares, cost_basis_usd
+        ) VALUES (
+            'pos-held-family', 'active', 'paris', '2026-06-10', 'high',
+            'cond-A', '60-61F', 'yes-A', '', 7.0, 5.53
+        )
+        """
+    )
+
+    direct_event_allow = era._event_allows_same_family_monitor_owned(
+        "FORECAST_SNAPSHOT_READY"
+    )
+    assert direct_event_allow is False
+    assert (
+        era._selection_scoped_proofs(
+            proofs=(a, b),
+            held_position_conn=conn,
+            allow_same_family_monitor_owned=direct_event_allow,
+        )
+        == ()
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=(a, b),
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=SimpleNamespace(city="paris", target_date="2026-06-10", metric="high"),
+    )
+    effective_scope = era._selection_allows_same_family_monitor_owned(
+        event_allows_same_family_monitor_owned=direct_event_allow,
+        selection_exposure_by_outcome=exposure,
+    )
+
+    assert exposure
+    assert effective_scope is True
+    assert era._selection_scoped_proofs(
+        proofs=(a, b),
+        held_position_conn=conn,
+        allow_same_family_monitor_owned=effective_scope,
+    ) == (a, b)
 
 
 def test_all_open_position_tokens_no_trade_with_honest_monitor_owned_reason():

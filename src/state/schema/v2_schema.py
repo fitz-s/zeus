@@ -31,6 +31,53 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def _migrate_observation_source_role_names(conn: sqlite3.Connection) -> None:
+    """Normalize old coverage-fill observation labels.
+
+    The retired names used fallback terminology for two different facts:
+    source role and temporal causality. Coverage-fill rows are not a second
+    live source of truth; they are same-station evidence that is not eligible
+    for calibration training. Temporal causality remains OK for those rows.
+    """
+    columns = _table_columns(conn, "observation_instants")
+    required = {"source_role", "training_allowed", "causality_status"}
+    if not required.issubset(columns):
+        return
+
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET source_role = 'coverage_fill_evidence'
+         WHERE source_role = 'fallback_evidence'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET causality_status = 'OK'
+         WHERE causality_status = 'RUNTIME_ONLY_FALLBACK'
+           AND COALESCE(source_role, '') = 'coverage_fill_evidence'
+           AND COALESCE(training_allowed, 1) = 0
+        """
+    )
+    remaining = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM observation_instants
+             WHERE causality_status = 'RUNTIME_ONLY_FALLBACK'
+            """
+        ).fetchone()[0]
+        or 0
+    )
+    if remaining:
+        raise RuntimeError(
+            "observation_instants contains RUNTIME_ONLY_FALLBACK rows outside "
+            "the retired coverage-fill encoding; repair causality_status before "
+            "schema admission"
+        )
+
+
 def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
@@ -67,6 +114,14 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             settlement_station TEXT,
             settlement_unit TEXT
                 CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
+            -- resolution_state placed LAST to match the ALTER TABLE ... ADD COLUMN append
+            -- position (consult 6a42bc3d [S2]): fresh + migrated DBs get identical physical
+            -- column order, removing a fresh-vs-migrated positional-read divergence class.
+            resolution_state TEXT
+                CHECK (resolution_state IS NULL OR resolution_state IN (
+                    'UNRESOLVED', 'PHYSICALLY_CONFIRMED', 'SOURCE_PUBLISHED_VENUE_UNRESOLVED',
+                    'VENUE_RESOLVED', 'OBSERVATION_REVISED', 'DISPUTED', 'VOID_50_50', 'SOURCE_REVISION'
+                )),
             UNIQUE(city, target_date, temperature_metric)
         )
     """)
@@ -133,6 +188,10 @@ def _create_market_events(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
             ON market_events(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_condition_id
+            ON market_events(condition_id)
     """)
     # Architect refinement: partial index on open markets
     conn.execute("""
@@ -202,7 +261,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
                     'N/A_CAUSAL_DAY_ALREADY_STARTED',
                     'N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON',
                     'REJECTED_BOUNDARY_AMBIGUOUS',
-                    'RUNTIME_ONLY_FALLBACK',
+                    'ISSUE_TIME_MISSING',
                     'UNKNOWN'
                 )),
             boundary_ambiguous INTEGER NOT NULL DEFAULT 0
@@ -229,7 +288,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots ADD COLUMN step_horizon_hours REAL",
         # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
         # contract_version + boundary_min_value columns dropped in P7B (no live
-        # consumer; P8 will re-add if needed when shadow-activation consumers land).
+        # consumer; P8 will re-add if needed when activation consumers land).
         "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
         # PLAN_v4 executable forecast-entry linkage. NULL means no live consumer.
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
@@ -304,19 +363,39 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
         )
         columns.add("runtime_layer")
     if "trade_authority_status" in columns:
-        conn.execute(
+        has_legacy_live_rows = conn.execute(
             """
-            UPDATE forecast_posteriors
-               SET runtime_layer = 'live'
+            SELECT 1
+              FROM forecast_posteriors
              WHERE runtime_layer IS NULL
                AND trade_authority_status = 'LIVE_AUTHORITY'
+             LIMIT 1
             """
-        )
-    conn.execute("""
-        DELETE FROM forecast_posteriors
+        ).fetchone()
+        if has_legacy_live_rows is not None:
+            conn.execute(
+                """
+                UPDATE forecast_posteriors
+                   SET runtime_layer = 'live'
+                 WHERE runtime_layer IS NULL
+                   AND trade_authority_status = 'LIVE_AUTHORITY'
+                """
+            )
+    has_non_live_rows = conn.execute(
+        """
+        SELECT 1
+          FROM forecast_posteriors
          WHERE runtime_layer IS NULL
             OR runtime_layer != 'live'
-    """)
+         LIMIT 1
+        """
+    ).fetchone()
+    if has_non_live_rows is not None:
+        conn.execute("""
+            DELETE FROM forecast_posteriors
+             WHERE runtime_layer IS NULL
+                OR runtime_layer != 'live'
+        """)
     if "trade_authority_status" in columns:
         conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
         columns.remove("trade_authority_status")
@@ -333,19 +412,31 @@ def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -
     columns = _table_columns(conn, "observation_instants")
     if not columns:
         return
+    desired_view_sql = (
+        "CREATE VIEW observation_hourly_extrema AS\n"
+        "            SELECT\n"
+        "                o.*,\n"
+        "                o.running_max AS hour_bucket_max,\n"
+        "                o.running_min AS hour_bucket_min\n"
+        "            FROM observation_instants o"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema'"
+    ).fetchone()
+    view_sql = str(row[0] if row else "")
+    has_v2 = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema_v2'"
+    ).fetchone()
+    if "running_min" in columns and view_sql == desired_view_sql and has_v2 is None:
+        return
     if "running_min" not in columns:
         conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
         columns.add("running_min")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-    conn.execute("""
-        CREATE VIEW observation_hourly_extrema AS
-            SELECT
-                o.*,
-                o.running_max AS hour_bucket_max,
-                o.running_min AS hour_bucket_min
-            FROM observation_instants o
-    """)
+    if has_v2 is not None:
+        conn.execute("DROP VIEW observation_hourly_extrema_v2")
+    if view_sql:
+        conn.execute("DROP VIEW observation_hourly_extrema")
+    conn.execute(desired_view_sql)
 
 
 def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
@@ -446,6 +537,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_target
             ON forecast_posteriors(city, target_date, temperature_metric, product_id, computed_at)
@@ -464,38 +556,6 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
-    """)
-    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS replacement_shadow_decisions (
-            decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            posterior_id INTEGER NOT NULL REFERENCES forecast_posteriors(posterior_id),
-            baseline_source_run_id TEXT,
-            market_snapshot_id TEXT NOT NULL,
-            condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            decision_time TEXT NOT NULL,
-            baseline_direction TEXT NOT NULL,
-            candidate_direction TEXT NOT NULL,
-            allowed_direction TEXT NOT NULL,
-            baseline_q_lcb REAL NOT NULL CHECK (baseline_q_lcb >= 0.0 AND baseline_q_lcb <= 1.0),
-            candidate_q_lcb REAL NOT NULL CHECK (candidate_q_lcb >= 0.0 AND candidate_q_lcb <= 1.0),
-            allowed_q_lcb REAL NOT NULL CHECK (allowed_q_lcb >= 0.0 AND allowed_q_lcb <= 1.0),
-            baseline_kelly_fraction REAL NOT NULL CHECK (baseline_kelly_fraction >= 0.0),
-            candidate_kelly_fraction REAL NOT NULL CHECK (candidate_kelly_fraction >= 0.0),
-            allowed_kelly_fraction REAL NOT NULL CHECK (allowed_kelly_fraction >= 0.0),
-            veto INTEGER NOT NULL CHECK (veto IN (0, 1)),
-            veto_reason TEXT,
-            dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
-            provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
-            UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_replacement_shadow_decisions_market_time
-            ON replacement_shadow_decisions(condition_id, token_id, decision_time)
     """)
 
     # ------------------------------------------------------------------------
@@ -693,7 +753,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # one row here. The UNIQUE index on (city, target_date, metric, source_cycle_time,
     # capturable_family_set) is the bound: a scope is re-enqueued AT MOST ONCE per
     # (cycle, capturable-family-superset) transition, so a still-missing 5th provider (gfs HTTP
-    # 400, jma off the 06Z single_runs cadence) can never loop the queue. SHADOW research surface
+    # 400, jma off the 06Z single_runs cadence) can never loop the queue. Audit trigger
     # only — never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fusion_upgrade_enqueues (
@@ -721,7 +781,8 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # (city, target_date, metric, target_cycle_time) is the bound: a scope is re-enqueued AT MOST
     # ONCE per (target-cycle) advance, so a still-unmaterialized seed (manifest not yet on disk,
     # day0 guard) can never loop the queue — it heals on the next tick once the seed drains, and
-    # the NEXT fresher cycle gets its own distinct marker. SHADOW research surface only.
+    # the NEXT fresher cycle gets its own distinct marker. Audit trigger only:
+    # never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cycle_advance_enqueues (
             enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1335,6 +1396,8 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+
+        _migrate_observation_source_role_names(conn)
 
         # ----------------------------------------------------------------
         # zeus_meta — runtime-switch registry for atomic data-version cutover

@@ -38,6 +38,11 @@ from dataclasses import dataclass, field
 
 from src.contracts.calibration_bins import CanonicalBinGrid
 from src.contracts.settlement_outcome import SettlementOutcome
+from src.contracts.settlement_axes import (
+    SettlementResolutionState,
+    is_promotion_eligible_resolution_state,
+    legacy_outcome_type_to_resolution_state,
+)
 from src.types.market import Bin
 
 # Resolution states under which a settlement is a clean, single-winner outcome
@@ -152,7 +157,19 @@ class SettlementResolution:
         stored = str(stored) if stored not in (None, "") else None
         stored_matches = None if stored is None else (stored == winner_bin.label)
 
-        eligible = state in _PROMOTION_ELIGIBLE_OUTCOMES
+        # A8 cutover (consult 6a42bc3d): promotion eligibility now reads the typed event
+        # lifecycle state. Behavior-preserving — is_promotion_eligible_resolution_state ∘
+        # legacy_outcome_type_to_resolution_state is proven zero-diff vs the legacy
+        # _PROMOTION_ELIGIBLE_OUTCOMES gate across every outcome_type value (so the all-WIN
+        # backfill cannot change eligibility). Prefers an explicit resolution_state column
+        # once the settlement_outcomes migration lands; else maps from the coerced state.
+        _explicit_resolution_state = row.get("resolution_state")
+        _resolution_state = (
+            SettlementResolutionState(str(_explicit_resolution_state))
+            if _explicit_resolution_state
+            else legacy_outcome_type_to_resolution_state(int(state))
+        )
+        eligible = is_promotion_eligible_resolution_state(_resolution_state)
         resolution_status = "resolved" if eligible else "exceptional"
 
         return cls(

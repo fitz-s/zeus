@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 
 """PR-E — Quarantine tooling for decisions backed by non-contributing forecast snapshots.
 
@@ -18,7 +18,6 @@ Tables quarantined (all via forecast-snapshot linkage):
 
 Tables intentionally SKIPPED (no forecast snapshot linkage):
   - no_trade_events    — composite PK only, no single row_id column usable as quarantine key
-  - shadow_experiments — no snapshot linkage of any kind
   - calibration_pairs  — legacy table, no snapshot_id column
 
 Design choices:
@@ -45,9 +44,268 @@ logger = logging.getLogger(__name__)
 
 # Reason code written into decision_integrity_quarantine.
 REASON_NON_CONTRIBUTING = "QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA"
+REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
 
 # Table name tagged in quarantine rows for the original opportunity_fact function.
 TARGET_TABLE = "opportunity_fact"
+DECISION_CERTIFICATES_TABLE = "decision_certificates"
+LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
+    "ActionableTradeCertificate",
+    "FinalIntentCertificate",
+    "ExecutorExpressibilityCertificate",
+    "PreSubmitRevalidationCertificate",
+    "ExecutionCommandCertificate",
+    "ExecutionReceiptCertificate",
+    "LiveCapTransitionCertificate",
+)
+
+
+def quarantine_invalid_live_actionable_certificates(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = False,
+    lookback_hours: float | None = None,
+) -> dict:
+    """Tag LIVE ActionableTradeCertificate rows that fail current money-law semantics.
+
+    The row remains immutable in ``decision_certificates``.  The quarantine tag
+    is the durable live-reader exclusion proof: old VERIFIED rows may still
+    exist for audit, but they are no longer consumable as executable authority.
+
+    ``conn`` is expected to expose ``decision_certificates`` in main and may
+    ATTACH the trade DB as ``trade`` for the quarantine write.  In tests, the
+    quarantine table may live unqualified in the same in-memory DB.
+    """
+
+    q_ref = _quarantine_ref(conn)
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    params: list[object] = []
+    since_clause = ""
+    if lookback_hours is not None:
+        from datetime import timedelta
+
+        since = datetime.now(timezone.utc) - timedelta(hours=float(lookback_hours))
+        since_clause = " AND datetime(decision_time) >= datetime(?)"
+        params.append(since.isoformat())
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT certificate_id, certificate_hash, decision_time, payload_json
+              FROM decision_certificates
+             WHERE certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+               {since_clause}
+             ORDER BY datetime(decision_time) DESC, certificate_id DESC
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        msg = f"invalid live actionable quarantine scan failed: {exc}"
+        logger.error(msg)
+        return {
+            "checked_count": 0,
+            "candidates_found": 0,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+            "error": msg,
+        }
+
+    from src.decision_kernel.verifier import _verify_actionable_payload
+
+    candidates: list[tuple[str, str | None, str, str]] = []
+    checked_count = 0
+    for row in rows:
+        checked_count += 1
+        cert_hash = str(row["certificate_hash"] if isinstance(row, sqlite3.Row) else row[1])
+        cert_id = str(row["certificate_id"] if isinstance(row, sqlite3.Row) else row[0])
+        decision_time = str(row["decision_time"] if isinstance(row, sqlite3.Row) else row[2])
+        payload_json = row["payload_json"] if isinstance(row, sqlite3.Row) else row[3]
+        try:
+            payload = json.loads(str(payload_json or "{}"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload_json is not an object")
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        except Exception as exc:  # noqa: BLE001
+            candidates.append((cert_hash, cert_id, decision_time, str(exc)))
+
+    if dry_run or not candidates:
+        return {
+            "checked_count": checked_count,
+            "candidates_found": len(candidates),
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+        }
+
+    pre_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT OR IGNORE INTO {q_ref}
+            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+        VALUES (?, ?, ?, NULL, ?, ?)
+        """,
+        [
+            (
+                DECISION_CERTIFICATES_TABLE,
+                cert_hash,
+                REASON_INVALID_LIVE_ACTIONABLE,
+                recorded_at,
+                json.dumps(
+                    {
+                        "source": "quarantine_invalid_live_actionable_certificates",
+                        "certificate_id": cert_id,
+                        "decision_time": decision_time,
+                        "verification_error": reason,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            for cert_hash, cert_id, decision_time, reason in candidates
+        ],
+    )
+    post_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()[0]
+    newly_quarantined = post_count - pre_count
+    return {
+        "checked_count": checked_count,
+        "candidates_found": len(candidates),
+        "already_quarantined": len(candidates) - newly_quarantined,
+        "newly_quarantined": newly_quarantined,
+        "dry_run": False,
+    }
+
+
+def quarantine_invalid_live_money_parent_modes(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = False,
+    lookback_hours: float | None = None,
+) -> dict:
+    """Tag LIVE money-boundary certificates whose parent ancestry is not LIVE.
+
+    Historical mixed-mode certificates are immutable evidence, but they cannot
+    remain consumable execution authority.  This writes a non-destructive
+    quarantine row keyed by the child certificate hash.
+    """
+
+    q_ref = _quarantine_ref(conn)
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    params: list[object] = list(LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
+    placeholders = ",".join("?" for _ in LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
+    since_clause = ""
+    if lookback_hours is not None:
+        from datetime import timedelta
+
+        since = datetime.now(timezone.utc) - timedelta(hours=float(lookback_hours))
+        since_clause = " AND datetime(child.decision_time) >= datetime(?)"
+        params.append(since.isoformat())
+
+    try:
+        candidates = conn.execute(
+            f"""
+            SELECT
+                child.certificate_id,
+                child.certificate_hash,
+                child.certificate_type,
+                child.decision_time,
+                COUNT(*) AS bad_parent_count,
+                GROUP_CONCAT(
+                    edge.parent_certificate_type || ':' || COALESCE(parent.mode, 'MISSING'),
+                    ','
+                ) AS bad_parent_modes
+              FROM decision_certificates child
+              JOIN decision_certificate_edges edge
+                ON edge.child_certificate_id = child.certificate_id
+              LEFT JOIN decision_certificates parent
+                ON parent.certificate_hash = edge.parent_certificate_hash
+             WHERE child.certificate_type IN ({placeholders})
+               AND child.mode = 'LIVE'
+               AND child.verifier_status = 'VERIFIED'
+               {since_clause}
+               AND COALESCE(parent.mode, '') != 'LIVE'
+             GROUP BY
+                child.certificate_id,
+                child.certificate_hash,
+                child.certificate_type,
+                child.decision_time
+             ORDER BY datetime(child.decision_time) DESC, child.certificate_id DESC
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        msg = f"invalid live money parent-mode quarantine scan failed: {exc}"
+        logger.error(msg)
+        return {
+            "checked_count": 0,
+            "candidates_found": 0,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+            "error": msg,
+        }
+
+    candidates_found = len(candidates)
+    if dry_run or candidates_found == 0:
+        return {
+            "checked_count": candidates_found,
+            "candidates_found": candidates_found,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+        }
+
+    pre_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_PARENT_MODE),
+    ).fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT OR IGNORE INTO {q_ref}
+            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+        VALUES (?, ?, ?, NULL, ?, ?)
+        """,
+        [
+            (
+                DECISION_CERTIFICATES_TABLE,
+                str(row["certificate_hash"] if isinstance(row, sqlite3.Row) else row[1]),
+                REASON_INVALID_LIVE_PARENT_MODE,
+                recorded_at,
+                json.dumps(
+                    {
+                        "source": "quarantine_invalid_live_money_parent_modes",
+                        "certificate_id": str(row["certificate_id"] if isinstance(row, sqlite3.Row) else row[0]),
+                        "certificate_type": str(row["certificate_type"] if isinstance(row, sqlite3.Row) else row[2]),
+                        "decision_time": str(row["decision_time"] if isinstance(row, sqlite3.Row) else row[3]),
+                        "bad_parent_count": int(row["bad_parent_count"] if isinstance(row, sqlite3.Row) else row[4]),
+                        "bad_parent_modes": str(row["bad_parent_modes"] if isinstance(row, sqlite3.Row) else row[5]),
+                    },
+                    sort_keys=True,
+                ),
+            )
+            for row in candidates
+        ],
+    )
+    post_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_PARENT_MODE),
+    ).fetchone()[0]
+    newly_quarantined = post_count - pre_count
+    return {
+        "checked_count": candidates_found,
+        "candidates_found": candidates_found,
+        "already_quarantined": candidates_found - newly_quarantined,
+        "newly_quarantined": newly_quarantined,
+        "dry_run": False,
+    }
 
 
 def quarantine_decisions_for_noncontributing_forecast(

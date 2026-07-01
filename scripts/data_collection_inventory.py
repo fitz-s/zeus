@@ -86,8 +86,6 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     # Trading-adjacent analysis + ops (classified 2026-06-11: not raw data collection;
     # these read already-collected data and produce derived outputs or control signals).
     "settlement_guard_report",    # settlement audit: reads trade/settlement tables → JSON report
-    "shadow_comparator",          # shadow vs live comparison (analysis, not source data)
-    "day0_shadow_enrichment",     # enriches shadow receipts from settlement data (derived)
     "settlement_skill_attribution",  # skill-vs-luck grade of settled positions (derived audit,
                                      # reads edli_live_profit_audit + settlement/forecast tables)
     "new_listing_scout",          # new market detection → intents (trading control, not raw data)

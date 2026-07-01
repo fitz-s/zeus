@@ -852,18 +852,24 @@ def submit_redeem(
                 parsed_index_sets,
             )
 
-            # negRisk routing: look up neg_risk flag + token IDs from world
-            # snapshot table. Live callers must provide or open a connection
-            # with world ATTACHed, so the query MUST use the qualified name
-            # world.executable_market_snapshots. The main connection is
-            # zeus_trades.db; unqualified reads would hit any legacy ghost row
-            # in the trade DB, not the authoritative world snapshot.
-            # (Thread 1 fix: qualify table as world.executable_market_snapshots)
+            # negRisk routing: resolve neg_risk flag + token IDs from the
+            # executable_market_snapshots CACHE, then the live Gamma authority.
+            # Ownership (K1 split eba80d2b9d, 2026-05-11): executable_market_snapshots
+            # is TRADE-class — the authoritative rows live in zeus_trades.db (this
+            # function's MAIN connection). The world.* copy is the legacy shadow, now
+            # empty post-K1 and scheduled for drop 2026-08-09; it is read first only for
+            # back-compat with any un-migrated caller. So the lookup is 3-tier, mirroring
+            # _lookup_market_neg_risk_authoritative():
+            #   Tier 1 — world.executable_market_snapshots (legacy shadow, ATTACHed above)
+            #   Tier 2 — the AUTHORITATIVE trade-class copy on the main zeus_trades.db conn
+            #   Tier 3 — live Gamma CLOB authority (below)
+            # Corrected 2026-06-30: the prior comment had this INVERTED — it claimed world
+            # was authoritative and the trade copy a "legacy ghost"; post-K1 the reverse is
+            # true, and reading ONLY world missed the local 9.1M-row snapshot (every redeem
+            # paid a Gamma round-trip and fail-closed to FACT_MISSING when Gamma was down).
             #
-            # Topology law (topology.yaml:4193): neg-risk facts may not be
-            # guessed; a missing snapshot row FAILS CLOSED by assigning raw to
-            # REDEEM_NEGRISK_FACT_MISSING and skipping the adapter call.
-            # (Thread 3 fix: fail-closed instead of defaulting is_neg_risk=False)
+            # Topology law (topology.yaml:4193): neg-risk facts may not be guessed; a miss on
+            # ALL THREE tiers FAILS CLOSED to REDEEM_NEGRISK_FACT_MISSING and skips the adapter.
             amount_per_slot: int | None = None
             try:
                 neg_risk_row = conn.execute(
@@ -882,6 +888,28 @@ def submit_redeem(
                     command_id, snap_exc,
                 )
                 neg_risk_row = None
+            if neg_risk_row is None:
+                # Tier 2 — the AUTHORITATIVE trade-class executable_market_snapshots on the
+                # main (zeus_trades.db) connection. Post-K1 this is where the real rows live
+                # (the world shadow above is empty); read it before paying for the Gamma
+                # network round-trip. Unqualified name = the main connection's own DB.
+                try:
+                    neg_risk_row = conn.execute(
+                        """
+                        SELECT neg_risk, yes_token_id, no_token_id
+                          FROM executable_market_snapshots
+                         WHERE condition_id = ?
+                         ORDER BY captured_at DESC
+                         LIMIT 1
+                        """,
+                        (row["condition_id"],),
+                    ).fetchone()
+                except Exception as snap2_exc:
+                    logger.warning(
+                        "[REDEEM_NEGRISK_TRADES_LOOKUP_FAILED] command_id=%s exc=%s",
+                        command_id, snap2_exc,
+                    )
+                    neg_risk_row = None
             if neg_risk_row is None:
                 # Snapshot miss — try live Gamma authority fallback before
                 # failing closed. The topology law (yaml:4193) forbids GUESSING

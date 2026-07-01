@@ -1,9 +1,9 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §F2
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2
 """Acceptance tests: F2 — event timestamps must be typed/explicit.
 
-F2 invariant (docs/findings_2026_05_28.md §F2):
+F2 invariant (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2):
   Every canonical event builder receives an explicit event_observed_at
   parameter. VENUE_POSITION_OBSERVED.occurred_at = venue_observed_at.
   REVIEW_REQUIRED.occurred_at = review_detected_at.
@@ -295,5 +295,5 @@ def test_no_f2_builder_uses_non_empty_fallback_for_event_occurred_at() -> None:
         f"F2 violation: the following builders still assign "
         f"occurred_at = _non_empty(...) instead of using an explicit "
         f"event_observed_at parameter: {sorted(violations)}. "
-        f"See docs/findings_2026_05_28.md §F2."
+        f"See docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2."
     )

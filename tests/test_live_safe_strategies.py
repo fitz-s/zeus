@@ -84,7 +84,6 @@ def _inject_ghost_strategy(monkeypatch, *, live_status: str = "live") -> str:
         metric_support={"high": "blocked", "low": "blocked"},
         kelly_default_multiplier=0.0,
         kelly_phase_overrides={},
-        min_shadow_decisions=0,
         min_settled_decisions=0,
         promotion_evidence_ref=None,
     )

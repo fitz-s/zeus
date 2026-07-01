@@ -102,7 +102,7 @@ Zeus 现在已经对时间语义这么做了：
 
 ### Near-term priorities
 - 提升历史 replay 的 vector compatibility，而不是继续改 replay 主逻辑
-- 继续让新的 `decision_log` / `shadow_signals` 样本稳定进入库
+- 继续让新的 `decision_log` 样本稳定进入库
 
 ### Mid-term priorities
 - 扩大 `historical_forecasts` 覆盖率

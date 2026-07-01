@@ -70,11 +70,9 @@ write):
      depth. The cost enters as a typed :class:`ExecutionPrice`, never a bare
      float.
 
-DEFAULT-OFF / SHADOW (operator directive 2026-06-08). Pure objects + pure
-functions. Importing this module changes NO live trading behavior; it is NOT
-wired into the live decision path (that is Phase-4 integration, later). No
-existing gate is weakened, and the spec keeps live family entry single-primary
-until the payoff-matrix shadow passes (§14.8).
+Runtime boundary. This module exposes pure scoring objects used by the family
+decision path. Importing it has no side effects; live eligibility, submission,
+and sizing authority remain with the caller's gates.
 """
 from __future__ import annotations
 

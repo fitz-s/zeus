@@ -20,12 +20,14 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -81,6 +83,7 @@ CANONICAL_STRATEGY_KEYS = frozenset(
 _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     {
         "EXIT_ORDER_POSTED",
+        "EXIT_INTENT",
         "EXIT_ORDER_ATTEMPTED",
         "EXIT_ORDER_FILLED",
         "EXIT_ORDER_REJECTED",
@@ -402,6 +405,45 @@ class WorldMutexIOViolation(RuntimeError):
     """
 
 
+def _world_live_writer_lock_path() -> Path:
+    """Return the cross-process LIVE writer lock file for zeus-world.db."""
+
+    return ZEUS_WORLD_DB_PATH.with_name(ZEUS_WORLD_DB_PATH.name + ".writer-lock.live")
+
+
+def _lock_acquire_kwargs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[bool, float]:
+    blocking = bool(kwargs.get("blocking", True))
+    timeout = float(kwargs.get("timeout", -1.0))
+    if args:
+        blocking = bool(args[0])
+    if len(args) >= 2:
+        timeout = float(args[1])
+    return blocking, timeout
+
+
+def _acquire_flock_fd(lock_path: Path, *, blocking: bool, timeout: float) -> int | None:
+    """Acquire a fcntl flock and return the open fd, or None for non-blocking miss."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    flags = fcntl.LOCK_EX
+    if not blocking or timeout >= 0.0:
+        flags |= fcntl.LOCK_NB
+    deadline = time.monotonic() + timeout if timeout >= 0.0 else None
+    while True:
+        try:
+            fcntl.flock(fd, flags)
+            return fd
+        except BlockingIOError:
+            if not blocking or (deadline is not None and time.monotonic() >= deadline):
+                os.close(fd)
+                return None
+            time.sleep(0.01)
+        except OSError:
+            os.close(fd)
+            raise
+
+
 class _GuardedWorldMutex:
     """A ``threading.Lock`` facade that tracks THREAD-LOCAL held depth.
 
@@ -421,21 +463,44 @@ class _GuardedWorldMutex:
     thread's acquisition, generating spurious advisories and (when fatal) daemon
     instability.
 
-    The held counter is a depth (not bool) so a future reentrant variant cannot
-    silently corrupt the flag; in practice it is 0 or 1 (non-reentrant lock).
+    The lock now has two layers:
+
+    * the original process-local ``threading.Lock`` for in-process scheduler
+      threads, and
+    * the zeus-world LIVE writer flock for launchd sidecars in other processes.
+
+    Without the flock, ``src.main`` and ``price_channel_daemon`` each held their
+    own independent process-local mutex and still collided on SQLite's WAL writer
+    lock, starving Day0/redecision/reactor claims under live load.
     """
 
-    __slots__ = ("_lock",)
+    __slots__ = ("_lock", "_flock_fd")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._flock_fd: int | None = None
 
     def acquire(self, *args: Any, **kwargs: Any) -> bool:
         acquired = self._lock.acquire(*args, **kwargs)
-        if acquired:
+        if not acquired:
+            return False
+        try:
+            blocking, timeout = _lock_acquire_kwargs(args, kwargs)
+            fd = _acquire_flock_fd(
+                _world_live_writer_lock_path(),
+                blocking=blocking,
+                timeout=timeout,
+            )
+            if fd is None:
+                self._lock.release()
+                return False
+            self._flock_fd = fd
             _tls = _world_mutex_tls()
             _tls.held_depth = getattr(_tls, "held_depth", 0) + 1
-        return acquired
+            return True
+        except BaseException:
+            self._lock.release()
+            raise
 
     def release(self) -> None:
         # Decrement the thread-local depth BEFORE releasing the OS lock so the
@@ -444,6 +509,13 @@ class _GuardedWorldMutex:
         d = getattr(_tls, "held_depth", 0)
         if d > 0:
             _tls.held_depth = d - 1
+        fd = self._flock_fd
+        self._flock_fd = None
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
         self._lock.release()
 
     def locked(self) -> bool:
@@ -737,8 +809,8 @@ def forecasts_connection_with_trades_flocked(
     INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
     harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
     ensemble_snapshots, observations) AND trade-class tables (position_current,
-    position_events, decision_log, chronicle, settlement_commands) in a SINGLE
-    atomic SAVEPOINT.  Opening two independent connections and committing them
+    position_events, decision_log, chronicle, settlement_commands) in a single
+    attached-connection SAVEPOINT. Opening two independent connections and committing them
     separately violates INV-37 — a crash / busy / kill between the two commits
     leaves logically impossible state (settlement truth written but positions not
     settled, or the reverse).
@@ -753,8 +825,10 @@ def forecasts_connection_with_trades_flocked(
         in forecasts.db so SQLite name resolution finds them in the attached
         'trades' schema (zeus_trades.db) ✓
 
-    Single SAVEPOINT spanning all writes makes the entire settlement cycle
-    all-or-nothing per INV-37 law.
+    A single SAVEPOINT spanning all writes keeps normal successful execution
+    all-or-nothing per INV-37 law. In WAL mode, ATTACHed DB files are not a
+    cross-file host-crash-atomic contract; crash recovery must still prove or
+    repair cross-file invariants.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
@@ -807,16 +881,16 @@ def get_world_connection_with_trades_required(
     of ``world_connection_with_trades_flocked``, for callers that must hold the
     connection across a LONG-LIVED loop (the forever market-channel ingestor thread)
     where holding cross-DB writer flocks for the whole lifetime would starve every
-    other writer. Atomicity of each write unit still comes from the single connection
-    + single ``commit()`` (SQLite commits the MAIN + ATTACHed databases atomically —
-    the same shape ``get_trade_connection_with_world_required`` relies on); the
-    per-commit world-WAL serialization is provided by the caller's world write mutex.
+    other writer. Each write unit uses one attached SQLite connection and one
+    ``commit()`` for normal successful-execution consistency, while the caller's
+    world write mutex provides per-commit world-WAL serialization. WAL mode does
+    not make MAIN + ATTACHed DB files a cross-file host-crash-atomic unit.
 
     world.db is MAIN so the EventStore's UNQUALIFIED ``opportunity_events`` (and its
     ``sqlite_master`` table-presence guard) resolve to the REAL world log; the
     feasibility write is schema-qualified ``trades.`` by the caller so it reaches the
-    runtime-read trades table and never the world shadow (see
-    ``world_connection_with_trades_flocked`` for the full shadow-table rationale).
+    runtime-read trades table and never the world ghost copy (see
+    ``world_connection_with_trades_flocked`` for the full ghost-table rationale).
 
     Fail closed: if ``trades`` cannot be ATTACHed, close and raise.
 
@@ -849,22 +923,23 @@ def world_connection_with_trades_flocked(
     INV-37 price-channel fix (PR415 review B5, 2026-06-20): the held/candidate
     quote-evidence ingest must write BOTH the world event (``opportunity_events``,
     world-class, via EventWriter/EventStore) AND the trade-owned book witness
-    (``execution_feasibility_evidence``, trade-class) in a SINGLE atomic SAVEPOINT.
+    (``execution_feasibility_evidence``, trade-class) in a single attached-connection
+    SAVEPOINT.
     The prior shape opened two independent connections (``get_world_connection`` +
     ``get_trade_connection``) and committed them SEPARATELY — a crash/busy/kill
     between the two commits left divergent state, violating INV-37.
 
-    SHADOW-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
+    GHOST-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
     feasibility write must be schema-QUALIFIED): BOTH databases physically contain
     BOTH tables. ``world.opportunity_events`` is the real ~9.5M-row log while
-    ``trades.opportunity_events`` is an empty shadow; conversely
+    ``trades.opportunity_events`` is an empty ghost copy; conversely
     ``trades.execution_feasibility_evidence`` is the real ~4.3M-row table the live
     runtime reads (via the trade connection) while ``world.execution_feasibility_
     evidence`` is a populated-but-not-read legacy table (~12.9M rows). So UNQUALIFIED
     name resolution on a single ATTACHed connection is AMBIGUOUS — it resolves to the
     MAIN schema's copy, and ``EventStore._require_world_event_tables`` queries plain
     ``sqlite_master`` (MAIN-only), so a trade-MAIN+world-ATTACHed connection would
-    silently write ``opportunity_events`` to the EMPTY trade shadow AND falsely pass
+    silently write ``opportunity_events`` to the EMPTY trade ghost copy AND falsely pass
     the presence guard. The repo's existing flocked helpers
     (``forecasts_connection_with_trades_flocked``) only work because the non-MAIN
     table is ABSENT from MAIN — which is FALSE here. This helper therefore:
@@ -875,10 +950,11 @@ def world_connection_with_trades_flocked(
       - ATTACHes zeus_trades.db as ``trades`` so the feasibility write can target
         ``trades.execution_feasibility_evidence`` EXPLICITLY (the caller passes the
         ``trades`` qualifier), reaching the runtime-read table and NEVER the world
-        shadow.
+        ghost copy.
 
-    Single SAVEPOINT / single commit spanning both writes makes the pair
-    all-or-nothing per INV-37.
+    A single SAVEPOINT / single commit spanning both writes keeps the pair
+    all-or-nothing during normal successful execution per INV-37. In WAL mode,
+    ATTACHed DB files are not a cross-file host-crash-atomic contract.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-world.db`` before ``zeus_trades.db``) — the SAME order as
@@ -1543,7 +1619,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1577,6 +1653,34 @@ def init_schema(
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     conn.executescript("""
+        -- Migration-created world-class tables promoted from legacy_archived (2026-07-01, atlas §6C):
+        -- declared world_class in db_table_ownership.yaml + hold live data; created here so init == registry.
+        CREATE TABLE IF NOT EXISTS historical_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            forecast_high REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            lead_days INTEGER,
+            available_at TEXT,
+            UNIQUE(city, target_date, source, lead_days)
+        );
+        CREATE TABLE IF NOT EXISTS hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc    TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (target_date, hour_utc)
+        );
+        CREATE TABLE IF NOT EXISTS day0_oracle_anomaly_flags (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            flagged_at TEXT NOT NULL,
+            ttl_hours REAL NOT NULL,
+            detail TEXT NOT NULL,
+            PRIMARY KEY (city, target_date)
+        );
         -- Inherited from legacy predecessor: settlement outcomes (world-class authoritative table)
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1784,19 +1888,6 @@ def init_schema(
             exit_timing_usd REAL DEFAULT 0.0,
             risk_throttling_usd REAL DEFAULT 0.0,
             settlement_edge_usd REAL DEFAULT 0.0
-        );
-
-        -- Shadow signals for pre-trading validation
-        CREATE TABLE IF NOT EXISTS shadow_signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            decision_snapshot_id TEXT,
-            p_raw_json TEXT NOT NULL,
-            p_cal_json TEXT,
-            edges_json TEXT,
-            lead_hours REAL NOT NULL
         );
 
         -- Durable per-decision probability lineage.
@@ -2010,7 +2101,7 @@ def init_schema(
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
             schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
-            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'offline_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
         CREATE INDEX IF NOT EXISTS idx_decision_events_slug_date
@@ -2072,7 +2163,7 @@ def init_schema(
         -- data_version, provenance_json, running_min, identity-spine, +bounds CHECK)
         -- is now the ONLY definition of observation_instants and lives in
         -- src/state/schema/v2_schema.py (applied via apply_canonical_schema, called
-        -- from init_schema). Defining a subset here would shadow the superset under
+        -- from init_schema). Defining a subset here would mask the superset under
         -- CREATE TABLE IF NOT EXISTS (init_schema runs this executescript BEFORE
         -- apply_canonical_schema), so it MUST stay deleted. Indexes moved to
         -- v2_schema.py as well (idx_observation_instants_city_ts).
@@ -2333,7 +2424,7 @@ def init_schema(
                 'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
             )),
             readiness_status TEXT NOT NULL CHECK (readiness_status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+                'LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_code TEXT,
             computed_at TEXT NOT NULL,
@@ -2374,7 +2465,7 @@ def init_schema(
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -2417,10 +2508,12 @@ def init_schema(
             )),
             source_contract_reason TEXT,
             authority_status TEXT NOT NULL CHECK (authority_status IN (
-                'VERIFIED','STALE','EMPTY_FALLBACK','UNKNOWN'
+                'VERIFIED','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','UNKNOWN'
             )),
             status TEXT NOT NULL CHECK (status IN (
-                'CURRENT','STALE','EMPTY_FALLBACK','MISMATCH','UNKNOWN'
+                'CURRENT','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','MISMATCH','UNKNOWN'
             )),
             expires_at TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
@@ -2436,7 +2529,8 @@ def init_schema(
             audit_id TEXT PRIMARY KEY,
             checked_at_utc TEXT NOT NULL,
             scan_authority TEXT NOT NULL CHECK (scan_authority IN (
-                'VERIFIED','FIXTURE','STALE_CACHE','EMPTY_FALLBACK','NEVER_FETCHED'
+                'VERIFIED','FIXTURE','STALE_CACHE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','NEVER_FETCHED'
             )),
             report_status TEXT CHECK (report_status IS NULL OR report_status IN (
                 'OK','WARN','ALERT','DATA_UNAVAILABLE'
@@ -2547,7 +2641,7 @@ def init_schema(
 
     """)
     _ensure_job_run_release_key_identity(conn)
-    init_snapshot_schema(conn)
+    init_snapshot_schema(conn, include_latest=False)
     init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
     # importing src.execution modules.  The execution module repeats the same
@@ -2858,11 +2952,6 @@ def init_schema(
         except sqlite3.OperationalError:
             pass
 
-    try:
-        conn.execute("ALTER TABLE shadow_signals ADD COLUMN decision_snapshot_id TEXT;")
-    except sqlite3.OperationalError:
-        pass
-
     # calibration_pairs bare ALTER TABLE blocks removed in B3 (PR3):
     # bare calibration_pairs shell dropped; v2 schema owns the table.
 
@@ -3124,7 +3213,7 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
     # position_current. F1 added chain_avg_price / chain_cost_basis_usd to the canonical
     # column contract (src/state/projection.py CANONICAL_POSITION_CURRENT_COLUMNS) and the
     # Position dataclass, but the boot migration was never added — so live trade DBs lack
@@ -3225,14 +3314,12 @@ def init_schema(
     _ensure_edli_fill_bridge_dispositions_table(conn)
 
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
-    # must admit shadow_decision / unknown_legacy. CREATE TABLE IF NOT EXISTS
+    # must admit offline_decision / unknown_legacy. CREATE TABLE IF NOT EXISTS
     # cannot upgrade stale CHECKs.
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
-
-    # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
-    from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
-    _ensure_tail_stress_scenarios_table(conn)
+    _migrate_market_scan_authority_checks(conn)
+    _migrate_readiness_state_status_checks(conn)
 
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
@@ -3242,7 +3329,7 @@ def init_schema(
     from src.state.schema.regime_correlation_cache_schema import ensure_table as _ensure_regime_correlation_cache_table
     _ensure_regime_correlation_cache_table(conn)
 
-    # Phase 6 T2+T3 (2026-05-21): shadow_experiments, evidence_tier_assignments,
+    # Phase 6 T2+T3 (2026-05-21): evidence_tier_assignments and
     # regret_decompositions tables (SCHEMA_VERSION 25/26).
     from src.state.schema.phase6_evidence_schema import ensure_tables as _ensure_phase6_evidence_tables
     _ensure_phase6_evidence_tables(conn)
@@ -3254,7 +3341,7 @@ def init_schema(
     # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
     # init_schema target so monitor_refresh + evaluator can read FT models at runtime
     # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
-    # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+    # Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
     from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
     _init_ens_bias_schema(conn)
 
@@ -3288,7 +3375,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
         return
     if (
         "unknown_legacy" in table_sql
-        and "shadow_decision" in table_sql
+        and "offline_decision" in table_sql
         and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
@@ -3330,7 +3417,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
             schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
-            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'offline_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
         """
@@ -3370,7 +3457,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
                 ELSE 36
             END,
             CASE
-                WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
+                WHEN source IN ('phase0_backfill', 'live_decision', 'offline_decision')
                     THEN source
                 ELSE 'phase0_backfill'
             END
@@ -3729,7 +3816,7 @@ def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
                 'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
             )),
             readiness_status TEXT NOT NULL CHECK (readiness_status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+                'LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_code TEXT,
             computed_at TEXT NOT NULL,
@@ -3781,7 +3868,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -3829,11 +3916,20 @@ _FORECAST_TABLES = (
     "settlement_capture_verifications",
     # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 PR #329 D (2026-05-24)
     "source_time_frontier",
-    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    # Replacement forecast live-authority provenance (2026-06-07).
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
+    # 2026-07-01 DB-ownership cleanup: sync this legacy constant with the registry
+    # forecast_class set (closes test_a1 drift). NOTE: init_schema_forecasts derives its
+    # table list from tables_for_class(FORECAST_CLASS), NOT this constant (P2 refactor
+    # 2026-05-14), so this tuple is a coherence witness only — no runtime driver. These 4
+    # were already forecast_class in the registry but absent here. settlements stays OUT
+    # (B3cont 2026-05-28 dropped its forecasts shell; reclassified legacy_archived here).
+    "raw_model_forecasts",
+    "raw_model_forecast_request_conflicts",
+    "cycle_advance_enqueues",
+    "fusion_upgrade_enqueues",
 )
 
 
@@ -3870,6 +3966,10 @@ def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
             ON market_events(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_condition_id
+            ON market_events(condition_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market_events_open
@@ -3912,6 +4012,12 @@ def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
             ON calibration_pairs(temperature_metric, dataset_id, training_allowed, authority)
     """)
+
+
+def ensure_forecast_runtime_indexes(conn: sqlite3.Connection) -> None:
+    """Idempotently converge hot forecast-class indexes needed by live readers."""
+
+    _ensure_forecast_indexes(conn)
 
 
 def _create_day0_horizon_platt_fits(conn: sqlite3.Connection) -> None:
@@ -4106,6 +4212,349 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
+
+
+def _migrate_market_scan_authority_checks(conn: sqlite3.Connection) -> None:
+    """Replace ambiguous EMPTY_FALLBACK scan-authority CHECK values.
+
+    EMPTY_FALLBACK conflated two different runtime facts: network fetch failed
+    without cache, and keyword-discovery recovery with weaker provenance. The
+    new CHECK admits precise facts only. Existing rows with the old value are
+    intentionally not auto-mapped because their original cause is unrecoverable.
+    """
+
+    _migrate_market_topology_state_authority_checks(conn)
+    _migrate_source_contract_audit_authority_checks(conn)
+
+
+def _migrate_readiness_state_status_checks(conn: sqlite3.Connection) -> None:
+    """Remove log-only readiness from the executable readiness vocabulary.
+
+    ``DEGRADED_LOG_ONLY`` was an observe-only/status-reporting word admitted by
+    the live readiness table. A readiness row either authorizes the live path
+    (``LIVE_ELIGIBLE``) or blocks it with evidence. If old rows still exist, the
+    migration fails instead of silently relabeling them.
+    """
+
+    sql = _table_create_sql(conn, "readiness_state")
+    if not sql or "DEGRADED_LOG_ONLY" not in sql:
+        return
+    stale_rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS n
+          FROM readiness_state
+         WHERE status NOT IN ('READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED')
+         GROUP BY status
+         ORDER BY status
+        """
+    ).fetchall()
+    if stale_rows:
+        details = ", ".join(f"{row[0]}={row[1]}" for row in stale_rows)
+        raise RuntimeError(
+            "readiness_state contains obsolete non-live status row(s); "
+            f"classify them before schema upgrade: {details}"
+        )
+    before = conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0]
+    conn.execute("DROP TABLE IF EXISTS readiness_state_status_migrated")
+    conn.execute(
+        """
+        CREATE TABLE readiness_state_status_migrated (
+            readiness_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            scope_type TEXT NOT NULL CHECK (scope_type IN (
+                'global','source','city_metric','market','strategy','quote'
+            )),
+            city_id TEXT,
+            city TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            metric TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            source_id TEXT,
+            track TEXT,
+            source_run_id TEXT,
+            market_family TEXT,
+            event_id TEXT,
+            condition_id TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            strategy_key TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
+            )),
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            dependency_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+            UNIQUE(
+                scope_type, city_id, city_timezone, target_local_date,
+                temperature_metric, physical_quantity, observation_field,
+                data_version, strategy_key, market_family, source_id, track,
+                condition_id
+            )
+        )
+        """
+    )
+    columns = (
+        "readiness_id, scope_key, scope_type, city_id, city, city_timezone, "
+        "target_local_date, metric, temperature_metric, physical_quantity, "
+        "observation_field, data_version, source_id, track, source_run_id, "
+        "market_family, event_id, condition_id, token_ids_json, strategy_key, "
+        "status, reason_codes_json, computed_at, expires_at, dependency_json, "
+        "provenance_json, recorded_at"
+    )
+    conn.execute(
+        f"INSERT INTO readiness_state_status_migrated ({columns}) "
+        f"SELECT {columns} FROM readiness_state"
+    )
+    after = conn.execute("SELECT COUNT(*) FROM readiness_state_status_migrated").fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "readiness_state status migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE readiness_state")
+    conn.execute("ALTER TABLE readiness_state_status_migrated RENAME TO readiness_state")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
+            ON readiness_state(city_id, city_timezone, target_local_date,
+                               temperature_metric, strategy_key,
+                               market_family, condition_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
+            ON readiness_state(status, expires_at)
+        """
+    )
+
+
+def _table_create_sql(conn: sqlite3.Connection, table_name: str) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row[0] or "")
+
+
+def _assert_no_ambiguous_empty_fallback_rows(
+    conn: sqlite3.Connection,
+    table_name: str,
+    columns: tuple[str, ...],
+) -> None:
+    predicates = " OR ".join(f"{column} = 'EMPTY_FALLBACK'" for column in columns)
+    count = conn.execute(f"SELECT COUNT(*) FROM {table_name} WHERE {predicates}").fetchone()[0]
+    if int(count or 0) > 0:
+        raise RuntimeError(
+            f"{table_name} contains {count} ambiguous EMPTY_FALLBACK row(s); "
+            "operator migration must classify them before schema upgrade"
+        )
+
+
+def _migrate_market_topology_state_authority_checks(conn: sqlite3.Connection) -> None:
+    leftover_table = "market_topology_state_authority_migrated"
+    sql = _table_create_sql(conn, "market_topology_state")
+    leftover_sql = _table_create_sql(conn, leftover_table)
+    if leftover_sql and (not sql or "EMPTY_FALLBACK" not in sql):
+        leftover_count = conn.execute(f"SELECT COUNT(*) FROM {leftover_table}").fetchone()[0]
+        if int(leftover_count or 0) > 0:
+            raise RuntimeError(
+                f"{leftover_table} contains {leftover_count} row(s); refusing to "
+                "discard interrupted market_topology_state migration residue"
+            )
+        conn.execute(f"DROP TABLE {leftover_table}")
+    if not sql or "EMPTY_FALLBACK" not in sql:
+        return
+    _assert_no_ambiguous_empty_fallback_rows(
+        conn,
+        "market_topology_state",
+        ("authority_status", "status"),
+    )
+    before = conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0]
+    conn.execute("DROP TABLE IF EXISTS market_topology_state_authority_migrated")
+    conn.execute(
+        """
+        CREATE TABLE market_topology_state_authority_migrated (
+            topology_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            market_family TEXT NOT NULL,
+            event_id TEXT,
+            condition_id TEXT NOT NULL,
+            question_id TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            bin_topology_hash TEXT,
+            gamma_captured_at TEXT,
+            gamma_updated_at TEXT,
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISMATCH','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            authority_status TEXT NOT NULL CHECK (authority_status IN (
+                'VERIFIED','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','UNKNOWN'
+            )),
+            status TEXT NOT NULL CHECK (status IN (
+                'CURRENT','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','MISMATCH','UNKNOWN'
+            )),
+            expires_at TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+            UNIQUE(market_family, condition_id, city_id, target_local_date, temperature_metric, data_version)
+        )
+        """
+    )
+    columns = (
+        "topology_id, scope_key, market_family, event_id, condition_id, question_id, "
+        "city_id, city_timezone, target_local_date, temperature_metric, physical_quantity, "
+        "observation_field, data_version, token_ids_json, bin_topology_hash, gamma_captured_at, "
+        "gamma_updated_at, source_contract_status, source_contract_reason, authority_status, "
+        "status, expires_at, provenance_json, recorded_at"
+    )
+    conn.execute(
+        f"INSERT INTO market_topology_state_authority_migrated ({columns}) "
+        f"SELECT {columns} FROM market_topology_state"
+    )
+    after = conn.execute("SELECT COUNT(*) FROM market_topology_state_authority_migrated").fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "market_topology_state scan-authority migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE market_topology_state")
+    conn.execute(
+        "ALTER TABLE market_topology_state_authority_migrated RENAME TO market_topology_state"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_topology_scope
+            ON market_topology_state(city_id, city_timezone, target_local_date, temperature_metric, market_family, condition_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_topology_status_expiry
+            ON market_topology_state(status, expires_at)
+        """
+    )
+
+
+def _migrate_source_contract_audit_authority_checks(conn: sqlite3.Connection) -> None:
+    sql = _table_create_sql(conn, "source_contract_audit_events")
+    if not sql or "EMPTY_FALLBACK" not in sql:
+        return
+    _assert_no_ambiguous_empty_fallback_rows(
+        conn,
+        "source_contract_audit_events",
+        ("scan_authority",),
+    )
+    before = conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0]
+    conn.execute("DROP TRIGGER IF EXISTS source_contract_audit_events_no_update")
+    conn.execute("DROP TRIGGER IF EXISTS source_contract_audit_events_no_delete")
+    conn.execute("DROP TABLE IF EXISTS source_contract_audit_events_authority_migrated")
+    conn.execute(
+        """
+        CREATE TABLE source_contract_audit_events_authority_migrated (
+            audit_id TEXT PRIMARY KEY,
+            checked_at_utc TEXT NOT NULL,
+            scan_authority TEXT NOT NULL CHECK (scan_authority IN (
+                'VERIFIED','FIXTURE','STALE_CACHE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','NEVER_FETCHED'
+            )),
+            report_status TEXT CHECK (report_status IS NULL OR report_status IN (
+                'OK','WARN','ALERT','DATA_UNAVAILABLE'
+            )),
+            severity TEXT NOT NULL CHECK (severity IN ('OK','WARN','ALERT','DATA_UNAVAILABLE')),
+            event_id TEXT,
+            slug TEXT,
+            title TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISSING','AMBIGUOUS','MISMATCH','UNSUPPORTED','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            configured_source_family TEXT,
+            configured_station_id TEXT,
+            observed_source_family TEXT,
+            observed_station_id TEXT,
+            resolution_sources_json TEXT NOT NULL DEFAULT '[]',
+            source_contract_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
+        )
+        """
+    )
+    columns = (
+        "audit_id, checked_at_utc, scan_authority, report_status, severity, event_id, "
+        "slug, title, city, target_date, temperature_metric, source_contract_status, "
+        "source_contract_reason, configured_source_family, configured_station_id, "
+        "observed_source_family, observed_station_id, resolution_sources_json, "
+        "source_contract_json, payload_hash, created_at"
+    )
+    conn.execute(
+        f"INSERT INTO source_contract_audit_events_authority_migrated ({columns}) "
+        f"SELECT {columns} FROM source_contract_audit_events"
+    )
+    after = conn.execute(
+        "SELECT COUNT(*) FROM source_contract_audit_events_authority_migrated"
+    ).fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "source_contract_audit_events scan-authority migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE source_contract_audit_events")
+    conn.execute(
+        "ALTER TABLE source_contract_audit_events_authority_migrated "
+        "RENAME TO source_contract_audit_events"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_city_date
+            ON source_contract_audit_events(city, target_date, temperature_metric, checked_at_utc)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_status
+            ON source_contract_audit_events(source_contract_status, severity, checked_at_utc)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_update
+        BEFORE UPDATE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_delete
+        BEFORE DELETE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END
+        """
+    )
 
 
 def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
@@ -4363,6 +4812,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _ensure_job_run_release_key_identity(conn)
     _create_source_run_coverage(conn)
     _create_readiness_state(conn)
+    _migrate_readiness_state_status_checks(conn)
 
     # Post-condition equivalence (Option A, 2026-05-14):
     # The ATTACH branch above copies indexes from world_src.sqlite_master; if
@@ -4407,6 +4857,21 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # B3cont (2026-05-28): table renamed from settlement_outcomes.
     try:
         conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
+    except sqlite3.OperationalError as _exc:
+        if "duplicate column" not in str(_exc).lower():
+            raise
+
+    # A8/A9 split (consult 6a42bc3d, 2026-06-29): add the canonical event-lifecycle
+    # column alongside the legacy fused outcome_type. Nullable; readers fall back to the
+    # legacy outcome_type mapping when absent (zero behavior change). log_settlement's
+    # INSERT is intentionally NOT changed — population is a later writer/backfill step.
+    try:
+        conn.execute(
+            "ALTER TABLE settlement_outcomes ADD COLUMN resolution_state TEXT "
+            "CHECK (resolution_state IS NULL OR resolution_state IN ("
+            "'UNRESOLVED', 'PHYSICALLY_CONFIRMED', 'SOURCE_PUBLISHED_VENUE_UNRESOLVED', "
+            "'VENUE_RESOLVED', 'OBSERVATION_REVISED', 'DISPUTED', 'VOID_50_50', 'SOURCE_REVISION'))"
+        )
     except sqlite3.OperationalError as _exc:
         if "duplicate column" not in str(_exc).lower():
             raise
@@ -4480,6 +4945,22 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "venue_order_facts",
     "venue_submission_envelopes",
     "venue_trade_facts",
+    # PR-S4b completion 2026-07-01: 13 heritage tables converged to trade_class
+    # (data 100% on zeus_trades.db; world ghosts 0-row legacy_archived). DDL now in
+    # _TRADE_CLASS_DDL above so fresh init_schema_trade_only creates them.
+    "collateral_ledger_snapshots",
+    "collateral_reservations",
+    "decision_log",
+    "exchange_reconcile_findings",
+    "exit_mutex_holdings",
+    "market_price_history",
+    "opportunity_fact",
+    "provenance_envelope_events",
+    "risk_actions",
+    "strategy_health",
+    "token_price_log",
+    "token_suppression",
+    "token_suppression_history",
 })
 
 # DDL for the 9 trade-class tables whose CREATE TABLE lives in db.py /
@@ -4535,7 +5016,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     idempotency_key TEXT UNIQUE,
     venue_status TEXT,
     source_module TEXT NOT NULL,
-    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest','shadow')),
+    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest')),
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
@@ -4608,7 +5089,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
-    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     -- economics columns so balance-only rescued positions persist
     -- venue truth without overwriting submitted entry economics. Additive
     -- on legacy DBs via _ensure_position_current_authority_columns.
@@ -5004,6 +5485,256 @@ CREATE TABLE IF NOT EXISTS outcome_fact (
     monitor_count INTEGER,
     chain_corrections_count INTEGER
 );
+-- ============================================================================
+-- PR-S4b completion (2026-07-01): 13 heritage trade tables created by
+-- init_schema_pre_pr_s4b but never migrated into _TRADE_CLASS_DDL. Data lives
+-- 100% on zeus_trades.db (probe: mph 622k, token_price_log 121k, etc.; world
+-- ghost copies are 0-row, legacy_archived, drop-after-2026-08-09). Registry
+-- converged them to trade_class; this wires their exact live DDL into fresh
+-- trade init so init==registry==data. Idempotent CREATE ... IF NOT EXISTS.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pusd_balance_micro INTEGER NOT NULL,
+  pusd_allowance_micro INTEGER NOT NULL,
+  usdc_e_legacy_balance_micro INTEGER NOT NULL,
+  ctf_token_balances_json TEXT NOT NULL,
+  ctf_token_allowances_json TEXT NOT NULL,
+  reserved_pusd_for_buys_micro INTEGER NOT NULL DEFAULT 0,
+  reserved_tokens_for_sells_json TEXT NOT NULL DEFAULT '{}',
+  captured_at TEXT NOT NULL,
+  authority_tier TEXT NOT NULL CHECK (authority_tier IN ('CHAIN','VENUE','DEGRADED')),
+  raw_balance_payload_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS collateral_reservations (
+  command_id TEXT PRIMARY KEY,
+  reservation_type TEXT NOT NULL CHECK (reservation_type IN ('PUSD_BUY','CTF_SELL')),
+  token_id TEXT,
+  amount INTEGER NOT NULL CHECK (amount >= 0),
+  created_at TEXT NOT NULL,
+  released_at TEXT,
+  release_reason TEXT,
+  CHECK (
+    (reservation_type = 'PUSD_BUY' AND token_id IS NULL)
+    OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL)
+  )
+);
+CREATE TABLE IF NOT EXISTS decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        , env TEXT NOT NULL DEFAULT 'live');
+CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
+CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
+          finding_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'exchange_ghost_order','local_orphan_order','unrecorded_trade',
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+          )),
+          subject_id TEXT NOT NULL,
+          context TEXT NOT NULL CHECK (context IN (
+            'periodic','ws_gap','heartbeat_loss','cutover','operator'
+          )),
+          evidence_json TEXT NOT NULL,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          resolution TEXT,
+          resolved_by TEXT
+        );
+CREATE INDEX IF NOT EXISTS idx_findings_unresolved
+          ON exchange_reconcile_findings (resolved_at)
+          WHERE resolved_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
+          ON exchange_reconcile_findings (kind, subject_id, context)
+          WHERE resolved_at IS NULL;
+CREATE TABLE IF NOT EXISTS exit_mutex_holdings (
+          mutex_key TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id) DEFERRABLE INITIALLY DEFERRED,
+          acquired_at TEXT NOT NULL,
+          released_at TEXT,
+          release_reason TEXT
+        );
+CREATE TABLE IF NOT EXISTS market_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_slug TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                price REAL NOT NULL CHECK (price >= 0.0 AND price <= 1.0),
+                recorded_at TEXT NOT NULL,
+                hours_since_open REAL,
+                hours_to_resolution REAL,
+                market_price_linkage TEXT NOT NULL DEFAULT 'price_only'
+                    CHECK (market_price_linkage IN ('price_only', 'full')),
+                source TEXT NOT NULL DEFAULT 'GAMMA_SCANNER',
+                best_bid REAL CHECK (best_bid IS NULL OR (best_bid >= 0.0 AND best_bid <= 1.0)),
+                best_ask REAL CHECK (best_ask IS NULL OR (best_ask >= 0.0 AND best_ask <= 1.0)),
+                raw_orderbook_hash TEXT,
+                snapshot_id TEXT,
+                condition_id TEXT,
+                UNIQUE(token_id, recorded_at)
+            );
+CREATE INDEX IF NOT EXISTS idx_market_price_history_condition_recorded
+                ON market_price_history(condition_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_slug_recorded
+                ON market_price_history(market_slug, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_snapshot
+                ON market_price_history(snapshot_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_token_recorded
+                ON market_price_history(token_id, recorded_at);
+CREATE TABLE IF NOT EXISTS "opportunity_fact" (
+    decision_id TEXT PRIMARY KEY,
+    candidate_id TEXT,
+    city TEXT,
+    target_date TEXT,
+    range_label TEXT,
+    direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+    strategy_key TEXT,
+    discovery_mode TEXT,
+    entry_method TEXT,
+    snapshot_id TEXT,
+    p_raw REAL,
+    p_cal REAL,
+    p_market REAL,
+    alpha REAL,
+    best_edge REAL,
+    ci_width REAL,
+    rejection_stage TEXT,
+    rejection_reason_json TEXT,
+    availability_status TEXT CHECK (availability_status IN (
+        'ok',
+        'missing',
+        'stale',
+        'rate_limited',
+        'unavailable',
+        'chain_unavailable'
+    )),
+    should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
+    recorded_at TEXT NOT NULL
+, observation_authority_id TEXT, day0_context_json TEXT);
+CREATE TABLE IF NOT EXISTS provenance_envelope_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_type TEXT NOT NULL CHECK (subject_type IN ('command','order','trade','lot','settlement','wrap_unwrap','heartbeat')),
+          subject_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          UNIQUE (subject_type, subject_id, local_sequence)
+        );
+CREATE INDEX IF NOT EXISTS idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);
+CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_delete
+        BEFORE DELETE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_update
+        BEFORE UPDATE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+CREATE TABLE IF NOT EXISTS risk_actions (
+    action_id TEXT PRIMARY KEY,
+    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
+        'settlement_capture',
+        'shoulder_sell',
+        'center_buy',
+        'opening_inertia'
+    )),
+    action_type TEXT NOT NULL CHECK (action_type IN (
+        'gate',
+        'allocation_multiplier',
+        'threshold_multiplier',
+        'exit_only'
+    )),
+    value TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    effective_until TEXT,
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('riskguard', 'manual', 'system')),
+    precedence INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked'))
+);
+CREATE TABLE IF NOT EXISTS "strategy_health" (
+            strategy_key TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            open_exposure_usd REAL NOT NULL DEFAULT 0,
+            settled_trades_30d INTEGER NOT NULL DEFAULT 0,
+            realized_pnl_30d REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            win_rate_30d REAL,
+            brier_30d REAL,
+            fill_rate_14d REAL,
+            edge_trend_30d REAL,
+            risk_level TEXT,
+            execution_decay_flag INTEGER NOT NULL DEFAULT 0 CHECK (execution_decay_flag IN (0, 1)),
+            edge_compression_flag INTEGER NOT NULL DEFAULT 0 CHECK (edge_compression_flag IN (0, 1)),
+            PRIMARY KEY (strategy_key, as_of)
+        );
+CREATE TABLE IF NOT EXISTS token_price_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            price REAL NOT NULL,
+            volume REAL,
+            bid REAL,
+            ask REAL,
+            spread REAL,
+            source_timestamp TEXT,
+            timestamp TEXT NOT NULL
+        );
+CREATE INDEX IF NOT EXISTS idx_token_price_token
+            ON token_price_log(token_id, timestamp);
+CREATE TABLE IF NOT EXISTS token_suppression (
+    token_id TEXT PRIMARY KEY,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'chain_only_quarantined',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+    ON token_suppression(suppression_reason, updated_at);
+CREATE TABLE IF NOT EXISTS token_suppression_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id TEXT NOT NULL,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'chain_only_quarantined',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_token_suppression_history_id_time
+    ON token_suppression_history(token_id, history_id DESC);
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_delete
+BEFORE DELETE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_update
+BEFORE UPDATE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
 """
 
 
@@ -5027,8 +5758,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     Ghost tables (Case C — production zeus_trades.db):
         Pre-PR-S4b, src/main.py:1747 called init_schema(trade_conn) which is the
         world-schema constructor. This polluted zeus_trades.db with 66 world-class
-        tables (including shadow_signals with 27k rows, probability_trace_fact with
-        33k rows, availability_fact with 24k rows). These ghost tables are NOT dropped
+        tables (including probability_trace_fact with 33k rows and availability_fact
+        with 24k rows). These ghost tables are NOT dropped
         here — they are declared ``legacy_archived`` in architecture/db_table_ownership.yaml
         (db: trade, §4 Path B). The INV-37 writer fix (PR-S4b §3) redirects all future
         writes to zeus-world.db. Data migration is deferred per dispatch guidance
@@ -5127,8 +5858,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     conn.commit()
 
     # NOTE: The 66 non-trade-class tables that pre-PR-S4b init_schema(trade_conn)
-    # created on zeus_trades.db (including shadow_signals with 27k rows,
-    # probability_trace_fact with 33k rows, availability_fact with 24k rows) are
+    # created on zeus_trades.db (including probability_trace_fact with 33k rows
+    # and availability_fact with 24k rows) are
     # declared as legacy_archived in architecture/db_table_ownership.yaml (db: trade)
     # per PR-S4b §4 (Path B). They are NOT dropped here — INV-37 writer fix
     # (PR-S4b §3) redirects future writes to zeus-world.db. Data migration deferred
@@ -5349,7 +6080,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             completed_at TEXT,
             status TEXT NOT NULL,
             authority_scope TEXT NOT NULL CHECK (
-                authority_scope = 'diagnostic_non_promotion'
+                authority_scope = 'offline_no_promotion'
             ),
             config_json TEXT NOT NULL,
             summary_json TEXT NOT NULL
@@ -5399,8 +6130,8 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             forecast_reference_id TEXT,
             evidence_json TEXT NOT NULL,
             missing_reason_json TEXT NOT NULL,
-            authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
-                CHECK (authority_scope = 'diagnostic_non_promotion'),
+            authority_scope TEXT NOT NULL DEFAULT 'offline_no_promotion'
+                CHECK (authority_scope = 'offline_no_promotion'),
             created_at TEXT NOT NULL,
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
@@ -5452,7 +6183,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             strategy_key TEXT,
             decision_time TEXT,
             point_in_time_provenance TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER
         );
 
@@ -5523,7 +6254,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             reciprocal_rank REAL,
             group_integrity_status TEXT,
             group_exclusion_reason TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER,
             limitations_json TEXT
         );
@@ -5710,7 +6441,8 @@ _SOURCE_CONTRACT_AUDIT_AUTHORITIES = frozenset({
     "VERIFIED",
     "FIXTURE",
     "STALE_CACHE",
-    "EMPTY_FALLBACK",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
     "NEVER_FETCHED",
 })
 _SOURCE_CONTRACT_AUDIT_SEVERITIES = frozenset({
@@ -5860,11 +6592,18 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
 
 
 def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    # Owner-routed (2026-07-01): market_price_history is trade-owned. This forward-substrate writer runs on a
+    # forecasts-rooted conn, so it cannot reach trade -> SKIP (never write the forecasts ghost). When called on
+    # a trade-reachable conn it lands in the owner. See site-8 decision in the atlas §6C.
+    from src.state.owner_routed_write import owner_write_target
+    _mph = owner_write_target(conn, "market_price_history")
+    if _mph is None:
+        return "skipped_wrong_db"
     existing = conn.execute(
-        """
+        f"""
         SELECT market_slug, token_id, price, recorded_at, hours_since_open,
                hours_to_resolution
-        FROM market_price_history
+        FROM {_mph}
         WHERE token_id = ? AND recorded_at = ?
         """,
         (values["token_id"], values["recorded_at"]),
@@ -5876,8 +6615,8 @@ def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str
         return "conflict"
 
     conn.execute(
-        """
-        INSERT INTO market_price_history (
+        f"""
+        INSERT INTO {_mph} (
             market_slug, token_id, price, recorded_at, hours_since_open,
             hours_to_resolution
         )
@@ -5889,12 +6628,18 @@ def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str
 
 
 def _insert_full_linkage_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    # Owner-routed (2026-07-01): market_price_history is trade-owned. This executable-snapshot-linkage writer
+    # runs on a trade-rooted conn -> owner_write_target returns the bare name (no-op); a wrong-DB conn SKIPs.
+    from src.state.owner_routed_write import owner_write_target
+    _mph = owner_write_target(conn, "market_price_history")
+    if _mph is None:
+        return "skipped_wrong_db"
     existing = conn.execute(
-        """
+        f"""
         SELECT market_slug, token_id, price, recorded_at, hours_since_open,
                hours_to_resolution, market_price_linkage, source, best_bid,
                best_ask, raw_orderbook_hash, snapshot_id, condition_id
-        FROM market_price_history
+        FROM {_mph}
         WHERE token_id = ? AND recorded_at = ?
         """,
         (values["token_id"], values["recorded_at"]),
@@ -5906,8 +6651,8 @@ def _insert_full_linkage_price_history(conn: sqlite3.Connection, values: dict) -
         return "conflict"
 
     conn.execute(
-        """
-        INSERT INTO market_price_history (
+        f"""
+        INSERT INTO {_mph} (
             market_slug, token_id, price, recorded_at, hours_since_open,
             hours_to_resolution, market_price_linkage, source, best_bid,
             best_ask, raw_orderbook_hash, snapshot_id, condition_id
@@ -7271,44 +8016,6 @@ def log_rescue_event(
         )
 
 
-def log_shadow_signal(
-    conn: sqlite3.Connection,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
-    *,
-    city: str,
-    target_date: str,
-    timestamp: str,
-    decision_snapshot_id: str,
-    p_raw_json: str,
-    p_cal_json: str,
-    edges_json: str,
-    lead_hours: float,
-) -> None:
-    """Write one shadow signal row to zeus-world.db.
-
-    INV-37 fix (PR-S4b §3, 2026-05-18): opens its own world connection rather
-    than accepting an opaque conn from callers. Pre-fix, callers passed the
-    cycle trades-rooted conn (zeus_trades.db MAIN with world ATTACHed), causing
-    shadow_signals rows to land in zeus_trades.db instead of zeus-world.db.
-    The ``conn`` parameter is kept for backward compat but is no longer used.
-    """
-    _wconn = get_world_connection()
-    try:
-        _wconn.execute(
-            """
-            INSERT INTO shadow_signals
-            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours),
-        )
-        _wconn.commit()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Failed to log shadow signal: %s", e)
-    finally:
-        _wconn.close()
-
-
 def _bin_type_for_label(label: str) -> str:
     lower = (label or "").lower()
     if "or below" in lower:
@@ -7893,7 +8600,12 @@ def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) ->
     return row is not None
 
 
-def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+def _selection_fact_table_ref(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    require_attached_world: bool = False,
+) -> str | None:
     # B-series restore: selection_family_fact / selection_hypothesis_fact are
     # world_class (db_table_ownership.yaml) — writes MUST route to world.<table>
     # when world.db is ATTACHed, else they land in the wrong DB (INV-37/K1).
@@ -7905,6 +8617,20 @@ def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | Non
             return f"world.{table}"
     except sqlite3.Error:
         pass
+    if require_attached_world:
+        return None
+    # Owner-routed (2026-06-30): selection_*_fact is world-owned. A bare `INSERT INTO <table>` lands in the
+    # connection's MAIN, so returning the bare name is only correct when MAIN IS the owner (world). A conn
+    # rooted at a wrong canonical DB (e.g. the evaluator's trade conn — the 412/3029 stray-ghost inversion)
+    # would silently write a ghost; skip the write instead. Memory/tempfile/ad-hoc test conns keep the legacy
+    # bare behavior so the suite is unaffected.
+    from src.state.owner_routed_write import _KNOWN_DB_FILENAMES, owner_db_filename
+    _main = _main_database_path(conn)
+    _mainname = _main.name if _main is not None else None
+    if _mainname == owner_db_filename(table):
+        return table if _table_exists(conn, table) else None
+    if _mainname is not None and _mainname in _KNOWN_DB_FILENAMES:
+        return None  # known-but-wrong canonical DB -> a bare write would be a ghost
     if _table_exists(conn, table):
         return table
     return None
@@ -7923,11 +8649,21 @@ def log_selection_family_fact(
     strategy_key: str | None = None,
     discovery_mode: str | None = None,
     decision_time_status: str | None = None,
+    require_attached_world: bool = False,
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
-    table_ref = _selection_fact_table_ref(conn, "selection_family_fact")
+    table_ref = _selection_fact_table_ref(
+        conn,
+        "selection_family_fact",
+        require_attached_world=require_attached_world,
+    )
     if table_ref is None:
+        if require_attached_world:
+            return {
+                "status": "skipped_missing_canonical_world_table",
+                "table": "selection_family_fact",
+            }
         return {"status": "skipped_missing_table", "table": "selection_family_fact"}
     if not family_id:
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
@@ -7987,11 +8723,21 @@ def log_selection_hypothesis_fact(
     passed_prefilter: bool = False,
     selected_post_fdr: bool = False,
     rejection_stage: str | None = None,
+    require_attached_world: bool = False,
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
-    table_ref = _selection_fact_table_ref(conn, "selection_hypothesis_fact")
+    table_ref = _selection_fact_table_ref(
+        conn,
+        "selection_hypothesis_fact",
+        require_attached_world=require_attached_world,
+    )
     if table_ref is None:
+        if require_attached_world:
+            return {
+                "status": "skipped_missing_canonical_world_table",
+                "table": "selection_hypothesis_fact",
+            }
         return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
     if not hypothesis_id:
         return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
@@ -8621,6 +9367,9 @@ def log_execution_fact(
         logger.info("Execution fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "execution_fact"}
 
+    from src.state.owner_routed_write import require_owner_main
+    require_owner_main(conn, "execution_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
+
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
 
@@ -8778,6 +9527,9 @@ def log_outcome_fact(
     if not _table_exists(conn, "outcome_fact"):
         logger.info("Outcome fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "outcome_fact"}
+
+    from src.state.owner_routed_write import require_owner_main
+    require_owner_main(conn, "outcome_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
 
     current = conn.execute(
         """
@@ -9123,11 +9875,22 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
     fill_price = getattr(pos, "entry_price", None) if status in {"entered", "day0_window"} else None
     entry_order_id = getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "")
     order_id = getattr(pos, "order_id", "") or entry_order_id
+    bridge_economics = _trade_decisions_bridge_entry_economics(pos)
+    bridge_cost_basis_usd = bridge_economics["cost_basis_usd"]
+    bridge_entry_price = bridge_economics["entry_price"]
     conn.execute(
         """
         UPDATE trade_decisions
         SET status = ?,
             timestamp = COALESCE(NULLIF(?, ''), timestamp),
+            size_usd = CASE
+                WHEN COALESCE(size_usd, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                ELSE size_usd
+            END,
+            price = CASE
+                WHEN COALESCE(price, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                ELSE price
+            END,
             filled_at = COALESCE(?, filled_at),
             fill_price = COALESCE(?, fill_price),
             fill_quality = COALESCE(?, fill_quality),
@@ -9141,6 +9904,10 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         (
             status,
             timestamp,
+            bridge_cost_basis_usd,
+            bridge_cost_basis_usd,
+            bridge_entry_price,
+            bridge_entry_price,
             filled_at,
             fill_price,
             getattr(pos, "fill_quality", None),
@@ -9152,6 +9919,48 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
             row["trade_id"],
         ),
     )
+
+
+def _trade_decisions_bridge_entry_economics(pos) -> dict[str, float]:
+    """Best-effort audit bridge economics from canonical position state.
+
+    `trade_decisions` is a legacy/audit bridge, not a money-path authority.
+    When an existing bridge row was synthesized or rescued with size_usd=0,
+    lifecycle sync may repair the display/audit cost from the canonical
+    position/chain fields without fabricating edge, Kelly, or probability.
+    """
+
+    def _attr(name: str) -> object:
+        try:
+            return getattr(pos, name)
+        except Exception:  # noqa: BLE001 - defensive against computed runtime props
+            return None
+
+    cost_basis_usd = _finite_float_or_zero(_attr("effective_cost_basis_usd"))
+    if cost_basis_usd <= 0.0:
+        for attr in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd"):
+            cost_basis_usd = _finite_float_or_zero(_attr(attr))
+            if cost_basis_usd > 0.0:
+                break
+
+    shares = _finite_float_or_zero(_attr("effective_shares"))
+    if shares <= 0.0:
+        for attr in ("chain_shares", "shares"):
+            shares = _finite_float_or_zero(_attr(attr))
+            if shares > 0.0:
+                break
+
+    entry_price = _finite_float_or_zero(_attr("chain_avg_price"))
+    if entry_price <= 0.0:
+        entry_price = _finite_float_or_zero(_attr("entry_price"))
+    if entry_price <= 0.0 and cost_basis_usd > 0.0 and shares > 0.0:
+        entry_price = cost_basis_usd / shares
+
+    return {
+        "cost_basis_usd": cost_basis_usd,
+        "entry_price": entry_price,
+        "shares": shares,
+    }
 
 
 
@@ -9384,10 +10193,10 @@ def query_authoritative_settlement_rows(
     env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs.
+    """Return stage-level settlement events only.
 
-    ``env`` gates both canonical ``position_events`` and legacy
-    ``decision_log`` rows. Missing canonical env is not live authority.
+    ``env`` gates canonical ``position_events`` rows. Missing canonical env is
+    not live authority.
     """
     stage_events = []
     if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
@@ -9407,18 +10216,7 @@ def query_authoritative_settlement_rows(
     if normalized_stage:
         return normalized_stage[:limit] if limit is not None else normalized_stage
 
-    from src.state.decision_chain import query_legacy_settlement_records
-    if not _table_exists(conn, "decision_log"):
-        return []
-    legacy_rows = query_legacy_settlement_records(
-        conn,
-        limit=limit,
-        city=city,
-        target_date=target_date,
-        env=env,
-        not_before=not_before,
-    )
-    return legacy_rows[:limit] if limit is not None else legacy_rows
+    return []
 
 
 def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
@@ -9999,7 +10797,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "fill_authority",
         "recovery_authority",
         "chain_shares",
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics columns round-trip through the loader.
         "chain_avg_price",
         "chain_cost_basis_usd",
@@ -10139,7 +10937,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "chain_seen_at": str(row["chain_seen_at"] or ""),
                 "chain_absence_at": str(row["chain_absence_at"] or ""),
                 "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
-                # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28):
+                # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28):
                 # chain-observed economics round-trip into Position via
                 # _position_from_row (state/portfolio.py).
                 "chain_avg_price": _finite_float_or_none(row["chain_avg_price"]) or 0.0,
@@ -10387,13 +11185,101 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
             ORDER BY ts.created_at ASC, ts.token_id ASC
             """
         ).fetchall()
+    chain_non_global: list = []
+    if _table_or_view_exists(conn, "market_topology_state"):
+        chain_rows = conn.execute(
+            """
+            SELECT token_id, condition_id
+            FROM token_suppression
+            WHERE suppression_reason = 'chain_only_quarantined'
+            ORDER BY created_at ASC, token_id ASC
+            """
+        ).fetchall()
+        chain_non_global = [
+            row
+            for row in chain_rows
+            if chain_only_entry_block_scope(
+                conn,
+                condition_id=str(row["condition_id"] or ""),
+            )
+            != "global"
+        ]
     out: list[str] = []
     seen: set[str] = set()
-    for row in list(base) + list(chain_terminal):
+    for row in list(base) + list(chain_terminal) + list(chain_non_global):
         tok = str(row["token_id"] or "")
         if tok and tok not in seen:
             seen.add(tok)
             out.append(tok)
+    return out
+
+
+def chain_only_entry_block_scope(
+    conn: sqlite3.Connection | None,
+    *,
+    condition_id: str | None,
+    decision_time: datetime | None = None,
+) -> str:
+    """Return the entry-block scope for a chain-only suppression fact.
+
+    Chain-only tokens are a real review signal, but they are only a global
+    entry kill-switch when they belong to the current Zeus weather topology.
+    Non-weather inventory, missing topology, stale topology, and old weather
+    dates remain position-level review debt so they cannot freeze all live
+    trading.
+    """
+
+    if conn is None or not condition_id:
+        return "position_only"
+    if not _table_or_view_exists(conn, "market_topology_state"):
+        return "global"
+    try:
+        row = conn.execute(
+            """
+            SELECT market_family, target_local_date, status, authority_status
+            FROM market_topology_state
+            WHERE condition_id = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (str(condition_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        logger.warning(
+            "chain-only scope lookup failed; preserving global entry block",
+            exc_info=True,
+        )
+        return "global"
+    if row is None:
+        return "position_only"
+    if str(row["market_family"] or "") != "weather_temperature":
+        return "position_only"
+    if str(row["status"] or "") != "CURRENT":
+        return "position_only"
+    if str(row["authority_status"] or "") != "VERIFIED":
+        return "position_only"
+    target_date_raw = str(row["target_local_date"] or "")
+    try:
+        target_date = datetime.strptime(target_date_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return "position_only"
+    now_dt = decision_time or datetime.now(timezone.utc)
+    # Allow one UTC-day slack for west-of-UTC local trading days. Older weather
+    # markets are settlement/redeem review debt, not current entry risk.
+    if target_date < (now_dt.date() - timedelta(days=1)):
+        return "position_only"
+    return "global"
+
+
+def _with_chain_only_entry_block_scope(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> dict:
+    out = dict(row)
+    out["entry_block_scope"] = chain_only_entry_block_scope(
+        conn,
+        condition_id=str(out.get("condition_id") or ""),
+    )
     return out
 
 
@@ -10434,7 +11320,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
             ORDER BY created_at ASC, token_id ASC
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
     rows = conn.execute(
         """
         SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
@@ -10448,7 +11334,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
         ORDER BY ts.created_at ASC, ts.token_id ASC
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
 
 
 def expire_control_override(
@@ -10511,7 +11397,9 @@ def query_control_override_state(
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    if not _table_exists(conn, "control_overrides_history"):
+    control_overrides_ref = _control_overrides_authority_ref(conn)
+    risk_actions_ref = _strategy_risk_actions_authority_ref(conn)
+    if control_overrides_ref is None and risk_actions_ref is None:
         return {
             "status": "missing_table",
             "entries_paused": False,
@@ -10520,17 +11408,20 @@ def query_control_override_state(
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    rows = conn.execute(
-        """
-        SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
-        FROM control_overrides
-        WHERE target_type IN ('global', 'strategy')
-          AND issued_at <= ?
-          AND (effective_until IS NULL OR effective_until > ?)
-        ORDER BY precedence DESC, issued_at DESC, override_id DESC
-        """,
-        (current_time, current_time),
-    ).fetchall()
+    if control_overrides_ref is None:
+        rows = []
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
+            FROM {control_overrides_ref}
+            WHERE target_type IN ('global', 'strategy')
+              AND issued_at <= ?
+              AND (effective_until IS NULL OR effective_until > ?)
+            ORDER BY precedence DESC, issued_at DESC, override_id DESC
+            """,
+            (current_time, current_time),
+        ).fetchall()
     entries_paused = False
     entries_pause_source = None
     entries_pause_reason = None
@@ -10586,6 +11477,37 @@ def query_control_override_state(
                 "gated_by": str(row["issued_by"] or "unknown"),
             }
             seen_strategy_gate.add(target_key)
+    if risk_actions_ref is not None:
+        action_rows = conn.execute(
+            f"""
+            SELECT action_id, strategy_key, action_type, value, issued_at, effective_until,
+                   reason, source, precedence, status
+            FROM {risk_actions_ref}
+            WHERE action_type = 'gate'
+              AND status = 'active'
+              AND issued_at <= ?
+              AND (effective_until IS NULL OR effective_until > ?)
+            ORDER BY precedence DESC, issued_at DESC, action_id DESC
+            """,
+            (current_time, current_time),
+        ).fetchall()
+        for row in action_rows:
+            target_key = str(row["strategy_key"] or "")
+            if not target_key or target_key in seen_strategy_gate:
+                continue
+            strategy_gates[target_key] = {
+                "enabled": not _parse_boolish_text(str(row["value"] or "")),
+                "reason_code": "riskguard_action",
+                "reason_snapshot": {
+                    "action_id": str(row["action_id"] or ""),
+                    "reason": str(row["reason"] or ""),
+                    "source": str(row["source"] or ""),
+                    "precedence": int(row["precedence"] or 0),
+                },
+                "gated_at": str(row["issued_at"] or ""),
+                "gated_by": f"auto:{str(row['source'] or 'risk_action')}",
+            }
+            seen_strategy_gate.add(target_key)
     return {
         "status": "ok",
         "entries_paused": entries_paused,
@@ -10594,6 +11516,67 @@ def query_control_override_state(
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }
+
+
+def _database_files_by_schema(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        try:
+            schema = str(row["name"] or "")
+            file_name = str(row["file"] or "")
+        except (KeyError, IndexError, TypeError):
+            schema = str(row[1] or "")
+            file_name = str(row[2] or "")
+        if schema:
+            out[schema] = file_name
+    return out
+
+
+def _schema_has_object(conn: sqlite3.Connection, schema: str, name: str) -> bool:
+    if not schema.replace("_", "").isalnum():
+        return False
+    try:
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM {schema}.sqlite_master
+            WHERE name = ?
+              AND type IN ('table', 'view')
+            LIMIT 1
+            """,
+            (name,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _control_overrides_authority_ref(conn: sqlite3.Connection) -> str | None:
+    databases = _database_files_by_schema(conn)
+    if _schema_has_object(conn, "world", "control_overrides"):
+        return "world.control_overrides"
+    main_file = Path(databases.get("main", "")).name
+    if main_file == "zeus_trades.db":
+        return None
+    if _schema_has_object(conn, "main", "control_overrides"):
+        return "control_overrides"
+    return None
+
+
+def _strategy_risk_actions_authority_ref(conn: sqlite3.Connection) -> str | None:
+    databases = _database_files_by_schema(conn)
+    if _schema_has_object(conn, "trades", "risk_actions"):
+        return "trades.risk_actions"
+    main_file = Path(databases.get("main", "")).name
+    if main_file == "zeus-world.db":
+        return None
+    if _schema_has_object(conn, "main", "risk_actions"):
+        return "risk_actions"
+    return None
 
 
 def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
@@ -10708,7 +11691,10 @@ def _query_entry_execution_fill_hints(
 
 
 def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
-    from src.state.portfolio import fill_authority_effective_open_cost_basis
+    from src.state.portfolio import (
+        fill_authority_effective_open_cost_basis,
+        has_verified_trade_fill,
+    )
 
     def _row_optional(key: str, default: object = None) -> object:
         try:
@@ -10724,12 +11710,12 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     chain_cost_basis_usd = _finite_float_or_zero(_row_optional("chain_cost_basis_usd"))
     chain_avg_price = _finite_float_or_zero(_row_optional("chain_avg_price"))
     phase = str(row["phase"] or "")
+    row_fill_authority = str(_row_optional("fill_authority") or "").strip()
 
     if fill_hint:
         filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
         filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
         avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
-        row_fill_authority = str(_row_optional("fill_authority") or "").strip()
         if (
             projection_shares > filled_shares + 1e-9
             and projection_cost_basis_usd > filled_cost_basis_usd + 1e-9
@@ -10792,6 +11778,34 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
             "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
         }
 
+    if (
+        chain_shares > 0.0
+        and chain_cost_basis_usd > 0.0
+        and row_fill_authority
+        and row_fill_authority != FILL_AUTHORITY_NONE
+    ):
+        effective_entry_price = chain_avg_price
+        if effective_entry_price <= 0.0:
+            effective_entry_price = chain_cost_basis_usd / chain_shares
+        return {
+            "submitted_size_usd": submitted_size_usd,
+            "projection_cost_basis_usd": projection_cost_basis_usd,
+            "effective_cost_basis_usd": chain_cost_basis_usd,
+            "effective_shares": chain_shares,
+            "pnl_cost_basis_usd": chain_cost_basis_usd,
+            "effective_entry_price": effective_entry_price,
+            "entry_price_avg_fill": effective_entry_price,
+            "shares_filled": chain_shares,
+            "filled_cost_basis_usd": chain_cost_basis_usd,
+            "entry_economics_authority": ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+            "fill_authority": row_fill_authority,
+            "entry_economics_source": "position_current_chain_observed",
+            "entry_fill_verified": has_verified_trade_fill({"fill_authority": row_fill_authority}),
+            "execution_fact_intent_id": "",
+            "execution_fact_filled_at": "",
+            "execution_fact_venue_status": "",
+        }
+
     if phase == "pending_entry":
         return {
             "submitted_size_usd": submitted_size_usd,
@@ -10819,7 +11833,6 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
     # effective_cost_basis_usd, effective_exposure) already route correctly via
     # has_chain_observed_authority when fill_authority is preserved here.
-    row_fill_authority = str(row["fill_authority"] or "").strip()
     effective_fill_authority = (
         row_fill_authority
         if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
@@ -11432,7 +12445,7 @@ def log_pending_exit_recovery_event(
 
 
 # ---------------------------------------------------------------------------
-# F3 admin queries (docs/findings_2026_05_28.md §F3, 2026-05-28)
+# F3 admin queries (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3, 2026-05-28)
 # ---------------------------------------------------------------------------
 
 

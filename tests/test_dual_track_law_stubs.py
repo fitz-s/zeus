@@ -398,7 +398,7 @@ def test_red_force_exit_marker_drives_evaluate_exit_to_exit():
 # INV-19a — DATA_DEGRADED design semantics (ultrareview25_remediation 2026-05-01 P0-4)
 def test_data_degraded_does_not_trigger_force_exit_sweep():
     """INV-19a (sibling to INV-19): DATA_DEGRADED is YELLOW-equivalent — it
-    blocks new entries (covered by tests/test_phase8_shadow_code.py:425+
+    blocks new entries (covered by tests/test_phase8_low_prerequisites.py:425+
     P9A entries_blocked_reason antibody) but does NOT trigger the active-
     position force-exit sweep that RED triggers.
 

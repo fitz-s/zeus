@@ -44,5 +44,5 @@ entries:
       to maybe_write_learning_pair; the tests use decision_snapshot_id=None and no position_current
       row is seeded, so the gate returns False (no matching rows). Tests were not updated to
       seed a position_current row with valid fill_authority.
-    active_task_scope: "feat/ft-ship-64 PR2 (docs/findings_2026_05_28.md §F3)"
+    active_task_scope: "feat/ft-ship-64 PR2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3)"
     allowed_only_if: "Fix is seeding a valid position_current row in T1/T7/T8 fixtures (D2 remediation, not F3 scope)."

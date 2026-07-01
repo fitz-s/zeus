@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Literal, Mapping, Optional
 
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.control.cutover_guard import CutoverPending, gate_for_intent
 from src.execution.command_bus import IntentKind
 
@@ -39,7 +40,7 @@ _TERMINAL_REPLACEMENT_STATES = frozenset(
     {"CANCELLED", "FILLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
 _MUTEX_RELEASE_STATES = _TERMINAL_REPLACEMENT_STATES | frozenset(
-    {"CANCELED", "CANCEL_CONFIRMED"}
+    {"CANCELED", "CANCEL_CONFIRMED", "REVIEW_REQUIRED"}
 )
 _ACTIVE_REPLACEMENT_STATES = frozenset(
     {
@@ -329,7 +330,13 @@ def release_exit_mutex_for_command_state(
     command_id: str,
     state: str,
 ) -> bool:
-    """Release a held exit mutex when a command reaches a safe terminal state."""
+    """Release a held exit mutex when command state owns duplicate prevention.
+
+    REVIEW_REQUIRED is not terminal and still blocks replacement sells through
+    ``can_submit_replacement_sell``. It does, however, transfer authority from
+    the short-lived mutex to the durable venue command row, so the mutex must
+    not remain held across restarts.
+    """
 
     normalized = str(state).upper()
     if normalized not in _MUTEX_RELEASE_STATES:
@@ -350,6 +357,66 @@ def release_exit_mutex_for_command_state(
             return False
         raise
     return cursor.rowcount > 0
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (str(table_name),),
+    ).fetchone()
+    return row is not None
+
+
+def reconcile_review_required_exit_mutex_releases(conn: sqlite3.Connection) -> dict[str, int]:
+    """Release historical REVIEW_REQUIRED exit mutexes without unblocking sells.
+
+    Legacy rows can have an EXIT venue command already in REVIEW_REQUIRED while
+    the short-lived exit mutex remains unreleased. The venue command is the
+    durable unresolved-side-effect guard; ``can_submit_replacement_sell`` still
+    blocks on it. This recovery pass only clears the restart/liveness mutex.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    try:
+        init_exit_mutex_schema(conn)
+        if not _table_exists(conn, "venue_commands"):
+            return summary
+        rows = conn.execute(
+            """
+            SELECT m.mutex_key, m.command_id
+              FROM exit_mutex_holdings m
+              JOIN venue_commands c
+                ON c.command_id = m.command_id
+             WHERE m.released_at IS NULL
+               AND c.intent_kind = 'EXIT'
+               AND UPPER(c.state) = 'REVIEW_REQUIRED'
+            """
+        ).fetchall()
+        summary["scanned"] = len(rows)
+        if not rows:
+            return summary
+        cursor = conn.execute(
+            """
+            UPDATE exit_mutex_holdings
+               SET released_at = COALESCE(released_at, ?),
+                   release_reason = 'REVIEW_REQUIRED_RECOVERY'
+             WHERE released_at IS NULL
+               AND command_id IN (
+                   SELECT command_id
+                     FROM venue_commands
+                    WHERE intent_kind = 'EXIT'
+                      AND UPPER(state) = 'REVIEW_REQUIRED'
+               )
+            """,
+            (_utcnow(),),
+        )
+        summary["advanced"] = int(cursor.rowcount or 0)
+        summary["stayed"] = max(0, summary["scanned"] - summary["advanced"])
+        return summary
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return summary
+        raise
 
 
 def _nonempty(value: Any) -> bool:
@@ -411,7 +478,7 @@ def parse_cancel_response(raw: Any) -> CancelOutcome:
     if _nonempty(canceled):
         return CancelOutcome("CANCELED", None, response)
     status = str(response.get("status") or "").upper()
-    if status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"}:
+    if is_cancel_confirmed_status(status):
         return CancelOutcome("CANCELED", None, response)
     if response.get("success") is True and status in {"", "OK", "SUCCESS"}:
         return CancelOutcome("CANCELED", None, response)
@@ -523,6 +590,13 @@ def request_cancel_for_command(
     cmd = get_command(conn, command_id)
     if cmd is None:
         raise ValueError(f"Unknown command_id: {command_id!r}")
+    command_state = str(cmd.get("state") or "").upper()
+    if command_state not in _CANCEL_REQUESTABLE_STATES and command_state != "CANCEL_PENDING":
+        return CancelOutcome(
+            "UNKNOWN",
+            f"state_not_cancel_requestable:{command_state}",
+            {"command_state": command_state},
+        )
     venue_order_id = str(cmd.get("venue_order_id") or "")
     if not venue_order_id:
         outcome = CancelOutcome("UNKNOWN", "missing_venue_order_id", {})
@@ -534,7 +608,7 @@ def request_cancel_for_command(
             execution_capability=_build_cancel_execution_capability(
                 command_id=command_id,
                 venue_order_id=venue_order_id,
-                command_state=str(cmd.get("state") or "").upper(),
+                command_state=command_state,
                 cutover=None,
                 freshness_time=when,
             ),
@@ -545,7 +619,6 @@ def request_cancel_for_command(
     if not cutover.allow_cancel:
         raise CutoverPending(cutover.block_reason or cutover.state.value)
 
-    command_state = str(cmd.get("state") or "").upper()
     if command_state != "CANCEL_PENDING":
         execution_capability = _build_cancel_execution_capability(
             command_id=command_id,
@@ -582,7 +655,7 @@ def request_cancel_for_command(
             f"post_cancel_exception_possible_side_effect: {exc}",
             {"exception_type": type(exc).__name__, "exception_message": str(exc)},
         )
-    if outcome.status == "CANCELED":
+    if is_cancel_confirmed_status(outcome.status):
         append_event(
             conn,
             command_id=command_id,

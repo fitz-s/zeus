@@ -92,10 +92,10 @@ Block ONLY cities confirmed negative-skill in BOTH time halves (temporally-stabl
 
 ## 6. Shadow-logger (the path to revenue — accrue, then license)
 
-`src/decision/shadow_admit_logger.py` (+7 tests) records every evaluated side-candidate's would-admit
+The removed would-admit logger used to record every evaluated side-candidate's would-admit
 decision + features (admit0 = native_quote_available AND quote_fresh AND q_lcb_side_old > own_side_cost;
 raw_side_prob, q_lcb_side, own_side_cost, admission_margin, city, target_date, side, posterior_version,
-city_skill_admit, selection_calibrator_q_safe). Append-only JSONL, flag-gated `ZEUS_SHADOW_ADMIT_LOG`
+city_skill_admit, selection_calibrator_q_safe). It was append-only JSONL and has been removed from the live admission seam.
 default OFF, fail-soft (a write error never breaks trading), NEVER read back into any gate. This
 accrues the current-regime (bayes_fusion) would-admit population that STEP-1 found ABSENT — so the
 selection-calibrator's full would-admit EB and a forward-positive city gate can be validated once a few

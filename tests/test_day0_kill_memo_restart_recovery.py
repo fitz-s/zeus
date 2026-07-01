@@ -1,6 +1,6 @@
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: docs/operations/day0_multiangle_critique_2026-06-12.md Angle 1
+# Authority basis: docs/archive/2026-Q2/operations_historical/day0_multiangle_critique_2026-06-12.md Angle 1
 #   Gap C (process-local kill/live memos lost on restart). Re-scoped 2026-06-12
 #   (operator anti-over-design): recover from the ALREADY-persisted
 #   DAY0_EXTREME_UPDATED events — no new table.

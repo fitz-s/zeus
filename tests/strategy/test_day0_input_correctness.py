@@ -1,6 +1,6 @@
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: docs/operations/day0_multiangle_critique_2026-06-12.md Blind
+# Authority basis: docs/archive/2026-Q2/operations_historical/day0_multiangle_critique_2026-06-12.md Blind
 #   spot C, re-scoped 2026-06-12 (operator anti-over-design: correctness check,
 #   NOT a cap). Antibodies for the quote-after-observation input-ordering gate.
 """Antibody tests: day0 quote-after-observation input-ordering correctness.

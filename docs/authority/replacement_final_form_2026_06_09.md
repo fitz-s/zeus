@@ -61,10 +61,13 @@ When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to t
 ```
 σ_resid  = stdev({mean_z(d) − Y(d) | d = common-date fused-center residuals, ≥5 dates})
            else 1.5 °C (conservative default)                # materializer:937,948–950
-σ_pred   = max(1.0,  sqrt(fused.sd² + σ_resid²))           # materializer:951
+σ_pred   = max(1.0,  σ_resid)                              # materializer:served_predictive_sigma_c
 ```
 
-Floor 1.0 °C honors the AIFS-experiment lead-0 overconfidence caveat: σ_pred=1.18 °C mean on lead-0 same-day analyses; forward lead-1 prospective spread will be higher.
+`σ_resid` is the realized walk-forward fused-center settlement error, so it is the
+served point predictive width after the 1.0 °C floor. `fused.sd` is center
+uncertainty and belongs in the q_lcb/q_ucb center bootstrap (`anchor_sigma_c`);
+adding it into `σ_pred` double-counts uncertainty.
 
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 
@@ -103,7 +106,7 @@ fitted-artifact-driven or per-cell-data-driven, never settings numbers
 **Single q authority (U1, `docs/authority/regime_unification_2026-06-12.md`):** the
 legacy baseline LCB cap on the live path is DELETED (commit 479cb34446) — the
 former `min(baseline, replacement)` joins are gone; the baseline is receipt
-diagnostics (`baseline_q_lcb_reference`). The honest no-replacement-data →
+comparison provenance (`comparison_q_lcb_reference`). The honest no-replacement-data →
 baseline fallback for genuinely-baseline strategies remains. The settlement-refuted
 EB bias correction and the bias_treatment_v2 branches are deleted with their code.
 

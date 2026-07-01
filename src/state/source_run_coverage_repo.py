@@ -9,7 +9,7 @@ from typing import Any
 from src.state.connection_pair import WorldConnection
 
 COMPLETENESS_STATUSES = frozenset({"COMPLETE", "PARTIAL", "MISSING", "HORIZON_OUT_OF_RANGE", "NOT_RELEASED"})
-READINESS_STATUSES = frozenset({"LIVE_ELIGIBLE", "SHADOW_ONLY", "BLOCKED", "UNKNOWN_BLOCKED"})
+READINESS_STATUSES = frozenset({"LIVE_ELIGIBLE", "BLOCKED", "BLOCKED", "UNKNOWN_BLOCKED"})
 
 
 def _to_iso(value: datetime | date | str | None) -> str | None:

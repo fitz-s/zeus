@@ -53,7 +53,7 @@ economic_objects:
       settlement_value:
         meaning: "Weather/source settlement physical value."
       mid:
-        meaning: "Market mid-price (bid-ask midpoint); used in price-discovery rate estimation for shadow candidates. Never executable fill price."
+        meaning: "Market mid-price (bid-ask midpoint); used in price-discovery rate estimation for blocked candidates. Never executable fill price."
         live_entry_allowed: false
         forbidden_uses: ["submitted limit price", "fill fact"]
   identity:
@@ -335,19 +335,6 @@ state_machines:
       - CHAIN_ONLY_REVIEW_WINDOW_HOURS
     invariant_tests:
       - tests/state/test_inv_chain_only_review_lifecycle.py
-  shoulder_readiness:
-    owner: scripts/shoulder_shadow_readiness_report.py
-    description: >
-      Shadow-readiness evaluation enum for shoulder strategy. NOT a money-path
-      state machine — this is a reporting/operator-review gate only. Registered
-      here to satisfy the CI semantic classifier's all-caps REVIEW-prefix check.
-    states:
-      - INSUFFICIENT_SHADOW
-      - INSUFFICIENT_STRESS_COVERAGE
-      - INSUFFICIENT_REGIME_COVERAGE
-      - READY_FOR_OPERATOR_REVIEW
-    invariant_tests:
-      - tests/test_shoulder_shadow_readiness_report.py
   redeem_review_error_code:
     owner: src/execution/settlement_commands.py
     description: >
@@ -373,9 +360,6 @@ state_machines:
       routing without adding command/lifecycle states. Registered here so
       CI treats new all-caps runtime authority as explicit, not accidental.
     states:
-      - ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES
-      - ZEUS_ALLOW_LEGACY_EXECUTION_INTENT
-      - ZEUS_LEGACY_EXECUTION_INTENT_SCOPE
       - ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS
       - ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS
       - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
@@ -383,7 +367,7 @@ state_machines:
       - tests/test_inv_family_exclusive_sizing.py
       - tests/test_inv_family_exclusive_cross_module_integration.py
       - tests/test_executor.py
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
   business_plane_health:
     owner: src/control/live_health.py
     description: >
@@ -449,7 +433,7 @@ state_machines:
       NULL contribution now fails closed for CURRENT data_versions (UNKNOWN) and
       passes through only for legacy versions (LEGACY_NULL_PASSTHROUGH, recorded
       in applied_validations).
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
       (bundle-layer selection design archived in that doc; prior .claude/jobs scratchpad
       path was non-repo-verifiable and has been removed).
     states:
@@ -525,9 +509,8 @@ state_machines:
       semantic classifier treats the all-caps constant as explicit, not accidental.
       Tables tagged: opportunity_fact, calibration_pairs_v2, probability_trace_fact,
       selection_family_fact, selection_hypothesis_fact, decision_events.
-      Tables skipped (no single-column row_id): no_trade_events, shadow_experiments,
-      calibration_pairs (legacy).
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E.
+      Tables skipped (no single-column row_id): no_trade_events, calibration_pairs (legacy).
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E.
     states:
       - QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA
     invariant_tests:
@@ -545,7 +528,7 @@ state_machines:
     states:
       - OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED
       - REPLACEMENT_GO_LIVE_ROLLBACK_PLAN_MISSING_FLAG_UPDATES
-      - REPLACEMENT_GO_LIVE_ROLLBACK_MAY_DELETE_SHADOW_ROWS
+      - REPLACEMENT_GO_LIVE_ROLLBACK_MAY_DELETE_BLOCKED_ROWS
       - REPLACEMENT_INTENT_CLOB_SNAPSHOT_CHANGED
       - REPLACEMENT_INTENT_CONDITION_CHANGED
       - REPLACEMENT_INTENT_NATIVE_TOKEN_CHANGED
@@ -705,7 +688,7 @@ state_machines:
       - CANARY_DB_PRE_SUBMIT_TOKEN_ID_MISMATCH
       - CANARY_DB_PRE_SUBMIT_SIDE_MISMATCH
       - CANARY_DB_QUOTE_AGE_MISMATCH
-      - EDLI_SHADOW_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT
+      - EDLI_BLOCKED_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT
       - EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT
       - EXECUTOR_REJECTED
       - EXECUTOR_UNKNOWN_SIDE_EFFECT
@@ -800,12 +783,12 @@ state_machines:
   obs_coverage_status:
     description: >
       Observation coverage status emitted by ObservationClient and stamped on
-      settlement_day_observation_authority rows. DIAGNOSTIC_FALLBACK indicates
-      the obs pipeline returned a result but via a degraded/fallback path (e.g.
-      stale open-meteo archive). Observability-only — never gates a trade.
-      OBS-AUTHORITY-FOUNDATION 2026-05-23.
+      settlement_day_observation_authority rows. NON_SETTLEMENT_SOURCE means an
+      explicitly requested non-settlement observation source returned a value,
+      but it is not source-authorized settlement truth and cannot authorize a
+      live Day0 hard fact. OBS-AUTHORITY-FOUNDATION 2026-05-23.
     states:
-      - DIAGNOSTIC_FALLBACK
+      - NON_SETTLEMENT_SOURCE
 
   collection_frontier:
     owner: src/data/collection_frontier.py
@@ -828,7 +811,7 @@ state_machines:
       - SHORT_HORIZON_ONLY
       - COVERAGE_UNKNOWN
       - BLOCK_LIVE                     # PartialPolicy values
-      - SHADOW_ONLY
+      - BLOCK_LIVE
       - REPLACE_SAME_IDEMPOTENCY_KEY   # LateArrivalPolicy values
       - APPEND_REVISION
       - QUARANTINE
@@ -924,7 +907,7 @@ state_machines:
       - FUSED_NORMAL_PARTIAL
       - FUSED_NORMAL_BOUNDS_MISSING
       - FUSED_NORMAL_GRANDFATHER_REVOKED
-      - SOFT_ANCHOR_FALLBACK
+      - FUSED_CENTER_ONLY_NORMAL
       - BAYES_PRECISION_FUSION_CAPTURE_MISSING
       - FUSED_Q_BUILD_FAILED
       - FULL_CURRENT
@@ -1081,7 +1064,7 @@ schema_objects:
         execution-command certificates can be accepted.
       required_tests:
         - tests/events/test_live_cap.py
-        - tests/money_path/test_edli_live_canary.py
+        - tests/money_path/test_edli_live_readiness.py
     edli_live_order_events:
       db: world
       pk: aggregate_event_id
@@ -1203,7 +1186,7 @@ external_truth_sources:
   open_meteo_mainstream:
     # Independent mainstream-forecast cross-check for the #135 direction-agreement
     # gate. Distinct authority from `ecmwf` (our own primary forecast): this is the
-    # external reference our shadow candidate must AGREE with to be arm-eligible.
+    # external reference our blocked candidate must AGREE with to be arm-eligible.
     # Fail-closed on staleness (6h TTL); source+authority provenance in
     # architecture/data_sources_registry_2026_05_08.yaml.
     authority_tier: mainstream_forecast

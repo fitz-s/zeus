@@ -44,8 +44,8 @@ def _coverage_status_to_readiness(coverage: dict[str, Any]) -> tuple[str, tuple[
         if not coverage.get("expires_at"):
             return "BLOCKED", ("PRODUCER_COVERAGE_EXPIRY_MISSING",), None
         return "LIVE_ELIGIBLE", ("PRODUCER_COVERAGE_READY",), str(coverage["expires_at"])
-    if readiness == "SHADOW_ONLY":
-        return "SHADOW_ONLY", (row_reason or "PRODUCER_COVERAGE_SHADOW_ONLY",), None
+    if readiness == "BLOCKED":
+        return "BLOCKED", (row_reason or "PRODUCER_COVERAGE_BLOCKED",), None
     if completeness == "HORIZON_OUT_OF_RANGE":
         return "BLOCKED", (row_reason or "SOURCE_RUN_HORIZON_OUT_OF_RANGE",), None
     if completeness == "NOT_RELEASED":

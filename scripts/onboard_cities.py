@@ -56,17 +56,15 @@ except ImportError:
     TIER_SCHEDULE = {}
 
 # ─────────────────────────────────────────────────────────────
-# Deferred artifacts: require live shadow history or ≥110
+# Deferred artifacts: require explicit post-onboarding evidence or >=110
 # settled calibration_pairs dates — cannot be derived from
 # public archives during initial onboarding.  The pipeline
 # records them as PENDING and keeps the city at oracle
-# MISSING-status (mult=0.5) until the bridge scripts accrue
-# sufficient evidence.
+# MISSING-status (mult=0.5) until an explicit authority rebuild lands.
 # ─────────────────────────────────────────────────────────────
 DEFERRED_ARTIFACTS: dict[str, str] = {
     "oracle_error_rates": (
-        "requires real-time oracle shadow snapshots "
-        "(bridge_oracle_to_calibration.py accrues ≥14d live)"
+        "requires explicit oracle authority evidence; not auto-derived during onboarding"
     ),
     "v2_nstar": (
         "requires ≥110 settled calibration_pairs_v2 target_dates "
@@ -1339,9 +1337,9 @@ def _record_deferred_artifacts(
             "oracle_effective_multiplier": 0.5,
             "note": (
                 "City is onboarded and will receive ARCHIVE-derivable data. "
-                "Deferred artifacts require live shadow history. "
-                "oracle_error_rates is MISSING (mult=0.5) until "
-                "bridge_oracle_to_calibration.py accrues ≥14d live data."
+                "Deferred artifacts require explicit authority evidence. "
+                "oracle_error_rates is MISSING (mult=0.5) until a reviewed "
+                "oracle authority rebuild lands."
             ),
         }
         sidecar = pending_dir / f"{slug}.json"

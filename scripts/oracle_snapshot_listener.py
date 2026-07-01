@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # Lifecycle: last_reviewed=2026-05-04; last_reused=2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (storage path centralization + atomic write).
-"""Oracle shadow-snapshot listener.
+"""Oracle-time snapshot listener.
 
 Captures WU ICAO API responses at the *same time window* that PM's UMA
-Oracle fetches its data, storing raw JSON in the shadow storage directory
-``raw/oracle_shadow_snapshots/``.  This enables post-hoc comparison
+Oracle fetches its data, storing raw JSON in the oracle-time snapshot directory
+``raw/oracle_time_snapshots/``.  These files are oracle-time evidence, not
+shadow authority.
+This enables post-hoc comparison
 between what the Oracle saw and what our normal ingestion pipeline records
 (which may include backfilled METAR data that wasn't available at Oracle
 settlement time).
@@ -15,7 +17,7 @@ Usage (cron — run once at 10:00 UTC, matching UMA Oracle window):
 
 Architecture notes:
 - Zero coupling to zeus-world.db — reads only ``config/cities.json``
-  and writes only to ``raw/oracle_shadow_snapshots/``.
+  and writes only to ``raw/oracle_time_snapshots/``.
 - The bridge script ``scripts/bridge_oracle_to_calibration.py`` is the
   only consumer of these snapshots.
 - One file per (city, date) keeps the directory browsable and diffable.
@@ -185,7 +187,7 @@ def capture_snapshots(target: date | None = None) -> dict:
             "source": "wu_icao_history",
             "daily_high_f": daily_high,
             "observation_count": len(payload.get("observations", [])),
-            "data_version": "oracle_shadow_v1",
+            "data_version": "oracle_time_snapshot_v1",
             "wu_raw_payload": payload,
         }
 
@@ -207,7 +209,7 @@ def capture_snapshots(target: date | None = None) -> dict:
             "captured_at_utc": capture_ts,
             "station_id": HKO_STATION,
             "source": "hko_daily_api",
-            "data_version": "oracle_shadow_v1",
+            "data_version": "oracle_time_snapshot_v1",
             "hko_raw_payload": hko_payload,
         }
         city_dir = oracle_snapshot_dir() / "hong_kong"

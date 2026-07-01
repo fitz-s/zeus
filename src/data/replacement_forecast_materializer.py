@@ -23,7 +23,7 @@ import json
 import math
 import sqlite3
 import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -73,8 +73,8 @@ UTC = timezone.utc
 # A posterior row's `replacement_q_mode` is DERIVED at materialization time (never guessed)
 # and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
 # fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
-# degradation category: with all flags on, a row that fell back to the legacy member-vote
-# soft-anchor q, anchor-only current surrogate, fused-q build failure, or flag-off path used
+# degradation category: with all flags on, a row that used anchor-only current surrogate,
+# fused-center-only q, fused-q build failure, or flag-off path used
 # to differ ONLY by a WARNING log + a q_shape string — live EDLI could size Kelly under a
 # different probability regime than the release evidence assumes. The mode is a fail-closed
 # data-class label.
@@ -82,23 +82,21 @@ UTC = timezone.utc
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
 REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
-REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 # PR#403 FIX (2026-06-09) — fused-q succeeded but the bounds failed. DISTINCT from
 # FUSED_Q_BUILD_FAILED (the point q is fine; only the bounds are absent). The fused-Normal
-# q point is STILL written to the DB (shadow materialization completes for accrual), but
+# q point is STILL written to the DB (blocked-candidate materialization completes for accrual), but
 # live eligibility is killed. Without this a FULL/PARTIAL row with NULL q_lcb_json would be
 # live-eligible, letting buy_yes fall back to legacy bounds — exactly the two-measures
 # disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
 REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
 # The fused CENTER materialized q purely from N(mu*, sigma), but the certified fused-q
 # SHAPE/BOUNDS bootstrap did not run (flag-off / fused-q build failure / predictive_sigma thin).
-# This replaces the old cold fail-closed fallback. The live gate licenses solely
+# This replaces the old cold fail-closed path. The live gate licenses solely
 # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this mode never carries, so a
 # fused-center-only row is materialized for experiment accrual but is NOT live-tradeable. Diagnosably
-# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q) and from the legacy
-# SOFT_ANCHOR_FALLBACK.
+# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q).
 REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
@@ -204,6 +202,44 @@ def _role_possession_available_at(
     )
 
 
+def _posterior_source_available_at(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> datetime:
+    """Return the honest fused-posterior availability instant.
+
+    The posterior cannot exist before the slowest contributing role is actually
+    possessed. Request-level times are preflight hints; source_run rows, when
+    present, are the stronger evidence because they record the completed fetch.
+    """
+
+    return max(
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.baseline_source_run_id,
+            request_source_available_at=request.baseline_source_available_at,
+        ),
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.openmeteo_source_run_id,
+            request_source_available_at=request.openmeteo_source_available_at,
+        ),
+    )
+
+
+def _request_with_materialization_clock(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeRequest:
+    """Lift computed_at to the first instant the posterior could truly exist."""
+
+    computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    source_available_at = _posterior_source_available_at(conn, request)
+    if source_available_at <= computed_at:
+        return request
+    return replace(request, computed_at=source_available_at)
+
+
 def _date_text(value: date | str) -> str:
     if isinstance(value, date):
         return value.isoformat()
@@ -251,6 +287,31 @@ def _replacement_is_live_layer(
         return False
 
 
+def _registered_source_clock_entry_ineligible(sources: Sequence[str]) -> tuple[str, ...]:
+    """Registered source-clock members that are not allowed to feed live entry."""
+
+    try:
+        from src.data.forecast_source_registry import SOURCES, source_allows_role  # noqa: PLC0415
+    except Exception:
+        return ()
+    blocked: list[str] = []
+    for source in sources:
+        source_id = str(source or "").strip()
+        if not source_id:
+            continue
+        spec = SOURCES.get(source_id)
+        if spec is None:
+            continue
+        if (
+            spec.tier == "disabled"
+            or not bool(spec.enabled_by_default)
+            or spec.degradation_level != "OK"
+            or not source_allows_role(spec, "entry_primary")
+        ):
+            blocked.append(source_id)
+    return tuple(blocked)
+
+
 def _anchor_data_version(metric: str) -> str:
     return ANCHOR_HIGH_DATA_VERSION if metric == "high" else ANCHOR_LOW_DATA_VERSION
 
@@ -273,18 +334,30 @@ def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -
     columns = _table_columns(conn, "observation_instants")
     if not columns:
         return
+    desired_view_sql = (
+        "CREATE VIEW observation_hourly_extrema AS\n"
+        "            SELECT\n"
+        "                o.*,\n"
+        "                o.running_max AS hour_bucket_max,\n"
+        "                o.running_min AS hour_bucket_min\n"
+        "            FROM observation_instants o"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema'"
+    ).fetchone()
+    view_sql = str(row[0] if row else "")
+    has_v2 = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema_v2'"
+    ).fetchone()
+    if "running_min" in columns and view_sql == desired_view_sql and has_v2 is None:
+        return
     if "running_min" not in columns:
         conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-    conn.execute("""
-        CREATE VIEW observation_hourly_extrema AS
-            SELECT
-                o.*,
-                o.running_max AS hour_bucket_max,
-                o.running_min AS hour_bucket_min
-            FROM observation_instants o
-    """)
+    if has_v2 is not None:
+        conn.execute("DROP VIEW observation_hourly_extrema_v2")
+    if view_sql:
+        conn.execute("DROP VIEW observation_hourly_extrema")
+    conn.execute(desired_view_sql)
 
 
 def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
@@ -302,23 +375,44 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
         )
         columns.add("runtime_layer")
     if "trade_authority_status" in columns:
-        conn.execute(
+        has_legacy_live_rows = conn.execute(
             """
-            UPDATE forecast_posteriors
-               SET runtime_layer = ?
+            SELECT 1
+              FROM forecast_posteriors
              WHERE runtime_layer IS NULL
                AND trade_authority_status = 'LIVE_AUTHORITY'
+             LIMIT 1
+            """
+        ).fetchone()
+        if has_legacy_live_rows is not None:
+            conn.execute(
+                """
+                UPDATE forecast_posteriors
+                   SET runtime_layer = ?
+                 WHERE runtime_layer IS NULL
+                   AND trade_authority_status = 'LIVE_AUTHORITY'
+                """,
+                (LIVE_RUNTIME_LAYER,),
+            )
+    has_non_live_rows = conn.execute(
+        """
+        SELECT 1
+          FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != ?
+         LIMIT 1
+        """,
+        (LIVE_RUNTIME_LAYER,),
+    ).fetchone()
+    if has_non_live_rows is not None:
+        conn.execute(
+            """
+            DELETE FROM forecast_posteriors
+             WHERE runtime_layer IS NULL
+                OR runtime_layer != ?
             """,
             (LIVE_RUNTIME_LAYER,),
         )
-    conn.execute(
-        """
-        DELETE FROM forecast_posteriors
-         WHERE runtime_layer IS NULL
-            OR runtime_layer != ?
-        """,
-        (LIVE_RUNTIME_LAYER,),
-    )
     if "trade_authority_status" in columns:
         conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
 
@@ -433,14 +527,18 @@ def _day0_observed_extreme_c(request: ReplacementForecastMaterializeRequest) -> 
     return number
 
 
-def _is_day0_target_window(request: ReplacementForecastMaterializeRequest, *, computed_at: datetime | None = None) -> bool:
+def _target_local_day_has_started(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    computed_at: datetime | None = None,
+) -> bool:
     computed = computed_at or _to_utc(request.computed_at, field_name="computed_at")
     target_date_value = date.fromisoformat(_date_text(request.target_date))
     target_window = compute_target_local_day_window_utc(
         city_timezone=request.city_timezone,
         target_local_date=target_date_value,
     )
-    return target_window.start_utc <= computed < target_window.end_utc
+    return computed >= target_window.start_utc
 
 
 def _local_hour_slot(value: datetime, *, city_timezone: str) -> datetime:
@@ -480,7 +578,7 @@ def _om9_localday_hourly_coverage_ok(
     anchor = request.openmeteo_anchor
     if anchor.sample_count == expected_sample_count:
         return True
-    if not _is_day0_target_window(request, computed_at=computed_at):
+    if not _target_local_day_has_started(request, computed_at=computed_at):
         return False
     if _day0_observed_extreme_c(request) is None:
         return False
@@ -544,7 +642,7 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         computed_at=computed_at,
     ):
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
-    if _is_day0_target_window(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
+    if _target_local_day_has_started(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
@@ -787,7 +885,7 @@ def _replacement_settlement_sigma_floor_lookup(
     Returns ``(floor_c, unavailable_reason)``:
       - ``(value, None)`` when a positive floor exists for the (city, season, metric) cell.
       - ``(None, reason)`` when the floor lookup is missing/malformed for the cell — recording-only,
-        NEVER blocks shadow materialization. The reason is folded into provenance.
+        NEVER blocks blocked-candidate materialization. The reason is folded into provenance.
 
     Single-builder: this calls src.calibration.emos.settlement_sigma_floor (the SAME lookup the
     EMOS q-builder uses, keyed city|season|metric via emos_cell_key), with required=False so a
@@ -810,7 +908,7 @@ def _replacement_settlement_sigma_floor_lookup(
         if not (math.isfinite(floor_value) and floor_value > 0.0):
             return None, f"SETTLEMENT_SIGMA_FLOOR_NON_POSITIVE:{floor_value}"
         return floor_value, None
-    except Exception as exc:  # fail-soft: never block shadow materialization
+    except Exception as exc:  # fail-soft: never block blocked-candidate materialization
         return None, f"SETTLEMENT_SIGMA_FLOOR_LOOKUP_ERROR:{type(exc).__name__}"
 
 
@@ -901,6 +999,59 @@ def _effective_unit_sigma_scale(unit: str) -> tuple[float, float, float]:
     is satisfied: k is MLE-fitted (never hand-set), and a refused family still falls back to inert.
     """
     return _replacement_sigma_scale_lookup(unit)
+
+
+# Created: 2026-06-29
+# Authority basis: capital-gated per-city rho-mix serving (frontier-consult validated; fitter side done).
+#   This REPLACES the prior UNSAFE per-city hard swap (which served any per-city (k,w) directly and
+#   harmed ~40% of cities). The city candidate is now read SEPARATELY from the global pair and served via
+#   a non-inferiority MIXTURE rho = 1-exp(-C/W). The fitter writes families[unit]["cities"][city] =
+#   {k, w, k_raw, w_raw, n_cells, score_capital} and ONLY for cities with positive earned OOS capital.
+def _replacement_city_candidate_lookup(unit: str, city: str | None) -> dict | None:
+    """Return the per-city EB candidate ``{"k", "w", "score_capital"}`` for the family, or None.
+
+    Reads the SAME fitted artifact ``state/sigma_scale_fit.json`` the global lookup uses, fail-soft. A
+    candidate is returned ONLY when:
+      - the family is fitted (a REFUSED family licenses nothing — no global scale, no city candidate), and
+      - the city has an entry under ``families[unit]["cities"]`` carrying a FINITE, POSITIVE
+        ``score_capital`` C (the prequential Bernoulli-log-score the city's (k,w) earned OVER global on
+        rolling OOS splits). C ≤ 0, a missing ``score_capital`` key, an absent city, an artifact with no
+        ``"cities"`` key, or no ``city`` argument ⇒ None ⇒ rho=0 ⇒ pure global serving (byte-identical to
+        today). k/w are clamped exactly as the global lookup clamps them.
+
+    NEVER hard-swaps: the caller mixes this candidate's q with the global q by rho. Any error → None.
+    """
+    if not city:
+        return None
+    try:
+        import os  # noqa: PLC0415
+        from src.config import runtime_state_path  # noqa: PLC0415
+
+        path = str(runtime_state_path("sigma_scale_fit.json"))
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        fam = (artifact.get("families") or {}).get(str(unit).upper())
+        if not isinstance(fam, dict) or not fam.get("fitted"):
+            return None
+        cfam = (fam.get("cities") or {}).get(str(city))
+        if not isinstance(cfam, dict):
+            return None
+        if "score_capital" not in cfam:
+            return None  # cannot license a mix without earned capital (defensive; fitter always writes it)
+        cap = float(cfam.get("score_capital"))
+        if not (math.isfinite(cap) and cap > 0.0):
+            return None  # C <= 0 ⇒ rho would be 0 ⇒ serve global; signal "no candidate"
+        k = float(cfam.get("k", 1.0))
+        w = float(cfam.get("w", 0.0))
+        if not (math.isfinite(k) and k > 0.0):
+            k = 1.0
+        if not (math.isfinite(w) and 0.0 <= w <= 1.0):
+            w = 0.0
+        return {"k": k, "w": w, "score_capital": cap}
+    except Exception:
+        return None
 
 
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
@@ -1009,10 +1160,42 @@ class _BayesPrecisionFusionFusionOverride:
     # when the grid table is absent ⇒ precision_center_basis is the same as before Option C.
     precision_center_basis: Mapping[str, Mapping[str, float]] | None = None
     precision_basis_hash: str | None = None
-    # Cold-start guard (2026-06-22, Finding 1): models excluded from the center because
-    # their walk-forward VERIFIED settled obs count was below MIN_SETTLED_N.  Empty when
-    # all models are mature (byte-identical to pre-guard in that case).
-    cold_start_excluded_models: tuple[str, ...] = ()
+    # Low-n prior weighting (2026-06-28): models whose walk-forward VERIFIED settled
+    # obs count was below MIN_SETTLED_N. These models are not excluded; their raw_m2
+    # is EB-shrunk toward the equal-precision prior before center weighting.
+    low_n_prior_weighted_models: tuple[str, ...] = ()
+    # Source-clock vNext fixed city basket (2026-06-25): present when the per-city one-scheme
+    # artifact supplied the served center. This is the live replacement upgrade surface.
+    source_clock_one_scheme: Mapping[str, object] | None = None
+    # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to anchor_value_c.
+    # (a,b)=(0.0,1.0) is IDENTITY (no city/metric served → byte-identical center). ``emos_center_delta_c``
+    # is the applied shift (a + (b−1)·μ) recorded for reconstructibility; RAW center = anchor_value_c −
+    # emos_center_delta_c. Temperature-dependent (slope b) — NOT a constant offset. σ untouched.
+    emos_center_a: float = 0.0
+    emos_center_b: float = 1.0
+    emos_center_delta_c: float = 0.0
+
+
+def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
+    """Served POINT predictive width = realized walk-forward fused-center error, floored.
+
+    Authority: frontier consult REQ-20260629-131502 + src/forecast/sigma_authority.py.
+    ``sigma_realized_c`` is the walk-forward fused-center residual std -- the realized total forecast
+    error of the served center -- and IS the point predictive sigma that feeds
+    ``bin_probability_settlement``. The center posterior sd (fused.sd) is NOT added here: adding it
+    double-counts center uncertainty on top of an already-complete realized error (served sigma ~3.0
+    vs realized RMSE ~1.35; PIT mound chi2=218; 50%CI covers 82%). fused.sd is carried separately as
+    ``anchor_sigma_c`` into the q_lcb/q_ucb center-uncertainty bootstrap, where it belongs. A
+    non-finite / non-positive realized width falls back to the floor (defensive;
+    ``bin_probability_settlement`` rejects a non-positive sigma).
+    """
+    try:
+        s = float(sigma_realized_c)
+    except (TypeError, ValueError):
+        return float(floor_c)
+    if not math.isfinite(s) or s <= 0.0:
+        return float(floor_c)
+    return max(float(floor_c), s)
 
 
 def _anchor_only_current_override(
@@ -1067,7 +1250,7 @@ def _anchor_only_current_override(
                 }
             }
         ),
-        cold_start_excluded_models=(),
+        low_n_prior_weighted_models=(),
     )
 
 
@@ -1270,6 +1453,11 @@ def _replacement_bayes_precision_fusion_override(
             served_current = read_current_instrument_values(
                 conn, city=request.city, metric=metric, target_date=target_date,
                 source_cycle_time_iso=source_cycle_iso,
+                # ADD-DATA (operator "加数据"): include station-calibrated sources (cwa_*/hko_*) at
+                # their OWN provider cycle so they enter persisted_current -> the precision fusion
+                # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
+                # skip (_station_live_omitted below) serves that live fusion center.
+                include_station_sources=True,
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
@@ -1386,6 +1574,30 @@ def _replacement_bayes_precision_fusion_override(
             else:
                 _raw_m2_and_n[_ins.model] = (None, 0)
             _z_by_model[_ins.model] = float(_ins.z)
+        _station_entry_models_added: tuple[str, ...] = ()
+        try:
+            from src.data.forecast_source_registry import (  # noqa: PLC0415
+                SOURCES as _FORECAST_SOURCES,
+                source_allows_role as _source_allows_role,
+            )
+
+            _added: list[str] = []
+            for _m, (_value, _rid) in persisted_current.items():
+                _m_str = str(_m)
+                if _m_str in _z_by_model or not _m_str.startswith(("cwa_", "hko_")):
+                    continue
+                _spec = _FORECAST_SOURCES.get(_m_str)
+                if _spec is None or not _source_allows_role(_spec, "entry_primary"):
+                    continue
+                try:
+                    _z_by_model[_m_str] = float(_value)
+                except (TypeError, ValueError):
+                    continue
+                _raw_m2_and_n[_m_str] = (None, 0)
+                _added.append(_m_str)
+            _station_entry_models_added = tuple(sorted(_added))
+        except Exception:
+            _station_entry_models_added = ()
         # Include anchor as a MEMBER (not a separate Bayesian prior).
         if capture.anchor_z is not None:
             _raw_m2_and_n[_ANCHOR] = (capture.anchor_raw_m2_native, capture.anchor_raw_n_train)
@@ -1404,7 +1616,7 @@ def _replacement_bayes_precision_fusion_override(
         # predictive_sigma_c / anchor_sigma_c (fused.sd) are UNTOUCHED (no Kelly double-
         # count). This is LIVE-DIRECT: the warming is active wherever the table has a cell;
         # rollout is controlled by populating config/grid_representativeness.json + the
-        # deploy commit, never by a dormant code flag (operator no-shadow law).
+        # deploy commit, never by a dormant code flag (operator no-blocked law).
         _sigma_repr_by_model = _build_sigma_repr_by_model(
             request.city, list(_raw_m2_and_n.keys()), anchor_model=_ANCHOR
         )
@@ -1444,20 +1656,232 @@ def _replacement_bayes_precision_fusion_override(
             }
         )
 
-        # Cold-start guard provenance (Finding 1, 2026-06-22): models that were
-        # excluded from the center because n < MIN_SETTLED_N.  Derived from the
-        # precision_center_basis: any model with weight=0.0 AND n < MIN_SETTLED_N
-        # was excluded by the guard (not merely absent from the DB).
+        # Low-n prior weighting provenance: models that entered the center through
+        # EB shrink-to-equal because n < MIN_SETTLED_N. They are not excluded.
         from src.forecast.center import MIN_SETTLED_N as _MIN_SETTLED_N  # noqa: PLC0415
-        _cold_start_excluded: tuple[str, ...] = tuple(
+        _low_n_prior_weighted: tuple[str, ...] = tuple(
             sorted(
                 str(_m)
                 for _m, _v in _precision_center_basis.items()
-                if int(_v["n"]) < _MIN_SETTLED_N and _v["weight"] == 0.0
+                if int(_v["n"]) < _MIN_SETTLED_N
             )
         )
 
-        used_models = tuple(fused.used_models)
+        _source_clock_payload: dict[str, object] | None = None
+        _source_clock_used_models: tuple[str, ...] | None = None
+        _source_clock_center_sigma_c: float | None = None
+        _source_clock_predictive_sigma_c: float | None = None
+        _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
+        _source_clock_dep_ids: set[int] = set()
+        try:
+            from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                GRID_AWARE_ARTIFACT_NAME,
+                fixed_weight_center_from_values,
+                scheme_for_city,
+            )
+
+            _scheme = scheme_for_city(request.city)
+            # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
+            # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
+            # frozen grid_aware scheme must be ADDED, never banned by the frozen snapshot. When such
+            # a source is present, skip the frozen scheme and serve the live fusion center
+            # (_mu_diagonal computed above), which already added that source at its initial precision
+            # weight via raw_second_moment_weights. Targeted: only cities with a live station source
+            # leave the scheme; every other city serves its scheme byte-identically.
+            _station_live_omitted = _scheme is not None and any(
+                str(_m).startswith(("cwa_", "hko_")) and str(_m) not in _scheme.weights
+                for _m in persisted_current
+            )
+            if _scheme is not None and not _station_live_omitted:
+                _source_values: dict[str, float] = {
+                    _ANCHOR: float(anchor_value_corrected_c),
+                }
+                for _m, (_value, _rid) in persisted_current.items():
+                    try:
+                        _source_values[str(_m)] = float(_value)
+                    except (TypeError, ValueError):
+                        continue
+                _entry_ineligible_sources = _registered_source_clock_entry_ineligible(
+                    _scheme.final_sources
+                )
+                _source_clock_center = None
+                if _entry_ineligible_sources:
+                    try:
+                        import logging  # noqa: PLC0415
+
+                        logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                            "source-clock one-scheme center skipped for %s %s %s: registered "
+                            "sources are not entry_primary eligible: %s",
+                            request.city,
+                            metric,
+                            target_date,
+                            list(_entry_ineligible_sources),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    _source_clock_center = fixed_weight_center_from_values(
+                        city=request.city,
+                        values_c_by_source=_source_values,
+                    )
+                    if _source_clock_center is None:
+                        _incomplete_probe = fixed_weight_center_from_values(
+                            city=request.city,
+                            values_c_by_source=_source_values,
+                            allow_incomplete=True,
+                        )
+                        if _incomplete_probe is not None and _incomplete_probe.missing_sources:
+                            try:
+                                import logging  # noqa: PLC0415
+
+                                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                                    "source-clock one-scheme center skipped for %s %s %s: missing "
+                                    "configured sources %s; live center is not renormalized",
+                                    request.city,
+                                    metric,
+                                    target_date,
+                                    list(_incomplete_probe.missing_sources),
+                                )
+                            except Exception:
+                                pass
+                if _source_clock_center is not None:
+                    _source_clock_used_models = tuple(_source_clock_center.used_weights)
+                    _mu_diagonal = float(_source_clock_center.mu_c)
+                    _weights = dict(_source_clock_center.used_weights)
+                    for _m in _source_clock_used_models:
+                        _z_by_model[str(_m)] = float(_source_values[str(_m)])
+                        if _m not in _raw_m2_and_n:
+                            _raw_m2_and_n[str(_m)] = (None, 0)
+                    _source_clock_histories: dict[str, object] = {}
+                    try:
+                        _source_clock_histories = dict(
+                            history_provider(
+                                city=request.city,
+                                metric=metric,
+                                lead_days=lead_days,
+                                target_date=target_local_date,
+                                models=list(_source_clock_used_models),
+                            )
+                        )
+                    except Exception:
+                        _source_clock_histories = {}
+                    for _m in _source_clock_used_models:
+                        _hist = _source_clock_histories.get(str(_m))
+                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
+                        if _residuals:
+                            _m2 = sum(float(r) * float(r) for r in _residuals) / len(_residuals)
+                            _raw_m2_and_n[str(_m)] = (_m2, int(getattr(_hist, "n_train", len(_residuals)) or len(_residuals)))
+                    _precision_center_basis = {}
+                    for _m in _source_clock_used_models:
+                        _rm2, _rn = _raw_m2_and_n.get(str(_m), (None, 0))
+                        _precision_center_basis[str(_m)] = {
+                            "raw_m2": (float("nan") if _rm2 is None else float(_rm2)),
+                            "n": float(int(_rn)),
+                            "repr_m2": float(_sigma_repr_by_model.get(str(_m), 0.0)),
+                            "weight": float(_weights.get(str(_m), 0.0)),
+                        }
+                    _precision_basis_hash = _json_hash(
+                        {
+                            "unit": _serving_unit,
+                            "basis": {
+                                k: [v["raw_m2"], v["n"], v["repr_m2"], v["weight"]]
+                                for k, v in sorted(_precision_center_basis.items())
+                            },
+                            "source_clock_one_scheme": True,
+                        }
+                    )
+
+                    _model_sigmas: list[float] = []
+                    _residual_maps: dict[str, Mapping[str, float]] = {}
+                    for _m in _source_clock_used_models:
+                        _hist = _source_clock_histories.get(str(_m))
+                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
+                        if len(_residuals) >= 2:
+                            import statistics  # noqa: PLC0415
+
+                            try:
+                                _sigma_m = float(statistics.stdev(float(r) for r in _residuals))
+                            except statistics.StatisticsError:
+                                _sigma_m = 1.5
+                        else:
+                            _sigma_m = 1.5
+                        _model_sigmas.append(max(1.0, _sigma_m))
+                        _by_date = getattr(_hist, "residual_by_target_date", {}) or {}
+                        if _by_date:
+                            _residual_maps[str(_m)] = _by_date
+                    if _model_sigmas:
+                        _source_clock_center_sigma_c = max(
+                            0.25,
+                            math.sqrt(
+                                sum(
+                                    (float(_weights.get(_m, 0.0)) * _sig) ** 2
+                                    for _m, _sig in zip(_source_clock_used_models, _model_sigmas, strict=False)
+                                )
+                            ),
+                        )
+                    if _residual_maps:
+                        _common_dates = sorted(set.intersection(*(set(v) for v in _residual_maps.values())))
+                        if len(_common_dates) >= 5:
+                            import statistics  # noqa: PLC0415
+
+                            _weighted_residuals = [
+                                sum(
+                                    float(_weights.get(_m, 0.0)) * float(_residual_maps[_m][d])
+                                    for _m in _source_clock_used_models
+                                    if _m in _residual_maps and d in _residual_maps[_m]
+                                )
+                                for d in _common_dates
+                            ]
+                            try:
+                                _sigma_resid_sc = max(1.0, float(statistics.stdev(_weighted_residuals)))
+                            except statistics.StatisticsError:
+                                _sigma_resid_sc = 1.5
+                        else:
+                            _sigma_resid_sc = 1.5
+                    else:
+                        _sigma_resid_sc = 1.5
+                    if _source_clock_center_sigma_c is not None:
+                        _source_clock_predictive_sigma_c = max(
+                            1.0,
+                            math.sqrt(_source_clock_center_sigma_c ** 2 + _sigma_resid_sc ** 2),
+                        )
+                    for _m in _source_clock_used_models:
+                        if _m in served_current:
+                            _source_clock_current_value_serving[_m] = served_current[_m].as_provenance()  # type: ignore[union-attr]
+                            try:
+                                _source_clock_dep_ids.add(int(served_current[_m].raw_model_forecast_id))  # type: ignore[union-attr]
+                            except Exception:
+                                pass
+                    _source_clock_payload = {
+                        "artifact": GRID_AWARE_ARTIFACT_NAME,
+                        "configured_sources": list(_scheme.final_sources),
+                        "configured_weights": dict(_source_clock_center.configured_weights),
+                        "used_weights": dict(_source_clock_center.used_weights),
+                        "missing_sources": list(_source_clock_center.missing_sources),
+                        "renormalized": bool(_source_clock_center.renormalized),
+                        "one_scheme_status": _source_clock_center.one_scheme_status,
+                        "walkforward_pass": bool(_source_clock_center.walkforward_pass),
+                        "sample_n": int(_scheme.sample_n),
+                        "center_sigma_c": _source_clock_center_sigma_c,
+                        "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                    }
+        except Exception as _source_clock_exc:  # fail-soft: legacy fusion remains available
+            try:
+                import logging  # noqa: PLC0415
+
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "source-clock one-scheme center skipped for %s %s %s: %s",
+                    request.city,
+                    metric,
+                    target_date,
+                    _source_clock_exc,
+                )
+            except Exception:
+                pass
+
+        used_models = _source_clock_used_models or tuple(
+            dict.fromkeys((*tuple(fused.used_models), *_station_entry_models_added))
+        )
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
         # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
@@ -1490,6 +1914,14 @@ def _replacement_bayes_precision_fusion_override(
         _decorrelated_expected = len(_expected_families)
         _decorrelated_served = len(_served_families & _expected_families)
         _decorrelated_complete = not _missing_providers
+        if _source_clock_payload is not None and _source_clock_used_models is not None:
+            _decorrelated_expected = len(_source_clock_payload.get("configured_sources", []) or [])
+            _decorrelated_served = len(_source_clock_used_models)
+            _decorrelated_complete = not bool(_source_clock_payload.get("missing_sources"))
+            _missing_providers = [
+                str(source)
+                for source in (_source_clock_payload.get("missing_sources", []) or [])
+            ]
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
@@ -1502,11 +1934,24 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
-        model_set_hash = _json_hash(sorted(used_models))
+        model_set_hash = _json_hash(
+            {
+                "models": sorted(used_models),
+                "source_clock_weights": (
+                    None
+                    if _source_clock_payload is None
+                    else _source_clock_payload.get("used_weights")
+                ),
+            }
+        )
         # resolution_mix_hash captures which native grid resolutions entered the fused product
         # (anchor 0.1, globals ~0.25/seamless, regional 2km). Keyed by the deduped model set.
         resolution_mix_hash = _json_hash(
-            {"models": sorted(used_models), "regional": sorted(fused.regional_models)}
+            {
+                "models": sorted(used_models),
+                "regional": sorted(fused.regional_models),
+                "source_clock_one_scheme": _source_clock_payload is not None,
+            }
         )
 
         # BLOCKER 5: the raw_model_forecast_ids this q was fused from = the persisted current
@@ -1518,6 +1963,7 @@ def _replacement_bayes_precision_fusion_override(
         anchor_row = persisted_current.get(_ANCHOR)
         if anchor_row is not None:
             dep_ids.add(int(anchor_row[1]))
+        dep_ids.update(_source_clock_dep_ids)
         raw_model_forecast_ids = tuple(sorted(dep_ids))
 
         # BLOCKER 3: declare the ifs025->ifs9 anchor bridge provenance (applied when the anchor
@@ -1535,10 +1981,10 @@ def _replacement_bayes_precision_fusion_override(
         # spread (the fused-N experiment's tight-sigma caveat). The irreducible part is
         # measured from the walk-forward FUSED-CENTER residual series: per common target_date,
         # the mean of the instruments' de-biased residuals; its std IS the historical error of
-        # an equal-weight fused center at this cell. sigma_pred = sqrt(fused.sd^2 + sigma_resid^2),
-        # floored at 1.0C (conservative: settlement-graded fused-center MAE ran 0.85-1.31C at
-        # real leads; never narrower than the evidence). Thin substrate (<5 common dates) ->
-        # conservative default sigma_resid = 1.5C.
+        # the served fused center at this cell. sigma_pred = max(1.0C, sigma_resid) because the
+        # realized residual already contains total point-forecast error. fused.sd is center
+        # uncertainty and is carried separately as anchor_sigma_c into the q_lcb/q_ucb bootstrap.
+        # Thin substrate (<5 common dates) -> conservative default sigma_resid = 1.5C.
         _date_sets = [set(ins.residuals_by_date) for ins in capture.likelihood if ins.residuals_by_date]
         _sigma_resid = 1.5
         if _date_sets:
@@ -1554,22 +2000,67 @@ def _replacement_bayes_precision_fusion_override(
                     _sigma_resid = float(statistics.stdev(_series))
                 except statistics.StatisticsError:
                     _sigma_resid = 1.5
-        predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
+        # DOUBLE-COUNT FIX (consult REQ-20260629-131502 + sigma_authority.py): the served POINT width
+        # is the realized walk-forward fused-center error ALONE -- NOT sqrt(fused.sd^2 + sigma_resid^2),
+        # which adds the center posterior sd on top of an already-complete realized error (served ~3.0
+        # vs realized ~1.35). fused.sd is carried separately as anchor_sigma_c (below) into the
+        # q_lcb/q_ucb center-uncertainty bootstrap, where center uncertainty belongs.
+        predictive_sigma_c = served_predictive_sigma_c(_sigma_resid, floor_c=1.0)
+        if _source_clock_predictive_sigma_c is not None:
+            predictive_sigma_c = float(_source_clock_predictive_sigma_c)
 
         # Task #32 follow-up (brand law): per-instrument serving provenance for the FUSED set.
         # served_current is the single-authority serving map (read_current_instrument_values);
         # restricting to used_models keeps the record scoped to what actually entered the q. A
         # previous_runs substitution surfaces here as served_via="previous_runs" — never silent.
-        _current_value_serving = {
-            m: served_current[m].as_provenance()  # type: ignore[union-attr]
-            for m in used_models
-            if m in served_current
-        } or None
+        _current_value_serving = (
+            _source_clock_current_value_serving
+            if _source_clock_current_value_serving
+            else {
+                m: served_current[m].as_provenance()  # type: ignore[union-attr]
+                for m in used_models
+                if m in served_current
+            }
+        ) or None
+
+        # EMOS/NGR affine CENTER calibration (2026-07-01, consult REQ-20260701-010328): apply the
+        # fitted, walk-forward, shrunk-to-identity affine μ'=a+b·μ to the SERVED runtime center. Applied
+        # HERE — the single authoritative _mu_diagonal feeding the q point, the q_lcb/q_ucb bounds,
+        # provenance.anchor_value_c (the reactor's ENTRY belief read), and the bpf sub-dict — so entry
+        # and exit stay unified (no #135 two-center re-split). Identity (0.0,1.0) is used only when no
+        # city/metric affine is served by state/emos_center_calibration.json; the center is then byte-
+        # identical to the uncalibrated fused center. The slope b captures the temperature-
+        # dependent representativeness bias a constant offset cannot. σ is untouched (center-only).
+        # LEAD-GATED + RANGE-GUARDED (consult REQ-20260701-063727): the affine is fit on ONE served
+        # center per date at the day-ahead decision lead, so it is served ONLY at that lead (applying
+        # it at L0/L2/… would extrapolate across the lead-dependent bias regime) and only WITHIN the
+        # observed temperature support (the tilt is held flat outside [x_lo,x_hi], guarding a strong
+        # slope from unearned extrapolation). Lead uncomputable -> identity (fail-closed).
+        from src.calibration.emos_center_calibration import (  # noqa: PLC0415
+            apply_affine_in_support,
+            lookup_affine,
+        )
+        try:
+            _emos_lead = (
+                date.fromisoformat(_date_text(request.target_date))
+                - _to_utc(request.source_cycle_time, field_name="source_cycle_time").date()
+            ).days
+        except Exception:
+            _emos_lead = None
+        if _emos_lead is None:
+            _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
+        else:
+            _emos_a, _emos_b, _emos_xlo, _emos_xhi = lookup_affine(request.city, metric, _emos_lead)
+        _mu_served = apply_affine_in_support(_mu_diagonal, _emos_a, _emos_b, _emos_xlo, _emos_xhi)
+        _emos_delta_c = _mu_served - _mu_diagonal
 
         return _BayesPrecisionFusionFusionOverride(
-            anchor_value_c=_mu_diagonal,
-            anchor_sigma_c=float(fused.sd),
-            method=fused.method,
+            anchor_value_c=_mu_served,
+            emos_center_a=_emos_a,
+            emos_center_b=_emos_b,
+            emos_center_delta_c=_emos_delta_c,
+            anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
+            method="SOURCE_CLOCK_FIXED_WEIGHT" if _source_clock_payload is not None else fused.method,
             used_models=used_models,
             model_set_hash=model_set_hash,
             resolution_mix_hash=resolution_mix_hash,
@@ -1586,9 +2077,10 @@ def _replacement_bayes_precision_fusion_override(
             current_value_serving=_current_value_serving,
             precision_center_basis=_precision_center_basis or None,
             precision_basis_hash=_precision_basis_hash,
-            cold_start_excluded_models=_cold_start_excluded,
+            low_n_prior_weighted_models=_low_n_prior_weighted,
+            source_clock_one_scheme=_source_clock_payload,
         )
-    except Exception as exc:  # fail-soft: never break shadow materialization
+    except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
             import logging  # noqa: PLC0415
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1604,14 +2096,14 @@ def _replacement_bayes_precision_fusion_override(
 #
 # Created: 2026-06-09
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1d-§1e (fused-N-direct q,
-#   σ_pred = sqrt(fused.sd² + σ_resid²)); root-cause /tmp/candidate_missing_rootcause.md (the
+#   σ_pred = max(1.0C, σ_resid)); root-cause /tmp/candidate_missing_rootcause.md (the
 #   live LCB falls back to legacy bounds when q_lcb_json is NULL -> under-certifies
 #   below ask → every proof killed). This builds a REAL per-bin q_lcb/q_ucb consistent with the fused
 #   posterior so the bundle q_lcb takes priority over the Wilson fallback (no downstream change).
 #
 # DESIGN (principled, not a fudge):
 #   The fused posterior gives center μ* with posterior sd = fused.sd (anchor_sigma_c — the CENTER
-#   uncertainty) and predictive spread σ_pred (predictive_sigma_c = sqrt(fused.sd² + σ_resid²)). The
+#   uncertainty) and predictive spread σ_pred (predictive_sigma_c = max(1.0C, σ_resid)). The
 #   q POINT vector integrates N(μ*, σ_pred). The q_lcb bound is a PARAMETER-uncertainty bootstrap:
 #   draw μ_i ~ N(μ*, fused.sd) — the center uncertainty ONLY (we do NOT re-add σ_resid here; that
 #   would double-count the residual spread already inside σ_pred). For each draw, integrate the SAME
@@ -1692,6 +2184,264 @@ def _normal_cdf(*, mu: float, sigma: float, x: float) -> float:
     return 0.5 * (1.0 + math.erf((float(x) - float(mu)) / (float(sigma) * math.sqrt(2.0))))
 
 
+# Created: 2026-06-29
+# Authority basis: capital-gated per-city rho-mix serving (frontier-consult validated; the fitter side —
+#   scripts/fit_sigma_scale.py per-city "cities" {k,w,score_capital} layer — is already DONE). This is the
+#   ONE shared q builder extracted from _compute_posterior_payload's fused-q construction. It MUST
+#   reproduce the prior in-line q byte-identically when called with the GLOBAL family (k, w, floor_steps),
+#   so a city with no earned capital (rho=0) serves exactly today's q.
+def _build_scaled_normal_uniform_q(
+    *,
+    mu: float,
+    sigma_pred: float,
+    k: float,
+    uniform_w: float,
+    floor_steps: float,
+    bins: "Sequence[object]",
+    half_step: float,
+    rounding_rule: str,
+    day0_obs_extreme_c: float | None,
+    settlement_step_c: float,
+    settlement_sigma_floor_c: float | None,
+    city_unit: str,
+    metric: str = "high",
+) -> tuple[dict[str, float], list[str], bool]:
+    """Build the served settlement-bin q = ∫_bin[(1−w)·Normal(μ, σ·k) + w·Uniform], normalized.
+
+    PURE module-level extraction of the fused-q construction body (k→σ scaling, the step-unit σ-floor
+    and the settlement-σ-floor, the per-bin ``_bin_mass`` with the catch-all coherence cap, the
+    normalization, and the uniform-w mixture + constrained redistribution + post-condition asserts).
+    Returns ``(q, catchall_capped_bins, uniform_applied)`` where ``q`` sums to 1, ``catchall_capped_bins``
+    lists the open-ended bins whose mass was capped at their honest (un-floored) value, and
+    ``uniform_applied`` is True iff the uniform-w mixture actually fired (so the caller stamps
+    ``uniform_mixture_w_applied`` exactly as the prior in-line code did).
+
+    Every invariant of the in-line construction is preserved EXACTLY:
+      - k applies BEFORE the floors; floors only WIDEN (``max()``) and leave ``sigma_pred`` (the honest
+        un-floored width) intact.
+      - the catch-all coherence cap pins each open-ended bin at its un-floored predictive-σ mass — the
+        floor (and below, the uniform mixture) may only FLATTEN, never inflate a far catch-all (the
+        Paris >=26 incident invariant).
+      - day0 conditioning uses ``_day0_conditioned_bin_probability`` when ``day0_obs_extreme_c`` is not
+        None, else ``bin_probability_settlement``.
+      - the uniform-w gate stays EXACTLY ``if uniform_w > 0.0 and city_unit == "C"`` (the C-only gate is
+        intentional — fixing F is a separate future release that alters the fallback and would
+        invalidate the capital accounting).
+      - the constrained-redistribution + post-condition asserts are byte-identical.
+
+    PURITY: no side effects, no provenance mutation, no DB / config / artifact reads — every input is an
+    explicit argument. The caller computes ``settlement_sigma_floor_c`` (the city|season|metric lookup,
+    which is not pure) and passes it in, and stamps provenance from the inputs/outputs.
+    """
+    from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
+
+    _sigma_pred = float(sigma_pred)
+    _sigma_used = _sigma_pred
+    # k applies BEFORE the floors (σ·k sharpens when k<1, widens when k>1). The k=1 no-op stays
+    # byte-identical; a non-positive k is the inert no-op (a k<=0 σ is nonsensical).
+    if k != 1.0 and k > 0.0:
+        _sigma_pred = _sigma_pred * float(k)
+        _sigma_used = _sigma_pred
+    # ABSOLUTE σ-floor in step units: σ_core = max(σ_impl·k, floor_steps·step). max() only WIDENS and
+    # leaves _sigma_pred intact so the catch-all cap still bars inflation. floor_steps==0.0 ⇒ inert.
+    if floor_steps > 0.0:
+        _floor_value = float(floor_steps) * float(settlement_step_c)
+        if math.isfinite(_floor_value) and _floor_value > _sigma_used:
+            _sigma_used = _floor_value
+    # Settlement σ-floor (city|season|metric), looked up impurely by the caller and threaded in.
+    if settlement_sigma_floor_c is not None and float(settlement_sigma_floor_c) > _sigma_used:
+        _sigma_used = float(settlement_sigma_floor_c)
+
+    _catchall_capped_bins: list[str] = []
+    _catchall_honest_mass: dict[str, float] = {}
+
+    def _is_open_ended_bin(_b) -> bool:
+        return (_b.lower_c is None) != (_b.upper_c is None)
+
+    def _bin_mass(_b) -> float:
+        _lo = None if _b.lower_c is None else float(_b.lower_c)
+        _hi = None if _b.upper_c is None else float(_b.upper_c)
+        if day0_obs_extreme_c is not None:
+            _m = _day0_conditioned_bin_probability(
+                metric=metric,
+                observed_extreme_c=day0_obs_extreme_c,
+                mu=float(mu),
+                sigma=_sigma_used,
+                bin_low_c=_lo,
+                bin_high_c=_hi,
+                half_step=half_step,
+                rounding_rule=rounding_rule,
+            )
+        else:
+            _m = bin_probability_settlement(
+                mu=float(mu),
+                sigma=_sigma_used,
+                bin_low=_lo,
+                bin_high=_hi,
+                half_step=half_step,
+                rounding_rule=rounding_rule,
+            )
+        # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the un-floored
+        # (predictive-sigma) mass so the floor can never inflate the tail.
+        if _is_open_ended_bin(_b):
+            if day0_obs_extreme_c is not None:
+                _m_unfloored = _day0_conditioned_bin_probability(
+                    metric=metric,
+                    observed_extreme_c=day0_obs_extreme_c,
+                    mu=float(mu),
+                    sigma=_sigma_pred,
+                    bin_low_c=_lo,
+                    bin_high_c=_hi,
+                    half_step=half_step,
+                    rounding_rule=rounding_rule,
+                )
+            else:
+                _m_unfloored = bin_probability_settlement(
+                    mu=float(mu),
+                    sigma=_sigma_pred,
+                    bin_low=_lo,
+                    bin_high=_hi,
+                    half_step=half_step,
+                    rounding_rule=rounding_rule,
+                )
+            _catchall_honest_mass[_b.bin_id] = float(_m_unfloored)
+            if _sigma_used > _sigma_pred and _m_unfloored < _m:
+                _catchall_capped_bins.append(_b.bin_id)
+                _m = _m_unfloored
+        return _m
+
+    _fused_q = {b.bin_id: _bin_mass(b) for b in bins}
+    _total = sum(_fused_q.values())
+    if not (_total > 0.0 and math.isfinite(_total)):
+        raise ValueError(f"fused-q mass not positive-finite: {_total}")
+    q = {key: float(value) / _total for key, value in _fused_q.items()}
+    # Whether the uniform mixture ACTUALLY fired (so the caller stamps uniform_mixture_w_applied exactly
+    # as the prior in-line code did — only when a renormalized mixed q was produced, never in the
+    # degenerate no-eligible-bins / non-finite-total cases).
+    _uniform_applied = False
+    # FITTED UNIFORM MIXTURE — applied to the final normalized q: q_adj = (1-w)·q_normal + w·uniform.
+    # The C-only gate is INTENTIONAL and unchanged (fixing F is a separate future release).
+    if uniform_w > 0.0 and city_unit == "C":
+        _uniform_eligible_bins = (
+            [key for key, val in q.items() if float(val) > 0.0]
+            if day0_obs_extreme_c is not None
+            else list(q)
+        )
+        _n_bins = len(_uniform_eligible_bins)
+        if _n_bins > 0:
+            _u = 1.0 / _n_bins
+            _eligible = set(_uniform_eligible_bins)
+            _mixed = {
+                key: (1.0 - uniform_w) * val + uniform_w * (_u if key in _eligible else 0.0)
+                for key, val in q.items()
+            }
+            _mtot = sum(_mixed.values())
+            if _mtot > 0.0 and math.isfinite(_mtot):
+                _q_mixed = {key: val / _mtot for key, val in _mixed.items()}
+                # Re-cap open-ended catch-all bins at their honest normalized mass (same honest mass,
+                # normalized by the pre-mixture _total, the floor cap used). CONSTRAINED REDISTRIBUTION:
+                # pin each capped bin at its honest mass and absorb the residual ONLY across the uncapped
+                # bins, so the renorm divide can never re-inflate a capped bin (the Paris >=26 category).
+                _honest_norm_by_bin: dict[str, float] = {}
+                _capped_now: set[str] = set()
+                for _bid, _honest in _catchall_honest_mass.items():
+                    _honest_norm = float(_honest) / _total
+                    _honest_norm_by_bin[_bid] = _honest_norm
+                    if _q_mixed.get(_bid, 0.0) > _honest_norm:
+                        _q_mixed[_bid] = _honest_norm
+                        _capped_now.add(_bid)
+                        if _bid not in _catchall_capped_bins:
+                            _catchall_capped_bins.append(_bid)
+                _capped_mass = sum(_q_mixed[_b] for _b in _capped_now)
+                _uncapped_mass = sum(
+                    _val for _key, _val in _q_mixed.items() if _key not in _capped_now
+                )
+                _residual = 1.0 - _capped_mass  # mass the uncapped bins must carry
+                if (
+                    _capped_now
+                    and _uncapped_mass > 0.0
+                    and math.isfinite(_uncapped_mass)
+                    and _residual >= 0.0
+                ):
+                    _scale = _residual / _uncapped_mass
+                    q = {
+                        _key: (_val if _key in _capped_now else _val * _scale)
+                        for _key, _val in _q_mixed.items()
+                    }
+                    _uniform_applied = True
+                else:
+                    # Degenerate: nothing capped (no-op), OR every bin is a capped open-ended bin / no
+                    # uncapped mass to absorb the residual. Plain renormalization is the only option and
+                    # is exactly the prior behavior when no cap bit.
+                    _rtot = sum(_q_mixed.values())
+                    if _rtot > 0.0 and math.isfinite(_rtot):
+                        q = {key: val / _rtot for key, val in _q_mixed.items()}
+                        _uniform_applied = True
+                # POST-CONDITIONS: in the non-degenerate path every capped open-ended bin sits at EXACTLY
+                # its honest mass and the total is 1.0 ± 1e-9. Assert so a refactor cannot silently
+                # reintroduce the renorm re-inflation.
+                if _capped_now and _uncapped_mass > 0.0 and _residual >= 0.0:
+                    for _bid in _capped_now:
+                        assert q[_bid] <= _honest_norm_by_bin[_bid] + 1e-9, (
+                            f"capped open-ended bin {_bid} re-inflated above honest mass: "
+                            f"{q[_bid]} > {_honest_norm_by_bin[_bid]}"
+                        )
+                    assert abs(sum(q.values()) - 1.0) <= 1e-9, (
+                        f"constrained-redistribution mass drift: {sum(q.values())}"
+                    )
+    return q, _catchall_capped_bins, _uniform_applied
+
+
+# Created: 2026-06-29
+# Authority basis: capital-gated per-city rho-mix serving — the NON-INFERIORITY weight. rho is a
+#   CALIBRATION WEIGHT derived AUTOMATICALLY from earned out-of-sample score capital C (never a manual
+#   flag / cap / allowlist). C<=0 (or city absent) ⇒ rho=0 ⇒ pure global ⇒ byte-identical to today.
+def _city_rho_from_capital(score_capital: float, n_eligible_bins: int) -> float:
+    """rho = 1 − exp(−C / W); C ≤ 0 or W ≤ 0 ⇒ 0.0.
+
+    ``score_capital`` (C) is the prequential Bernoulli-log-score the city's EB (k,w) earned OVER global
+    on rolling OOS splits (written by the fitter). ``n_eligible_bins`` (W) is the number of eligible
+    Bernoulli bin terms in this family batch — the SAME bin set q is built over. A city saturates toward
+    rho=1 only after earning many batches' worth of capital; a city that barely cleared zero serves a
+    light city blend over the proven global.
+    """
+    try:
+        C = float(score_capital)
+        W = int(n_eligible_bins)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(C) or C <= 0.0 or W <= 0:
+        return 0.0
+    return 1.0 - math.exp(-C / float(W))
+
+
+def _mix_q_by_rho(
+    q_global: "Mapping[str, float]",
+    q_city: "Mapping[str, float]",
+    rho: float,
+    *,
+    renormalize: bool = True,
+) -> dict[str, float]:
+    """Serve q_mix(bin) = (1−rho)·q_global[bin] + rho·q_city[bin] over the union of bin keys.
+
+    ``renormalize=True`` (the served POINT q) divides by the total so it sums to 1 defensively; the two
+    inputs already sum to ~1 so this is a no-op up to FP. ``renormalize=False`` (the q_lcb/q_ucb bound
+    CARRIERS, which do NOT each sum to 1) keeps the raw convex combination — the bound carriers are
+    intentionally not a probability simplex.
+    """
+    r = float(rho)
+    keys = list(q_global) if set(q_global) == set(q_city) else sorted(set(q_global) | set(q_city))
+    mixed = {
+        b: (1.0 - r) * float(q_global.get(b, 0.0)) + r * float(q_city.get(b, 0.0))
+        for b in keys
+    }
+    if renormalize:
+        tot = sum(mixed.values())
+        if tot > 0.0 and math.isfinite(tot):
+            return {b: v / tot for b, v in mixed.items()}
+    return mixed
+
+
 def _day0_conditioned_bin_probability(
     *,
     metric: str,
@@ -1752,7 +2502,7 @@ def _build_fused_q_bounds(
     When ``return_samples`` is true, also return the per-bin draw vectors so the
     live decision adapter can compute empirical edge p-values directly.
 
-    PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): each draw's row is
+    PATH-A COHERENCE (2026-06-18 FINAL no-blocked execution flow §5): each draw's row is
     renormalized to the probability simplex BEFORE the marginal quantile — the IDENTICAL
     renormalize-then-quantile transform ``src/probability/joint_q_band.build_joint_q_band``
     (the q_lcb AUTHORITY) performs. This makes the modal-collapse defect of the old raw
@@ -1831,7 +2581,7 @@ def _build_fused_q_bounds(
     else:
         probs = np.clip(cdf_high - cdf_low, 0.0, 1.0)  # (N, M) per-draw per-bin mass
 
-    # PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): renormalize EACH
+    # PATH-A COHERENCE (2026-06-18 FINAL no-blocked execution flow §5): renormalize EACH
     # draw's row to the probability simplex BEFORE taking the marginal quantile — the
     # EXACT transformation src/probability/joint_q_band.build_joint_q_band performs
     # (q_k = q_k / q_k.sum() per draw, then quantile along axis 0). Without this the
@@ -1921,14 +2671,14 @@ def _compute_posterior_payload(
     # activation guard (n>=n_min) + EB shrink toward 0 by SE + a do-no-harm walk-forward gate.
     # The fitted, auditable artifact state/anchor_representativeness_debias.json carries δ_city;
     # the loader (src/calibration/anchor_representativeness_debias.py) returns δ_city ONLY for an
-    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a shadow flag: when the
+    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a blocked flag: when the
     # artifact is absent (current live state — gitignored generated file) the loader returns None
     # → bias_shift_c stays None → BYTE-IDENTICAL to today. It goes live the moment the operator
     # places the fitted artifact in state/ and restarts (same posture as the σ-floor artifact).
     # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
     # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
     # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
-    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-shadow execution flow §3-§4; operator
+    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-blocked execution flow §3-§4; operator
     # "NO fitted forward per-city de-bias"): the consumed posterior center is RAW. The
     # per-city representativeness de-bias (``get_city_debias_c`` → δ_city) is a FITTED
     # FORWARD PER-CITY shift on μ — forbidden under the RAW law. It is forced to None
@@ -1956,19 +2706,7 @@ def _compute_posterior_payload(
     # constructed before its LAST-arriving input landed — availability is gated by the slowest
     # dependency. The old max(request.*_source_available_at) used the cycle-time nominal-lag GUESS
     # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
-    _possession_candidates = [
-        _role_possession_available_at(
-            conn,
-            source_run_id=request.baseline_source_run_id,
-            request_source_available_at=request.baseline_source_available_at,
-        ),
-        _role_possession_available_at(
-            conn,
-            source_run_id=request.openmeteo_source_run_id,
-            request_source_available_at=request.openmeteo_source_available_at,
-        ),
-    ]
-    available_at = max(_possession_candidates).isoformat()
+    available_at = _posterior_source_available_at(conn, request).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
     _n_bins_seed = len(request.bins) or 1
@@ -2007,10 +2745,18 @@ def _compute_posterior_payload(
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
     # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
     settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
+    # CAPITAL-GATED PER-CITY rho-MIX provenance (2026-06-29). The served q is a non-inferiority MIXTURE
+    # q_serve = (1-rho)*q_global + rho*q_city with rho = 1-exp(-C/W), C = the city's earned OOS score
+    # capital, W = the eligible Bernoulli bin count. Defaults = NOT applied (rho=0 => pure global =>
+    # byte-identical to today). Stamped in provenance so the served weight is reconstructible.
+    city_calibration_layer_applied: bool = False
+    city_calibration_rho: float | None = None
+    city_score_capital: float | None = None
+    city_k_eb: float | None = None
+    city_w_eb: float | None = None
     # Q_LCB / Q_UCB outputs. The certified bootstrap basis is present only when fused-q is built and
-    # bound construction succeeds. If it fails, the soft-anchor Wilson fallback below may publish
-    # lower/upper carrier bounds under its own non-live-eligible basis; if that fallback also fails,
-    # q_lcb_json/q_ucb_json remain NULL.
+    # bound construction succeeds. If it fails, carrier bounds may remain present under their own
+    # non-live-eligible basis; if that also fails, q_lcb_json/q_ucb_json remain NULL.
     q_lcb_map: dict[str, float] | None = None
     q_ucb_map: dict[str, float] | None = None
     q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
@@ -2021,7 +2767,7 @@ def _compute_posterior_payload(
     _far_tail_honesty_count: int = 0
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
-        replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
+        replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -2037,7 +2783,7 @@ def _compute_posterior_payload(
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
             _day0_obs_extreme_c = (
-                _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+                _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
             )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
@@ -2045,253 +2791,136 @@ def _compute_posterior_payload(
             # and widen: sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q ->
             # fewer overconfident bets (it can never tighten). When the fitted floor exists for
             # the cell it applies; when it is absent/malformed for the cell the lookup returns
-            # None and the floor is simply not applied (recorded, NEVER blocks shadow). One
+            # None and the floor is simply not applied (recorded, NEVER blocks blocked). One
             # construction rule, no knob.
-            _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
-            _sigma_used = _sigma_pred
+            _sigma_pred_raw = float(bayes_precision_fusion_override.predictive_sigma_c)
             replacement_sigma_basis = "fused_center_residual_std"
             # C3 CALIBRATION SURFACE (2026-06-12) — FITTED σ_pred scale (k) + uniform-mixture (w).
             # OPERATOR LAW 2026-06-12: the correction factor must be FITTED by math, never hand-set.
             # k and w are read from state/sigma_scale_fit.json (MLE over settled cells; only
             # scripts/fit_sigma_scale.py writes it). The artifact is keyed by SETTLEMENT UNIT family;
             # an unfitted family (e.g. F today, n=47<60) returns (1.0, 0.0) so the correction stays
-            # INERT for it automatically. Evidence: C n=215 settled cells, fitted k≈1.58 + w≈0.28 brings
-            # the mode-bin d=0 realized/expected ratio from ~0.51 to ~0.96 (see the calibration table in
-            # the artifact and docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
-            # Contract: σ-scale applies BEFORE the floor (floor stays a lower bound on the scaled σ);
-            # the uniform mixture w is applied to the FINAL normalized q below (after integration).
-            # Per-family licensing is the artifact's job (a REFUSED family → (1.0,0.0,0.0) inert from
-            # the lookup), so NO hardcoded settlement-unit allow-list here: every family the fitter
-            # licensed (C, and F since it crossed n>=60 → k=0.7322) applies. See
-            # _effective_unit_sigma_scale (2026-06-23 universal-correctness fix — the stale
-            # `unit != "C"` gate was suppressing the math-licensed F correction → US cities stayed
-            # flat → buy_yes leaked to deep-OTM tails instead of the predicted bin).
+            # INERT for it automatically. Per-family licensing is the artifact's job (a REFUSED family →
+            # (1.0,0.0,0.0) inert from the lookup), so NO hardcoded settlement-unit allow-list here.
             _city_unit = _city_settlement_unit_from_bins(request)
             _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(_city_unit)
-            # Apply k for BOTH widening (k>1) and SHARPENING (k<1). genuine-alpha 2026-06-21:
-            # the served fused belief drifted too FLAT / over-smoothed, so the MLE now fits k<1
-            # (mode under-weighted ratio 1.63; -6.5% out-of-sample log-loss from a sharpen,
-            # forward-validated). The body is IDENTICAL — σ·k sharpens when k<1 and widens when
-            # k>1. The guard fires for any k != 1.0 (the k=1 no-op stays byte-identical). _k>0.0
-            # is defensive: _replacement_sigma_scale_lookup already clamps k>0, and a k<=0 σ is
-            # nonsensical, so a non-positive k is treated as the inert no-op.
-            if _k != 1.0 and _k > 0.0:
-                _sigma_pred = _sigma_pred * _k
-                _sigma_used = _sigma_pred
-                sigma_scale_k_applied = _k
-            # ABSOLUTE σ-FLOOR in step units (σ-refit report 2026-06-13, task #69, GATE-2 fix).
-            # σ_core = max(σ_impl·k, floor_steps·step) where step = request.settlement_step_c (the SAME
-            # per-cell bin width the integrator's _half_step = step/2 derives from — reused, not
-            # recomputed, so the floor is the SAME physical dispersion across C/F unit families). The
-            # realized ring dispersion is ~constant in absolute (step) terms; the floor widens an
-            # over-sharp forecast UP TO that dispersion and never narrows a forecast already wider
-            # (max() only widens). STRICT BACKWARD COMPATIBILITY: the live artifact has NO floor_steps
-            # key ⇒ _floor_steps == 0.0 ⇒ floor_value == 0.0 ⇒ max(σ_used, 0.0) == σ_used (UNCHANGED).
-            # Applied unconditionally (NOT gated on _k>1) because the floor must be able to bind even at
-            # k=1.0 (the refit's form is k=1.0 + absolute floor). m / the second-Normal is inert at w=0.
-            # The floor widens _sigma_used ONLY and leaves _sigma_pred (the honest un-floored σ) intact,
-            # exactly like the settlement σ-floor below — so the catch-all coherence cap (which caps
-            # open-ended bins at their honest, un-floored mass) still bars the floor from inflating a
-            # far catch-all (Paris >=26 incident invariant).
-            if _floor_steps > 0.0:
-                _floor_value = float(_floor_steps) * float(request.settlement_step_c)
-                if math.isfinite(_floor_value) and _floor_value > _sigma_used:
-                    _sigma_used = _floor_value
-                    sigma_floor_steps_applied = float(_floor_steps)
-            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
-                request, metric=metric
-            )
+            _mu_anchor = float(bayes_precision_fusion_override.anchor_value_c)
+            # The settlement σ-floor (city|season|metric) lookup is IMPURE (config + season) and is read
+            # ONCE here, then threaded into the pure q builder for BOTH the global and the city carriers
+            # (same physical dispersion). It sets the floor provenance fields exactly as before.
+            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(request, metric=metric)
             if _floor_c is not None:
                 settlement_sigma_floor_c = float(_floor_c)
-                if float(_floor_c) > _sigma_used:
-                    _sigma_used = float(_floor_c)
                 settlement_sigma_floor_applied = True
             else:
                 floor_unavailable_reason = _floor_reason
-            # CATCH-ALL EXEMPTION (2026-06-10, Paris >=26C incident /tmp/deep_verify_report.md
-            # Verification A). The settlement sigma floor is calibrated on INTERIOR-bin settlement
-            # dispersion and its contract is "max() only WIDENS -> flatter q -> fewer overconfident
-            # bets". That contract HOLDS for interior bins (widening pulls mass AWAY from the modal
-            # bin) but is VIOLATED on an OPEN-ENDED catch-all on the far side of the center: widening
-            # dumps the whole outward Gaussian tail into the single open-ended bin, INFLATING its
-            # mass (Paris >=26: 0.252 at predictive sigma 1.906 -> 0.384 at floored 4.326 — the exact
-            # over-mass bin the wrong trade bought). RELATIONSHIP INVARIANT: a floor that may only
-            # FLATTEN must never INCREASE any bin's mass. For open-ended (catch-all) bins we therefore
-            # cap the floored mass at the UN-floored (predictive-sigma) mass: min(floored, unfloored).
-            # This is monotone-conservative by construction and makes the inflation category
-            # unconstructable regardless of the floor's magnitude. Interior / distinct-endpoint bins
-            # keep the floored mass (the floor's intended interior flattening). When the floor did NOT
-            # widen sigma (_sigma_used == _sigma_pred) the cap is a no-op (both masses identical).
-            _catchall_capped_bins: list[str] = []
 
-            # Honest (un-floored, predictive-sigma) mass per OPEN-ENDED catch-all bin. This is the
-            # category-kill upper bound the catch-all must never exceed — for the floor AND, below,
-            # the uniform mixture. Computed once at sigma_pred (the honest spread before any widening).
-            _catchall_honest_mass: dict[str, float] = {}
+            def _resolve_sigma_used(_k_in: float, _floor_steps_in: float) -> float:
+                # The SAME σ ladder the pure builder applies (k → step-floor → settlement-floor). Used to
+                # feed _build_fused_q_bounds the EXACT predictive σ each carrier's point q integrates at,
+                # so q_lcb ≤ q_point ≤ q_ucb holds per bin. max() only ever widens.
+                _s = _sigma_pred_raw
+                if _k_in != 1.0 and _k_in > 0.0:
+                    _s = _s * float(_k_in)
+                if _floor_steps_in > 0.0:
+                    _fv = float(_floor_steps_in) * float(request.settlement_step_c)
+                    if math.isfinite(_fv) and _fv > _s:
+                        _s = _fv
+                if _floor_c is not None and float(_floor_c) > _s:
+                    _s = float(_floor_c)
+                return _s
 
-            def _is_open_ended_bin(_b) -> bool:
-                return (_b.lower_c is None) != (_b.upper_c is None)
-
-            def _bin_mass(_b) -> float:
-                _lo = None if _b.lower_c is None else float(_b.lower_c)
-                _hi = None if _b.upper_c is None else float(_b.upper_c)
-                if _day0_obs_extreme_c is not None:
-                    _m = _day0_conditioned_bin_probability(
-                        metric=metric,
-                        observed_extreme_c=_day0_obs_extreme_c,
-                        mu=float(bayes_precision_fusion_override.anchor_value_c),
-                        sigma=_sigma_used,
-                        bin_low_c=_lo,
-                        bin_high_c=_hi,
-                        half_step=_half_step,
-                        rounding_rule=_rounding_rule,
-                    )
-                else:
-                    _m = bin_probability_settlement(
-                        mu=float(bayes_precision_fusion_override.anchor_value_c),
-                        sigma=_sigma_used,
-                        bin_low=_lo,
-                        bin_high=_hi,
-                        half_step=_half_step,
-                        rounding_rule=_rounding_rule,
-                    )
-                # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
-                # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
-                if _is_open_ended_bin(_b):
-                    if _day0_obs_extreme_c is not None:
-                        _m_unfloored = _day0_conditioned_bin_probability(
-                            metric=metric,
-                            observed_extreme_c=_day0_obs_extreme_c,
-                            mu=float(bayes_precision_fusion_override.anchor_value_c),
-                            sigma=_sigma_pred,
-                            bin_low_c=_lo,
-                            bin_high_c=_hi,
-                            half_step=_half_step,
-                            rounding_rule=_rounding_rule,
-                        )
-                    else:
-                        _m_unfloored = bin_probability_settlement(
-                            mu=float(bayes_precision_fusion_override.anchor_value_c),
-                            sigma=_sigma_pred,
-                            bin_low=_lo,
-                            bin_high=_hi,
-                            half_step=_half_step,
-                            rounding_rule=_rounding_rule,
-                        )
-                    _catchall_honest_mass[_b.bin_id] = float(_m_unfloored)
-                    if _sigma_used > _sigma_pred and _m_unfloored < _m:
-                        _catchall_capped_bins.append(_b.bin_id)
-                        _m = _m_unfloored
-                return _m
-
-            _fused_q = {b.bin_id: _bin_mass(b) for b in request.bins}
-            settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
-            if set(_fused_q) != set(q):
+            # GLOBAL q — the proven family pair. Byte-identical to the prior in-line construction (the
+            # pure builder is a verbatim extraction). Its k/floor provenance describes the GLOBAL layer.
+            _sigma_used = _resolve_sigma_used(_k, _floor_steps)
+            # k provenance: stamped iff the scale fired (k != 1.0, k > 0.0) — the k=1 no-op stays None.
+            _sigma_after_k = _sigma_pred_raw * _k if (_k != 1.0 and _k > 0.0) else _sigma_pred_raw
+            if _k != 1.0 and _k > 0.0:
+                sigma_scale_k_applied = _k
+            # step-floor provenance: stamped iff floor_steps·step actually WIDENED σ over σ_after_k (the
+            # same `> _sigma_used` test the in-line code used, evaluated against σ_after_k before the
+            # settlement floor). floor_steps absent ⇒ 0.0 ⇒ inert ⇒ None.
+            if _floor_steps > 0.0:
+                _floor_value = float(_floor_steps) * float(request.settlement_step_c)
+                if math.isfinite(_floor_value) and _floor_value > _sigma_after_k:
+                    sigma_floor_steps_applied = float(_floor_steps)
+            q_global, _capped_global, _uniform_applied_global = _build_scaled_normal_uniform_q(
+                mu=_mu_anchor,
+                sigma_pred=_sigma_pred_raw,
+                k=_k,
+                uniform_w=_uniform_w,
+                floor_steps=_floor_steps,
+                bins=request.bins,
+                half_step=_half_step,
+                rounding_rule=_rounding_rule,
+                day0_obs_extreme_c=_day0_obs_extreme_c,
+                settlement_step_c=float(request.settlement_step_c),
+                settlement_sigma_floor_c=settlement_sigma_floor_c,
+                city_unit=_city_unit,
+                metric=metric,
+            )
+            if set(q_global) != set(q):
                 raise ValueError(
-                    f"fused-q bin keys != soft-anchor q keys ({sorted(_fused_q)[:3]}... vs "
+                    f"fused-q bin keys != soft-anchor q keys ({sorted(q_global)[:3]}... vs "
                     f"{sorted(q)[:3]}...)"
                 )
-            _total = sum(_fused_q.values())
-            if not (_total > 0.0 and math.isfinite(_total)):
-                raise ValueError(f"fused-q mass not positive-finite: {_total}")
-            q = {key: float(value) / _total for key, value in _fused_q.items()}
-            # FITTED UNIFORM MIXTURE (2026-06-12, operator law) — applied at the SAME seam as k, to the
-            # final normalized q: q_adj = (1-w)·q_normal_rescaled + w·uniform(1/n_bins). w lifts the flat
-            # realized tails (d≥2) that a scaled Normal alone cannot match (the surface's flat d=0,1,2
-            # curve). w comes from the SAME artifact family entry as k. C-only via the same artifact gate.
-            # CATCH-ALL COHERENCE (relationship invariant, Paris >=26 incident): the SAME rule that bars
-            # the floor from inflating an open-ended catch-all bars the uniform mixture from doing so —
-            # after mixing, any open-ended catch-all is re-capped at its honest (predictive-sigma) mass
-            # in NORMALIZED space, so neither correction can recreate the far-catch-all inflation
-            # category. The mass removed by the cap is redistributed over the remaining bins (renorm).
-            # Pedestal applies under SHARPENING too (genuine-alpha 2026-06-21): the `_k >= 1.0`
-            # condition was dropped so a k<1 fit (sharpen) still gets its fitted uniform mixture
-            # w (the two are fit JOINTLY from the same artifact family entry — w lifts the flat
-            # realized tails the scaled Normal alone cannot match, independent of k's direction).
-            if _uniform_w > 0.0 and _city_unit == "C":
-                _uniform_eligible_bins = (
-                    [key for key, val in q.items() if float(val) > 0.0]
+            # GLOBAL-layer provenance: the uniform-w and catch-all-cap describe the global build. These
+            # are byte-identical to today when no city candidate fires (rho=0). uniform_mixture_w_applied
+            # is stamped ONLY when the mixture actually fired (exactly the prior in-line semantics).
+            if _uniform_applied_global:
+                uniform_mixture_w_applied = _uniform_w
+            settlement_sigma_floor_catchall_capped = tuple(_capped_global)
+
+            # CAPITAL-GATED PER-CITY rho-MIX (2026-06-29). The city candidate (k_eb, w_eb, score_capital)
+            # is read SEPARATELY from the global pair (NO hard swap — the prior swap harmed ~40% of
+            # cities). When the city earned POSITIVE out-of-sample score capital C, serve the NON-
+            # INFERIORITY mixture q_serve = (1-rho)*q_global + rho*q_city with rho = 1-exp(-C/W). W is the
+            # eligible Bernoulli bin count over the SAME bin set q is built over (day0 uses the same
+            # `> 0` eligibility the uniform mixture uses). rho is a CALIBRATION WEIGHT derived AUTOMATICALLY
+            # from capital — never a manual flag / cap / allowlist. C<=0 or no candidate ⇒ rho=0 ⇒ q is
+            # exactly q_global (byte-identical to today). The city carrier's σ ladder is computed at the
+            # city (k_eb, floor) so its bounds integrate at the matching predictive width.
+            _city_cand = _replacement_city_candidate_lookup(_city_unit, getattr(request, "city", None))
+            _city_sigma_used: float | None = None
+            _city_rho: float = 0.0
+            q = q_global
+            if _city_cand is not None:
+                _k_eb = float(_city_cand["k"])
+                _w_eb = float(_city_cand["w"])
+                _cap = float(_city_cand["score_capital"])
+                # W = eligible bin count over THIS family batch (the bin set q is built over). For day0
+                # use the same `> 0` eligibility the uniform-mixture pedestal uses; otherwise all bins.
+                _eligible_for_W = (
+                    [b for b in q_global if float(q_global[b]) > 0.0]
                     if _day0_obs_extreme_c is not None
-                    else list(q)
+                    else list(q_global)
                 )
-                _n_bins = len(_uniform_eligible_bins)
-                if _n_bins > 0:
-                    _u = 1.0 / _n_bins
-                    _eligible = set(_uniform_eligible_bins)
-                    _mixed = {
-                        key: (1.0 - _uniform_w) * val + _uniform_w * (_u if key in _eligible else 0.0)
-                        for key, val in q.items()
-                    }
-                    _mtot = sum(_mixed.values())
-                    if _mtot > 0.0 and math.isfinite(_mtot):
-                        _q_mixed = {key: val / _mtot for key, val in _mixed.items()}
-                        # Re-cap open-ended catch-all bins at their honest normalized mass (the same
-                        # honest mass, normalized by the pre-mixture _total, that the floor cap used).
-                        # CATEGORY-KILL FIX (2026-06-12, external review FINDING 1): the cap is an
-                        # HONESTY constraint, not an artificial throttle — a capped open-ended bin must
-                        # end EXACTLY at its honest mass, never above. The previous code capped, then
-                        # renormalized ALL bins by _rtot; with _rtot < 1 after the cap (the common case,
-                        # the cap removes mass) the divide RE-INFLATED the capped bin above its cap,
-                        # resurrecting the Paris >=26 inflation category the cap exists to kill.
-                        # CONSTRAINED REDISTRIBUTION: pin each capped open-ended bin at its honest mass
-                        # and absorb the deficit/surplus ONLY across the UNCAPPED bins (proportionally).
-                        # Capped bins are excluded from the renorm divisor so they stay exactly at cap.
-                        _honest_norm_by_bin: dict[str, float] = {}
-                        _capped_now: set[str] = set()
-                        for _bid, _honest in _catchall_honest_mass.items():
-                            _honest_norm = float(_honest) / _total
-                            _honest_norm_by_bin[_bid] = _honest_norm
-                            if _q_mixed.get(_bid, 0.0) > _honest_norm:
-                                _q_mixed[_bid] = _honest_norm
-                                _capped_now.add(_bid)
-                                if _bid not in _catchall_capped_bins:
-                                    _catchall_capped_bins.append(_bid)
-                        _capped_mass = sum(_q_mixed[_b] for _b in _capped_now)
-                        _uncapped_mass = sum(
-                            _val for _key, _val in _q_mixed.items() if _key not in _capped_now
-                        )
-                        _residual = 1.0 - _capped_mass  # mass the uncapped bins must carry
-                        if (
-                            _capped_now
-                            and _uncapped_mass > 0.0
-                            and math.isfinite(_uncapped_mass)
-                            and _residual >= 0.0
-                        ):
-                            # Scale uncapped bins so the whole vector sums to 1; capped bins untouched.
-                            _scale = _residual / _uncapped_mass
-                            q = {
-                                _key: (_val if _key in _capped_now else _val * _scale)
-                                for _key, _val in _q_mixed.items()
-                            }
-                            uniform_mixture_w_applied = _uniform_w
-                            settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
-                        else:
-                            # Degenerate: nothing capped (no-op cap), OR every bin is a capped
-                            # open-ended bin / no uncapped mass to absorb the residual. With no uncapped
-                            # bin to redistribute onto, plain renormalization is the only option (and is
-                            # exactly the prior behavior — correct when no cap bit). DOCUMENTED tradeoff:
-                            # in the all-capped degenerate case a capped bin may exceed its honest mass
-                            # after the renorm divide; this is unavoidable when there is no other bin to
-                            # carry the residual, and is mathematically distinct from the inflation bug
-                            # (there it was a non-degenerate vector with uncapped bins available).
-                            _rtot = sum(_q_mixed.values())
-                            if _rtot > 0.0 and math.isfinite(_rtot):
-                                q = {key: val / _rtot for key, val in _q_mixed.items()}
-                                uniform_mixture_w_applied = _uniform_w
-                                settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
-                        # POST-CONDITIONS (relationship invariant): in the non-degenerate path every
-                        # capped open-ended bin sits at EXACTLY its honest mass (<= honest + 1e-9) and
-                        # the total is 1.0 +/- 1e-9. Assert so a future refactor cannot silently
-                        # reintroduce the renorm re-inflation.
-                        if _capped_now and _uncapped_mass > 0.0 and _residual >= 0.0:
-                            for _bid in _capped_now:
-                                assert q[_bid] <= _honest_norm_by_bin[_bid] + 1e-9, (
-                                    f"capped open-ended bin {_bid} re-inflated above honest mass: "
-                                    f"{q[_bid]} > {_honest_norm_by_bin[_bid]}"
-                                )
-                            assert abs(sum(q.values()) - 1.0) <= 1e-9, (
-                                f"constrained-redistribution mass drift: {sum(q.values())}"
-                            )
+                _W = len(_eligible_for_W)
+                _city_rho = _city_rho_from_capital(_cap, _W)
+                if _city_rho > 0.0:
+                    q_city, _capped_city, _ = _build_scaled_normal_uniform_q(
+                        mu=_mu_anchor,
+                        sigma_pred=_sigma_pred_raw,
+                        k=_k_eb,
+                        uniform_w=_w_eb,
+                        floor_steps=_floor_steps,
+                        bins=request.bins,
+                        half_step=_half_step,
+                        rounding_rule=_rounding_rule,
+                        day0_obs_extreme_c=_day0_obs_extreme_c,
+                        settlement_step_c=float(request.settlement_step_c),
+                        settlement_sigma_floor_c=settlement_sigma_floor_c,
+                        city_unit=_city_unit,
+                        metric=metric,
+                    )
+                    if set(q_city) == set(q_global):
+                        q = _mix_q_by_rho(q_global, q_city, _city_rho, renormalize=True)
+                        _city_sigma_used = _resolve_sigma_used(_k_eb, _floor_steps)
+                        city_calibration_layer_applied = True
+                        city_calibration_rho = float(_city_rho)
+                        city_score_capital = _cap
+                        city_k_eb = _k_eb
+                        city_w_eb = _w_eb
             q_shape = (
                 "fused_day0_conditioned_normal"
                 if _day0_obs_extreme_c is not None
@@ -2306,22 +2935,61 @@ def _compute_posterior_payload(
             # (settlement-floored if the floor applied) so q_lcb <= q_point <= q_ucb holds per bin;
             # center uncertainty is fused.sd (anchor_sigma_c), NOT sigma_resid (already inside
             # _sigma_used) — no double-count.
+            #
+            # CAPITAL-GATED rho-MIX BOUNDS (2026-06-29): the persisted bounds must reflect the SERVED
+            # mixture, never leave q_lcb on pure-global while the q point is mixed. CHOICE — carrier-
+            # level mixing: build the GLOBAL bound carriers (at the global σ, q_point=q_global) and, when
+            # a city mix fires, the CITY bound carriers (at the city σ, q_point=q_city), then mix each by
+            # the SAME rho: q_lcb_serve = (1-rho)*q_lcb_global + rho*q_lcb_city (and q_ucb likewise),
+            # renormalize=False (bounds are NOT a simplex). The mixed bounds are then re-clipped to the
+            # SERVED q per bin (q_lcb ≤ q_point ≤ q_ucb) and the far-tail honesty is re-applied against
+            # the served q, so the persisted bounds are coherent with the served point. rho=0 ⇒ only the
+            # global carriers are built and the result is byte-identical to today. The bootstrap SAMPLE
+            # substrate stays the GLOBAL carriers' draws (the empirical edge-confidence basis); the served
+            # bounds are the mixed quantiles.
             try:
-                _lcb_map, _ucb_map, _q_samples = _build_fused_q_bounds(
+                _lcb_g, _ucb_g, _samples_g = _build_fused_q_bounds(
                     mu_star=float(bayes_precision_fusion_override.anchor_value_c),
                     center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                     predictive_sigma_c=_sigma_used,
                     bins=request.bins,
                     half_step=_half_step,
-                    q_point=q,
+                    q_point=q_global,
                     rounding_rule=_rounding_rule,
                     day0_observed_extreme_c=_day0_obs_extreme_c,
                     day0_metric=metric,
                     return_samples=True,
                 )
+                if _city_sigma_used is not None and _city_rho > 0.0:
+                    _lcb_c, _ucb_c, _ = _build_fused_q_bounds(
+                        mu_star=float(bayes_precision_fusion_override.anchor_value_c),
+                        center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
+                        predictive_sigma_c=_city_sigma_used,
+                        bins=request.bins,
+                        half_step=_half_step,
+                        q_point=q_city,
+                        rounding_rule=_rounding_rule,
+                        day0_observed_extreme_c=_day0_obs_extreme_c,
+                        day0_metric=metric,
+                        return_samples=False,
+                    )
+                    _lcb_map = _mix_q_by_rho(_lcb_g, _lcb_c, _city_rho, renormalize=False)
+                    _ucb_map = _mix_q_by_rho(_ucb_g, _ucb_c, _city_rho, renormalize=False)
+                    # Re-clip the mixed bounds to the SERVED q per bin and re-apply far-tail honesty, so
+                    # q_lcb ≤ q_point ≤ q_ucb holds against the served point (each carrier was clipped to
+                    # its OWN q_point; the convex mix needs a final clip to the served q).
+                    for _bid in list(_lcb_map):
+                        _qpt = float(q.get(_bid, 0.0))
+                        _lo = min(max(_lcb_map[_bid], 0.0), max(_qpt, 0.0))
+                        if _qpt < FAR_TAIL_Q_POINT_THRESH:
+                            _lo = min(_lo, FAR_TAIL_LCB_FLOOR)
+                        _lcb_map[_bid] = _lo
+                        _ucb_map[_bid] = max(_ucb_map.get(_bid, _qpt), _qpt)
+                else:
+                    _lcb_map, _ucb_map = _lcb_g, _ucb_g
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map
-                q_bootstrap_samples_by_bin = _q_samples
+                q_bootstrap_samples_by_bin = _samples_g
                 q_lcb_basis = _QLCB_BASIS
                 # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count how many bins had their
                 # q_lcb capped by the far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH
@@ -2329,7 +2997,7 @@ def _compute_posterior_payload(
                 # This is a plain fact of the LIVE value: True (non-zero count) when at
                 # least one far-tail bin was capped; False / 0 when the data had no far-
                 # tail bins (identity for all bins). Recorded in provenance_payload below.
-                # We re-derive from the final q_lcb_map + q_point dict: a bin was capped
+                # We re-derive from the final q_lcb_map + SERVED q_point dict: a bin was capped
                 # iff its q_lcb == FAR_TAIL_LCB_FLOOR AND q_point < FAR_TAIL_Q_POINT_THRESH
                 # (the cap is min(lcb, FLOOR) so equality holds when the floor bit). A bin
                 # where q_point < THRESH but lcb was already ≤ FLOOR before the cap is also
@@ -2361,7 +3029,7 @@ def _compute_posterior_payload(
             # the mode; floor application is purely data-availability driven above.
             # PR#403 FIX (2026-06-09): bounds required for live eligibility. FUSED_NORMAL_FULL/PARTIAL
             # now REQUIRES both q_lcb_map and q_ucb_map successfully built. Bounds failure degrades
-            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (shadow accrual continues) but the
+            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (blocked-candidate accrual continues) but the
             # live gate will reject this mode. This kills the two-measures disease: fused-Normal q
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
@@ -2373,21 +3041,25 @@ def _compute_posterior_payload(
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
         except Exception as _exc:
-            # FIX 1 — the fused-q construction itself raised and fails CLOSED to the soft-anchor q.
-            # This is DISTINCT from flag-off / predictive_sigma None (SOFT_ANCHOR_FALLBACK): the
-            # mode records that a fused-q was attempted and failed, so the live gate rejects it with
-            # a mode that is diagnosably different from a deliberate fallback.
+            # FIX 1 — the fused-q construction itself raised and fails CLOSED.
+            # This is DISTINCT from flag-off / predictive_sigma None: the mode records that a fused-q
+            # was attempted and failed, so the live gate rejects it with a specific failure mode.
             replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED
             settlement_sigma_floor_applied = False
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
             settlement_sigma_floor_catchall_capped = ()
-            # The fused-q (incl. any σ-scale / uniform-mixture / σ-floor) was discarded → soft-anchor q
-            # has none applied. Reset all three provenance fields so they cannot misreport on the
-            # fallback q.
+            # The fused-q (incl. any sigma-scale / uniform-mixture / sigma-floor / city rho-mix) was
+            # discarded. Reset every calibration-layer provenance field so none misreports on the
+            # retained non-live q.
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
             sigma_floor_steps_applied = None
+            city_calibration_layer_applied = False
+            city_calibration_rho = None
+            city_score_capital = None
+            city_k_eb = None
+            city_w_eb = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -2396,20 +3068,20 @@ def _compute_posterior_payload(
                 )
             except Exception:
                 pass
-    # FUSED-CENTER-ONLY NORMAL FALLBACK. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
+    # FUSED-CENTER-ONLY NORMAL NON-LIVE PATH. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
     # predictive_sigma None, or a fused-q build failure — i.e. q_shape is still the seeded
     # placeholder, NOT "fused_normal_direct". If a multi-model fused CENTER exists (override present) with a usable
     # spread, build q PURELY from N(mu*, sigma) over the SAME settlement bins (anchor_weight
     # using the SAME emos.bin_probability_settlement integrator the
     # live path uses. If even that is impossible (no override, or no finite spread), q is left at the
     # uniform seed and the row is recorded NON-tradeable (the live gate licenses only
-    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this fallback never
-    # carries). This fallback is experiment-only; it is intentionally not live-eligible.
+    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this path never
+    # carries). This path is experiment-only; it is intentionally not live-eligible.
     # FAIL-SOFT: any error leaves q at the prior value and logs.
     if q_shape not in {"fused_normal_direct", "fused_day0_conditioned_normal"} and bayes_precision_fusion_override is not None:
         try:
             _fc_mu = float(bayes_precision_fusion_override.anchor_value_c)
-            # Spread: ONLY the predictive settlement sigma (sqrt(fused.sd^2 + sigma_resid^2)) is a
+            # Spread: ONLY the predictive settlement sigma (served realized residual width) is a
             # valid dispersion for a settlement bin Normal. We deliberately do NOT substitute
             # anchor_sigma_c (the fused CENTER uncertainty) when predictive_sigma_c is None — that
             # conflates center uncertainty with predictive settlement spread (the q point and q bounds
@@ -2444,8 +3116,7 @@ def _compute_posterior_payload(
                     replacement_sigma_basis = "fused_center_residual_std"
                     # Distinct mode: a fused CENTER materialized the q but the certified fused-q
                     # bootstrap shape/bounds did NOT (so the live gate still rejects it). Diagnosably
-                    # different from FUSED_Q_BUILD_FAILED (no center q at all) and from the deliberate
-                    # SOFT_ANCHOR_FALLBACK.
+                    # different from FUSED_Q_BUILD_FAILED (no center q at all).
                     replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
         except Exception as _fcexc:
             try:
@@ -2471,7 +3142,7 @@ def _compute_posterior_payload(
         "settlement_step_c": float(request.settlement_step_c),
     }
     _posterior_day0_observed_extreme_c = (
-        _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+        _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
     )
     if _posterior_day0_observed_extreme_c is not None:
         posterior_config.update(
@@ -2618,7 +3289,7 @@ def _compute_posterior_payload(
         # C3 calibration surface 2026-06-12 — FITTED σ scale + uniform-mixture provenance (一切可被溯源).
         # Both None when inert (artifact missing / family unfitted / k=1.0,w=0.0). Float applied values
         # when the correction fired. Source: state/sigma_scale_fit.json (MLE, operator law 2026-06-12).
-        # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
+        # Authority: docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md
         "sigma_scale_k_applied": sigma_scale_k_applied,
         "uniform_mixture_w_applied": uniform_mixture_w_applied,
         # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None
@@ -2628,6 +3299,16 @@ def _compute_posterior_payload(
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
+        # CAPITAL-GATED PER-CITY rho-MIX provenance (2026-06-29). The served q is a non-inferiority
+        # mixture q_serve = (1-rho)*q_global + rho*q_city with rho = 1-exp(-C/W) (C = the city's earned
+        # OOS score capital, W = the eligible Bernoulli bin count). False/None when no city candidate
+        # fired (rho=0 ⇒ pure global ⇒ byte-identical to today). When applied, rho/C and the served city
+        # (k_eb, w_eb) make the mixture reconstructible. Source: state/sigma_scale_fit.json cities layer.
+        "city_calibration_layer_applied": city_calibration_layer_applied,
+        "city_calibration_rho": city_calibration_rho,
+        "city_score_capital": city_score_capital,
+        "city_k_eb": city_k_eb,
+        "city_w_eb": city_w_eb,
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
         # FAR-TAIL q_lcb HONESTY provenance (2026-06-22): plain fact of the live value.
@@ -2709,6 +3390,12 @@ def _compute_posterior_payload(
             "lead_bucket": bayes_precision_fusion_override.lead_bucket,
             "anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
             "anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
+            # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to
+            # anchor_value_c above; RAW served center = anchor_value_c − emos_center_delta_c.
+            # (a,b)=(0,1) identity for cities/metrics not gated to serve (byte-identical center).
+            "emos_center_a": float(bayes_precision_fusion_override.emos_center_a),
+            "emos_center_b": float(bayes_precision_fusion_override.emos_center_b),
+            "emos_center_delta_c": float(bayes_precision_fusion_override.emos_center_delta_c),
             "predictive_sigma_c": (
                 None if bayes_precision_fusion_override.predictive_sigma_c is None
                 else float(bayes_precision_fusion_override.predictive_sigma_c)
@@ -2735,10 +3422,14 @@ def _compute_posterior_payload(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
-            # Cold-start guard provenance (Finding 1, 2026-06-22): models excluded from the
-            # center because n_train < MIN_SETTLED_N.  Empty list when all models are mature
-            # (byte-identical provenance to pre-guard in that case).
-            "cold_start_excluded_models": list(bayes_precision_fusion_override.cold_start_excluded_models),
+            "source_clock_one_scheme": (
+                dict(bayes_precision_fusion_override.source_clock_one_scheme)
+                if bayes_precision_fusion_override.source_clock_one_scheme
+                else None
+            ),
+            # Low-n prior weighting provenance: these models still entered the center,
+            # but their raw second moment was shrunk toward the equal-precision prior.
+            "low_n_prior_weighted_models": list(bayes_precision_fusion_override.low_n_prior_weighted_models),
             "runtime_layer": runtime_layer,
         }
     return _PosteriorComputeResult(
@@ -2921,6 +3612,9 @@ def compute_replacement_posterior_readonly(
         return None
     if _precision_guard_block_reason(request):
         return None
+    request = _request_with_materialization_clock(conn, request)
+    if _prewrite_block_reasons(request):
+        return None
     # anchor_id is consumed ONLY by the write-path identity hash (not built here),
     # so a sentinel is safe; the read path never persists a posterior row.
     metric = _metric(request.temperature_metric)
@@ -3038,6 +3732,16 @@ def materialize_replacement_forecast_live(
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=precision_block_reasons,
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+    request = _request_with_materialization_clock(conn, request)
+    prewrite_reasons = _prewrite_block_reasons(request)
+    if prewrite_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=prewrite_reasons,
             posterior_id=None,
             anchor_id=None,
             readiness_id=None,

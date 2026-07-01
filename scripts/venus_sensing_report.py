@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,12 +78,12 @@ def _safe_query(conn: sqlite3.Connection, sql: str, params=()) -> list[sqlite3.R
 # ── Layer 1: Diagnostics ──────────────────────────────────────────────────
 
 def _collect_diagnostics() -> dict:
-    """Import and run diagnose_truth_surfaces.py checks."""
-    try:
-        from scripts.diagnose_truth_surfaces import diagnose
-        return diagnose()
-    except Exception as exc:
-        return {"_error": str(exc)}
+    """Reserved report slot for standalone checks.
+
+    Venus computes the few required consistency checks locally below instead
+    of importing a separate operator report script.
+    """
+    return {}
 
 
 # ── Layer 2: Truth Surfaces ───────────────────────────────────────────────
@@ -281,7 +282,11 @@ def _collect_source_contract_watch() -> dict:
         from scripts import watch_source_contract
 
         events, authority = watch_source_contract.fetch_active_events()
-        if authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+        if authority in {
+            "FETCH_FAILED_NO_CACHE",
+            "KEYWORD_DISCOVERY_UNVERIFIED",
+            "NEVER_FETCHED",
+        }:
             return _source_watch_unavailable(authority, city=city)
 
         report = watch_source_contract.analyze_events(
@@ -372,16 +377,8 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
         "conflicts": legacy_conflicts,
     }
 
-    # Ghost positions (entered with past target dates)
-    ghost_count = 0
-    oldest_ghost_target = None
-    try:
-        from scripts.diagnose_truth_surfaces import check_ghost_positions
-        ghost_cur = conn.cursor()
-        ghost_result = check_ghost_positions(ghost_cur)
-        ghost_count = int(ghost_result.get("evidence", "0").replace("ghost_count=", ""))
-    except Exception:
-        pass
+    # Ghost positions: entered trade_decisions with parsed target dates in the past.
+    ghost_count = _count_entered_past_target_dates(conn)
 
     # Settlement gap hours
     settlement_gap_hours = None
@@ -389,7 +386,6 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
     latest_settled = settlements.get("latest_settled_at")
     if latest_settled:
         try:
-            from scripts.diagnose_truth_surfaces import _parse_ts
             dt = _parse_ts(latest_settled)
             if dt:
                 settlement_gap_hours = round((_utcnow() - dt).total_seconds() / 3600, 1)
@@ -402,7 +398,6 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
     td_newest = td.get("newest")
     if pc_latest and td_newest:
         try:
-            from scripts.diagnose_truth_surfaces import _parse_ts
             pc_dt = _parse_ts(pc_latest)
             td_dt = _parse_ts(td_newest)
             if pc_dt and td_dt:
@@ -417,6 +412,54 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
         "settlement_gap_hours": settlement_gap_hours,
         "canonical_path_alive": canonical_path_alive,
     }
+
+
+def _parse_ts(ts_str: object) -> datetime | None:
+    """Best-effort ISO timestamp parse for report consistency checks."""
+    if not ts_str:
+        return None
+    text = str(ts_str).strip()
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+    ):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _count_entered_past_target_dates(conn: sqlite3.Connection) -> int:
+    today = date.today()
+    count = 0
+    rows = _safe_query(
+        conn,
+        "SELECT bin_label FROM trade_decisions WHERE status='entered'",
+    )
+    for row in rows:
+        bin_label = row[0] if row else ""
+        match = re.search(r"on (\w+ \d+)\?", str(bin_label or ""))
+        if not match:
+            continue
+        try:
+            target = datetime.strptime(f"{match.group(1)}, {today.year}", "%B %d, %Y").date()
+        except ValueError:
+            continue
+        if target < today:
+            count += 1
+    return count
 
 
 # ── Layer 4: Deltas ───────────────────────────────────────────────────────

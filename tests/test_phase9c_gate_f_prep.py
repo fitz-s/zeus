@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-04-19; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Phase 9C Gate F prep antibodies (R-BZ..R-CE). Dedicated test file
 #          per critic-carol cycle-3 L2 observation — P8/9A/9B antibodies were
-#          piled into test_phase8_shadow_code.py + test_dual_track_law_stubs.py;
+#          piled into test_phase8_low_prerequisites.py + test_dual_track_law_stubs.py;
 #          P9C has its own home to reduce checkbox-antibody contamination risk
 #          and make phase-boundary regression math clean.
 # Reuse: Anchors on phase9c_contract.md (S1 L3 CRITICAL + S2 A3 + S3 A1 + S4 A4

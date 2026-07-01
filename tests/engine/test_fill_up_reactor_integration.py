@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -238,6 +239,54 @@ def test_held_same_token_proof_dropped_for_fresh_entry_byte_identical():
         allow_same_family_monitor_owned=False,
     )
     assert scoped == ()  # dropped: a held token is not a fresh-entry candidate
+
+
+def test_qkernel_same_token_unstrengthened_fill_up_is_not_selection_actionable():
+    """A non-strengthened held token must not starve sibling shift re-selection."""
+
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=4.0,
+        p_posterior=0.50,
+        entry_ci_width=0.20,
+    )
+    proof = _held_token_proof(token_id="tok-A")
+    bin_id = era._candidate_bin_id(proof)
+    proof = replace(
+        proof,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": f"DIRECT_YES:{bin_id}",
+            "route_id": f"DIRECT_YES:{bin_id}@proof",
+            "side": "YES",
+            "bin_id": bin_id,
+            "payoff_q_point": 0.50,
+            "payoff_q_lcb": 0.35,
+            "q_dot_payoff": 0.50,
+            "edge_lcb": 0.15,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.02,
+            "cost": 0.20,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.35,
+        },
+    )
+
+    reason = era._qkernel_same_token_fill_up_selection_rejection_reason(
+        proof=proof,
+        held_position_conn=conn,
+        locked_opportunity_conn=None,
+    )
+
+    assert reason == "BELIEF_NOT_STRENGTHENED"
 
 
 def test_two_concurrent_redecisions_one_lease_one_order():

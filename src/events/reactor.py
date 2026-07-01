@@ -60,9 +60,13 @@ from src.strategy.live_inference.live_admission import (
 
 UTC = timezone.utc
 
-DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 22.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
+DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
+DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
+DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
+DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -112,26 +116,106 @@ def _fetch_batch_limit() -> int:
     return max(1, min(250, limit))
 
 
-def _snapshot_block_retry_delay_seconds() -> float:
+def _lane_fairness_fetch_limit(process_limit: int) -> int:
+    """Overfetch enough rows for cross-lane fairness before applying work limit.
+
+    ``fetch_pending`` is tier ordered: live Day0 rows can legitimately sort ahead
+    of ordinary forecast rows.  The reactor's cross-lane interleave can only
+    protect the forecast/redecision lane if both lanes are present in the fetched
+    page.  Keep ``process_limit`` as the hard per-cycle work cap, but request a
+    slightly wider page so a small live limit (for cadence) does not truncate the
+    forecast lane before interleaving.
+    """
+
+    try:
+        limit = int(process_limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    limit = max(1, limit)
+    return min(
+        250,
+        max(
+            limit,
+            limit * DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER,
+            limit + DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA,
+        ),
+    )
+
+
+def _reactor_claim_busy_timeout_ms() -> int:
+    """SQLite busy timeout for the pre-submit claim window.
+
+    The live reactor must not spend a whole cycle waiting for another writer
+    before it has emitted any order. A claim lock miss is retryable because the
+    event remains pending; keep the wait long enough to absorb ordinary
+    millisecond-scale WAL overlap, but short enough that redecision/day0 cadence
+    survives a stuck writer.
+    """
+
+    raw = os.environ.get("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS")
+    if raw is None:
+        return DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS
+    return max(1, min(30_000, value))
+
+
+def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA busy_timeout").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+@contextlib.contextmanager
+def _scoped_sqlite_busy_timeout(conn: sqlite3.Connection, timeout_ms: int):
+    previous = _sqlite_busy_timeout_ms(conn)
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout_ms)}")
+    try:
+        yield
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {previous}")
+
+
+def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
     """Retry floor for executable-snapshot substrate blocks.
 
     A blocked family is already delegated to the substrate refresher. Reclaiming
     the same event immediately only spends decision budget before that refresh
-    can land. The delay is short and horizon-bounded; it does not terminalize or
-    suppress the event.
+    can land. The delay is horizon-bounded; it does not terminalize or suppress
+    the event. Repeated substrate failures back off so one uncapturable Day0
+    family cannot spend a Tier-0 slot every scheduler minute.
     """
 
     raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS")
     if raw is None:
-        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+        delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    else:
+        try:
+            delay = float(raw)
+        except (TypeError, ValueError):
+            delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    base_delay = max(5.0, min(300.0, delay))
+    max_raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS")
     try:
-        delay = float(raw)
+        max_delay = (
+            float(max_raw)
+            if max_raw is not None
+            else DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS
+        )
     except (TypeError, ValueError):
-        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
-    return max(5.0, min(300.0, delay))
+        max_delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS
+    max_delay = max(base_delay, min(1800.0, max_delay))
+    try:
+        attempt = int(attempt_count or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    multiplier = max(1, min(attempt, 10))
+    return min(max_delay, base_delay * multiplier)
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
+DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 75.0
 
 
 def _drain_budget_seconds() -> float | None:
@@ -173,6 +257,57 @@ def _drain_budget_seconds() -> float | None:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS
     return budget if budget > 0 else None
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _substrate_sidecar_owns_broad_refresh(*, now: datetime | None = None) -> bool:
+    """True when the dedicated substrate observer is fresh enough to own broad warmup.
+
+    The live split moved market-substrate warming out of ``src.main``. Keeping the
+    old end-of-cycle broad drain in the reactor duplicates the sidecar's writer and
+    turns stale executable prices into DB-lock stalls. The reactor still supports a
+    bounded fallback when the sidecar is absent/stale, and the adapter's targeted
+    single-family refresh remains available for the selected stale row.
+    """
+
+    if _truthy_env(os.environ.get("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN")):
+        return False
+    if str(os.environ.get("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", "1")).strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+
+    path = os.environ.get(
+        "ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH",
+        os.path.join(os.getcwd(), "state", "daemon-heartbeat-substrate-observer.json"),
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        alive_raw = str(payload.get("alive_at") or "").strip()
+        alive_at = _parse_utc_instant(alive_raw)
+        if alive_at is None:
+            return False
+        checked_at = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+        age_seconds = (checked_at - alive_at).total_seconds()
+    except Exception:
+        return False
+    try:
+        max_age = float(
+            os.environ.get(
+                "ZEUS_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS",
+                str(DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS),
+            )
+        )
+    except (TypeError, ValueError):
+        max_age = DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS
+    return 0.0 <= age_seconds <= max(1.0, max_age)
 
 
 def _operator_disarm_active() -> bool:
@@ -249,24 +384,9 @@ def _fair_lane_interleave(events: list) -> list:
             j += 1
     return out
 
-# VENUE-CLOSE HORIZON eligibility (freshness-throughput starvation fix 2026-06-14,
-# #92 / docs/evidence/deadloop_2026-06-14/binding_wall.md). The geometric
-# venue-close terminal (horizon b) applies to EVERY family-keyed event that binds a
-# (city, target_date) weather market — NOT only the forecast-decision lane.
-# DAY0_EXTREME_UPDATED is family-keyed (carries city + target_date + metric) but is
-# NOT a forecast-decision type, so the prior horizon scope (forecast-decision types
-# only) NEVER terminalized a past-close DAY0 event: EventStore._is_timely returns
-# True for non-forecast-decision types (event_store.py L803) AND the venue-close
-# horizon skipped them (reactor L959), so a past-close DAY0 event whose market
-# settled at the F1 12:00-UTC close requeued FOREVER on EXECUTABLE_SNAPSHOT_BLOCKED.
-# Live 2026-06-14 19:36Z (daemon pid 8058): 4903 of 5180 pending events were
-# past-close DAY0_EXTREME_UPDATED (target_date 06-12/06-13), monopolizing the
-# reactor working set so the ~277 live 06-15 families were starved (processed≈0).
-# The venue-close predicate is purely geometric (city tz + target_date + F1 anchor)
-# and returns None for any live future-close family, so widening the scope can NEVER
-# terminalize a genuinely-live family — it only sweeps the dead past-close clog out
-# of the working set. The forecast-decision set keeps its other (non-horizon)
-# semantics (source-truth treatment, _is_timely floor) unchanged.
+# Event types that may carry explicit venue-closed evidence. Static city/date
+# geometry is not enough to terminalize them: Gamma endDate is a resolution
+# timestamp, while live order-entry authority is closed + accepting_orders.
 _VENUE_CLOSE_HORIZON_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
     {"DAY0_EXTREME_UPDATED"}
 )
@@ -364,6 +484,14 @@ class EventSubmissionReceipt:
     # vs reactor family_id:condition_id). Threaded the same way q_source / the stamp are.
     candidate_bin_id: str | None = None
     strategy_key: str | None = None
+    # Live execution-quality floors proven by the selected strategy profile.
+    # These travel with new event-bound receipts so the final pre-submit append
+    # can verify the actual submitted order size/price clears the strategy's
+    # minimum executable profit and edge-density bar. None on legacy receipts;
+    # omit-when-None in receipt_json keeps existing hashes stable.
+    min_entry_price: float | None = None
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
@@ -382,13 +510,11 @@ class EventSubmissionReceipt:
     # buy-YES / canonical / legacy receipts; omitted-when-None from receipt_json so
     # those receipts keep byte-identical hashes.
     same_bin_yes_posterior: float | None = None
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage VERDICT status ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on
-    # canonical/legacy receipts). Mirrors same_bin_yes_posterior's travel exactly:
-    # the ADAPTER admission gate evaluated buy-NO conservative evidence WITH this
-    # verdict, so the receipt-level re-enforcement (_receipt_money_path_blocker)
-    # MUST see the SAME value — a starved receipt-level twin would re-reject every
-    # coverage-licensed buy_no it had just admitted (the 21a4c14ee2 lesson).
+    # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
+    # settlement-backward coverage VERDICT status for the exact condition+direction
+    # ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on canonical/legacy receipts).
+    # The adapter admission gate and receipt-level re-enforcement must see the same
+    # selected-leg value.
     # Omitted-when-None from receipt_json so existing hashes stay byte-stable.
     settlement_coverage_status: str | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
@@ -459,8 +585,8 @@ class EventSubmissionReceipt:
     #                          a TYPED NO_SUBMIT abort — never the default reason).
     #   "SUBMIT_DISABLED"   — live adapter, real_order_submit_enabled False (the
     #                          submit-disabled-bridge build lane).
-    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (the degrade lane). On a
-    #                          full-pass its reason names the degrade cause that drove
+    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (control-blocked live-submit lane). On a
+    #                          full-pass its reason names the live block cause that drove
     #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
     #                          <cause>), NEVER the default literal.
     # This is DECISION provenance (which lane decided), not transport metadata, so it
@@ -508,14 +634,14 @@ class LiveLaneDarkInvariantError(RuntimeError):
 
     The combination (nominally-armed live daemon + proof_accepted=True +
     side_effect_status=NO_SUBMIT + submit_lane="LIVE") is IMPOSSIBLE for a genuine
-    full-pass: the live lane either SUBMITs, returns a SUBMIT_DISABLED build, or
-    carries a TYPED abort reason (never a default no-submit). If this combination
+    full-pass: the live lane either submits, produces an execution terminal, or
+    returns a typed pre-venue abort with proof_accepted=False. If this combination
     reaches persistence the live lane silently ate a tradeable full-pass entry —
     the 2026-06-12 11:51-12:12Z silent-kill incident — so we RAISE instead of
     persisting a kill indistinguishable from normal no-submit accounting.
 
-    A no-submit receipt produced by the legitimate degrade lane carries
-    submit_lane="NO_SUBMIT_ADAPTER" + a named degrade cause and is NOT impacted by
+    A no-submit receipt produced by the legitimate control-blocked lane carries
+    submit_lane="NO_SUBMIT_ADAPTER" + a named live block cause and is NOT impacted by
     this invariant (it persists, honestly labelled).
     """
 
@@ -581,6 +707,8 @@ class ReactorConfig:
 # When a horizon fires the dead-letter label says WHY
 # (MONEY_PATH_HORIZON_EXPIRED:<horizon>:<last_reason>), NEVER an attempt count.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
+_PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT"
+_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
 
 # K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
 # bases (see _write_regret). Module-level so every reactor instance shares it.
@@ -645,6 +773,7 @@ class ReactorResult:
     # pulse (a transient-requeue cycle with snapshot_refreshes==0 would be the regression).
     snapshot_refreshes: int = 0
     cycle_advance_enqueues: int = 0
+    day0_hourly_refreshes: int = 0
     # DRAIN BUDGET (#83, 2026-06-16): how many families the end-of-cycle substrate-refresh
     # drain did NOT reach this cycle because the per-cycle drain wall-clock budget
     # (ZEUS_REACTOR_DRAIN_BUDGET_SECONDS) was spent. Visibility only — those families stay in
@@ -673,6 +802,7 @@ class OpportunityEventReactor:
         decision_provenance_hook: Any | None = None,
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
         cycle_advance_enqueuer: "Callable[..., bool] | None" = None,
+        day0_hourly_refresher: "Callable[..., bool] | None" = None,
         held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
         family_market_absence_provider: "Callable[..., bool] | None" = None,
     ) -> None:
@@ -697,6 +827,11 @@ class OpportunityEventReactor:
         # re-materialization lane scoped to ONE family) for a posterior-staleness block. Same
         # discipline: no network/heavy work in txn, debounced, fail-soft. Absent => no-op.
         self._cycle_advance_enqueuer = cycle_advance_enqueuer
+        # Day0 remaining-day q depends on persisted high-resolution hourly vectors,
+        # not executable CLOB snapshots. Missing vectors use this separate
+        # substrate refresher so weather-carrier faults do not refresh the wrong
+        # upstream surface.
+        self._day0_hourly_refresher = day0_hourly_refresher
         # ORDERING (operator correction 2026-06-12): refresh fan-out is NOT liquidity-ordered —
         # opportunity is uncorrelated with liquidity (small markets can carry denser sophisticated
         # competition; liquidity's only role stays in sizing/fill). The ONLY ordering bias is
@@ -716,6 +851,7 @@ class OpportunityEventReactor:
         # window is DERIVED from the snapshot freshness window (half of it), never a magic number.
         self._family_refresh_last_at: dict[str, float] = {}
         self._family_cycle_advance_last_at: dict[str, float] = {}
+        self._family_day0_hourly_last_at: dict[str, float] = {}
         # FAIR-CURSOR fan-out (Wave1B precedent): blocked families discovered this cycle queue here
         # in encounter order; the cursor rotates which family is refreshed FIRST across cycles so no
         # single family monopolizes the per-cycle refresh fan-out and ALL blocked families are
@@ -739,6 +875,9 @@ class OpportunityEventReactor:
         # restart the label degrades to the generic snapshot reason, never lies
         # about a cause it does not know.
         self._transient_requeue_reasons: dict[str, str] = {}
+        self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
+        self._pending_cycle_advances: list[tuple[str, str, str]] = []
+        self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
         # Per-event requeue counter — LOG HYGIENE ONLY (operator law 2026-06-12:
         # a retry count is not a market fact and MUST NOT terminalize). Used
         # solely to dedupe the requeue log line (log at attempt 1, then every
@@ -764,12 +903,13 @@ class OpportunityEventReactor:
         # un-blocks stops being refreshed.
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
+        self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
         # cycle so the scheduler never hits "max running instances reached" and
         # fresh candidates (freshest-target-first, STEP 3) are reached promptly.
-        # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
+        # Default 22s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
         batch_limit = _fetch_batch_limit() if limit is None else max(1, int(limit))
@@ -796,9 +936,14 @@ class OpportunityEventReactor:
                     "(stale-snapshot guard)"
                 )
             request_limit = batch_limit if remaining is None else min(batch_limit, remaining)
+            fetch_limit = (
+                request_limit
+                if remaining is None
+                else _lane_fairness_fetch_limit(request_limit)
+            )
             events = self._store.fetch_pending(
                 decision_time=decision_time.astimezone(UTC).isoformat(),
-                limit=request_limit,
+                limit=fetch_limit,
                 day0_is_tradeable=self._config.day0_is_tradeable,
             )
             if not events:
@@ -887,43 +1032,51 @@ class OpportunityEventReactor:
         pre_disposition: str | None
         should_submit = False
         try:
-            try:
-                # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
-                # DETERMINISTICALLY with BEGIN IMMEDIATE (full busy_timeout engaged
-                # at BEGIN) instead of letting claim()'s UPDATE upgrade lazily.
-                # A lazily-upgraded txn whose snapshot predates another writer's
-                # commit fails SQLITE_BUSY_SNAPSHOT IMMEDIATELY — the busy handler
-                # never engages for snapshot-upgrade conflicts — which is how one
-                # bounced claim poisoned every later claim in the cycle. Mirrors
-                # Window B's BEGIN IMMEDIATE discipline (line ~497).
-                if not self._store.conn.in_transaction:
-                    self._store.conn.execute("BEGIN IMMEDIATE")
-                claimed = self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat())
-            except Exception as exc:
-                if _is_sqlite_lock_error(exc):
-                    # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
-                    # path returned with the implicit txn left OPEN on the store
-                    # conn; the next fetch_pending then read INSIDE that dangling
-                    # txn, pinning a stale snapshot, and every subsequent claim
-                    # failed BUSY_SNAPSHOT instantly => the whole-cycle 0/250
-                    # bounce storm. Rollback resets the conn so the next event
-                    # starts a fresh txn under the full busy handler.
-                    _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
-                    with contextlib.suppress(Exception):
-                        self._store.conn.rollback()
-                    result.claim_lock_bounces += 1
-                    result.retried += 1
-                    import logging as _logging
-
-                    _logging.getLogger("zeus.events.reactor").warning(
-                        "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s exc=%s "
-                        "(rolled back; event stays pending; counted in claim_lock_bounces)",
+            with _scoped_sqlite_busy_timeout(
+                self._store.conn, _reactor_claim_busy_timeout_ms()
+            ):
+                try:
+                    # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
+                    # DETERMINISTICALLY with BEGIN IMMEDIATE instead of letting
+                    # claim()'s UPDATE upgrade lazily. Live cadence fix
+                    # (2026-06-26): this pre-submit claim uses a scoped short busy
+                    # timeout, not the connection's default 30 s timeout. A claim
+                    # miss has emitted no order and leaves the event pending, so it
+                    # must be a fast retryable bounce rather than spending a whole
+                    # redecision/day0 scheduler interval behind another writer.
+                    if not self._store.conn.in_transaction:
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                    claimed = self._store.claim(
                         event.event_id,
-                        _was_in_txn,
-                        exc,
+                        claimed_at=decision_time.astimezone(UTC).isoformat(),
                     )
-                    return
-                raise
+                except Exception as exc:
+                    if _is_sqlite_lock_error(exc):
+                        # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
+                        # path returned with the implicit txn left OPEN on the store
+                        # conn; the next fetch_pending then read INSIDE that dangling
+                        # txn, pinning a stale snapshot, and every subsequent claim
+                        # failed BUSY_SNAPSHOT instantly => the whole-cycle 0/250
+                        # bounce storm. Rollback resets the conn so the next event
+                        # starts a fresh txn under the scoped busy handler.
+                        _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
+                        with contextlib.suppress(Exception):
+                            self._store.conn.rollback()
+                        result.claim_lock_bounces += 1
+                        result.retried += 1
+                        import logging as _logging
+
+                        _logging.getLogger("zeus.events.reactor").warning(
+                            "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s "
+                            "claim_busy_timeout_ms=%s exc=%s "
+                            "(rolled back; event stays pending; counted in claim_lock_bounces)",
+                            event.event_id,
+                            _was_in_txn,
+                            _reactor_claim_busy_timeout_ms(),
+                            exc,
+                        )
+                        return
+                    raise
             if not claimed:
                 # Claim lost (another worker / lease not yet stale): release any
                 # open txn and the mutex; nothing to process this cycle.
@@ -947,6 +1100,16 @@ class OpportunityEventReactor:
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 self._commit_event_unit()
             except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    with contextlib.suppress(Exception):
+                        self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    with contextlib.suppress(Exception):
+                        if getattr(self._store.conn, "in_transaction", False):
+                            self._store.conn.rollback()
+                    result.rejection_reasons.append(_PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+                    result.retried += 1
+                    return
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
                 return
         finally:
@@ -985,42 +1148,49 @@ class OpportunityEventReactor:
         mutex.acquire()
         try:
             try:
-                # Window A committed and released the WAL write lock; this conn has
-                # no open txn. Open one with BEGIN IMMEDIATE so the WAL write lock is
-                # acquired DETERMINISTICALLY up front (under busy_timeout) rather
-                # than lazily on the first DML — mirrors the claim()-first discipline
-                # of Window A and avoids an immediate "database is locked" when a
-                # concurrent writer holds the WAL write lock at first-DML time.
-                if not self._store.conn.in_transaction:
-                    self._store.conn.execute("BEGIN IMMEDIATE")
-                self._store.conn.execute("SAVEPOINT edli_reactor_event")
-                # FIX B (P1 zero-submit co-cause): capture the accept counter
-                # BEFORE post-submit so we can tell whether THIS event was
-                # actually EMITTED (committed) vs rejected downstream of Kelly.
-                _accepted_before = result.proof_accepted
-                post_disposition = self._process_one_post_submit(
-                    event, submit_result, decision_time=decision_time, result=result
-                )
-                # FIX B: finalize the per-cycle in-flight reservation. The adapter
-                # PROVISIONALLY reserved this event's stake when it passed
-                # Kelly+RiskGuard; commit it ONLY if the reactor emitted it
-                # (proof_accepted advanced), else roll it back so a candidate
-                # rejected at DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or a
-                # transient retry) never inflates corr/raw committed for the next
-                # sequential event. Runs before RELEASE so it shares this unit.
-                self._finalize_reservation(
-                    event, emitted=result.proof_accepted > _accepted_before
-                )
-                # Honour the post-submit disposition exactly as the legacy
-                # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
-                # requeues without consuming; a terminal accept/reject (None) marks
-                # the event processed and counts it. ``_finalize_disposition`` runs
-                # inside this open savepoint.
-                self._finalize_disposition(
-                    event, post_disposition, decision_time=decision_time, result=result
-                )
-                self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                self._commit_event_unit()
+                with _scoped_sqlite_busy_timeout(
+                    self._store.conn, _reactor_claim_busy_timeout_ms()
+                ):
+                    # Window A committed and released the WAL write lock; this conn has
+                    # no open txn. Open one with BEGIN IMMEDIATE so the WAL write lock is
+                    # acquired DETERMINISTICALLY up front (under busy_timeout) rather
+                    # than lazily on the first DML — mirrors the claim()-first discipline
+                    # of Window A and avoids an immediate "database is locked" when a
+                    # concurrent writer holds the WAL write lock at first-DML time.
+                    if not self._store.conn.in_transaction:
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                    self._store.conn.execute("SAVEPOINT edli_reactor_event")
+                    # FIX B (P1 zero-submit co-cause): capture the accept counter
+                    # BEFORE post-submit so we can tell whether THIS event was
+                    # actually EMITTED (committed) vs rejected downstream of Kelly.
+                    _accepted_before = result.proof_accepted
+                    post_disposition = self._process_one_post_submit(
+                        event, submit_result, decision_time=decision_time, result=result
+                    )
+                    # FIX B: finalize the per-cycle in-flight reservation. The adapter
+                    # PROVISIONALLY reserved this event's stake when it passed
+                    # Kelly+RiskGuard; commit it ONLY if the reactor emitted it
+                    # (proof_accepted advanced), else roll it back so a candidate
+                    # rejected at DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or a
+                    # transient retry) never inflates corr/raw committed for the next
+                    # sequential event. Runs before RELEASE so it shares this unit.
+                    self._finalize_reservation(
+                        event, emitted=result.proof_accepted > _accepted_before
+                    )
+                    # Honour the post-submit disposition exactly as the legacy
+                    # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
+                    # requeues without consuming; a terminal accept/reject (None) marks
+                    # the event processed and counts it. ``_finalize_disposition`` runs
+                    # inside this open savepoint.
+                    self._finalize_disposition(
+                        event,
+                        post_disposition,
+                        decision_time=decision_time,
+                        result=result,
+                        proof_emitted=result.proof_accepted > _accepted_before,
+                    )
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    self._commit_event_unit()
             except Exception as exc:
                 if _is_sqlite_lock_error(exc):
                     with contextlib.suppress(Exception):
@@ -1028,11 +1198,30 @@ class OpportunityEventReactor:
                         self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     with contextlib.suppress(Exception):
                         self._finalize_reservation(event, emitted=False)
+                    result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                     # If the lock failure happened before the savepoint opened
-                    # (for example BEGIN IMMEDIATE in Window B), we cannot safely
-                    # write requeue/dead-letter surfaces because the same writer
-                    # lock is unavailable. Leave the event in processing; the
-                    # store's stale-lease fetch path will retry it next cycle.
+                    # (for example BEGIN IMMEDIATE in Window B), try to return the
+                    # event to pending with a visible reason. If the same external
+                    # writer still holds the WAL write lock, fall back to the
+                    # existing stale-lease path rather than dead-lettering a live
+                    # money event for infrastructure contention.
+                    with contextlib.suppress(Exception):
+                        if getattr(self._store.conn, "in_transaction", False):
+                            self._store.conn.rollback()
+                    try:
+                        with _scoped_sqlite_busy_timeout(
+                            self._store.conn, _reactor_claim_busy_timeout_ms()
+                        ):
+                            self._store.requeue_pending(
+                                event.event_id,
+                                last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                            )
+                            self._commit_event_unit()
+                    except Exception as requeue_exc:
+                        if not _is_sqlite_lock_error(requeue_exc):
+                            raise
+                        with contextlib.suppress(Exception):
+                            self._store.conn.rollback()
                     result.retried += 1
                     return
                 with contextlib.suppress(Exception):
@@ -1089,57 +1278,38 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
-          (b) MARKET_VENUE_CLOSED — the venue market has entered POST_TRADING
-              (RESOLVED). For a Polymarket weather family this is the F1 12:00-UTC
-              close of target_date (authority: src/strategy/market_phase). Once the
-              venue market is closed the family can produce no fresh executable book
-              (capture freezes at the last pre-close snapshot) and no receipt, so a
-              transient EXECUTABLE_SNAPSHOT_STALE block on it can NEVER clear — it
-              must terminalize at the venue close, not requeue.
+          (d) EVENT_EXPIRES_AT_PAST or payload-level SELECTION_DEADLINE_PAST — the
+              event's own execution window is past. A selection_deadline embedded in an
+              EXECUTABLE_SNAPSHOT_STALE reason is NOT an event horizon; it is stale price
+              evidence and must refresh/requeue.
+          (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
+              ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
+              / F1 timing cannot terminalize a money-path event.
           (a) TIMELINESS_FLOOR_PAST — the event is no longer timely. Delegates to
               the SINGLE existing timeliness authority (EventStore._is_timely):
               a forecast-decision event whose target LOCAL day is strictly past
               has crossed its market horizon. This is the SAME predicate
               fetch_pending applies on its read floor — no second clock.
 
-        WHY (b) EXISTS — the local-day floor (a) is NOT the market-closed signal.
-        The prior design assumed "(a) subsumes market-closed (b): the
-        settlement-day-end floor IS the market-closed authority." That assumption
-        was FALSE: the venue closes at 12:00 UTC of target_date (POST_TRADING),
-        which is EARLIER than the target-LOCAL-day end for every city whose local
-        day extends past 12:00 UTC (UTC+, and UTC- before noon-local). In the window
-        [venue_close, local_day_end) the book is gone but (a) still reports the
-        event timely → an EXECUTABLE_SNAPSHOT_STALE block requeued FOREVER (measured
-        live 2026-06-13 15:48Z: 679 events / 51 families pinned at processed=0;
-        docs/evidence/no_order_root_2026-06-13/diagnosis.md). (b) closes that gap by
-        asking the venue-close authority directly. It invents NO new clock and runs
-        NO venue probe — it reuses the SAME market_phase POST_TRADING anchor the
-        reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, applied at the horizon
-        locus. It is a SEMANTIC horizon (venue close), never an attempt cap.
-
         Non-family-keyed events (no city+target_date) have no timeliness floor of
         their own — for them only the operator disarm horizon applies; absent that
         they requeue until consumed by another terminal path. They cannot leak the
         queue: the cross-city round-robin in fetch_pending interleaves fresh events
         fairly (see _note_transient_requeue docstring).
-
-        FAMILY-KEYED COVERAGE (2026-06-14, #92): the venue-close horizon (b) now
-        covers DAY0_EXTREME_UPDATED in addition to the forecast-decision lane (see
-        _VENUE_CLOSE_HORIZON_EVENT_TYPES). The timeliness floor (a) still applies only
-        to the forecast-decision lane (EventStore._is_timely L803), so for a past-close
-        DAY0 family the venue-close horizon (b) — which fires EARLIER and is geometric
-        — is the terminal that sweeps it out of the working set.
         """
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
 
-        # (b) Venue-close floor — the market has entered POST_TRADING/RESOLVED. A
-        # closed market yields no fresh book and no receipt, so a transient block on
-        # it cannot clear; terminalize at the venue close (which precedes the
-        # local-day floor (a) for most cities). Fail-soft: an unresolvable
-        # tz/date returns None (NOT closed) so the event keeps requeueing — never
-        # burned on a missing predicate.
+        deadline_horizon = _event_deadline_horizon(
+            event,
+            decision_time=decision_time,
+            transient_reason=self._last_transient_requeue_reason(event),
+        )
+        if deadline_horizon is not None:
+            return deadline_horizon
+
+        # (b) Venue-close floor. This is evidence-based, not time-derived.
         venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
         if venue_closed is not None:
             return venue_closed
@@ -1167,62 +1337,38 @@ class OpportunityEventReactor:
     def _venue_market_closed_horizon(
         self, event: OpportunityEvent, *, decision_time: datetime
     ) -> tuple[str, str] | None:
-        """Horizon (b): the venue market is in POST_TRADING/RESOLVED at decision_time.
+        """Terminalize only on explicit venue-closed evidence.
 
-        For a family-keyed event (city + target_date), consult the canonical
-        market_phase authority with the F1 12:00-UTC fallback close anchor — the
-        SAME authority the reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, so
-        the two sites cannot disagree on the venue-close instant. No venue probe, no
-        snapshot read: the phase is derived purely from city timezone + target_date
-        + decision_time + the F1 anchor.
-
-        SCOPE (freshness-throughput starvation fix 2026-06-14, #92): applies to every
-        ``_VENUE_CLOSE_HORIZON_EVENT_TYPES`` member — the forecast-decision lane AND
-        ``DAY0_EXTREME_UPDATED`` (also family-keyed). A past-close DAY0 event has a
-        real venue close (its market settled at the F1 12:00-UTC anchor) and must
-        terminalize at that horizon; before this fix it was scoped out and requeued
-        forever, clogging the working set (see ``_VENUE_CLOSE_HORIZON_EVENT_TYPES``).
-
-        Returns ``("MARKET_VENUE_CLOSED", detail)`` iff the phase is POST_TRADING or
-        RESOLVED; otherwise None (the family is still live, or the inputs are
-        unresolvable → fail-soft requeue, never a premature terminal).
+        Gamma ``endDate``/the old F1 12:00Z anchor is not enough: live weather
+        markets can remain ``closed=false`` and ``acceptingOrders=true`` after
+        that timestamp. A static city/date calculation therefore cannot burn a
+        money-path event. The executable snapshot and submit layers already use
+        the decomposed venue authority: orderbook enabled, not closed, and
+        accepting_orders not explicitly false.
         """
         if event.event_type not in _VENUE_CLOSE_HORIZON_EVENT_TYPES:
             return None
         payload = _payload_dict(event)
-        city = str(payload.get("city") or "").strip()
-        target_date = str(payload.get("target_date") or "").strip()
-        if not city or not target_date:
-            return None
-        try:
-            from datetime import date as _date_cls
-
-            from src.config import runtime_cities_by_name
-            from src.strategy.market_phase import (
-                MarketPhase,
-                _f1_fallback_end_utc,
-                market_phase_for_decision,
-            )
-
-            city_config = runtime_cities_by_name().get(city)
-            tz = getattr(city_config, "timezone", None) if city_config is not None else None
-            if not tz:
+        def _venue_bool(value: object) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if value is None:
                 return None
-            target_local_date = _date_cls.fromisoformat(target_date)
-            phase = market_phase_for_decision(
-                target_local_date=target_local_date,
-                city_timezone=tz,
-                decision_time_utc=decision_time.astimezone(UTC),
-                polymarket_start_utc=None,
-                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
-            )
-        except Exception:
-            # Fail-soft: an unresolvable city/tz/date must NOT terminalize a family
-            # that might still be live. Requeue (None); the local-day floor (a) is
-            # the backstop terminal once the whole local day ends.
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
             return None
-        if phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED):
-            return ("MARKET_VENUE_CLOSED", f"venue market phase {phase.value} (F1 12:00-UTC close)")
+
+        closed = _venue_bool(payload.get("closed") or payload.get("market_closed"))
+        accepting = _venue_bool(
+            payload.get("accepting_orders")
+            if "accepting_orders" in payload
+            else payload.get("acceptingOrders")
+        )
+        if closed is True and accepting is False:
+            return ("MARKET_VENUE_CLOSED", "explicit venue closed=true accepting_orders=false")
         return None
 
     def _venue_market_not_listed_horizon(
@@ -1237,8 +1383,8 @@ class OpportunityEventReactor:
         """
         if self._family_market_absence_provider is None:
             return None
-        last_reason = self._transient_requeue_reasons.get(event.event_id)
-        if last_reason != "EXECUTABLE_SNAPSHOT_BLOCKED":
+        last_reason = self._last_transient_requeue_reason(event)
+        if _money_path_reason_base(last_reason or "") != "EXECUTABLE_SNAPSHOT_BLOCKED":
             return None
         family = self._family_identity(event)
         if family is None:
@@ -1261,6 +1407,30 @@ class OpportunityEventReactor:
             f"Gamma/topology has no listed Polymarket market for {city}/{target_date}/{metric}",
         )
 
+    def _last_transient_requeue_reason(self, event: OpportunityEvent) -> str | None:
+        """Return the transient cause from memory or durable processing state.
+
+        ``_transient_requeue_reasons`` is process-local. After a daemon restart,
+        the durable retry cause lives in ``opportunity_event_processing.last_error``.
+        Losing it lets a stale executable-snapshot ``selection_deadline`` be read
+        as an event horizon instead of price evidence.
+        """
+
+        event_id = str(getattr(event, "event_id", "") or "")
+        if not event_id:
+            return None
+        live_reason = self._transient_requeue_reasons.get(event_id)
+        if live_reason:
+            return live_reason
+        try:
+            stored_reason = self._store.processing_last_error(event_id)
+        except Exception:
+            return None
+        if stored_reason and _is_transient_money_path_reason(stored_reason):
+            self._transient_requeue_reasons[event_id] = stored_reason
+            return stored_reason
+        return None
+
     @staticmethod
     def _family_identity(event: OpportunityEvent) -> tuple[str, str, str] | None:
         """The (city, target_date, metric) family key from the event payload, or None when the
@@ -1280,15 +1450,23 @@ class OpportunityEventReactor:
         """ALWAYS-DECIDABLE invariant (2026-06-12): record that THIS event was blocked on a
         REFRESHABLE substrate this cycle so the post-unit-of-work drain refreshes that substrate.
 
-        ``kind`` is ``"snapshot"`` (executable-snapshot block -> family_snapshot_refresher) or
-        ``"posterior"`` (stale/absent replacement posterior -> single-family cycle-advance reseed).
-        De-duplicated per family per cycle (a family blocked by many bins refreshes ONCE). The
-        intents are drained AFTER the event's unit-of-work closes (no network in any open txn).
+        ``kind`` is ``"snapshot"`` (executable-snapshot block -> family_snapshot_refresher),
+        ``"posterior"`` (stale/absent replacement posterior -> single-family cycle-advance reseed),
+        or ``"day0_hourly"`` (Day0 remaining-day hourly-vector substrate). De-duplicated per family
+        per cycle (a family blocked by many bins refreshes ONCE). The intents are drained AFTER the
+        event's unit-of-work closes (no network in any open txn).
         """
         family = self._family_identity(event)
         if family is None:
             return
-        bucket = self._pending_snapshot_refreshes if kind == "snapshot" else self._pending_cycle_advances
+        if kind == "snapshot":
+            bucket = self._pending_snapshot_refreshes
+        elif kind == "posterior":
+            bucket = self._pending_cycle_advances
+        elif kind == "day0_hourly":
+            bucket = self._pending_day0_hourly_refreshes
+        else:
+            return
         if family not in bucket:
             bucket.append(family)
 
@@ -1314,6 +1492,21 @@ class OpportunityEventReactor:
         SHARED across both buckets and HELD-position families are drained FIRST (money at risk),
         so a budget can never starve a held family's refresh.
         """
+        sidecar_owns_broad = _substrate_sidecar_owns_broad_refresh()
+        if sidecar_owns_broad:
+            blocked = (
+                len(self._pending_snapshot_refreshes)
+                + len(self._pending_cycle_advances)
+                + len(self._pending_day0_hourly_refreshes)
+            )
+            if blocked:
+                import logging as _logging
+
+                _logging.getLogger("zeus.events.reactor").info(
+                    "always-decidable broad drain delegated to substrate observer sidecar; "
+                    "draining targeted blocked-family refreshes locally deferred_families=%d",
+                    blocked,
+                )
         # HELD-POSITION set, computed ONCE per cycle (fail-soft): families with money at risk now.
         held = self._held_families_failsoft()
         if held:
@@ -1334,6 +1527,16 @@ class OpportunityEventReactor:
             last_at=self._family_refresh_last_at,
             counter_attr="snapshot_refreshes",
             label="snapshot",
+            result=result,
+            held=held,
+            deadline=drain_deadline,
+        )
+        self._drain_one_bucket(
+            self._pending_day0_hourly_refreshes,
+            refresher=self._day0_hourly_refresher,
+            last_at=self._family_day0_hourly_last_at,
+            counter_attr="day0_hourly_refreshes",
+            label="day0-hourly",
             result=result,
             held=held,
             deadline=drain_deadline,
@@ -1499,6 +1702,7 @@ class OpportunityEventReactor:
         *,
         decision_time: datetime,
         result: ReactorResult,
+        proof_emitted: bool = False,
     ) -> None:
         """Apply the terminal/retry book-keeping for a window disposition.
 
@@ -1546,12 +1750,23 @@ class OpportunityEventReactor:
                 # (after capture completes / book settles / risk clears). Do NOT
                 # consume the event the way mark_processed would. There is NO
                 # attempt cap — the event requeues until a horizon terminal fires.
-                last_reason = self._transient_requeue_reasons.get(event.event_id)
+                last_reason = self._last_transient_requeue_reason(event)
                 retry_not_before = None
-                if last_reason == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                if _money_path_reason_base(last_reason or "") in {
+                    "EXECUTABLE_SNAPSHOT_BLOCKED",
+                    "EXECUTABLE_SNAPSHOT_STALE",
+                } or _is_day0_hourly_refresh_reason(last_reason):
+                    try:
+                        snapshot_block_attempts = self._store.attempt_count(event.event_id)
+                    except Exception:
+                        snapshot_block_attempts = 1
                     retry_not_before = (
                         decision_time.astimezone(UTC)
-                        + timedelta(seconds=_snapshot_block_retry_delay_seconds())
+                        + timedelta(
+                            seconds=_snapshot_block_retry_delay_seconds(
+                                attempt_count=snapshot_block_attempts
+                            )
+                        )
                     ).isoformat()
                 self._note_transient_requeue(event)
                 self._store.requeue_pending(
@@ -1560,6 +1775,7 @@ class OpportunityEventReactor:
                     last_error=last_reason,
                 )
                 result.retried += 1
+                result.rejection_reasons.append(last_reason or "EXECUTABLE_SNAPSHOT_PENDING")
             return
         # disposition is None: a pre-submit gate rejected the event (its reject
         # ledgers were written in _process_one_pre_submit). The legacy single-pass
@@ -1567,8 +1783,32 @@ class OpportunityEventReactor:
         # ``processed`` (the event is consumed, not retried). Preserve that exactly.
         self._transient_requeue_reasons.pop(event.event_id, None)
         self._transient_requeue_counts.pop(event.event_id, None)
+        if not proof_emitted and not self._terminal_rejection_evidence_exists(event.event_id):
+            self._reject_event(
+                event,
+                "UNKNOWN_REVIEW_REQUIRED",
+                "UNKNOWN_REVIEW_REQUIRED:PROCESSED_WITHOUT_DECISION_EVIDENCE",
+                result,
+                decision_time=decision_time,
+            )
         self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
         result.processed += 1
+
+    def _terminal_rejection_evidence_exists(self, event_id: str) -> bool:
+        for table in (
+            "edli_no_submit_receipts",
+            "decision_compile_failures",
+            "no_trade_regret_events",
+        ):
+            try:
+                if self._store.conn.execute(
+                    f"SELECT 1 FROM {table} WHERE event_id = ? LIMIT 1",
+                    (event_id,),
+                ).fetchone():
+                    return True
+            except sqlite3.Error:
+                continue
+        return False
 
     def _dead_letter_unknown(
         self,
@@ -1842,6 +2082,16 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                     )
                 self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                if (
+                    _event_deadline_horizon(
+                        event,
+                        decision_time=decision_time,
+                        transient_reason=receipt.reason,
+                    )
+                    is None
+                    and _is_executable_snapshot_refresh_reason(str(receipt.reason))
+                ):
+                    self._record_substrate_block(event, kind="snapshot")
                 return _EXECUTABLE_SNAPSHOT_RETRY
             return self._reject_or_retry_post_submit(
                 event,
@@ -1894,6 +2144,16 @@ class OpportunityEventReactor:
             if _is_transient_money_path_reason(receipt.reason):
                 if receipt.reason:
                     self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                    if (
+                        _event_deadline_horizon(
+                            event,
+                            decision_time=decision_time,
+                            transient_reason=receipt.reason,
+                        )
+                        is None
+                        and _is_executable_snapshot_refresh_reason(str(receipt.reason))
+                    ):
+                        self._record_substrate_block(event, kind="snapshot")
                 return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
@@ -1957,11 +2217,12 @@ class OpportunityEventReactor:
             # accepted terminal. If the daemon is NOMINALLY ARMED (reactor_mode=live AND
             # the operator arm is on — read the SAME way the main.py selector reads it,
             # no second authority) the receipt MUST NOT carry submit_lane="LIVE": the
-            # live lane never produces a full-pass NO_SUBMIT with proof_accepted — it
-            # SUBMITs, returns a SUBMIT_DISABLED build, or carries a typed abort reason.
-            # submit_lane="LIVE" here means the live lane silently ate a tradeable entry
+            # live lane never produces a full-pass NO_SUBMIT with proof_accepted; a
+            # typed pre-venue abort is proof_accepted=False and is routed through
+            # visible rejection/retry classification. submit_lane="LIVE" here means
+            # the live lane silently ate a tradeable entry
             # (the 11:51-12:12Z incident). Raise rather than persist the kill. Receipts
-            # from the honest degrade lane (submit_lane="NO_SUBMIT_ADAPTER" + named
+            # from the honest control-blocked lane (submit_lane="NO_SUBMIT_ADAPTER" + named
             # cause) and legacy pre-stamp receipts (submit_lane=None) pass through.
             self._assert_no_submit_lane_invariant(receipt)
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
@@ -2056,6 +2317,18 @@ class OpportunityEventReactor:
         if _is_posterior_staleness_reason(reason):
             self._record_substrate_block(event, kind="posterior")
         if _is_transient_money_path_reason(reason):
+            if (
+                _event_deadline_horizon(
+                    event,
+                    decision_time=decision_time,
+                    transient_reason=reason,
+                )
+                is None
+            ):
+                if _is_day0_hourly_refresh_reason(reason):
+                    self._record_substrate_block(event, kind="day0_hourly")
+                elif _is_executable_snapshot_refresh_reason(reason):
+                    self._record_substrate_block(event, kind="snapshot")
             # Transient: the forecast source was re-ingested after this cycle's
             # decision moment, or the selected executable price expired between
             # the pre-submit family identity gate and the adapter's JIT scoring.
@@ -2064,8 +2337,36 @@ class OpportunityEventReactor:
             # _transient_horizon_terminal).
             self._transient_requeue_reasons[event.event_id] = str(reason)
             return _EXECUTABLE_SNAPSHOT_RETRY
+        self._persist_terminal_no_submit_receipt(
+            receipt,
+            decision_time=decision_time,
+        )
         self._reject_event(event, stage, reason, result, receipt=receipt, decision_time=decision_time)
         return None
+
+    def _persist_terminal_no_submit_receipt(
+        self,
+        receipt: EventSubmissionReceipt | None,
+        *,
+        decision_time: datetime,
+    ) -> None:
+        """Materialize terminal no-submit decisions before rejection bookkeeping.
+
+        ``decision_certificates`` still distinguish VERIFIED no-submit certificates from
+        rejected terminal decisions. The receipt ledger is the per-event decision trace that
+        live observability, attribution, and redecision audits query; terminal economic
+        no-submits must not disappear just because the money-path blocker later writes a
+        compile failure/regret row. Transient blockers are filtered by the caller and remain
+        pending with no terminal receipt.
+        """
+        if receipt is None:
+            return
+        if receipt.side_effect_status != "NO_SUBMIT" or receipt.proof_accepted is not True:
+            return
+        self._no_submit_receipt_ledger.insert_idempotent(
+            receipt,
+            decision_time=decision_time,
+        )
 
     def _reject_event(
         self,
@@ -2409,6 +2710,80 @@ def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _parse_utc_instant(value: object) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _deadline_from_reason(reason: object, field_name: str) -> datetime | None:
+    text = str(reason or "")
+    marker = f"{field_name}="
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker) :]
+    for delimiter in (":decision_time=", " ", ",", ";", "|"):
+        split_at = tail.find(delimiter)
+        if split_at > 0:
+            tail = tail[:split_at]
+            break
+    return _parse_utc_instant(tail)
+
+
+def _event_deadline_horizon(
+    event: OpportunityEvent,
+    *,
+    decision_time: datetime,
+    transient_reason: object | None = None,
+) -> tuple[str, str] | None:
+    decision_time_utc = decision_time.astimezone(UTC)
+    expires_at = _parse_utc_instant(getattr(event, "expires_at", None))
+    if expires_at is not None and expires_at <= decision_time_utc:
+        return ("EVENT_EXPIRES_AT_PAST", f"expires_at={expires_at.isoformat()}")
+
+    payload = _payload_dict(event)
+    payload_selection_deadline = _parse_utc_instant(payload.get("selection_deadline"))
+    if payload_selection_deadline is not None and payload_selection_deadline <= decision_time_utc:
+        return (
+            "SELECTION_DEADLINE_PAST",
+            f"selection_deadline={payload_selection_deadline.isoformat()}",
+        )
+
+    reason_selection_deadline = _deadline_from_reason(transient_reason, "selection_deadline")
+    reason_base = _money_path_reason_base(str(transient_reason or ""))
+    if (
+        reason_base != "EXECUTABLE_SNAPSHOT_STALE"
+        and not _reason_wraps_executable_snapshot_selection_deadline(transient_reason)
+        and reason_selection_deadline is not None
+        and reason_selection_deadline <= decision_time_utc
+    ):
+        return (
+            "SELECTION_DEADLINE_PAST",
+            f"selection_deadline={reason_selection_deadline.isoformat()}",
+        )
+    return None
+
+
+def _reason_wraps_executable_snapshot_selection_deadline(reason: object | None) -> bool:
+    text = str(reason or "")
+    return (
+        "EXECUTABLE_SNAPSHOT_STALE" in text
+        and "selection_deadline=" in text
+    )
+
+
 def _receipt_or_payload(
     receipt: EventSubmissionReceipt | None,
     payload: dict[str, Any],
@@ -2481,11 +2856,16 @@ def _all_candidates_rejected_candidate_rows(
         ):
             continue
         if qkernel_family_reason and qkernel_economics is not None:
-            candidate_missing_reason = str(family_reason or "").strip()
+            candidate_missing_reason = (
+                missing_reason
+                if missing_reason.startswith("QKERNEL_")
+                else str(family_reason or "").strip()
+            )
             q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
             c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
             c_cost_95pct = qkernel_economics["c_cost_95pct"]
             candidate_trade_score = qkernel_economics["trade_score"]
+            q_live = qkernel_economics["q_live"]
         else:
             if (
                 trade_score is None
@@ -2498,6 +2878,7 @@ def _all_candidates_rejected_candidate_rows(
             c_fee_adjusted = execution_price
             c_cost_95pct = _optional_float(raw.get("c_cost_95pct")) or execution_price
             candidate_trade_score = trade_score
+            q_live = _optional_float(raw.get("q_posterior"))
         reason = (
             "EVENT_BOUND_CANDIDATE_REJECTED:"
             f"{candidate_missing_reason}:candidate_id={candidate_id}"
@@ -2511,7 +2892,7 @@ def _all_candidates_rejected_candidate_rows(
                 "outcome_label": raw.get("outcome_label"),
                 "bin_label": raw.get("bin_label"),
                 "direction": raw.get("direction"),
-                "q_live": _optional_float(raw.get("q_posterior")),
+                "q_live": q_live,
                 "q_lcb_5pct": q_lcb_5pct,
                 "c_fee_adjusted": c_fee_adjusted,
                 "c_cost_95pct": c_cost_95pct,
@@ -2529,14 +2910,18 @@ def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, flo
     if not isinstance(cert, Mapping):
         return None
     try:
+        payoff_q_point = float(cert["payoff_q_point"])
         payoff_q_lcb = float(cert["payoff_q_lcb"])
         cost = float(cert["cost"])
         edge_lcb = float(cert["edge_lcb"])
     except (KeyError, TypeError, ValueError):
         return None
-    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+    if not all(math.isfinite(value) for value in (payoff_q_point, payoff_q_lcb, cost, edge_lcb)):
+        return None
+    if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
     return {
+        "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,
@@ -2549,24 +2934,28 @@ def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, floa
 
     ``q_live`` / ``q_lcb_5pct`` on the receipt are selected-side probability
     provenance. A qkernel-selected route is economically licensed by its guarded
-    payoff-space certificate: ``payoff_q_lcb``, ``cost`` and ``edge_lcb``. Project
-    those values into the regret table's scalar economic columns so operators and
-    continuous-redecision screens do not compare a preserved selected-side q_lcb
-    against a qkernel route score.
+    payoff-space certificate: ``payoff_q_point``, ``payoff_q_lcb``, ``cost`` and
+    ``edge_lcb``. Project those values into the regret table's scalar economic columns
+    so operators and continuous-redecision screens do not compare preserved proof
+    probabilities against a qkernel route score.
     """
 
     cert = receipt.qkernel_execution_economics
     if not isinstance(cert, dict):
         return None
     try:
+        payoff_q_point = float(cert["payoff_q_point"])
         payoff_q_lcb = float(cert["payoff_q_lcb"])
         cost = float(cert["cost"])
         edge_lcb = float(cert["edge_lcb"])
     except (KeyError, TypeError, ValueError):
         return None
-    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+    if not all(math.isfinite(value) for value in (payoff_q_point, payoff_q_lcb, cost, edge_lcb)):
+        return None
+    if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
     return {
+        "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,
@@ -2664,6 +3053,8 @@ def _receipt_money_path_blocker(
         )
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason
+    if receipt.proof_accepted is False:
+        return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "NO_SUBMIT_PROOF_FALSE"
     # Task #102 — optional book-wide edge-zone admission. The always-on live
     # DELETED 2026-06-12 (operator no-caps law; gate inventory D3): the
     # edge_zone_admission "extra tightening" was a second, knob-configurable
@@ -2692,8 +3083,24 @@ def _receipt_money_path_blocker(
 TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
+    # Replacement posterior substrate is missing/stale relative to live inputs.
+    # These can appear bare or nested under LIVE_INFERENCE_INPUTS_MISSING. The
+    # cure is a same-family posterior cycle-advance plus redecision, not terminal
+    # burn of the opportunity event.
+    "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
+    "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+    "REPLACEMENT_0_1_LIVE_INPUT_LAG",
+    "REPLACEMENT_LIVE_INPUT_LAG",
+    # Read-boundary compatibility for queued/durable pre-cutover reasons.
+    "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+    "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
     # Executable family snapshot not captured yet / went stale this cycle.
+    "EXECUTABLE_SNAPSHOT_BLOCKED",
     "EXECUTABLE_SNAPSHOT_STALE",
+    # Day0 remaining-day q needs persisted high-resolution hourly weather
+    # vectors. Missing vectors are a refreshable weather-substrate fault, not a
+    # no-edge conclusion and not a CLOB executable-snapshot fault.
+    "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
     # Taker race: JIT recapture found all-in cost above max + bounded tolerance
     # (Miami 16:22:35Z — EV at the NEW price still strongly positive).
     "SUBMIT_ABORTED_PRICE_MOVED",
@@ -2744,6 +3151,16 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # Synchronous Polymarket 400 submit rejection with no venue order id. The
+    # submit crossed the HTTP boundary but the venue rejected before creating an
+    # order. This is a stale maker-price/mode race; release the command/cap and
+    # re-decide from a fresh book instead of treating it as unknown string drift.
+    "venue_rejected_400",
+    # Operator/manual entry pause is a pre-venue control state. No new order is
+    # posted while active; once cleared, the event must be re-decided from fresh
+    # belief/price evidence rather than burned as terminal or logged as an
+    # unknown fail-open reason.
+    "entries_paused",
     # Continuous redecision coordination: another live action already owns this
     # family, or the old leg is still exiting. The cure is state advancement from
     # that existing action, not burning the family forever.
@@ -2792,6 +3209,21 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # receipt.reason or the bare status when reason is empty).
     "REJECTED",
     "PRE_SUBMIT_ERROR",
+    # Pre-venue collateral/allowance failed before a submit can be attempted.
+    # No order exists, and replaying the same event cannot cure wallet allowance;
+    # capital/allowance recovery should surface as fresh candidates/redecision.
+    "pre_submit_collateral_reservation_failed",
+    # Polymarket rejected the signed order as a deterministic Safe-signature 400.
+    # The adapter already retries once after signer-bound L2 credential refresh.
+    # Requeueing the same event repeats the same invalid signed request and then
+    # usually degrades into an idempotency collision; fresh price/belief movement
+    # must arrive as a new event.
+    "venue_auth_invalid_signature_400",
+    # Existing command ownership for this idempotency key is a final disposition
+    # for this event. ACKED/FILLED/PARTIAL commands are already projected through
+    # lifecycle recovery; REJECTED/CANCELLED/EXPIRED commands should be replaced
+    # only by a fresh redecision event with a fresh executable identity.
+    "idempotency_collision",
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
@@ -2803,13 +3235,13 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # NO_EXECUTABLE_ROUTE_CANDIDATE, MARKET_INCOHERENT_BLOCK_LIVE,
     # PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE, NO_DIRECTION_LAW_CANDIDATE,
     # NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE, QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
-    # QKERNEL_DAY0_NOT_WIRED, SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
+    # SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
     # for THIS event, exactly like the legacy honest-no-edge declines (FDR_REJECTED,
     # TRADE_SCORE_NON_POSITIVE): the spine re-prices the whole family from a FRESH
     # book on the NEXT forecast snapshot, which arrives as a NEW event — so the
     # recovery path is a fresh event, NOT a requeue of this one. Requeueing instead
     # would double-churn the same event every cycle against an unchanged decision
-    # substrate (the live QKERNEL_DAY0_NOT_WIRED requeue storm, monitor b9w56vec6).
+    # substrate (the historic day0 forecast-spine requeue storm, monitor b9w56vec6).
     # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
     # later at the SUBMIT stage under their own transient bases and are unaffected.
     "QKERNEL_SPINE_NO_TRADE",
@@ -2878,6 +3310,8 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
     return (
         "would_cross_book" in suffix_lower
         or _certificate_build_failed_is_book_authority_gap(reason)
+        or _certificate_build_failed_is_maker_book_witness_race(reason)
+        or _certificate_build_failed_is_taker_reservation_race(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
         or "database is busy" in suffix_lower
@@ -2889,7 +3323,60 @@ def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
     return (
         "pre_submit_book_authority_missing" in suffix_lower
         or "pre_submit_book_authority_stale" in suffix_lower
+        or "pre_submit_book_authority_jit_" in suffix_lower
     )
+
+
+def _certificate_build_failed_is_maker_book_witness_race(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return "maker_book_fresh_witness_disagreement" in suffix_lower
+
+
+def _certificate_build_failed_is_taker_reservation_race(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return (
+        "taker_buy_touch_exceeds_reservation" in suffix_lower
+        or "taker_sell_touch_below_reservation" in suffix_lower
+    )
+
+
+def _is_day0_hourly_refresh_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    return "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE" in segments
+
+
+def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
+    """True when a transient money-path reason is cured by fresh book/substrate capture."""
+
+    if not reason:
+        return False
+    if _is_day0_hourly_refresh_reason(reason):
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    if any(
+        seg
+        in {
+            "EXECUTABLE_SNAPSHOT_BLOCKED",
+            "EXECUTABLE_SNAPSHOT_STALE",
+            "SUBMIT_ABORTED_PRICE_MOVED",
+            "SUBMIT_ABORTED_MODE_FLIPPED",
+            "LIVE_DEPTH_AUTHORITY_MISSING",
+        }
+        for seg in segments
+    ):
+        return True
+    base = _money_path_reason_base(str(reason))
+    if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
+        suffix_lower = str(reason).lower()
+        return (
+            "would_cross_book" in suffix_lower
+            or _certificate_build_failed_is_book_authority_gap(str(reason))
+            or _certificate_build_failed_is_maker_book_witness_race(str(reason))
+            or _certificate_build_failed_is_taker_reservation_race(str(reason))
+        )
+    return False
 
 
 def _is_transient_money_path_reason(reason: str | None) -> bool:
@@ -2948,12 +3435,17 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
 # cure is re-materializing the posterior onto a fresher model cycle (the cycle-advance reseed
 # lane), NOT requeueing against the same unchanging posterior. Explicit closed set (segment
 # membership, never substring soup): the adapter raises these from its readiness/bundle gate
-# (event_reactor_adapter.py ~9609-9622). A reason CHAIN that nests one of these ANYWHERE
+# or live-input lag gate. A reason CHAIN that nests one of these ANYWHERE
 # (e.g. wrapped in a stage prefix) still counts — the belief substrate is the root cause.
 _POSTERIOR_STALENESS_REASON_BASES = frozenset(
     {
         "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+        "REPLACEMENT_0_1_LIVE_INPUT_LAG",
+        # Older replacement gate path in event_reactor_adapter.py. If it reaches
+        # the live reactor, the cure is still the same posterior cycle-advance
+        # reseed; this is read-boundary handling, not a producer alias.
+        "REPLACEMENT_LIVE_INPUT_LAG",
         # Pre-cutover queued/durable reason bases. These are read-boundary
         # compatibility only; producers now emit the LIVE_READINESS/BUNDLE names
         # above. Old rows still need the same single-family reseed cure.
@@ -2988,18 +3480,26 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
 
 
 def _regret_bucket_for(reason: str) -> str:
-    if reason in {"FDR_REJECTED"}:
+    reason_text = str(reason or "")
+    if reason_text == "FDR_REJECTED" or reason_text.startswith("FDR_REJECTED:"):
         return "FDR_REJECTED"
-    if reason in {"KELLY_TOO_SMALL"}:
+    if reason_text in {"KELLY_TOO_SMALL"}:
         return "KELLY_TOO_SMALL"
-    if "RISK" in reason:
+    try:
+        from src.contracts.rejection_reasons import classify_rejection_reason, lookup_rejection_reason
+
+        if lookup_rejection_reason(reason_text) is not None:
+            return classify_rejection_reason(reason_text).value
+    except Exception:
+        pass
+    if "RISK" in reason_text:
         return "RISK_CAP"
-    if "QUOTE" in reason or "SNAPSHOT" in reason:
+    if "QUOTE" in reason_text or "SNAPSHOT" in reason_text:
         return "QUOTE_UNAVAILABLE"
-    if "SOURCE" in reason or "DAY0_HARD_FACT" in reason:
+    if "SOURCE" in reason_text or "DAY0_HARD_FACT" in reason_text:
         return "SOURCE_WRONG"
-    if "FAMILY" in reason:
+    if "FAMILY" in reason_text:
         return "FAMILY_INCOMPLETE"
-    if "LEAK" in reason or "AVAILABLE_AT" in reason:
+    if "LEAK" in reason_text or "AVAILABLE_AT" in reason_text:
         return "LEAKAGE_BLOCKED"
     return "UNKNOWN_REVIEW_REQUIRED"

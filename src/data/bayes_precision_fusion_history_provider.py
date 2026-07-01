@@ -57,7 +57,7 @@ def raw_second_moment_by_model(
     target_date: date | str,
     models: Sequence[str],
 ) -> dict[str, tuple[float, int]]:
-    """RAW second moment Ê[(x−Y)²] + walk-forward n per model (FINAL no-shadow §1).
+    """RAW second moment Ê[(x−Y)²] + walk-forward n per model (single-serving-rule §1).
 
     The strictly-prior, date-aligned RAW second moment of the residual ``x − Y``
     (forecast minus settlement, in degC) for each requested model at this

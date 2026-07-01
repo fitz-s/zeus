@@ -49,6 +49,13 @@ scripts are registered and safe for their declared class.
 - Repair/ETL writers must declare write targets and dry-run/apply behavior.
 - Diagnostics and reports must not write canonical DB truth.
 - Scripts are not hidden authority centers.
+- Do not copy or back up canonical Zeus DB files (`state/zeus_trades.db`,
+  `state/zeus-world.db`, `state/zeus-forecasts.db`) to `/tmp`,
+  `/private/tmp`, `/private/var/folders`, evidence dirs, or ad hoc backup dirs
+  by default. Dry-runs must use tiny isolated fixtures or read-only SQLite
+  connections. Any full live DB backup requires an explicit operator opt-in
+  gate such as `ZEUS_ALLOW_LIVE_DB_BACKUP=1`, a named destination, and a cleanup
+  plan.
 
 ## Local Registry
 
@@ -100,12 +107,10 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `migrate_world_to_forecasts.py` | Migration: K1 DB split world→forecasts DB transition per task_2026-05-11_forecast_db_split PLAN §5.4 (dry-run/apply; created 2026-05-11) |
 | `operator_record_redeem.py` | Operator CLI: advance REDEEM_OPERATOR_REQUIRED rows; runtime support (created 2026-05-14) |
 | `pre-commit-capability-gate.sh` | Pre-commit enforcement gate for capability declarations; runs on staged changes (created 2026-05-06) |
-| `reevaluate_readiness_2026_05_07.py` | Repair: re-evaluate BLOCKED readiness rows post D1 bridge policy 2026-05-07 (dry-run/apply; created 2026-05-07) |
 | `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |
 | `replay_correctness_gate.py` | Enforcement gate for replay correctness per IMPLEMENTATION_PLAN Phase 0.G + ADR-5 (created 2026-05-14) |
 | `repro_antibodies.py` | Antibody reproduction diagnostic; verifies antibody tests catch their target defect (created 2026-05-03) |
 | `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; diagnostic_report_writer (created 2026-05-06) |
-| `topology_route_shadow.py` | Topology route shadow probe; diagnostic for topology_v_next shadow comparison (created 2026-05-06) |
 | `zeus_blocks.py` | Zeus block state diagnostic; reads and reports current block conditions (created 2026-05-04) |
 | `doc_citation_lint.py` | Citation-rot detector for Zeus docs; scans .md/.py/.yaml/.json for broken doc references per SCAFFOLD §4 FM-01/FM-04 (created 2026-05-17) |
 | `pr_monitor.py` | Canonical PR monitor; single source of filter logic for Monitor tool armed after gh pr create; 7 filter contracts pinned by tests/test_pr_monitor.py (created 2026-05-17) |

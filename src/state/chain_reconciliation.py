@@ -23,6 +23,7 @@ Rules:
 Live mode: MANDATORY every cycle before any trading.
 """
 
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -52,6 +53,8 @@ LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API",
 FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
 CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
+ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON = "entry_authority_chain_absence_conflict"
+ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE = "entry_authority_quarantined"
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -213,6 +216,7 @@ _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
 # persisted timestamp is older than this threshold to keep classify_chain_state()
 # correctly classifying long-lived synced positions on daemon restart.
 _CHAIN_SEEN_AT_MAX_AGE_SECONDS: int = 1800  # 30 minutes
+_CONFIRMED_CHAIN_ABSENCE_RECENT_POSITIVE_SECONDS: int = 6 * 3600
 
 
 def allocate_chain_truth(
@@ -375,24 +379,59 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ) from exc
         return row is not None
 
-    def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
+    def _position_has_linked_fill_fact(position: Position) -> bool:
         if conn is None:
             return False
-        order_id = str(getattr(position, "entry_order_id", "") or getattr(position, "order_id", "") or "").strip()
-        if not order_id:
+        position_id = str(getattr(position, "trade_id", "") or "").strip()
+        order_ids = {
+            str(value).strip()
+            for value in (
+                getattr(position, "entry_order_id", ""),
+                getattr(position, "order_id", ""),
+            )
+            if str(value or "").strip()
+        }
+        command_ids = {
+            str(value).strip()
+            for value in (
+                getattr(position, "entry_command_id", ""),
+                getattr(position, "command_id", ""),
+            )
+            if str(value or "").strip()
+        }
+        predicates: list[str] = []
+        params: list[str] = []
+        if position_id:
+            predicates.append("vc.position_id = ?")
+            params.append(position_id)
+        if order_ids:
+            placeholders = ", ".join(["?"] * len(order_ids))
+            predicates.append(f"(vtf.venue_order_id IN ({placeholders}) OR vc.venue_order_id IN ({placeholders}))")
+            params.extend(order_ids)
+            params.extend(order_ids)
+        if command_ids:
+            placeholders = ", ".join(["?"] * len(command_ids))
+            predicates.append(f"(vtf.command_id IN ({placeholders}) OR vc.command_id IN ({placeholders}))")
+            params.extend(command_ids)
+            params.extend(command_ids)
+        if not predicates:
             return False
         try:
             rows = conn.execute(
-                """
-                SELECT state, source, filled_size, fill_price
-                  FROM venue_trade_facts
-                 WHERE venue_order_id = ?
-                 ORDER BY observed_at DESC, local_sequence DESC
+                f"""
+                SELECT vtf.state, vtf.source, vtf.filled_size, vtf.fill_price
+                  FROM venue_trade_facts vtf
+                  LEFT JOIN venue_commands vc
+                    ON vc.command_id = vtf.command_id
+                 WHERE {" OR ".join(f"({predicate})" for predicate in predicates)}
+                 ORDER BY vtf.observed_at DESC, vtf.local_sequence DESC
                 """,
-                (order_id,),
+                tuple(params),
             ).fetchall()
-        except Exception:
-            return False
+        except Exception as exc:
+            raise RuntimeError(
+                f"venue fill fact lookup failed for position_id={position_id or 'missing'}"
+            ) from exc
         for row in rows:
             state = str(row["state"] if hasattr(row, "keys") else row[0])
             source = str(row["source"] if hasattr(row, "keys") else row[1])
@@ -406,6 +445,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ):
                 return True
         return False
+
+    def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
+        return _position_has_linked_fill_fact(position)
 
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
@@ -524,7 +566,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         try:
             if has_trade_fact:
-                # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): trade-verified
+                # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): trade-verified
                 # rescue is the verified entry-fill recovery — pending_entry →
                 # ACTIVE. Pass phase_after explicitly; the canonical projection's
                 # phase no longer reads pos.state/exit_state/chain_state strings.
@@ -570,7 +612,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
-            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): size-correction
+            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): size-correction
             # does NOT transition the canonical phase — pass the position's
             # *current* canonical phase explicitly.
             events, projection = build_chain_size_corrected_canonical_write(
@@ -808,7 +850,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
-            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): unresolved
+            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): unresolved
             # size mismatch always quarantines the position. Pass phase_after
             # explicitly so canonical position_current.phase is QUARANTINED
             # regardless of any prior runtime pos.state string mutation.
@@ -967,7 +1009,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     f"void projection for {trade_id} resolved to {projection.get('phase')!r}"
                 )
             env = str(getattr(position, "env", "") or "live")
-            if env not in {"live", "test", "replay", "backtest", "shadow"}:
+            if env not in {"live", "test", "replay", "backtest"}:
                 env = "live"
             event = {
                 "event_id": f"{trade_id}:chain_void:{sequence_no}",
@@ -1031,9 +1073,126 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             bool(getattr(position, "entry_fill_verified", False))
             or str(getattr(position, "fill_authority", "") or "")
             == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            or _position_has_linked_fill_fact(position)
         )
 
-    def _quarantine_confirmed_chain_absence(
+    def _parse_reconcile_dt(value: object) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _positive_chain_observation_is_recent(value: object) -> bool:
+        observed_at = _parse_reconcile_dt(value)
+        now_dt = _parse_reconcile_dt(now)
+        if observed_at is None or now_dt is None:
+            return False
+        age_seconds = (now_dt - observed_at).total_seconds()
+        return 0.0 <= age_seconds <= _CONFIRMED_CHAIN_ABSENCE_RECENT_POSITIVE_SECONDS
+
+    def _payload_has_positive_chain_observation(payload_json: str) -> bool:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            return False
+        if str(payload.get("chain_state") or "") not in {"", "synced"}:
+            return False
+        for key in ("chain_shares_after", "chain_shares", "shares_after", "shares"):
+            if _positive_decimal(payload.get(key)):
+                return True
+        return False
+
+    def _recent_positive_chain_observation(position: Position) -> tuple[bool, str, str]:
+        """Return whether recent positive chain evidence should veto absence quarantine.
+
+        A non-empty chain snapshot that omits one token is not proof that a
+        recently observed, venue-confirmed position is gone. Treating that case
+        as terminal quarantine removed live exposure from monitor/redecision.
+        """
+        runtime_seen_at = getattr(position, "chain_verified_at", "") or ""
+        if (
+            _positive_decimal(getattr(position, "chain_shares", None))
+            and runtime_seen_at
+            and _positive_chain_observation_is_recent(runtime_seen_at)
+        ):
+            return (True, str(runtime_seen_at), "runtime_chain_verified_at")
+        if conn is not None:
+            position_id = str(getattr(position, "trade_id", "") or "")
+            if position_id:
+                try:
+                    row = conn.execute(
+                        """
+                        SELECT chain_shares, chain_seen_at
+                          FROM position_current
+                         WHERE position_id = ?
+                        """,
+                        (position_id,),
+                    ).fetchone()
+                except Exception:
+                    row = None
+                if row is not None:
+                    chain_shares = row["chain_shares"] if hasattr(row, "keys") else row[0]
+                    chain_seen_at = row["chain_seen_at"] if hasattr(row, "keys") else row[1]
+                    if (
+                        _positive_decimal(chain_shares)
+                        and chain_seen_at
+                        and _positive_chain_observation_is_recent(chain_seen_at)
+                    ):
+                        return (True, str(chain_seen_at), "position_current.chain_seen_at")
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT occurred_at, payload_json
+                          FROM position_events
+                         WHERE position_id = ?
+                           AND event_type IN ('CHAIN_SYNCED', 'CHAIN_SIZE_CORRECTED')
+                         ORDER BY occurred_at DESC, sequence_no DESC
+                         LIMIT 8
+                        """,
+                        (position_id,),
+                    ).fetchall()
+                except Exception:
+                    rows = []
+                for event_row in rows:
+                    occurred_at = event_row["occurred_at"] if hasattr(event_row, "keys") else event_row[0]
+                    payload_json = event_row["payload_json"] if hasattr(event_row, "keys") else event_row[1]
+                    if (
+                        _positive_chain_observation_is_recent(occurred_at)
+                        and _payload_has_positive_chain_observation(str(payload_json or ""))
+                    ):
+                        return (True, str(occurred_at), "position_events.positive_chain_observation")
+        return (False, "", "")
+
+    def _defer_confirmed_chain_absence_when_recently_observed(
+        position: Position,
+        *,
+        token_id: str,
+        source: str,
+    ) -> bool:
+        recent, observed_at, basis = _recent_positive_chain_observation(position)
+        if not recent:
+            return False
+        position.last_chain_absence_observed_at = now
+        stats["confirmed_chain_absence_recent_positive_deferred"] = (
+            stats.get("confirmed_chain_absence_recent_positive_deferred", 0) + 1
+        )
+        logger.warning(
+            "CONFIRMED_POSITION_CHAIN_ABSENCE_DEFERRED: trade_id=%s token=%s "
+            "source=%s basis=%s observed_at=%s; preserving monitorable exposure",
+            getattr(position, "trade_id", "?"),
+            token_id,
+            source,
+            basis,
+            observed_at,
+        )
+        return True
+
+    def _preserve_confirmed_fill_chain_absence_conflict(
         position: Position,
         *,
         token_id: str,
@@ -1041,36 +1200,49 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     ) -> None:
         corrected = replace(position)
         corrected.state = LifecycleState.QUARANTINED.value
-        corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+        corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+        if not _positive_decimal(getattr(corrected, "chain_shares", None)):
+            corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
+        if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
+            corrected.chain_avg_price = float(getattr(corrected, "entry_price", 0.0) or 0.0)
+        if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
+            corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
+        corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
         corrected.last_chain_absence_observed_at = now
         corrected.quarantined_at = corrected.quarantined_at or now
         logger.error(
-            "CONFIRMED_POSITION_CHAIN_ABSENT: trade_id=%s token=%s source=%s; "
-            "quarantining for attribution instead of phantom void",
+            "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT: trade_id=%s token=%s source=%s; "
+            "preserving live monitorable exposure for attribution instead of marking no-risk absent",
             getattr(position, "trade_id", "?"),
             token_id,
             source,
         )
         if _append_canonical_review_required(
             corrected,
-            reason=CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ):
             stats["review_required_persisted"] = (
                 stats.get("review_required_persisted", 0) + 1
             )
         position.state = corrected.state
         position.chain_state = corrected.chain_state
+        position.chain_shares = corrected.chain_shares
+        position.chain_avg_price = corrected.chain_avg_price
+        position.chain_cost_basis_usd = corrected.chain_cost_basis_usd
+        position.fill_authority = corrected.fill_authority
+        position.exit_reason = corrected.exit_reason
         position.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
         position.quarantined_at = corrected.quarantined_at
         stats["quarantined"] += 1
-        stats["confirmed_chain_absence_quarantined"] = (
-            stats.get("confirmed_chain_absence_quarantined", 0) + 1
+        stats["confirmed_fill_chain_absence_conflict_preserved"] = (
+            stats.get("confirmed_fill_chain_absence_conflict_preserved", 0) + 1
         )
 
-    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
+    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> str:
         if conn is None:
-            return
-        from src.state.db import record_token_suppression
+            return "global"
+        from src.state.db import chain_only_entry_block_scope, record_token_suppression
 
         try:
             result = record_token_suppression(
@@ -1095,6 +1267,249 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             raise RuntimeError(
                 f"chain-only quarantine fact write failed for {token_id}: {result}"
             )
+        return chain_only_entry_block_scope(
+            conn,
+            condition_id=str(getattr(chain, "condition_id", "") or ""),
+        )
+
+    def _held_token_id(position: Position) -> str:
+        direction = getattr(position, "direction", "")
+        direction = getattr(direction, "value", direction)
+        if str(direction) == "buy_no":
+            return str(getattr(position, "no_token_id", "") or "")
+        return str(getattr(position, "token_id", "") or "")
+
+    def _chain_observed_cost(chain: ChainPosition) -> float:
+        try:
+            cost = float(getattr(chain, "cost", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        if cost > 0.0:
+            return cost
+        try:
+            return float(chain.size) * float(chain.avg_price or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _restore_terminal_chain_exposure_if_available(
+        token_id: str,
+        chain: ChainPosition,
+    ) -> bool:
+        candidates: list[Position] = []
+        chain_condition_id = str(getattr(chain, "condition_id", "") or "")
+        for position in portfolio.positions:
+            if _held_token_id(position) != token_id:
+                continue
+            state_value = getattr(position.state, "value", position.state)
+            if str(state_value) == "economically_closed":
+                continue
+            if str(state_value) not in INACTIVE_RUNTIME_STATES:
+                continue
+            if (
+                chain_condition_id
+                and str(getattr(position, "condition_id", "") or "")
+                and str(getattr(position, "condition_id", "") or "") != chain_condition_id
+            ):
+                continue
+            candidates.append(position)
+        if not candidates:
+            return False
+        restored = sorted(
+            candidates,
+            key=lambda p: (
+                str(getattr(p, "entered_at", "") or ""),
+                str(getattr(p, "order_posted_at", "") or ""),
+                str(getattr(p, "trade_id", "") or ""),
+            ),
+            reverse=True,
+        )[0]
+        cost = _chain_observed_cost(chain)
+        restored.state = LifecycleState.QUARANTINED.value
+        restored.chain_state = "entry_authority_quarantined"
+        restored.chain_shares = float(chain.size)
+        restored.chain_avg_price = float(getattr(chain, "avg_price", 0.0) or 0.0)
+        restored.chain_cost_basis_usd = cost
+        restored.chain_verified_at = now
+        restored.quarantined_at = restored.quarantined_at or now
+        restored.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+        restored.recovery_authority = "balance_only"
+        restored.shares = float(chain.size)
+        restored.cost_basis_usd = cost
+        restored.size_usd = cost
+        if restored.entry_price <= 0.0:
+            restored.entry_price = float(getattr(chain, "avg_price", 0.0) or 0.0)
+        if chain_condition_id and not str(getattr(restored, "condition_id", "") or ""):
+            restored.condition_id = chain_condition_id
+        restored.order_status = "filled"
+        restored.exit_state = ""
+        restored.exit_reason = ""
+        if _append_canonical_review_required(
+            restored,
+            reason="chain_held_after_terminal_projection",
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        stats["terminal_chain_exposure_restored"] = (
+            stats.get("terminal_chain_exposure_restored", 0) + 1
+        )
+        stats["quarantined"] += 1
+        return True
+
+    def _attached_schemas() -> set[str]:
+        if conn is None:
+            return set()
+        try:
+            return {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        except Exception:
+            return {"main"}
+
+    def _table_exists(schema: str, table: str) -> bool:
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None
+
+    def _ensure_forecasts_attached() -> None:
+        if conn is None:
+            return
+        if "forecasts" in _attached_schemas():
+            return
+        try:
+            from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except Exception:
+            return
+
+    def _chain_market_metadata(token_id: str, chain: ChainPosition) -> dict[str, object] | None:
+        if conn is None:
+            return None
+        _ensure_forecasts_attached()
+        schemas = _attached_schemas()
+        for schema in ("forecasts", "world", "main"):
+            if schema not in schemas or not _table_exists(schema, "market_events"):
+                continue
+            cols = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA {schema}.table_info(market_events)").fetchall()
+            }
+            metric_expr = (
+                "temperature_metric"
+                if "temperature_metric" in cols
+                else (
+                    "CASE WHEN lower(market_slug) LIKE '%lowest-temperature%' "
+                    "THEN 'low' ELSE 'high' END"
+                )
+            )
+            query = f"""
+                SELECT city, target_date, {metric_expr} AS temperature_metric,
+                       market_slug, range_label, token_id, condition_id
+                  FROM {schema}.market_events
+                 WHERE (
+                        NULLIF(condition_id, '') = NULLIF(?, '')
+                     OR NULLIF(token_id, '') = NULLIF(?, '')
+                 )
+                 ORDER BY CASE WHEN token_id = ? THEN 0 ELSE 1 END
+                 LIMIT 1
+            """
+            try:
+                row = conn.execute(
+                    query,
+                    (
+                        str(getattr(chain, "condition_id", "") or ""),
+                        token_id,
+                        token_id,
+                    ),
+                ).fetchone()
+            except Exception:
+                continue
+            if row is None:
+                continue
+            try:
+                row_token = str(row["token_id"] or "")
+            except Exception:
+                row_token = str(row[5] or "")
+            direction = "buy_yes" if row_token == token_id else "buy_no"
+            return {
+                "city": row["city"],
+                "target_date": row["target_date"],
+                "temperature_metric": row["temperature_metric"],
+                "market_slug": row["market_slug"],
+                "bin_label": row["range_label"],
+                "yes_token_id": row_token,
+                "condition_id": row["condition_id"] or getattr(chain, "condition_id", ""),
+                "direction": direction,
+            }
+        return None
+
+    def _materialize_chain_only_position_if_resolvable(
+        token_id: str,
+        chain: ChainPosition,
+    ) -> bool:
+        metadata = _chain_market_metadata(token_id, chain)
+        if metadata is None:
+            return False
+        cost = _chain_observed_cost(chain)
+        direction = str(metadata["direction"])
+        yes_token_id = str(metadata.get("yes_token_id") or "")
+        position = Position(
+            trade_id=f"chain-only-{token_id[-16:]}",
+            market_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or token_id),
+            city=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
+            cluster=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
+            target_date=str(metadata.get("target_date") or ""),
+            bin_label=str(metadata.get("bin_label") or ""),
+            direction=direction,
+            unit="C" if "°C" in str(metadata.get("bin_label") or "") else "F",
+            temperature_metric=str(metadata.get("temperature_metric") or "high"),
+            env="live",
+            size_usd=cost,
+            entry_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+            p_posterior=0.0,
+            shares=float(chain.size),
+            cost_basis_usd=cost,
+            entered_at=now,
+            entered_at_authority="reconstructed_from_chain",
+            entry_method="chain_only_reconciliation",
+            strategy_key="chain_only_reconciliation",
+            strategy="chain_only_reconciliation",
+            edge_source="chain_only_quarantine",
+            discovery_mode="chain_reconciliation",
+            state=LifecycleState.QUARANTINED.value,
+            order_status="filled",
+            chain_state="entry_authority_quarantined",
+            chain_shares=float(chain.size),
+            chain_avg_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+            chain_cost_basis_usd=cost,
+            chain_verified_at=now,
+            token_id=yes_token_id if direction == "buy_no" else token_id,
+            no_token_id=token_id if direction == "buy_no" else "",
+            condition_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or ""),
+            quarantined_at=now,
+            fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+            market_slug=str(metadata.get("market_slug") or ""),
+        )
+        position.recovery_authority = "balance_only"
+        if _append_canonical_review_required(
+            position,
+            reason="chain_only_canonical_quarantine",
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        portfolio.positions.append(position)
+        stats["chain_only_canonical_quarantine_materialized"] = (
+            stats.get("chain_only_canonical_quarantine_materialized", 0) + 1
+        )
+        stats["quarantined"] += 1
+        return True
 
     # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
     # reconcile() is only called when the chain API responded (cycle_runtime.py
@@ -1202,7 +1617,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         # Void using the existing PHANTOM_NOT_ON_CHAIN state (no new enum).
         if pos.trade_id in phantom_set:
             if _has_confirmed_entry_authority(pos):
-                _quarantine_confirmed_chain_absence(
+                if _defer_confirmed_chain_absence_when_recently_observed(
+                    pos,
+                    token_id=tid,
+                    source="aggregate_allocation",
+                ):
+                    continue
+                _preserve_confirmed_fill_chain_absence_conflict(
                     pos,
                     token_id=tid,
                     source="aggregate_allocation",
@@ -1238,6 +1659,56 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         elif state_name not in INACTIVE_RUNTIME_STATES:
             local_tokens.add(tid)
 
+        if (
+            state_name == LifecyclePhase.VOIDED.value
+            and str(getattr(pos, "exit_reason", "") or "") == "PHANTOM_NOT_ON_CHAIN"
+            and (
+                _positive_decimal(getattr(pos, "chain_shares", None))
+                or _positive_decimal(getattr(pos, "shares", None))
+            )
+            and _has_confirmed_entry_authority(pos)
+        ):
+            corrected = replace(pos)
+            corrected.state = LifecycleState.QUARANTINED.value
+            corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+            if not _positive_decimal(getattr(corrected, "chain_shares", None)):
+                corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
+            if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
+                corrected.chain_avg_price = float(getattr(corrected, "entry_price", 0.0) or 0.0)
+            if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
+                corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
+            corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
+            corrected.last_chain_absence_observed_at = (
+                getattr(corrected, "last_chain_absence_observed_at", "") or now
+            )
+            corrected.quarantined_at = corrected.quarantined_at or now
+            if _append_canonical_review_required(
+                corrected,
+                reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+            ):
+                stats["false_phantom_void_positive_exposure_restored"] = (
+                    stats.get("false_phantom_void_positive_exposure_restored", 0) + 1
+                )
+                stats["review_required_persisted"] = (
+                    stats.get("review_required_persisted", 0) + 1
+                )
+            else:
+                stats["false_phantom_void_positive_exposure_runtime_restored"] = (
+                    stats.get("false_phantom_void_positive_exposure_runtime_restored", 0) + 1
+                )
+            pos.state = corrected.state
+            pos.chain_state = corrected.chain_state
+            pos.chain_shares = corrected.chain_shares
+            pos.chain_avg_price = corrected.chain_avg_price
+            pos.chain_cost_basis_usd = corrected.chain_cost_basis_usd
+            pos.fill_authority = corrected.fill_authority
+            pos.exit_reason = corrected.exit_reason
+            pos.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
+            pos.quarantined_at = corrected.quarantined_at
+            stats["quarantined"] += 1
+            continue
+
         if pos.state in INACTIVE_RUNTIME_STATES:
             state_name = getattr(pos.state, "value", pos.state)
             key = f"skipped_{state_name}"
@@ -1268,7 +1739,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             rescued.chain_shares = chain.size
             rescued.chain_verified_at = now
             rescued.condition_id = rescued.condition_id or chain.condition_id
-            # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain
+            # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain
             # aggregate always lands on chain_* fields, regardless of rescue
             # authority. This is the canonical home for venue-observed
             # economics; the legacy `entry_price` / `cost_basis_usd` /
@@ -1442,7 +1913,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
                 continue
             if _has_confirmed_entry_authority(pos):
-                _quarantine_confirmed_chain_absence(
+                if _defer_confirmed_chain_absence_when_recently_observed(
+                    pos,
+                    token_id=tid,
+                    source="per_position_missing_token",
+                ):
+                    continue
+                _preserve_confirmed_fill_chain_absence_conflict(
                     pos,
                     token_id=tid,
                     source="per_position_missing_token",
@@ -1606,6 +2083,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if tid in ignored:
             continue  # Token was explicitly acknowledged/resolved or redeemed/expired — don't resurrect
         if tid not in local_tokens:
+            if _restore_terminal_chain_exposure_if_available(tid, chain):
+                local_tokens.add(tid)
+                continue
+            if _materialize_chain_only_position_if_resolvable(tid, chain):
+                local_tokens.add(tid)
+                continue
             logger.warning(
                 "QUARANTINE EXCLUDED FROM CANONICAL MIGRATION: chain token %s...%s not in portfolio; pending future governance design",
                 tid[:8],
@@ -1618,7 +2101,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # unchanged. portfolio.chain_only_facts carries the in-memory
             # review-queue signal that cycle gates consult alongside
             # portfolio.positions during the migration window.
-            _persist_chain_only_quarantine_fact(tid, chain)
+            entry_block_scope = _persist_chain_only_quarantine_fact(tid, chain)
             portfolio.chain_only_facts.append(
                 ChainOnlyFact(
                     token_id=tid,
@@ -1628,6 +2111,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     cost_basis=float(chain.cost or (chain.size * (chain.avg_price or 0.0))),
                     first_seen_at=now,
                     last_seen_at=now,
+                    entry_block_scope=entry_block_scope,
                 )
             )
             stats["quarantined"] += 1
@@ -1649,7 +2133,8 @@ def quarantine_resolution_reason(chain_state: str) -> str:
 def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     """Expire quarantined positions after 48 hours.
 
-    Expired positions become eligible for exit evaluation.
+    Expired positions remain non-entry-block-cleared, but become eligible for
+    explicit monitor/admin resolution with QUARANTINE_EXPIRED_REVIEW_REQUIRED.
     Returns: number of positions expired.
     """
     now = datetime.now(timezone.utc)
@@ -1659,9 +2144,9 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         if pos.chain_state != "quarantined":
             continue
         if not pos.quarantined_at:
-            # No timestamp at all — treat as maximally stale, force expiry
+            # No timestamp at all — treat as maximally stale, force admin review.
             logger.warning(
-                "QUARANTINE MISSING TIMESTAMP: %s — forcing exit evaluation",
+                "QUARANTINE MISSING TIMESTAMP: %s — forcing admin resolution",
                 pos.trade_id,
             )
             pos.chain_state = "quarantine_expired"
@@ -1674,7 +2159,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
             )
         except ValueError:
             logger.warning(
-                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing exit evaluation",
+                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing admin resolution",
                 pos.trade_id, pos.quarantined_at,
             )
             pos.chain_state = "quarantine_expired"
@@ -1684,7 +2169,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         hours_quarantined = (now - quarantined_dt).total_seconds() / 3600
         if hours_quarantined > QUARANTINE_TIMEOUT_HOURS:
             logger.warning(
-                "QUARANTINE EXPIRED: %s held for %.0fh — forcing exit evaluation",
+                "QUARANTINE EXPIRED: %s held for %.0fh — forcing admin resolution",
                 pos.trade_id, hours_quarantined,
             )
             pos.chain_state = "quarantine_expired"
@@ -1694,27 +2179,28 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     # escalation consumer. Chain-only inventory is NOT a local Position, so the
     # position "exit evaluation" above does not apply — there is nothing to
     # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h
-    # window and is surfaced here for operator attention; `blocks_entry` remains
-    # True until the operator RESOLVES the suppression row. Prior to this, the
-    # 48h ChainOnlyFact lifecycle the README references had no consumer beyond
-    # the entry gate. Read-only escalation (the fact's review_state is derived);
-    # resolution is operator-driven via the suppression row.
+    # window and is surfaced here for operator attention. Expiry is not current
+    # chain truth and must not freeze unrelated entries forever. Prior to this,
+    # the 48h ChainOnlyFact lifecycle the README references had no consumer
+    # beyond the entry gate. Read-only escalation (the fact's review_state is
+    # derived); resolution is operator-driven via the suppression row.
     for fact in getattr(portfolio, "chain_only_facts", None) or []:
-        if not getattr(fact, "blocks_entry", True):
+        review_state = getattr(getattr(fact, "review_state", None), "value", None)
+        if review_state == "resolved":
             continue  # RESOLVED — nothing to escalate
         first_seen = str(getattr(fact, "first_seen_at", "") or "")
         try:
             seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
         except ValueError:
             logger.warning(
-                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (entry blocked)",
+                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (fresh entry blocked)",
                 getattr(fact, "token_id", "?"), first_seen,
             )
             continue
         hours_seen = (now - seen_dt).total_seconds() / 3600
         if hours_seen > CHAIN_ONLY_REVIEW_WINDOW_HOURS:
             logger.warning(
-                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry remains blocked)",
+                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry no longer globally blocked by this stale fact)",
                 getattr(fact, "token_id", "?"),
                 hours_seen,
                 getattr(getattr(fact, "review_state", None), "value", "?"),

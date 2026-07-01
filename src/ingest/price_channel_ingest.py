@@ -34,12 +34,16 @@ WHY IT LIVES HERE (and NOT in src.main) — system_decomposition_plan §4.2/§9:
 
 THE DURABLE FILL BRIDGE IS THE PERSISTED TRUTH (system_decomposition_plan §8 Step 3):
   ``_edli_durable_fill_bridge_scan`` re-derives the bridge work set from the persisted
-  ``edli_live_order_events`` on EVERY cycle, so NO fill is lost across the conceptual
-  cutover from "WS thread in src.main" to "WS thread in P3". The order-runtime BOOT
-  recovery (``_edli_boot_fill_bridge_recovery``, which STAYS in src.main) imports THIS
-  same scan helper so a restart on either side heals any orphaned confirmed fill. The
-  scan is the single canonical copy — src.main imports it from here (mirroring the P4
-  pattern ``from src.execution.post_trade_capital import _harvester_cycle``).
+  ``edli_live_order_events`` on EVERY cycle for fills that still have no
+  ``position_current`` row, so NO confirmed fill is lost across the conceptual cutover
+  from "WS thread in src.main" to "WS thread in P3". Already-materialised historical
+  projection repair is an explicit maintenance action, not part of the per-minute live
+  hot path, because it can rewrite old rows and contend with fresh book/substrate writes.
+  The order-runtime BOOT recovery (``_edli_boot_fill_bridge_recovery``, which STAYS in
+  src.main) imports THIS same scan helper so a restart on either side heals any orphaned
+  confirmed fill. The scan is the single canonical copy — src.main imports it from here
+  (mirroring the P4 pattern ``from src.execution.post_trade_capital import
+  _harvester_cycle``).
 
 NO-BACK-COUPLING (system_decomposition_plan §7 I2): P3's trigger is the WS stream + its
   own 1-min reconcile clock. The reactor reads the durable fill bridge; it never signals
@@ -56,6 +60,7 @@ ALL imports are LAZY (inside functions), exactly as the order daemon kept them, 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -82,26 +87,206 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 # process — the two processes write the snapshot table via the same single-writer
 # discipline, and the lock is per-process by construction.)
 _market_substrate_refresh_lock = threading.Lock()
+_held_quote_seed_refresh_lock = threading.Lock()
+_candidate_quote_seed_refresh_lock = threading.Lock()
 
-# Live-execution-mode constants (moved verbatim from src/main.py:83-96) — needed by the
+# Live-execution-mode constants (kept aligned with src/main.py) — needed by the
 # reconcile-runtime gate. Kept LOCAL here so the lane module never imports src.main.
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
     "disabled",
 }
 EDLI_EVENT_DRIVEN_MODES = {
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
 }
 
-MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 15.0
-MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 45.0
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
+MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
+MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
+MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MIN = 128
+MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX = 2048
+MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
+PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
+PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
+PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
+
+
+def _price_channel_clob_timeout(deadline_monotonic: float):
+    """Return a per-request CLOB timeout bounded by the refresh wall-clock budget."""
+
+    remaining = float(deadline_monotonic) - time.monotonic()
+    reserve = PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS
+    if remaining <= reserve:
+        raise TimeoutError(
+            f"price-channel quote refresh budget exhausted before CLOB fetch: "
+            f"remaining_seconds={remaining:.3f}"
+        )
+    budget = max(0.1, remaining - reserve)
+    phase = min(PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS, budget)
+
+    import httpx
+
+    return httpx.Timeout(
+        connect=min(2.0, phase),
+        read=phase,
+        write=min(1.0, phase),
+        pool=min(0.5, phase),
+    )
+
+
+def _budgeted_orderbook_fetchers(clob, *, deadline_monotonic: float):
+    """Wrap CLOB book fetchers so every REST call consumes the caller's budget."""
+
+    def _fetch_orderbook(token_id: str) -> dict:
+        return clob.get_orderbook_snapshot(
+            token_id,
+            timeout=_price_channel_clob_timeout(deadline_monotonic),
+        )
+
+    fetch_many = getattr(clob, "get_orderbook_snapshots", None)
+    if fetch_many is None:
+        return _fetch_orderbook, None
+
+    def _fetch_orderbooks(token_ids: list[str]) -> dict[str, dict]:
+        return fetch_many(
+            token_ids,
+            timeout=_price_channel_clob_timeout(deadline_monotonic),
+        )
+
+    return _fetch_orderbook, _fetch_orderbooks
+
+
+class _PriceChannelWorldTradeWriteGate:
+    """Reusable context manager for one price-channel world+trade write unit."""
+
+    def __init__(self, *, owner: str) -> None:
+        self._owner = owner
+        self._stack: contextlib.ExitStack | None = None
+
+    def __enter__(self):
+        from src.events.triggers.market_channel_ingestor import _world_write_mutex
+        from src.state.write_coordinator import (
+            DBIdentity,
+            default_runtime_write_coordinator,
+        )
+
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(
+                default_runtime_write_coordinator().lease(
+                    (DBIdentity.WORLD, DBIdentity.TRADE),
+                    owner=self._owner,
+                    write_class="live",
+                    deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                )
+            )
+            stack.enter_context(_world_write_mutex())
+        except BaseException:
+            stack.close()
+            raise
+        self._stack = stack
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+        if self._stack is None:
+            return False
+        try:
+            return self._stack.__exit__(exc_type, exc, tb)
+        finally:
+            self._stack = None
+
+
+def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWorldTradeWriteGate:
+    return _PriceChannelWorldTradeWriteGate(owner=owner)
+
+
+def _edli_price_channel_trade_write_context_factory(*, owner: str):
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        )
+
+    return _factory
+
+
+def _rest_quote_refresh_backpressure_result(
+    *,
+    kind: str,
+    started_monotonic: float,
+    budget: float,
+    token_ids: int,
+    token_metadata: int,
+    attempted_tokens: int,
+    extra: dict | None = None,
+) -> dict:
+    elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+    result = {
+        f"{kind}_quote_refresh_events": 0,
+        f"{kind}_quote_refresh_attempted_tokens": 0,
+        "budget_seconds": budget,
+        "elapsed_seconds": elapsed_seconds,
+        "budget_exhausted": False,
+        "budget_skipped_tokens": max(0, int(attempted_tokens)),
+        "skipped": f"price_channel_{kind}_quote_refresh_in_progress",
+        "backpressure": True,
+    }
+    if kind == "held":
+        result.update(
+            {
+                "held_priority_token_ids": int(token_ids),
+                "held_token_metadata": int(token_metadata),
+            }
+        )
+    else:
+        result.update(
+            {
+                "candidate_priority_token_ids": int(token_ids),
+                "candidate_token_metadata": int(token_metadata),
+            }
+        )
+    if extra:
+        result.update(extra)
+    return result
+
+
+def _price_channel_quote_refresh_failed(
+    result: dict,
+    *,
+    token_key: str,
+    event_key: str,
+) -> tuple[bool, str | None]:
+    """Return business-health failure for quote refresh that made no coverage progress."""
+
+    token_count = int(result.get(token_key) or 0)
+    events = int(result.get(event_key) or 0)
+    skipped_tokens = int(result.get("budget_skipped_tokens") or 0)
+    if token_count <= 0:
+        return False, None
+    if result.get("backpressure"):
+        return True, str(result.get("write_backpressure_reason") or result.get("skipped") or "quote_refresh_backpressure")
+    if skipped_tokens > 0:
+        if events > 0:
+            return True, "quote_refresh_partial_coverage"
+        return True, "quote_refresh_budget_exhausted_no_coverage"
+    if result.get("budget_exhausted") and events <= 0:
+        return True, "quote_refresh_budget_exhausted_no_coverage"
+    if events > 0:
+        return False, None
+    skipped = str(result.get("skipped") or "")
+    if skipped:
+        return True, skipped
+    return False, None
+
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
 USER_CHANNEL_REQUIRED_ENV_VARS = (
@@ -171,6 +356,16 @@ def _edli_bounded_positive_float(
     if value <= 0:
         value = default
     return max(0.001, min(value, maximum))
+
+
+def _edli_quote_refresh_max_tokens(
+    config: dict,
+    key: str,
+    *,
+    default: int,
+    maximum: int = 128,
+) -> int:
+    return _edli_bounded_positive_int(config, key, default=default, maximum=maximum)
 
 
 def _row_get(row, key: str):
@@ -736,7 +931,7 @@ def _edli_durable_fill_bridge_scan(
     *,
     now=None,
     limit: int = 500,
-    already_bridged_repair_limit: int = 50,
+    already_bridged_repair_limit: int = 0,
 ) -> int:
     """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
 
@@ -763,6 +958,11 @@ def _edli_durable_fill_bridge_scan(
     projection. The absence filter below ALSO skips already-bridged aggregates so
     a healthy daemon does no redundant work.
 
+    Already-bridged repair is opt-in via ``already_bridged_repair_limit``. The
+    per-minute live cycle must stay focused on fresh/orphaned fills; repeatedly
+    repairing historical projections can hold the trade DB writer and starve the
+    substrate/redecision snapshot path.
+
     INV-37 / transaction ownership: reads ``edli_live_order_events`` and writes
     ``position_current`` / ``position_events`` ON THE SAME connection ``conn``
     (in production a trade connection with ``world`` ATTACHed). Performs NO
@@ -783,6 +983,7 @@ def _edli_durable_fill_bridge_scan(
         _market_is_settled,
         _quarantine_aggregate,
         _record_settled_disposition,
+        _venue_command_row_for_execution_command_id,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
         get_fill_bridge_disposition,
@@ -816,6 +1017,80 @@ def _edli_durable_fill_bridge_scan(
             raise ValueError(f"unexpected EDLI events table: {table!r}")
 
         candidate_rows = conn.execute(sql).fetchall()
+        incomplete_open_position_ids: set[str] = set()
+        command_position_by_aggregate: dict[str, str] = {}
+        try:
+            incomplete_rows = conn.execute(
+                """
+                SELECT position_id
+                  FROM position_current
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND (
+                        p_posterior IS NULL
+                     OR p_posterior <= 0.0
+                     OR entry_method IS NULL
+                     OR entry_method = ''
+                     OR entry_method = 'ens_member_counting'
+                   )
+                """
+            ).fetchall()
+            incomplete_open_position_ids = {
+                str(_row_get(r, "position_id"))
+                for r in incomplete_rows
+                if _row_get(r, "position_id")
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI durable fill-bridge scan: incomplete projection query failed "
+                "(non-fatal; normal scan continues): %s",
+                exc,
+            )
+        try:
+            command_rows = conn.execute(
+                f"""
+                WITH command_events AS (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+                      FROM {table}
+                     WHERE event_type = 'ExecutionCommandCreated'
+                       AND json_extract(payload_json, '$.execution_command_id') IS NOT NULL
+                )
+                SELECT ce.aggregate_id, vc.position_id
+                  FROM command_events ce
+                  JOIN venue_commands vc
+                    ON vc.command_id = ce.execution_command_id
+                    OR vc.decision_id = ce.execution_command_id
+                  JOIN position_current pc
+                    ON pc.position_id = vc.position_id
+                 WHERE vc.position_id IS NOT NULL
+                   AND vc.position_id != ''
+                """
+            ).fetchall()
+            command_position_by_aggregate = {
+                str(_row_get(r, "aggregate_id")): str(_row_get(r, "position_id"))
+                for r in command_rows
+                if _row_get(r, "aggregate_id") and _row_get(r, "position_id")
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI durable fill-bridge scan: command-linked position query failed "
+                "(non-fatal; hash/legacy scan continues): %s",
+                exc,
+            )
+        if incomplete_open_position_ids:
+            candidate_rows.sort(
+                key=lambda r: (
+                    0
+                    if edli_bridge_position_id(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    or edli_bridge_position_id_legacy(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    or command_position_by_aggregate.get(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    else 1,
+                    str(_row_get(r, "aggregate_id")),
+                )
+            )
     except Exception as exc:  # noqa: BLE001
         # Missing table / attach (e.g. a degraded boot) must not crash the
         # caller — the EDLI events persist and the next cycle retries.
@@ -829,7 +1104,8 @@ def _edli_durable_fill_bridge_scan(
 
     bridged = 0
     new_fills_seen = 0
-    already_bridged_repairs_seen = 0
+    already_bridged_link_sync_seen = 0
+    already_bridged_repairs_attempted = 0
     for row in candidate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
@@ -841,7 +1117,7 @@ def _edli_durable_fill_bridge_scan(
         legacy_position_id = edli_bridge_position_id_legacy(aggregate_id)
         existing = conn.execute(
             """
-            SELECT position_id
+            SELECT position_id, p_posterior, entry_method
               FROM position_current
              WHERE position_id IN (?, ?)
              ORDER BY CASE WHEN position_id = ? THEN 0 ELSE 1 END
@@ -849,10 +1125,40 @@ def _edli_durable_fill_bridge_scan(
             """,
             (position_id, legacy_position_id, position_id),
         ).fetchone()
+        if existing is None:
+            command_position_id = command_position_by_aggregate.get(aggregate_id)
+            if command_position_id:
+                existing = conn.execute(
+                    """
+                    SELECT position_id, p_posterior, entry_method
+                      FROM position_current
+                     WHERE position_id = ?
+                     LIMIT 1
+                    """,
+                    (command_position_id,),
+                ).fetchone()
+            else:
+                events_for_command = _aggregate_event_rows(conn, aggregate_id)
+                command = _latest_payload(events_for_command, "ExecutionCommandCreated") or {}
+                command_row = _venue_command_row_for_execution_command_id(
+                    conn,
+                    str(command.get("execution_command_id") or ""),
+                )
+                command_position_id = str(_row_get(command_row, "position_id") or "")
+                if command_position_id:
+                    existing = conn.execute(
+                        """
+                        SELECT position_id, p_posterior, entry_method
+                          FROM position_current
+                         WHERE position_id = ?
+                         LIMIT 1
+                        """,
+                        (command_position_id,),
+                    ).fetchone()
         if existing is not None:
             existing_position_id = str(_row_get(existing, "position_id"))
-            if already_bridged_repairs_seen < max(0, already_bridged_repair_limit):
-                already_bridged_repairs_seen += 1
+            if already_bridged_link_sync_seen < max(0, already_bridged_repair_limit):
+                already_bridged_link_sync_seen += 1
                 try:
                     sync_venue_command_position_link_for_edli_fill(
                         conn,
@@ -864,6 +1170,42 @@ def _edli_durable_fill_bridge_scan(
                     logger.warning(
                         "EDLI durable fill-bridge: command position-link sync failed "
                         "for already-bridged aggregate=%s position_id=%s: %s",
+                        aggregate_id,
+                        existing_position_id,
+                        exc,
+                    )
+            try:
+                p_posterior = float(_row_get(existing, "p_posterior") or 0.0)
+            except (TypeError, ValueError):
+                p_posterior = 0.0
+            entry_method = str(_row_get(existing, "entry_method") or "")
+            incomplete_projection = (
+                p_posterior <= 0.0 or entry_method in {"", "ens_member_counting"}
+            )
+            if (
+                incomplete_projection
+                and already_bridged_repairs_attempted
+                < max(0, already_bridged_repair_limit)
+            ):
+                already_bridged_repairs_attempted += 1
+                try:
+                    result = materialize_position_current_from_edli_fill(
+                        conn, aggregate_id, now=now
+                    )
+                    if result is not None:
+                        logger.warning(
+                            "EDLI durable fill-bridge: REPAIRED incomplete bridged fill "
+                            "aggregate=%s -> position_id=%s p_posterior_was=%s "
+                            "entry_method_was=%s",
+                            aggregate_id,
+                            result.get("position_id"),
+                            p_posterior,
+                            entry_method,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "EDLI durable fill-bridge: incomplete bridged fill repair failed "
+                        "for aggregate=%s position_id=%s: %s",
                         aggregate_id,
                         existing_position_id,
                         exc,
@@ -968,10 +1310,7 @@ def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
         return False
     if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
         return True
-    return (
-        _live_execution_mode(edli_cfg) == "edli_shadow_no_submit"
-        and _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED")
-    )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1328,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
     market-channel data remains quote evidence only.
     """
     from src.observability.scheduler_health import _write_scheduler_health
-    from src.state.db import get_world_connection
+    from src.state.db import get_trade_connection_with_world_required
 
     edli_cfg = _settings_section("edli_v1", {})
     if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
@@ -1017,7 +1356,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
         pending_user_channel_inbox_messages,
     )
 
-    conn = get_world_connection(write_class="live")
+    conn = get_trade_connection_with_world_required(write_class="live")
     try:
         ledger = LiveOrderAggregateLedger(conn)
         user_channel_reader = _edli_user_channel_reader(edli_cfg)
@@ -1221,7 +1560,7 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
     return filtered
 
 
-def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
+def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> list[str]:
     """Tokens the EDLI reactor has recently decided on — the candidate universe.
 
     These are the YES/NO tokens of opportunity families the reactor actually
@@ -1241,31 +1580,44 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     """
 
     if world_conn is None:
-        return set()
+        return []
     try:
         has_table = world_conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
         ).fetchone()
     except Exception:
-        return set()
+        return []
     if not has_table:
-        return set()
+        return []
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    requested_limit = max(1, int(limit or 1))
+    scan_rows = min(
+        max(
+            MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MIN,
+            requested_limit * 16,
+        ),
+        MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX,
+    )
     try:
         rows = world_conn.execute(
             """
-            SELECT DISTINCT token_id
-            FROM no_trade_regret_events
-            WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
-              AND created_at >= ?
-            ORDER BY created_at DESC
-            LIMIT ?
+            SELECT token_id, created_at
+              FROM no_trade_regret_events
+             WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
+               AND created_at >= ?
+             ORDER BY rowid DESC
+             LIMIT ?
             """,
-            (cutoff, int(limit)),
+            (cutoff, scan_rows),
         ).fetchall()
     except Exception:
-        return set()
-    return {str(r[0]) for r in rows if r and r[0]}
+        return []
+    ordered_rows = sorted(
+        enumerate(rows),
+        key=lambda item: (str(item[1][1] or ""), -int(item[0])),
+        reverse=True,
+    )
+    return list(dict.fromkeys(str(row[0]) for _, row in ordered_rows if row and row[0]))[:requested_limit]
 
 
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
@@ -1282,12 +1634,43 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     if not has_table:
         return set()
     try:
+        columns = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        if not {"phase", "token_id", "no_token_id"}.issubset(columns):
+            return set()
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        chain_placeholders = ",".join("?" for _ in chain_state_values)
+        open_phase_clause = "phase IN ('pending_entry','active','day0_window','pending_exit')"
+        exposure_clause = open_phase_clause
+        params: tuple[object, ...] = ()
+        if "chain_shares" in columns and "chain_state" in columns:
+            exposure_clause = (
+                f"({open_phase_clause} OR ("
+                "phase IN ('quarantined','voided') "
+                f"AND COALESCE(chain_state, '') IN ({chain_placeholders}) "
+                "AND COALESCE(chain_shares, 0) > ?"
+                "))"
+            )
+            params = (*chain_state_values, 0.000001)
+        elif "chain_shares" in columns:
+            exposure_clause = (
+                f"({open_phase_clause} OR ("
+                "phase IN ('quarantined','voided') "
+                "AND COALESCE(chain_shares, 0) > ?"
+                "))"
+            )
+            params = (0.000001,)
         rows = trade_conn.execute(
-            """
+            f"""
             SELECT token_id, no_token_id
               FROM position_current
-             WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
-            """
+             WHERE {exposure_clause}
+            """,
+            params,
         ).fetchall()
     except Exception:
         return set()
@@ -1300,15 +1683,72 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     return tokens
 
 
+def _edli_open_rest_priority_token_ids(trade_conn) -> set[str]:
+    """Selected tokens for live entry commands that still need rest/reprice evidence."""
+
+    if trade_conn is None:
+        return set()
+    try:
+        has_table = trade_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='venue_commands'"
+        ).fetchone()
+    except Exception:
+        return set()
+    if not has_table:
+        return set()
+    try:
+        columns = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+    except Exception:
+        return set()
+    required = {"token_id", "intent_kind", "state"}
+    if not required <= columns:
+        return set()
+    open_states = {
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "ACKED",
+        "PARTIAL",
+    }
+    placeholders = ",".join("?" for _ in open_states)
+    try:
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT token_id
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND state IN ({placeholders})
+               AND token_id IS NOT NULL
+               AND token_id != ''
+            """,
+            tuple(sorted(open_states)),
+        ).fetchall()
+    except Exception:
+        return set()
+    tokens = {str(row[0] or "").strip() for row in rows}
+    tokens.discard("")
+    tokens.discard("None")
+    return tokens
+
+
 def _edli_order_token_ids_by_feasibility_age(
     trade_conn,
-    token_ids: set[str],
+    token_ids,
 ) -> list[str]:
     """Oldest/missing quote evidence first for bounded held-position refreshes."""
 
-    tokens = sorted({str(token_id) for token_id in token_ids if str(token_id or "").strip()})
+    if isinstance(token_ids, (set, frozenset)):
+        raw_tokens = sorted(str(token_id) for token_id in token_ids if str(token_id or "").strip())
+    else:
+        raw_tokens = [str(token_id) for token_id in token_ids if str(token_id or "").strip()]
+    tokens = list(dict.fromkeys(raw_tokens))
     if not tokens:
         return []
+    priority_index = {token: idx for idx, token in enumerate(tokens)}
     try:
         has_table = trade_conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
@@ -1317,27 +1757,50 @@ def _edli_order_token_ids_by_feasibility_age(
         return tokens
     if not has_table:
         return tokens
-    latest_by_token: dict[str, str | None] = {}
-    for token in tokens:
-        try:
-            row = trade_conn.execute(
-                """
-                SELECT created_at
-                  FROM execution_feasibility_evidence
-                 WHERE token_id = ?
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                """,
-                (token,),
-            ).fetchone()
-        except Exception:
-            return tokens
-        latest_by_token[token] = str(row[0]) if row and row[0] else None
+    latest_by_token: dict[str, str | None] = {token: None for token in tokens}
+
+    def _created_by_token_from(table: str, subset: list[str]) -> dict[str, str]:
+        if not subset:
+            return {}
+        placeholders = ",".join("?" for _ in subset)
+        rows = trade_conn.execute(
+            f"""
+            SELECT token_id, MAX(created_at) AS created_at
+              FROM {table}
+             WHERE token_id IN ({placeholders})
+             GROUP BY token_id
+            """,
+            tuple(subset),
+        ).fetchall()
+        return {
+            str(row[0]): str(row[1])
+            for row in rows
+            if row and row[0] is not None and row[1] is not None
+        }
+
+    try:
+        if _edli_table_exists(trade_conn, "execution_feasibility_latest"):
+            latest_by_token.update(
+                _created_by_token_from("execution_feasibility_latest", tokens)
+            )
+        missing_from_latest = [
+            token for token in tokens if latest_by_token.get(token) is None
+        ]
+        if missing_from_latest:
+            latest_by_token.update(
+                _created_by_token_from(
+                    "execution_feasibility_evidence",
+                    missing_from_latest,
+                )
+            )
+    except Exception:
+        return tokens
     return sorted(
         tokens,
         key=lambda token: (
             latest_by_token.get(token) is not None,
             latest_by_token.get(token) or "",
+            priority_index[token],
             token,
         ),
     )
@@ -1346,27 +1809,443 @@ def _edli_order_token_ids_by_feasibility_age(
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
-    candidate_priority_token_ids: set[str],
+    open_rest_priority_token_ids: set[str] | None = None,
+    candidate_priority_token_ids,
 ) -> set[str]:
     """REST-seed tokens that must be fresh before the broad market universe.
 
     Open exposure owns the strictest freshness SLA: monitor/redecision/exit can
-    act only when held-position quote evidence is current. Candidate tokens still
-    stay pinned in the subscribed universe, but seeding a large candidate set
-    before held tokens lets open exposure age past preflight/redecision limits.
-    When there is no open exposure, fall back to candidate seeding so entry
-    witness rows are still warmed promptly.
+    act only when held-position quote evidence is current. Resting entry orders
+    have the same SLA because cancel/reprice/hold decisions are live money-path
+    actions, not background discovery. Candidate tokens also stay seed-first so
+    the entry witness does not wait behind the broad market universe.
     """
 
     held = {str(token or "").strip() for token in held_priority_token_ids}
     held.discard("")
     held.discard("None")
-    if held:
-        return held
+    open_rest = {str(token or "").strip() for token in (open_rest_priority_token_ids or set())}
+    open_rest.discard("")
+    open_rest.discard("None")
     candidates = {str(token or "").strip() for token in candidate_priority_token_ids}
     candidates.discard("")
     candidates.discard("None")
-    return candidates
+    return held | open_rest | candidates
+
+
+def _edli_schema_prefix(schema: str = "") -> str:
+    clean = str(schema or "").strip()
+    return f"{clean}." if clean else ""
+
+
+def _edli_table_exists(conn, table: str, *, schema: str = "") -> bool:
+    clean_table = str(table or "").strip()
+    if not clean_table:
+        return False
+    master = f"{_edli_schema_prefix(schema)}sqlite_master"
+    try:
+        return (
+            conn.execute(
+                f"SELECT 1 FROM {master} WHERE type='table' AND name=?",
+                (clean_table,),
+            ).fetchone()
+            is not None
+        )
+    except Exception:
+        return False
+
+
+def _edli_quote_event_token_ids(events) -> set[str]:
+    tokens: set[str] = set()
+    for event in events or ():
+        if getattr(event, "event_type", "") not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            continue
+        try:
+            payload = json.loads(str(getattr(event, "payload_json", "") or "{}"))
+        except Exception:
+            continue
+        token = str(payload.get("token_id") or "").strip()
+        if token and token != "None":
+            tokens.add(token)
+    return tokens
+
+
+def _edli_money_path_family_keys_for_tokens(
+    trade_conn,
+    forecasts_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    """Resolve quote token ids to live money-path families.
+
+    Price-channel events are token-keyed cache facts; EDLI decisions are
+    family-keyed forecast events. This bridge intentionally admits only tokens
+    that already belong to held exposure, resting entry commands, or the active
+    weather topology. It never turns arbitrary market noise into reactor work.
+    """
+
+    tokens = {
+        str(token or "").strip()
+        for token in (token_ids or set())
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not tokens:
+        return set()
+
+    families: set[tuple[str, str, str]] = set()
+    trade_prefix = _edli_schema_prefix(trade_schema)
+    placeholders = ",".join("?" for _ in tokens)
+
+    if _edli_table_exists(trade_conn, "position_current", schema=trade_schema):
+        try:
+            rows = trade_conn.execute(
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM {trade_prefix}position_current
+                 WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+                   AND (
+                        token_id IN ({placeholders})
+                     OR no_token_id IN ({placeholders})
+                   )
+                   AND city IS NOT NULL AND TRIM(city) != ''
+                   AND target_date IS NOT NULL AND TRIM(target_date) != ''
+                   AND temperature_metric IN ('high', 'low')
+                """,
+                (*tuple(tokens), *tuple(tokens)),
+            ).fetchall()
+            for row in rows:
+                families.add((str(row[0]), str(row[1]), str(row[2])))
+        except Exception:
+            pass
+
+    condition_ids: set[str] = set()
+    if _edli_table_exists(trade_conn, "executable_market_snapshots", schema=trade_schema):
+        try:
+            rows = trade_conn.execute(
+                f"""
+                SELECT DISTINCT condition_id
+                  FROM {trade_prefix}executable_market_snapshots
+                 WHERE selected_outcome_token_id IN ({placeholders})
+                    OR yes_token_id IN ({placeholders})
+                    OR no_token_id IN ({placeholders})
+                """,
+                (*tuple(tokens), *tuple(tokens), *tuple(tokens)),
+            ).fetchall()
+            condition_ids.update(str(row[0] or "").strip() for row in rows)
+        except Exception:
+            pass
+    condition_ids.discard("")
+    condition_ids.discard("None")
+
+    if condition_ids and _edli_table_exists(forecasts_conn, "market_events"):
+        cond_placeholders = ",".join("?" for _ in condition_ids)
+        try:
+            rows = forecasts_conn.execute(
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE condition_id IN ({cond_placeholders})
+                   AND city IS NOT NULL AND TRIM(city) != ''
+                   AND target_date IS NOT NULL AND TRIM(target_date) != ''
+                   AND temperature_metric IN ('high', 'low')
+                """,
+                tuple(condition_ids),
+            ).fetchall()
+            for row in rows:
+                families.add((str(row[0]), str(row[1]), str(row[2])))
+        except Exception:
+            pass
+
+    return {
+        (city.strip(), target_date.strip(), metric.strip())
+        for city, target_date, metric in families
+        if city.strip() and target_date.strip() and metric.strip() in {"high", "low"}
+    }
+
+
+def _edli_held_family_keys_for_tokens(
+    trade_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    tokens = {
+        str(token or "").strip()
+        for token in (token_ids or set())
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not tokens or not _edli_table_exists(trade_conn, "position_current", schema=trade_schema):
+        return set()
+    trade_prefix = _edli_schema_prefix(trade_schema)
+    placeholders = ",".join("?" for _ in tokens)
+    try:
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+              FROM {trade_prefix}position_current
+             WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+               AND (
+                    token_id IN ({placeholders})
+                 OR no_token_id IN ({placeholders})
+               )
+               AND city IS NOT NULL AND TRIM(city) != ''
+               AND target_date IS NOT NULL AND TRIM(target_date) != ''
+               AND temperature_metric IN ('high', 'low')
+            """,
+            (*tuple(tokens), *tuple(tokens)),
+        ).fetchall()
+    except Exception:
+        return set()
+    return {
+        (str(row[0]).strip(), str(row[1]).strip(), str(row[2]).strip())
+        for row in rows
+        if str(row[0]).strip() and str(row[1]).strip() and str(row[2]).strip() in {"high", "low"}
+    }
+
+
+def _edli_screened_entry_family_keys_for_price_channel(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    """Entry families whose current quote tick still clears the live screen.
+
+    The price-channel sidecar is a quote-evidence producer, not a trading
+    authority. A non-held family may enter Tier-0 redecision only after the same
+    continuous entry screen proves current q_lcb, fresh executable price, spine
+    inputs, and recent full-economics backoff all allow it. Held families are
+    handled separately because open exposure itself is money-path evidence.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in (families or set())
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return set()
+    try:
+        from src.events.continuous_redecision import (
+            _all_latest_beliefs,
+            filter_redecisions_with_spine_members,
+            screen_entry_redecisions,
+            screened_family_keys,
+        )
+    except Exception:
+        return set()
+    decision_iso = decision_time.astimezone(timezone.utc).isoformat()
+    try:
+        beliefs = [
+            belief
+            for belief in _all_latest_beliefs(world_conn, decision_time=decision_iso)
+            if (
+                str(belief.city or "").strip(),
+                str(belief.target_date or "").strip(),
+                str(belief.metric or "").strip(),
+            )
+            in clean_families
+        ]
+    except Exception:
+        return set()
+    if not beliefs:
+        return set()
+
+    screen_trade_conn = trade_conn
+    close_trade_conn = False
+    if trade_schema:
+        try:
+            from src.state.db import get_trade_connection_read_only
+
+            screen_trade_conn = get_trade_connection_read_only()
+            close_trade_conn = True
+        except Exception:
+            return set()
+    try:
+        redecisions = screen_entry_redecisions(
+            world_conn,
+            screen_trade_conn,
+            decision_time=decision_iso,
+            min_edge=0.01,
+            acted_state=None,
+            beliefs=beliefs,
+        )
+    except Exception:
+        return set()
+    finally:
+        if close_trade_conn:
+            try:
+                screen_trade_conn.close()
+            except Exception:
+                pass
+    if not redecisions:
+        return set()
+    try:
+        redecisions = filter_redecisions_with_spine_members(
+            forecasts_conn,
+            redecisions,
+            beliefs=beliefs,
+            decision_time=decision_iso,
+        )
+        return screened_family_keys(world_conn, redecisions, beliefs=beliefs)
+    except Exception:
+        return set()
+
+
+def _edli_pending_redecision_entity_keys(world_conn) -> set[str]:
+    if not (
+        _edli_table_exists(world_conn, "opportunity_events")
+        and _edli_table_exists(world_conn, "opportunity_event_processing")
+    ):
+        return set()
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.entity_key
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE e.event_type = 'EDLI_REDECISION_PENDING'
+               AND p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status IN ('pending','processing')
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+
+def _edli_redecision_event_with_origin(event, origin: str):
+    from src.events.opportunity_event import make_opportunity_event
+
+    try:
+        payload = json.loads(str(event.payload_json or "{}"))
+        if not isinstance(payload, dict):
+            return event
+        payload["redecision_origin"] = str(origin)
+        return make_opportunity_event(
+            event_type=event.event_type,
+            entity_key=event.entity_key,
+            source=event.source,
+            observed_at=event.observed_at,
+            available_at=event.available_at,
+            received_at=event.received_at,
+            causal_snapshot_id=event.causal_snapshot_id,
+            payload=payload,
+            priority=event.priority,
+            expires_at=event.expires_at,
+            created_at=event.created_at,
+        )
+    except Exception:
+        return event
+
+
+def _edli_emit_price_channel_redecisions_for_events(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    events,
+    *,
+    received_at: str,
+    trade_schema: str = "",
+) -> int:
+    """Emit EDLI_REDECISION_PENDING for money-path quote changes.
+
+    The raw market-channel events stay cache-only/ignored. This function derives
+    the family-level decision trigger from successfully persisted quote evidence,
+    so live orders and positions re-enter the normal forecast decision path on
+    price movement without letting the entire market-data stream flood reactor
+    priority lanes.
+    """
+
+    tokens = _edli_quote_event_token_ids(events)
+    families = _edli_money_path_family_keys_for_tokens(
+        trade_conn,
+        forecasts_conn,
+        tokens,
+        trade_schema=trade_schema,
+    )
+    try:
+        decision_time = datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
+        if decision_time.tzinfo is None:
+            decision_time = decision_time.replace(tzinfo=timezone.utc)
+        decision_time = decision_time.astimezone(timezone.utc)
+    except Exception:
+        decision_time = datetime.now(timezone.utc)
+    held_families = _edli_held_family_keys_for_tokens(
+        trade_conn,
+        tokens,
+        trade_schema=trade_schema,
+    )
+    entry_families = _edli_screened_entry_family_keys_for_price_channel(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        set(families) - set(held_families),
+        decision_time=decision_time,
+        trade_schema=trade_schema,
+    )
+    families = held_families | entry_families
+    if not families:
+        return 0
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+
+    writer = EventWriter(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        writer,
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+    events_to_emit = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=decision_time,
+        received_at=decision_time.isoformat(),
+        limit=None,
+        source=f"market_channel_price:{decision_time.isoformat()}",
+        already_pending_keys=_edli_pending_redecision_entity_keys(world_conn),
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families=families,
+    )
+    emitted = writer.write_many(
+        [_edli_redecision_event_with_origin(event, "market_price") for event in events_to_emit]
+    )
+    return sum(1 for result in emitted if result.inserted)
+
+
+def _edli_price_channel_redecision_sink(world_with_trades_conn, *, trade_schema: str = "trades"):
+    """Build a market-event sink bound to the attached world+trades connection."""
+
+    def _sink(events) -> None:
+        from src.state.db import get_forecasts_connection_read_only
+
+        forecasts_conn = get_forecasts_connection_read_only()
+        try:
+            emitted = _edli_emit_price_channel_redecisions_for_events(
+                world_with_trades_conn,
+                world_with_trades_conn,
+                forecasts_conn,
+                events,
+                received_at=datetime.now(timezone.utc).isoformat(),
+                trade_schema=trade_schema,
+            )
+        finally:
+            forecasts_conn.close()
+        if emitted:
+            logger.info(
+                "EDLI market-channel price trigger emitted redecision events=%d quote_events=%d",
+                emitted,
+                len(events),
+            )
+
+    return _sink
 
 
 def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
@@ -1411,10 +2290,9 @@ def _edli_refresh_held_position_quote_evidence(
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
-        _world_write_mutex,
         active_weather_token_metadata_for_tokens,
     )
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import get_trade_connection
 
     edli_cfg = _settings_section("edli_v1", {})
     budget = max(
@@ -1442,9 +2320,15 @@ def _edli_refresh_held_position_quote_evidence(
             trade_read,
             held_token_ids,
         )
+        max_tokens = _edli_quote_refresh_max_tokens(
+            edli_cfg,
+            "market_channel_held_quote_refresh_max_tokens_per_cycle",
+            default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
+        )
+        selected_held_token_ids = ordered_held_token_ids[:max_tokens]
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=ordered_held_token_ids,
+            token_ids=selected_held_token_ids,
         )
     finally:
         trade_read.close()
@@ -1452,36 +2336,61 @@ def _edli_refresh_held_position_quote_evidence(
     if not token_metadata:
         return {
             "held_priority_token_ids": len(held_token_ids),
+            "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_held_token_ids) - len(selected_held_token_ids),
+            ),
             "held_quote_refresh_events": 0,
             "skipped": "no_held_token_metadata",
         }
 
-    # INV-37 (PR415 B5, 2026-06-20): write the world event (opportunity_events) AND
-    # the trade-owned book witness (execution_feasibility_evidence) through ONE
-    # connection with a SINGLE atomic commit, never two independent connections
-    # committed separately. world.db is MAIN (so the EventStore's unqualified
-    # opportunity_events + its sqlite_master guard resolve to the real world log)
-    # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
-    # insert reaches the runtime-read trades table, never the world shadow). A single
-    # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
-    # same INV-37 atomic-commit shape the EDLI position bridge uses.
+    # Quote/book refresh writes trade-owned execution_feasibility_evidence and may
+    # synchronously emit derived EDLI_REDECISION_PENDING world events. Raw
+    # BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED cache facts are intentionally not persisted
+    # to opportunity_events; keeping them there was write amplification, not
+    # decision truth. The attached connection still keeps the trade witness and any
+    # derived world event on one commit boundary.
     from src.state.db import get_world_connection_with_trades_required
 
     ordered_metadata_tokens = [
-        token_id for token_id in ordered_held_token_ids if token_id in token_metadata
+        token_id for token_id in selected_held_token_ids if token_id in token_metadata
     ]
 
-    # The single ATTACHed connection preserves the atomic world-event +
-    # trades.feasibility commit. Do not use the flocked context here: REST book
-    # fetches happen inside seed_rest_books_in_chunks before each DB chunk write,
-    # and holding cross-process trade/world writer flocks across those network
-    # calls starves live redecision's executable snapshot refresh.
-    conn = get_world_connection_with_trades_required(write_class="live")
+    rest_seed_acquired = _held_quote_seed_refresh_lock.acquire(blocking=False)
+    if not rest_seed_acquired:
+        return _rest_quote_refresh_backpressure_result(
+            kind="held",
+            started_monotonic=started_monotonic,
+            budget=budget,
+            token_ids=len(held_token_ids),
+            token_metadata=len(token_metadata),
+            attempted_tokens=len(ordered_metadata_tokens),
+            extra={
+                "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+                "held_quote_refresh_deferred_tokens": max(
+                    0,
+                    len(ordered_held_token_ids) - len(selected_held_token_ids),
+                ),
+            },
+        )
+
+    # Do not use the flocked context here: REST book fetches happen inside
+    # seed_rest_books_in_chunks before each DB chunk write, and holding
+    # cross-process trade/world writer flocks across those network calls starves
+    # live redecision's executable snapshot refresh.
+    conn = None
     try:
+        conn = get_world_connection_with_trades_required(write_class="live")
+
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
         with PolymarketClient() as clob:
+            fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
+                clob,
+                deadline_monotonic=deadline,
+            )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
                     EventWriter(conn),
@@ -1490,35 +2399,54 @@ def _edli_refresh_held_position_quote_evidence(
                     feasibility_conn=conn,
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
+                    market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
-                fetch_orderbook=clob.get_orderbook_snapshot,
+                fetch_orderbook=fetch_orderbook,
+                fetch_orderbooks=fetch_orderbooks,
             )
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_world_write_mutex(),
+                world_mutex=_edli_price_channel_world_trade_write_gate(
+                    owner="price_channel_held_quote_refresh"
+                ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
+                chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
-        return {
+        result = {
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
+            "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_held_token_ids) - len(selected_held_token_ids),
+            ),
             "held_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+        if service.rest_seed_backpressure_count:
+            result["backpressure"] = True
+            result["write_backpressure_count"] = service.rest_seed_backpressure_count
+            result["write_backpressure_reason"] = service.rest_seed_backpressure_reason
+        return result
     finally:
-        conn.close()
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            _held_quote_seed_refresh_lock.release()
 
 
 def _edli_refresh_candidate_priority_quote_evidence(
     *,
-    limit: int = 128,
+    limit: int = 32,
     budget_seconds: float = MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
 ) -> dict:
     """Refresh executable quote evidence for recently selected candidate tokens.
@@ -1535,7 +2463,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
-        _world_write_mutex,
         active_weather_token_metadata_for_tokens,
     )
     from src.state.db import get_trade_connection, get_world_connection
@@ -1549,42 +2476,106 @@ def _edli_refresh_candidate_priority_quote_evidence(
     finally:
         world_read.close()
     started_monotonic = time.monotonic()
-    budget = max(0.001, float(budget_seconds))
-    deadline = started_monotonic + budget
-    if not candidate_token_ids:
-        return {"candidate_priority_token_ids": 0, "candidate_quote_refresh_events": 0}
-
+    requested_budget = max(0.001, float(budget_seconds))
     trade_read = get_trade_connection(write_class=None)
     try:
+        held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+        open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
+        priority_token_ids = list(
+            dict.fromkeys(
+                list(sorted(open_rest_token_ids))
+                + [str(token) for token in candidate_token_ids if str(token or "").strip()]
+            )
+        )
+        if not priority_token_ids:
+            return {
+                "candidate_priority_token_ids": 0,
+                "open_rest_priority_token_ids": 0,
+                "candidate_quote_refresh_events": 0,
+            }
+        ordered_candidate_token_ids = _edli_order_token_ids_by_feasibility_age(
+            trade_read,
+            priority_token_ids,
+        )
+        max_tokens = _edli_quote_refresh_max_tokens(
+            _settings_section("edli_v1", {}),
+            "market_channel_candidate_quote_refresh_max_tokens_per_cycle",
+            default=MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
+        )
+        selected_candidate_token_ids = ordered_candidate_token_ids[:max_tokens]
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=candidate_token_ids,
+            token_ids=selected_candidate_token_ids,
         )
     finally:
         trade_read.close()
+    held_priority_count = len(held_token_ids)
+    # Held exposure has its own independent edli_held_quote_refresh job. Do not
+    # steal candidate/redecision refresh budget just because a position exists;
+    # that starves entry and repricing quote evidence whenever the book is wide.
+    budget = requested_budget
+    deadline = started_monotonic + budget
 
     if not token_metadata:
         return {
             "candidate_priority_token_ids": len(candidate_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_token_ids),
+            "held_priority_token_ids": held_priority_count,
+            "quote_priority_token_ids": len(priority_token_ids),
+            "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+            "candidate_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+            ),
             "candidate_quote_refresh_events": 0,
             "skipped": "no_candidate_token_metadata",
         }
 
-    # INV-37 (PR415 B5, 2026-06-20): single connection + single atomic commit for the
-    # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
-    # for the full rationale + the shadow-table hazard this world-MAIN + ATTACHed
-    # 'trades' + schema-qualified-feasibility shape avoids).
+    # Same attached-connection shape as held refresh: quote evidence lands in
+    # trades.execution_feasibility_evidence, while only derived redecision events
+    # touch world.opportunity_events.
     from src.state.db import get_world_connection_with_trades_required
 
     # Same lock discipline as held-position refresh: one world-main connection
     # with trades attached, but no cross-process writer flock held across REST
-    # fetches. Each seed chunk still commits atomically on this single connection.
-    conn = get_world_connection_with_trades_required(write_class="live")
+    # fetches. Each seed chunk still commits on this single attached connection.
+    ordered_metadata_tokens = [
+        token_id for token_id in selected_candidate_token_ids if token_id in token_metadata
+    ]
+    rest_seed_acquired = _candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    if not rest_seed_acquired:
+        return _rest_quote_refresh_backpressure_result(
+            kind="candidate",
+            started_monotonic=started_monotonic,
+            budget=budget,
+            token_ids=len(candidate_token_ids),
+            token_metadata=len(token_metadata),
+            attempted_tokens=len(ordered_metadata_tokens),
+            extra={
+                "open_rest_priority_token_ids": len(open_rest_token_ids),
+                "quote_priority_token_ids": len(priority_token_ids),
+                "held_priority_token_ids": held_priority_count,
+                "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+                "candidate_quote_refresh_deferred_tokens": max(
+                    0,
+                    len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+                ),
+                "budget_seconds": budget,
+            },
+        )
+
+    conn = None
     try:
+        conn = get_world_connection_with_trades_required(write_class="live")
+
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
         with PolymarketClient() as clob:
+            fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
+                clob,
+                deadline_monotonic=deadline,
+            )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
                     EventWriter(conn),
@@ -1593,28 +2584,53 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     feasibility_conn=conn,
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
+                    market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
-                fetch_orderbook=clob.get_orderbook_snapshot,
+                fetch_orderbook=fetch_orderbook,
+                fetch_orderbooks=fetch_orderbooks,
             )
             written = service.seed_rest_books_in_chunks(
-                token_ids=set(token_metadata),
+                token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_world_write_mutex(),
+                world_mutex=_edli_price_channel_world_trade_write_gate(
+                    owner="price_channel_candidate_quote_refresh"
+                ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
+                chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
-        return {
+        result = {
             "candidate_priority_token_ids": len(candidate_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_token_ids),
+            "held_priority_token_ids": held_priority_count,
+            "quote_priority_token_ids": len(priority_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
+            "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+            "candidate_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+            ),
+            "candidate_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
+            "requested_budget_seconds": requested_budget,
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
+            "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+        if service.rest_seed_backpressure_count:
+            result["backpressure"] = True
+            result["write_backpressure_count"] = service.rest_seed_backpressure_count
+            result["write_backpressure_reason"] = service.rest_seed_backpressure_reason
+        return result
     finally:
-        conn.close()
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            _candidate_quote_seed_refresh_lock.release()
 
 
 def _edli_held_quote_refresh_cycle() -> dict:
@@ -1637,15 +2653,24 @@ def _edli_held_quote_refresh_cycle() -> dict:
             reason=f"{type(exc).__name__}: {exc}",
         )
         raise
+    failed, reason = _price_channel_quote_refresh_failed(
+        result,
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+    if failed:
+        result["scheduler_failed"] = True
+        result["scheduler_failure_reason"] = reason or "held_quote_refresh_no_coverage"
     _write_scheduler_health(
         "edli_held_quote_refresh",
-        failed=False,
+        failed=failed,
+        reason=reason,
         extra=result,
     )
     return result
 
 
-def _edli_market_channel_ingestor_cycle() -> None:
+def _edli_market_channel_ingestor_cycle() -> dict | None:
     """EDLI market-channel online data-service bootstrap.
 
     This daemon-side job discovers active weather tokens and prepares the public
@@ -1663,7 +2688,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
             limit=_edli_bounded_positive_int(
                 edli_cfg,
                 "market_channel_candidate_priority_max_tokens",
-                default=128,
+                default=32,
                 maximum=1000,
             ),
             budget_seconds=_edli_bounded_positive_float(
@@ -1673,18 +2698,33 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 maximum=120.0,
             ),
         )
+        candidate_failed, candidate_reason = _price_channel_quote_refresh_failed(
+            candidate_refresh,
+            token_key="candidate_token_metadata",
+            event_key="candidate_quote_refresh_events",
+        )
+        if candidate_failed:
+            candidate_refresh["scheduler_failed"] = True
+            candidate_refresh["scheduler_failure_reason"] = (
+                candidate_reason or "candidate_quote_refresh_no_coverage"
+            )
+        health = {
+            "thread": "alive",
+            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "fill_authority": "user_channel_or_reconcile_only",
+            "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
+            "candidate_quote_refresh": candidate_refresh,
+        }
+        if candidate_failed:
+            health["scheduler_failed"] = True
+            health["scheduler_failure_reason"] = candidate_reason or "candidate_quote_refresh_no_coverage"
         _write_scheduler_health(
             "edli_market_channel_ingestor",
-            failed=False,
-            extra={
-                "thread": "alive",
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-                "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
-                "candidate_quote_refresh": candidate_refresh,
-            },
+            failed=candidate_failed,
+            reason=candidate_reason,
+            extra=health,
         )
-        return
+        return health
 
     from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_for_tokens
     from src.state.db import get_trade_connection, get_world_connection
@@ -1693,13 +2733,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
     # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
     # evidence row before the pre-submit witness reads it. The full latest-per-market
     # universe is captured up to the cap; candidates are never dropped by the cap.
-    candidate_priority_token_ids: set[str] = set()
+    candidate_priority_token_ids: list[str] = []
     world_read = get_world_connection(write_class=None)
     try:
         candidate_priority_limit = _edli_bounded_positive_int(
             edli_cfg,
             "market_channel_candidate_priority_max_tokens",
-            default=128,
+            default=32,
             maximum=1000,
         )
         candidate_priority_token_ids = _edli_candidate_priority_token_ids(
@@ -1715,10 +2755,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
     trade_conn = get_trade_connection(write_class=None)
     try:
         held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
+        open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
         priority_token_ids = set(candidate_priority_token_ids)
         priority_token_ids.update(held_priority_token_ids)
+        priority_token_ids.update(open_rest_priority_token_ids)
         seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
             held_priority_token_ids=held_priority_token_ids,
+            open_rest_priority_token_ids=open_rest_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
         token_metadata = active_weather_token_metadata_for_tokens(
@@ -1730,20 +2773,22 @@ def _edli_market_channel_ingestor_cycle() -> None:
         trade_conn.close()
 
     if not token_ids:
+        health = {
+            "active_weather_token_ids": 0,
+            "priority_token_ids": len(priority_token_ids),
+            "held_priority_token_ids": len(held_priority_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+            "seed_first_token_ids": len(seed_first_token_ids),
+            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "fill_authority": "user_channel_or_reconcile_only",
+            "skipped": "no_priority_token_metadata",
+        }
         _write_scheduler_health(
             "edli_market_channel_ingestor",
             failed=False,
-            extra={
-                "active_weather_token_ids": 0,
-                "priority_token_ids": len(priority_token_ids),
-                "held_priority_token_ids": len(held_priority_token_ids),
-                "seed_first_token_ids": len(seed_first_token_ids),
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-                "skipped": "no_priority_token_metadata",
-            },
+            extra=health,
         )
-        return
+        return health
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient
@@ -1758,17 +2803,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
         )
         from src.state.db import get_world_connection_with_trades_required
 
-        # INV-37 (PR415 B5, 2026-06-20): the long-lived market-channel ingestor writes
-        # the world event (opportunity_events) AND the trade-owned feasibility witness
-        # (execution_feasibility_evidence) atomically per unit through ONE connection
-        # (world.db MAIN + zeus_trades.db ATTACHed as 'trades'), never two independent
-        # connections committed separately. The NON-flocked helper is used here because
-        # this connection lives for the whole forever-loop — holding cross-DB writer
-        # flocks for that lifetime would starve every other writer; each per-unit
-        # commit is still atomic across both DBs (single connection) and serialized on
-        # zeus-world.db by the world write mutex inside the service loop. The
-        # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
-        # it reaches the runtime-read trades table, never the world shadow.
+        # The long-lived market-channel ingestor writes quote evidence to trades and
+        # derived redecision events to world on one attached connection. It does not
+        # persist raw BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED rows to opportunity_events.
+        # The NON-flocked helper is used here because this connection lives for the
+        # whole forever-loop; holding cross-DB writer flocks for that lifetime would
+        # starve every other writer. Feasibility writes are schema-qualified 'trades'
+        # so they reach the runtime-read trades table, never the world ghost copy.
         conn = get_world_connection_with_trades_required(write_class="live")
         world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
         feasibility_conn = conn
@@ -1783,17 +2824,29 @@ def _edli_market_channel_ingestor_cycle() -> None:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.state.db import get_trade_connection
 
-                trade_conn = get_trade_connection(write_class="live")
-                try:
-                    invalidated = invalidate_executable_snapshots_for_market_channel_action(
-                        trade_conn,
-                        action,
-                        invalidated_at=datetime.now(timezone.utc),
-                    )
-                    if invalidated:
-                        trade_conn.commit()
-                finally:
-                    trade_conn.close()
+                with _edli_price_channel_trade_write_context_factory(
+                    owner="price_channel_snapshot_invalidate"
+                )() as write_lease:
+                    trade_conn = get_trade_connection(write_class="live")
+                    before_changes = int(trade_conn.total_changes)
+                    try:
+                        invalidated = invalidate_executable_snapshots_for_market_channel_action(
+                            trade_conn,
+                            action,
+                            invalidated_at=datetime.now(timezone.utc),
+                        )
+                        if invalidated:
+                            commit_started = time.monotonic()
+                            trade_conn.commit()
+                            write_lease.record_commit(
+                                commit_ms=(time.monotonic() - commit_started) * 1000.0,
+                                rows_changed=max(
+                                    0,
+                                    int(trade_conn.total_changes) - before_changes,
+                                ),
+                            )
+                    finally:
+                        trade_conn.close()
 
             def _refresh_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.data.market_scanner import (
@@ -1801,6 +2854,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
+                from src.data.dual_run_lock import acquire_lock
                 from src.state.db import get_trade_connection
 
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
@@ -1809,9 +2863,18 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         "EDLI market-channel refresh skipped: executable substrate refresh already running"
                     )
                     return
+                process_lock_ctx = acquire_lock("market_substrate_refresh")
+                process_entered = False
+                process_acquired = False
                 trade_conn = None
                 try:
-                    trade_conn = get_trade_connection(write_class="live")
+                    process_acquired = process_lock_ctx.__enter__()
+                    process_entered = True
+                    if not process_acquired:
+                        logger.info(
+                            "EDLI market-channel refresh skipped: cross-process executable substrate refresh already running"
+                        )
+                        return
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -1832,19 +2895,26 @@ def _edli_market_channel_ingestor_cycle() -> None:
                                 action.condition_id,
                             )
                             return
+                    trade_conn = get_trade_connection(write_class="live")
                     summary = refresh_executable_market_substrate_snapshots(
                         trade_conn,
                         **_edli_market_channel_refresh_kwargs(
                             action, markets, clob, datetime.now(timezone.utc)
                         ),
+                        snapshot_write_context_factory=_edli_price_channel_trade_write_context_factory(
+                            owner="price_channel_snapshot_refresh"
+                        ),
                     )
-                    trade_conn.commit()
                 finally:
                     try:
                         if trade_conn is not None:
                             trade_conn.close()
                     finally:
-                        _market_substrate_refresh_lock.release()
+                        try:
+                            if process_entered:
+                                process_lock_ctx.__exit__(None, None, None)
+                        finally:
+                            _market_substrate_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,
@@ -1862,8 +2932,10 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         feasibility_conn=feasibility_conn,
                         feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
+                        market_event_sink=_edli_price_channel_redecision_sink(conn),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
+                    fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
                     invalidate_snapshot=_invalidate_snapshot_action,
                     refresh_snapshot=_refresh_snapshot_action,
                     max_refresh_actions_per_window=_edli_bounded_positive_int(
@@ -1880,6 +2952,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     logger=logger,
                     commit=_commit_event_and_feasibility,
                     rollback=_rollback_event_and_feasibility,
+                    world_mutex=_edli_price_channel_world_trade_write_gate(
+                        owner="price_channel_market_channel"
+                    ),
                 )
         finally:
             conn.close()
@@ -1890,18 +2965,21 @@ def _edli_market_channel_ingestor_cycle() -> None:
         daemon=True,
     )
     _edli_market_channel_thread.start()
+    health = {
+        "active_weather_token_ids": len(token_ids),
+        "priority_token_ids": len(priority_token_ids),
+        "held_priority_token_ids": len(held_priority_token_ids),
+        "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+        "seed_first_token_ids": len(seed_first_token_ids),
+        "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+        "fill_authority": "user_channel_or_reconcile_only",
+        "thread": "started",
+        "rest_seed_status": "polymarket_public_orderbook",
+        "websocket_endpoint": "polymarket_public_market_channel",
+    }
     _write_scheduler_health(
         "edli_market_channel_ingestor",
         failed=False,
-        extra={
-            "active_weather_token_ids": len(token_ids),
-            "priority_token_ids": len(priority_token_ids),
-            "held_priority_token_ids": len(held_priority_token_ids),
-            "seed_first_token_ids": len(seed_first_token_ids),
-            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-            "fill_authority": "user_channel_or_reconcile_only",
-            "thread": "started",
-            "rest_seed_status": "polymarket_public_orderbook",
-            "websocket_endpoint": "polymarket_public_market_channel",
-        },
+        extra=health,
     )
+    return health

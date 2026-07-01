@@ -452,11 +452,11 @@ def _low_live_min_decision_groups() -> int:
 def _calibration_bin_source_fit_enabled() -> bool:
     """Return True when the canonical_v2 bin_source fit flag is ON.
 
-    FIX-1 shadow flag (2026-06-03): gates the correction that makes
+    Canonical bin-source fit switch (2026-06-03): gates the correction that makes
     get_decision_group_count and get_pairs_for_bucket query the SAME
     population (canonical_v2) via CANONICAL_CALIBRATION_PAIR_BIN_SOURCE.
 
-    Flag-OFF  (default): legacy behavior preserved — bin_source_filter
+    Flag-OFF  (default): bin_source_filter
               is passed as None to both calls, which on the live corpus
               (100% canonical_v2 rows) returns 0 pairs → cross-cluster
               Platt borrow.  BYTE-IDENTICAL to pre-fix behavior.
@@ -608,13 +608,12 @@ def get_calibration_authority_result(
     source_id: Optional[str] = None,
     horizon_profile: Optional[str] = None,
 ):
-    """Return a shadow authority envelope for the calibration read path.
+    """Return an authority envelope for the calibration read path.
 
     This intentionally does not replace ``get_calibrator``.  It mirrors the
     requested domain, exposes the served model domain when it can be proven,
-    and marks fallback/legacy routes as non-live in this envelope unless they
-    are exact primary v2 matches.  Live evaluator wiring can consume this later
-    through an explicit governance slice.
+    and marks fallback routes as non-live in this envelope unless they are exact
+    primary v2 matches.
     """
     assert temperature_metric in ("high", "low"), (
         f"Invalid temperature_metric: {temperature_metric!r}"
@@ -756,34 +755,23 @@ def get_calibration_authority_result(
     served_domain = _parse_model_key_domain(model_key)
     n_samples = int(getattr(cal, "n_samples", 0) or 0)
     if served_domain is None:
-        served_domain = requested_domain
-        synthetic_key = (
-            f"legacy_v1:{temperature_metric}:{cluster}:{season}"
-            if temperature_metric == "high"
-            else None
-        )
         return _authority_result_for_calibrator(
             contract_domain=contract_domain,
             requested_domain=requested_domain,
-            served_domain=served_domain if synthetic_key is not None else None,
-            route="LEGACY_HIGH_ONLY" if synthetic_key is not None else "BLOCKED",
-            calibrator_model_key=synthetic_key,
+            served_domain=None,
+            route="BLOCKED",
+            calibrator_model_key=None,
             n_samples=n_samples,
-            block_reasons=("legacy_high_only_shadow_not_live_authorized",)
-            if synthetic_key is not None
-            else ("served_calibration_domain_unproven",),
+            block_reasons=("served_calibration_domain_unproven",),
         )
 
     exact_domain = requested_domain.matches(served_domain)
     route = "PRIMARY_EXACT" if exact_domain else "COMPATIBLE_FALLBACK"
     block_reasons: tuple[str, ...] = ()
     if not exact_domain:
-        block_reasons = (
-            "fallback_shadow_requires_explicit_compatibility_proof",
-            *(
-                f"calibration_domain_mismatch:{field}"
-                for field in requested_domain.mismatch_fields(served_domain)
-            ),
+        block_reasons = tuple(
+            f"calibration_domain_mismatch:{field}"
+            for field in requested_domain.mismatch_fields(served_domain)
         )
     return _authority_result_for_calibrator(
         contract_domain=contract_domain,

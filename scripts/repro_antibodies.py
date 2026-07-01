@@ -52,8 +52,8 @@ from unittest.mock import patch, MagicMock
 # ---------------------------------------------------------------------------
 ZEUS_ROOT = Path(__file__).parent.parent
 DB_PATH = ZEUS_ROOT / "state" / "zeus-world.db"
-STREAK_PATH = ZEUS_ROOT / "state" / "auto_pause_streak.json"
-TOMBSTONE_PATH = ZEUS_ROOT / "state" / "auto_pause_failclosed.tombstone"
+LEGACY_STREAK_PATH = ZEUS_ROOT / "state" / "auto_pause_streak.json"
+LEGACY_TOMBSTONE_PATH = ZEUS_ROOT / "state" / "auto_pause_failclosed.tombstone"
 STDERR_LOG = Path("/tmp/repro_stderr.log")
 
 # Ensure zeus root in sys.path
@@ -95,14 +95,14 @@ def _pre_run_cleanup(pre_ts: str) -> None:
         conn.close()
     print(f"[SETUP]   DB unpause row inserted at {now}")
 
-    for path in (STREAK_PATH, TOMBSTONE_PATH):
+    for path in (LEGACY_STREAK_PATH, LEGACY_TOMBSTONE_PATH):
         if path.exists():
             path.unlink()
-            print(f"[SETUP]   Removed {path.name}")
+            print(f"[SETUP]   Removed legacy {path.name}")
 
 
 def _post_run_cleanup() -> None:
-    """Re-insert unpause row and remove tombstone if test created one."""
+    """Re-insert unpause row and remove legacy pause files if present."""
     print("[CLEANUP] Re-inserting DB unpause row...")
     with db_writer_lock(DB_PATH, WriteClass.BULK):
         conn = sqlite3.connect(str(DB_PATH))
@@ -126,12 +126,12 @@ def _post_run_cleanup() -> None:
         conn.close()
     print(f"[CLEANUP]  DB unpause row inserted at {now}")
 
-    if TOMBSTONE_PATH.exists():
-        TOMBSTONE_PATH.unlink()
-        print("[CLEANUP]  Tombstone removed")
-    if STREAK_PATH.exists():
-        STREAK_PATH.unlink()
-        print("[CLEANUP]  Streak file removed")
+    if LEGACY_TOMBSTONE_PATH.exists():
+        LEGACY_TOMBSTONE_PATH.unlink()
+        print("[CLEANUP]  Legacy tombstone removed")
+    if LEGACY_STREAK_PATH.exists():
+        LEGACY_STREAK_PATH.unlink()
+        print("[CLEANUP]  Legacy streak file removed")
 
 
 @contextmanager
@@ -486,16 +486,16 @@ def main() -> int:
 
 def _build_synthetic_deps(
     *,
-    state_dir: Path,
-    tombstone_present: bool = False,
+    entries_paused: bool = False,
+    risk_level: str = "GREEN",
     heartbeat_summary: dict | None = None,
     ws_gap_summary: dict | None = None,
 ) -> "Any":
     """Build a synthetic RegistryDeps for registry injection tests.
 
-    Uses types.ModuleType stubs for all module fields so no real daemon
-    state is read.  Only the fields relevant to the tested gate are wired;
-    others return CLEAR-safe defaults.
+    Uses module stubs so no real daemon state is read. Only current runtime
+    blocker surfaces are wired; retired/informational probes are not part of
+    EntriesBlockRegistry.
     """
     import types
     import sqlite3
@@ -522,26 +522,10 @@ def _build_synthetic_deps(
         mod.summary = lambda: _ws
         return mod
 
-    def _make_riskguard_mod() -> types.ModuleType:
-        """Returns a stub that makes gate 6 report GREEN (CLEAR)."""
-        from src.riskguard.riskguard import RiskLevel
-        mod = types.ModuleType("riskguard_stub")
-        mod.get_current_level = lambda: RiskLevel.GREEN
-        mod.RiskLevel = RiskLevel
-        return mod
-
-    def _make_rollout_gate_mod() -> types.ModuleType:
-        mod = types.ModuleType("rollout_gate_stub")
-        # evaluate_entry_forecast_rollout_gate: not called in DISCOVERY stage
-        # so a no-op is fine.
-        mod.evaluate_entry_forecast_rollout_gate = lambda *a, **kw: None
-        return mod
-
     # ── In-memory SQLite stub (no real file) ──────────────────────────────
 
     def _make_mem_conn() -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
-        # Minimal schema so gate 3/5 queries don't crash
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS control_overrides_history (
@@ -554,32 +538,68 @@ def _build_synthetic_deps(
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS cycles (id INTEGER, summary_json TEXT, created_at TEXT)
+            CREATE VIEW IF NOT EXISTS control_overrides AS
+            SELECT * FROM control_overrides_history
+            WHERE (override_id, issued_at) IN (
+                SELECT override_id, MAX(issued_at)
+                FROM control_overrides_history
+                GROUP BY override_id
+            )
             """
+        )
+        if entries_paused:
+            conn.execute(
+                """
+                INSERT INTO control_overrides_history
+                    (override_id, target_type, target_key, action_type, value,
+                     issued_by, issued_at, reason, precedence)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "control_plane:global:entries_paused",
+                    "global",
+                    "entries",
+                    "gate",
+                    "true",
+                    "operator",
+                    _now_iso(),
+                    "registry repro",
+                    1,
+                ),
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT NOT NULL,
+                checked_at TEXT,
+                details_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO risk_state (level, checked_at, details_json) VALUES (?, ?, ?)",
+            (risk_level, _now_iso(), "{}"),
         )
         conn.commit()
         return conn
 
     return RegistryDeps(
-        state_dir=state_dir,
         db_connection_factory=_make_mem_conn,
         risk_state_db_connection_factory=_make_mem_conn,
-        riskguard_module=_make_riskguard_mod(),
         heartbeat_module=_make_heartbeat_mod(heartbeat_summary),
         ws_gap_guard_module=_make_ws_gap_mod(ws_gap_summary),
-        rollout_gate_module=_make_rollout_gate_mod(),
-        env={},
     )
 
 
 def verify_registry_catches_gates() -> int:
-    """Verify the registry detects BLOCKING state for 4 representative gate types.
+    """Verify the registry detects BLOCKING state for current runtime blockers.
 
     Scenarios:
-      1. Gate 1 (tombstone present) → BLOCKING
-      2. Gate 9 (heartbeat DEGRADED + allow_submit=False) → BLOCKING
-      3. Gate 10 (ws_gap DISCONNECTED + allow_submit=False) → BLOCKING
-      4. Gate 12 (promotion evidence file absent) → BLOCKING (default state)
+      1. DB entries pause override → BLOCKING
+      2. risk_state RED → BLOCKING
+      3. heartbeat allow_submit=False → BLOCKING
+      4. ws_gap allow_submit=False → BLOCKING
 
     Returns 0 if all assertions pass, 1 if any fails.
     """
@@ -592,32 +612,41 @@ def verify_registry_catches_gates() -> int:
 
     failures: list[str] = []
 
-    # ── 1. Tombstone present → gate 1 CLEAR (retired 2026-05-04 Stage 2) ────
-    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
-        state_dir = Path(tmp)
-        # Create the tombstone file (gate is retired — adapter always returns CLEAR)
-        (state_dir / "auto_pause_failclosed.tombstone").write_text("", encoding="utf-8")
-
-        deps = _build_synthetic_deps(state_dir=state_dir)
+    # ── 1. DB entries pause override → BLOCKING ──────────────────────────────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_"):
+        deps = _build_synthetic_deps(entries_paused=True)
         registry = EntriesBlockRegistry.from_runtime(deps)
         blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
-        b1 = blocks[1]
+        b3 = blocks[3]
 
-        if b1.state == BlockState.CLEAR:
-            print(f"[REGISTRY] Gate 1 (auto_pause_failclosed_tombstone): CLEAR ✓ (retired — tombstone no longer blocks)")
+        if b3.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] DB pause override: BLOCKING ✓ reason={b3.blocking_reason}")
         else:
-            msg = f"Gate 1 expected CLEAR after retirement, got {b1.state.value!r}"
-            print(f"[REGISTRY] Gate 1 FAIL: {msg}")
+            msg = f"DB pause override expected BLOCKING, got {b3.state.value!r}"
+            print(f"[REGISTRY] DB pause override FAIL: {msg}")
             failures.append(msg)
 
-    # ── 2. Heartbeat DEGRADED + allow_submit=False → gate 9 BLOCKING ──────
-    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
-        state_dir = Path(tmp)
+    # ── 2. risk_state RED → BLOCKING ────────────────────────────────────────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_"):
+        deps = _build_synthetic_deps(risk_level="RED")
+        registry = EntriesBlockRegistry.from_runtime(deps)
+        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
+        b6 = blocks[6]
+
+        if b6.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] Risk level RED: BLOCKING ✓ reason={b6.blocking_reason}")
+        else:
+            msg = f"Risk level RED expected BLOCKING, got {b6.state.value!r}"
+            print(f"[REGISTRY] Risk level FAIL: {msg}")
+            failures.append(msg)
+
+    # ── 3. Heartbeat DEGRADED + allow_submit=False → BLOCKING ───────────────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_"):
         hb_summary = {
             "health": "DEGRADED",
             "entry": {"allow_submit": False},
         }
-        deps = _build_synthetic_deps(state_dir=state_dir, heartbeat_summary=hb_summary)
+        deps = _build_synthetic_deps(heartbeat_summary=hb_summary)
         registry = EntriesBlockRegistry.from_runtime(deps)
         blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
         b9 = blocks[9]
@@ -629,15 +658,14 @@ def verify_registry_catches_gates() -> int:
             print(f"[REGISTRY] Gate 9 FAIL: {msg}")
             failures.append(msg)
 
-    # ── 3. WS gap DISCONNECTED + allow_submit=False → gate 10 BLOCKING ────
-    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
-        state_dir = Path(tmp)
+    # ── 4. WS gap DISCONNECTED + allow_submit=False → gate 10 BLOCKING ────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_"):
         ws_summary = {
             "subscription_state": "DISCONNECTED",
             "gap_reason": "not_configured",
             "entry": {"allow_submit": False},
         }
-        deps = _build_synthetic_deps(state_dir=state_dir, ws_gap_summary=ws_summary)
+        deps = _build_synthetic_deps(ws_gap_summary=ws_summary)
         registry = EntriesBlockRegistry.from_runtime(deps)
         blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
         b10 = blocks[10]
@@ -647,22 +675,6 @@ def verify_registry_catches_gates() -> int:
         else:
             msg = f"Gate 10 expected BLOCKING when subscription_state=DISCONNECTED, got {b10.state.value!r}"
             print(f"[REGISTRY] Gate 10 FAIL: {msg}")
-            failures.append(msg)
-
-    # ── 4. Promotion evidence file absent → gate 12 BLOCKING ──────────────
-    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
-        state_dir = Path(tmp)
-        # No evidence file written — that is the default state
-        deps = _build_synthetic_deps(state_dir=state_dir)
-        registry = EntriesBlockRegistry.from_runtime(deps)
-        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
-        b12 = blocks[12]
-
-        if b12.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
-            print(f"[REGISTRY] Gate 12 (entry_forecast_promotion_evidence_file): BLOCKING ✓ reason={b12.blocking_reason}")
-        else:
-            msg = f"Gate 12 expected BLOCKING when evidence file absent, got {b12.state.value!r}"
-            print(f"[REGISTRY] Gate 12 FAIL: {msg}")
             failures.append(msg)
 
     # ── Summary ────────────────────────────────────────────────────────────

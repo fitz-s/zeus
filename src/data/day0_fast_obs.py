@@ -1059,6 +1059,7 @@ class Day0FastObsEmitter:
         received_at: str,
         limit: int = 50,
         day0_is_tradeable: bool = True,
+        family_admission=None,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -1067,10 +1068,9 @@ class Day0FastObsEmitter:
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
 
-        ``day0_is_tradeable`` (default True) flows to the trigger so day0 events
-        emitted under day0_shadow carry the lower PRIORITY_DAY0_SHADOW sub-sort
-        (2026-06-11 anti-starvation; the scope-aware claim tier in fetch_pending
-        is the cross-tier authority).
+        ``day0_is_tradeable`` (default True) flows to the trigger so non-tradeable
+        day0 events carry the lower sub-sort (2026-06-11 anti-starvation; the
+        scope-aware claim tier in fetch_pending is the cross-tier authority).
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
@@ -1091,7 +1091,9 @@ class Day0FastObsEmitter:
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
         trigger = Day0ExtremeUpdatedTrigger(
-            EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+            EventWriter(world_conn),
+            day0_is_tradeable=day0_is_tradeable,
+            family_admission=family_admission,
         )
         emitted = 0
         for city, source, target_date in prefetch.eligible:
@@ -1190,6 +1192,8 @@ class Day0FastObsEmitter:
                         decision_time=decision_time,
                         received_at=received_at,
                     )
+                    if result is None:
+                        continue
                     if result.inserted or result.duplicate:
                         # A PERSISTED live event advances the live memo. `inserted`
                         # is the normal path; `duplicate` is the restart/dedup path

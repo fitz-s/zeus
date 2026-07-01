@@ -32,7 +32,7 @@ from decimal import Decimal
 from typing import Optional, Sequence, Union
 
 from src.analysis.promotion_readiness import ReadinessVerdict, SignalResult
-from src.contracts.evidence_tier import EvidenceTier
+from src.contracts.evidence_tier import EvidenceTier, next_evidence_tier
 from src.contracts.deterministic_edge import DeterministicEdgeDecision, VectorEdgeDecision
 
 
@@ -228,7 +228,7 @@ class DeterministicEdgeVerifier:
 
         # Determine tier_target
         if all_pass and tier_current < self._tier_required_for_live:
-            tier_target = EvidenceTier(min(7, tier_current.value + 1))
+            tier_target = next_evidence_tier(tier_current)
         else:
             tier_target = tier_current
 

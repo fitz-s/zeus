@@ -2,16 +2,15 @@
 # Created: 2026-05-01
 # Last reused/audited: 2026-05-01
 # Authority basis: live-blockers session 2026-05-01 — operator helper to clear
-#                  an active auto_pause without re-arming the rest of the
-#                  system. Sister script of arm_live_mode.sh; runs only step 3.
+#                  an active durable entries_paused override without re-arming
+#                  the rest of the system. Sister script of arm_live_mode.sh.
 #
 # What this script does:
 #   1. Append an 'expire' row to control_overrides_history that sets
 #      effective_until on the latest active row of
 #      override_id='control_plane:global:entries_paused'.
-#   2. Remove state/auto_pause_failclosed.tombstone if present.
-#   3. Remove state/auto_pause_streak.json so the next failure starts a
-#      fresh streak instead of immediately re-tripping the threshold.
+#   2. Remove retired state/auto_pause_failclosed.tombstone if present.
+#   3. Remove retired state/auto_pause_streak.json if present.
 #
 # What this script does NOT do:
 #   - Touch cutover_guard.json or any plist env var.
@@ -49,7 +48,7 @@ conn.close()
 print(f"  override-expire: {result}")
 PY
 
-echo "[expire_auto_pause] step 2/3 — clear tombstone"
+echo "[expire_auto_pause] step 2/3 — clear legacy tombstone"
 TOMBSTONE="state/auto_pause_failclosed.tombstone"
 if [[ -f "$TOMBSTONE" ]]; then
   printf "  removing tombstone "
@@ -60,7 +59,7 @@ else
   echo "  no tombstone present"
 fi
 
-echo "[expire_auto_pause] step 3/3 — clear auto_pause_streak.json"
+echo "[expire_auto_pause] step 3/3 — clear legacy auto_pause_streak.json"
 STREAK="state/auto_pause_streak.json"
 if [[ -f "$STREAK" ]]; then
   echo "  removing $STREAK"
@@ -70,4 +69,4 @@ else
 fi
 
 echo ""
-echo "[expire_auto_pause] DONE — entries should resume on next cycle if no fresh failure occurs."
+echo "[expire_auto_pause] DONE — entries should resume on next cycle if no current runtime blocker remains."

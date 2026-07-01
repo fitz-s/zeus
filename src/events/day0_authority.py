@@ -12,6 +12,18 @@ class Day0AuthorityError(ValueError):
     """Raised when a Day0 observation cannot authorize live hard facts."""
 
 
+DAY0_LIVE_AUTHORITY_MATCHES = {
+    "source_match_status": "MATCH",
+    "local_date_status": "MATCH",
+    "station_match_status": "MATCH",
+    "dst_status": "UNAMBIGUOUS",
+    "metric_match_status": "MATCH",
+    "rounding_status": "MATCH",
+    "source_authorized_status": "AUTHORIZED",
+    "live_authority_status": "live",
+}
+
+
 def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNOWN") -> str:
     """Normalize durable Day0 authority status at read boundaries.
 
@@ -25,6 +37,31 @@ def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNO
     if raw == "NON_LIVE_AUTHORITY":
         return "blocked"
     return raw
+
+
+def day0_live_payload_authority_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Return mismatched live Day0 authority fields for an already-built payload."""
+
+    errors: list[str] = []
+    for field_name, expected in DAY0_LIVE_AUTHORITY_MATCHES.items():
+        observed = payload.get(field_name)
+        if observed in (None, ""):
+            observed_value = ""
+        elif field_name == "live_authority_status":
+            observed_value = normalize_day0_live_authority_status(observed)
+        else:
+            observed_value = str(observed or "").strip()
+        if observed_value != expected:
+            errors.append(f"{field_name}={observed_value or 'missing'}")
+    return tuple(errors)
+
+
+def assert_live_day0_payload_authority(payload: Mapping[str, object]) -> None:
+    """Fail closed unless a payload carries the live Day0 observation authority contract."""
+
+    errors = day0_live_payload_authority_errors(payload)
+    if errors:
+        raise Day0AuthorityError(",".join(errors))
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-14
 # Authority basis: ChatGPT PR#408 review B1 INV-37,
 #   docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md
-#   docs/operations/inv37_harvester_fix_2026-06-14.md
+#   docs/archive/2026-Q2/operations_historical/inv37_harvester_fix_2026-06-14.md
 """INV-37 harvester atomicity fault-injection test (RED-on-revert).
 
 The settlement harvester writes to TWO DB families in a single cycle:

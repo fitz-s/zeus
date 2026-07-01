@@ -6,15 +6,16 @@
 # Reuse: Run via `pytest tests/test_divergence_panic_no_self_trip.py`. Break/
 #   restore probe: swap helper body to abs() — TestProductionFormulaIsAdverseOnly
 #   must fail. Authority: architecture/naming_conventions.yaml freshness_metadata.
-"""Relationship test: entry edge must not self-trip MODEL_DIVERGENCE_PANIC.
+"""Relationship test: divergence telemetry must not revive MODEL_DIVERGENCE_PANIC.
 
 Cross-module invariant:
     A buy_yes position that entered with edge E (p_posterior - p_market = E > 0)
     must NOT trigger MODEL_DIVERGENCE_PANIC on the next monitor cycle when
     p_posterior and p_market are IDENTICAL to entry-time values.
 
-    Conversely, when p_market has risen past p_posterior (model underpriced the
-    outcome; market has run ahead of us), panic MUST fire at the hard threshold.
+    When p_market has risen past p_posterior, the old panic path still must not
+    fire. Real exits require the current evidence gates in Position.evaluate_exit
+    (flash crash, CI-separated reversal, hold-value economics, Day0 hard fact).
 
 This is a relationship test per CLAUDE.md: it verifies the cross-module
 invariant "entry edge and exit panic evaluate directionally consistent functions
@@ -202,17 +203,17 @@ class TestEntryEdgeDoesNotSelfTrip:
 
 
 # ---------------------------------------------------------------------------
-# Case B: genuine adverse overshoot MUST fire panic
+# Case B: adverse overshoot is telemetry, not the removed panic path
 # ---------------------------------------------------------------------------
 
-class TestAdverseOvershotFiresPanic:
+class TestAdverseOvershotDoesNotReviveRemovedPanic:
     """
     When the market has moved past the model (p_market > p_posterior), the
-    model is now the bearish voice and the market is the bullish one. Our
-    YES position is wrong-way. Panic is correct.
+    removed panic path must stay dead. Current exit gates may later exit with
+    stronger evidence, but a bare divergence score is not authority.
     """
 
-    def test_market_above_posterior_exceeds_hard_threshold_fires_panic(self):
+    def test_market_above_posterior_exceeds_hard_threshold_does_not_panic(self):
         """
         p_posterior=0.62, p_market=0.95: divergence = 0.33 >= 0.30 -> PANIC.
         """
@@ -237,14 +238,10 @@ class TestAdverseOvershotFiresPanic:
             best_bid=p_market,
         )
 
-        assert result.should_exit, (
-            "Expected MODEL_DIVERGENCE_PANIC when market has blown past posterior, got should_exit=False"
-        )
-        assert result.trigger == "MODEL_DIVERGENCE_PANIC", (
-            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger!r}"
-        )
+        assert not result.should_exit
+        assert result.trigger != "MODEL_DIVERGENCE_PANIC"
 
-    def test_market_above_posterior_at_soft_threshold_with_adverse_velocity_fires(self):
+    def test_market_above_posterior_at_soft_threshold_with_velocity_does_not_panic(self):
         """
         Soft path: divergence >= 0.20 AND market_velocity_1h <= -0.05.
         p_posterior=0.62, p_market=0.84: divergence = 0.22 >= 0.20.
@@ -270,12 +267,7 @@ class TestAdverseOvershotFiresPanic:
             best_bid=p_market,
         )
 
-        assert result.should_exit, (
-            "Expected MODEL_DIVERGENCE_PANIC (soft path) with adverse velocity, got should_exit=False"
-        )
-        assert result.trigger == "MODEL_DIVERGENCE_PANIC", (
-            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger!r}"
-        )
+        assert result.trigger != "MODEL_DIVERGENCE_PANIC"
 
     def test_market_above_posterior_soft_zone_without_velocity_does_not_fire(self):
         """

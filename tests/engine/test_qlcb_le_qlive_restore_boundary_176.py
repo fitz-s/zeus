@@ -1,6 +1,6 @@
 # Created: 2026-06-04
 # Last reused/audited: 2026-06-08
-# Authority basis: docs/operations/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md R5/#176
+# Authority basis: docs/archive/2026-Q2/operations_historical/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md R5/#176
 #   (lcb>point inversion) + "bin selection.md" §5.6 / §9 Hidden #2/#3 / §12.B.1 +
 #   operator directive 2026-06-08 (S2 single-primary q_lcb from probability samples).
 #

@@ -408,8 +408,8 @@ cutover:
 - `docs/runbooks/live-operation.md`
 - `docs/runbooks/forecast-live-daemon.md`
 - `docs/runbooks/live-phase-1-first-boot.md`
-- `docs/operations/com.zeus.d7-bias.plist`
-- `docs/operations/PLIST_UPDATE_FOR_RELOCK.md`
+- `docs/archive/2026-Q2/operations_historical/com.zeus.d7-bias.plist`
+- `docs/archive/2026-Q2/operations_historical/PLIST_UPDATE_FOR_RELOCK.md`
 - `docs/operations/current_state.md`
 - `docs/operations/current/task.md`
 - `docs/operations/current/package.yaml`
@@ -430,7 +430,6 @@ The local clone should bring:
 - `config/settings.example.json`
 - `state/.gitkeep`
 - `state/README.md`
-- `state/topology_v_next_shadow/.gitkeep`
 
 ### Copy Manually And Intentionally
 

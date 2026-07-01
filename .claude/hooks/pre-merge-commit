@@ -1,1 +1,9 @@
-legacy/pre-merge-contamination-check.sh
+#!/usr/bin/env bash
+# Git pre-merge entrypoint. Delegates to the canonical hook dispatcher.
+
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+PAYLOAD='{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git merge"}}'
+
+echo "$PAYLOAD" | python3 "${REPO_ROOT}/.claude/hooks/dispatch.py" pre_merge_contamination

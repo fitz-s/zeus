@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""Gate 9: heartbeat_supervisor_allow_submit adapter.
+"""Blocker 9: heartbeat_supervisor_allow_submit adapter.
 
 Probes: memory:HeartbeatSupervisor._health (in-process singleton)
         via deps.heartbeat_module.summary()['entry']['allow_submit']
@@ -66,5 +66,5 @@ class HeartbeatHealthAdapter:
                 owner_module="src.control.heartbeat_supervisor",
                 owner_function="summary",
                 raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                notes="probe raised — unknown in snapshot",
             )

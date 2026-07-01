@@ -1618,7 +1618,7 @@ EDLI writes two kinds of no-trade evidence:
    always for event-triggered rejection
 ```
 
-Existing writer uses `DecisionNaturalKey`, `NoTradeReason`, `strategy_key`, `event_source`, and `shadow_runtime`, and commits through a caller-supplied world connection. ([GitHub][30])
+Existing writer uses `DecisionNaturalKey`, `NoTradeReason`, `strategy_key`, and `event_source`, and commits through a caller-supplied world connection. ([GitHub][30])
 
 ## 16.2 Record object
 

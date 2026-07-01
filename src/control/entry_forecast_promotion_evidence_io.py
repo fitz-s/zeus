@@ -3,16 +3,15 @@
 # Authority basis: docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md Phase B1 atomic JSON I/O + Phase C-flock concurrent-writer protection for EntryForecastPromotionEvidence.
 """Atomic JSON read/write for ``EntryForecastPromotionEvidence``.
 
-Phase C activation status: read-side wired into ``src/engine/evaluator.py``
-behind ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` env flag (default OFF).
-Write-side remains operator-script-only — no daemon writer in the
-default activation path.
+This module is control-plane persistence for operator promotion CLI
+workflows. The live evaluator does not read this file; executable
+entry-forecast reader/config checks own the money path.
 
 The promotion evidence carries the operator approval, G1 attestation,
 calibration promotion approval, and canary-success attestation that
-``evaluate_entry_forecast_rollout_gate`` requires before authorizing
-canary or live entry-forecast orders. Storage on disk so an operator
-script can populate it atomically without taking the daemon down.
+``evaluate_entry_forecast_rollout_gate`` validates for operator
+promotion workflows. Storage on disk lets an operator script populate
+it atomically without taking the daemon down.
 
 Concurrent-writer protection: writes hold an exclusive ``fcntl.flock``
 on a sidecar lock file at ``<path>.lock`` for the duration of the
@@ -45,8 +44,7 @@ PROMOTION_EVIDENCE_SCHEMA_VERSION = 1
 class PromotionEvidenceCorruption(ValueError):
     """Raised when the on-disk promotion evidence file fails strict parsing.
 
-    The caller is expected to treat this as ``EVIDENCE_MISSING`` for
-    rollout-gate purposes — never as ``EVIDENCE_PRESENT_AND_VALID``.
+    The caller must never treat corruption as valid promotion evidence.
     """
 
 
@@ -153,11 +151,8 @@ def _parse_evidence_payload_cached(
 ) -> EntryForecastPromotionEvidence | None:
     """Strict-parse a promotion-evidence payload.
 
-    Phase C-perf-cache (critic ATTACK 3 follow-up): cache keyed by
-    ``(path, mtime_ns, size, ino, ctime_ns)`` so the daemon does not
-    re-parse the file 200×/cycle when both
-    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
-    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON.
+    Cache keyed by ``(path, mtime_ns, size, ino, ctime_ns)`` so repeated
+    operator CLI reads do not re-parse an unchanged file.
 
     Cache key strength (2026-05-04, codex P2 follow-up on PR #47):
     keying on ``(mtime_ns, size)`` alone allowed stale entries to

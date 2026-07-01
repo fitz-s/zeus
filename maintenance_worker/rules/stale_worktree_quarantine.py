@@ -64,7 +64,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     Forbidden (always skip):
       - Currently checked-out branch (main/canonical worktree)
       - Worktree with uncommitted changes
-      - Worktree whose branch appears in an open PR (stubbed: warns + skips check)
+      - Worktree whose branch appears in an open PR, or whose PR status cannot be verified
 
     Returns list[Candidate] with verdict STALE_QUARANTINE_CANDIDATE or SKIP_*.
     """

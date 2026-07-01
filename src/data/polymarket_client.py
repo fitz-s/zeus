@@ -45,7 +45,7 @@ PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_c
 # on EVERY reactor cycle → hundreds of serial 15s-bounded calls → 10-30 min/cycle → fresh
 # families never finished capture to reach Kelly (0 receipts). Polymarket CLOB fees are
 # process-stable, so cache per-token fee details with a TTL: each token is fetched once per
-# window instead of per cycle. SHADOW-safe; cost-basis impact nil (fees stable). Cached
+# window instead of per cycle. Cost-basis impact nil (fees stable). Cached
 # value is the already-canonicalized details dict.
 _FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
 _FEE_RATE_TTL_SECONDS = 1800.0
@@ -250,7 +250,15 @@ resolve_polymarket_credentials = _resolve_credentials
 
 
 def _resolve_clob_v2_signature_type() -> int:
-    raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
+    raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE")
+    if raw is None:
+        if _real_order_submit_enabled():
+            raise RuntimeError(
+                "POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required when "
+                "edli.real_order_submit_enabled=true; live submit must not rely on "
+                "the historical implicit POLY_GNOSIS_SAFE signature_type=2 default."
+            )
+        raw = "2"
     try:
         signature_type = int(raw)
     except ValueError as exc:
@@ -262,6 +270,24 @@ def _resolve_clob_v2_signature_type() -> int:
             f"Invalid POLYMARKET_CLOB_V2_SIGNATURE_TYPE={raw!r}; expected 0, 1, 2, or 3"
         )
     return signature_type
+
+
+def _real_order_submit_enabled() -> bool:
+    """Return the live submit arming flag from strict settings.
+
+    This is intentionally fail-closed: if the config cannot be read, a caller about to
+    construct the authenticated CLOB adapter must not assume submit is disabled and fall
+    back to an implicit signature mode.
+    """
+
+    try:
+        from src.config import Settings
+
+        return bool(Settings()["edli"]["real_order_submit_enabled"])
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Cannot determine edli.real_order_submit_enabled for CLOB signature preflight"
+        ) from exc
 
 
 def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
@@ -358,16 +384,40 @@ class PolymarketClient:
         self.close()
         return False
 
-    def _public_get(self, path: str, *, params: dict[str, Any] | None = None):
+    def _public_get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: "float | httpx.Timeout | None" = None,
+    ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.get(url, params=params, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+            return httpx.get(
+                url,
+                params=params,
+                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            )
+        if timeout is not None:
+            return self._public_http().get(url, params=params, timeout=timeout)
         return self._public_http().get(url, params=params)
 
-    def _public_post(self, path: str, *, json_body: Any):
+    def _public_post(
+        self,
+        path: str,
+        *,
+        json_body: Any,
+        timeout: "float | httpx.Timeout | None" = None,
+    ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.post(url, json=json_body, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+            return httpx.post(
+                url,
+                json=json_body,
+                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            )
+        if timeout is not None:
+            return self._public_http().post(url, json=json_body, timeout=timeout)
         return self._public_http().post(url, json=json_body)
 
     def _ensure_client(self):
@@ -483,7 +533,12 @@ class PolymarketClient:
 
         return data
 
-    def get_orderbook_snapshot(self, token_id: str) -> dict:
+    def get_orderbook_snapshot(
+        self,
+        token_id: str,
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict:
         """Fetch raw CLOB orderbook facts for executable snapshot capture.
 
         LOCK DISCIPLINE (2026-06-04): this method performs blocking HTTP I/O
@@ -495,14 +550,26 @@ class PolymarketClient:
         from src.state.db import assert_no_world_mutex_held_for_io
         assert_no_world_mutex_held_for_io("get_orderbook_snapshot")
 
-        resp = self._public_get("/book", params={"token_id": token_id})
+        if timeout is None:
+            resp = self._public_get("/book", params={"token_id": token_id})
+        else:
+            resp = self._public_get(
+                "/book",
+                params={"token_id": token_id},
+                timeout=timeout,
+            )
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
             raise RuntimeError(f"CLOB orderbook response for {token_id} is not an object")
         return data
 
-    def get_orderbook_snapshots(self, token_ids: list[str]) -> dict[str, dict]:
+    def get_orderbook_snapshots(
+        self,
+        token_ids: list[str],
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict[str, dict]:
         """Batch-fetch raw CLOB orderbook facts for many tokens in ONE request.
 
         Uses the public ``POST /books`` endpoint (rate limit 500 req/10s, vs the
@@ -542,7 +609,10 @@ class PolymarketClient:
             seen.add(tok)
             body.append({"token_id": tok})
 
-        resp = self._public_post("/books", json_body=body)
+        if timeout is None:
+            resp = self._public_post("/books", json_body=body)
+        else:
+            resp = self._public_post("/books", json_body=body, timeout=timeout)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):

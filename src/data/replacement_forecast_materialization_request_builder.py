@@ -18,6 +18,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+_OM9_LOCALDAY_COVERAGE_INCOMPLETE = "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE"
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,37 @@ def _precision_ready(path: Path) -> tuple[Mapping[str, object], tuple[str, ...]]
     return metadata_payload, ()
 
 
+def _om9_localday_coverage_ready(
+    request: Mapping[str, object],
+    *,
+    base_dir: Path,
+) -> tuple[str, ...]:
+    from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+        _expected_om9_hourly_count,
+        _om9_localday_hourly_coverage_ok,
+    )
+
+    try:
+        materialize_request = build_materialize_request_dataclass(request, base_dir=base_dir)
+    except ValueError as exc:
+        if "insufficient Open-Meteo hourly samples inside target local day" in str(exc):
+            return (_OM9_LOCALDAY_COVERAGE_INCOMPLETE,)
+        raise
+
+    expected_count = _expected_om9_hourly_count(
+        city_timezone=materialize_request.city_timezone,
+        target_date=materialize_request.target_date,
+    )
+    computed_at = _dt(request.get("computed_at"), field_name="computed_at")
+    if _om9_localday_hourly_coverage_ok(
+        materialize_request,
+        expected_sample_count=expected_count,
+        computed_at=computed_at,
+    ):
+        return ()
+    return (_OM9_LOCALDAY_COVERAGE_INCOMPLETE,)
+
+
 def build_replacement_forecast_materialization_request(
     payload: Mapping[str, object],
     *,
@@ -238,6 +270,13 @@ def build_replacement_forecast_materialization_request(
     # never ship a poison file downstream. Authority basis: pipeline-contract
     # project, operator directive 2026-06-10.
     validate_materialization_request(request)
+    coverage_reasons = _om9_localday_coverage_ready(request, base_dir=base_path)
+    if coverage_reasons:
+        return ReplacementForecastMaterializationRequestBuildResult(
+            status="BLOCKED",
+            reason_codes=coverage_reasons,
+            request=None,
+        )
     return ReplacementForecastMaterializationRequestBuildResult(
         status="READY",
         reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),

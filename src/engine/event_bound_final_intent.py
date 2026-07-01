@@ -153,6 +153,18 @@ def submit_event_bound_final_intent_via_existing_executor(
             side_effect_known=True,
         )
     except Exception as exc:
+        if _exception_is_pre_venue_runtime_block(exc):
+            return EventBoundExecutorSubmitResult(
+                status="PRE_SUBMIT_ERROR",
+                reason_code=f"EXECUTOR_PRE_VENUE_REJECTED:{exc}",
+                submit_started_at=started_at,
+                submit_finished_at=datetime.now(timezone.utc).isoformat(),
+                raw_response={"error": str(exc), "stage": "existing_executor_pre_venue_runtime_gate"},
+                reconciliation_followup_required=False,
+                venue_call_started=False,
+                venue_ack_received=False,
+                side_effect_known=True,
+            )
         return EventBoundExecutorSubmitResult(
             status="POST_SUBMIT_UNKNOWN",
             reason_code=f"EXECUTOR_SUBMIT_UNKNOWN:{exc}",
@@ -165,6 +177,19 @@ def submit_event_bound_final_intent_via_existing_executor(
             side_effect_known=False,
         )
     return _executor_order_result_to_submit_result(result, started_at=started_at)
+
+
+def _exception_is_pre_venue_runtime_block(exc: Exception) -> bool:
+    """True for runtime gates that fire before the venue boundary.
+
+    ``execute_final_intent`` checks ``gate_runtime`` before constructing or
+    persisting a venue command. If that non-bypassable gate blocks, the order
+    provably did not reach CLOB and must not be represented as a post-submit
+    unknown side effect.
+    """
+
+    text = str(exc or "")
+    return text.startswith("[gate_runtime] BLOCKED")
 
 
 def validate_final_intent_cert_for_existing_executor(final_intent_cert: DecisionCertificate) -> str:
@@ -300,6 +325,15 @@ def _final_execution_intent_from_payload(final_payload: dict):
         taker_quality_proof=(
             final_payload.get("taker_quality_proof") if is_taker else None
         ),
+        q_live=final_payload.get("q_live"),
+        q_lcb_5pct=final_payload.get("q_lcb_5pct"),
+        expected_edge=final_payload.get("trade_score"),
+        min_entry_price=final_payload.get("min_entry_price"),
+        min_expected_profit_usd=final_payload.get("min_expected_profit_usd"),
+        min_submit_edge_density=final_payload.get("min_submit_edge_density"),
+        selection_authority_applied=final_payload.get("selection_authority_applied"),
+        qkernel_execution_economics=final_payload.get("qkernel_execution_economics"),
+        actionable_certificate_hash=final_payload.get("actionable_certificate_hash"),
     )
 
 
@@ -359,6 +393,7 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
     return text.startswith(
         (
             "entry_cooldown:",
+            "entries_paused:",
             "duplicate_entry_same_token:",
             "executable_snapshot_gate:",
             "pre_submit_collateral_reservation_failed:",

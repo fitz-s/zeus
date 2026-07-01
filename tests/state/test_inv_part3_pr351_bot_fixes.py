@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md
 #   + Part-3 audit (PR #352) — Copilot review bugs on PR #350/#351.
 """Antibody regressions for the Part-3 audit / Copilot review bugs.
 

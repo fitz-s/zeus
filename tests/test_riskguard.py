@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-06-29
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -41,6 +41,15 @@ def _policy_conn() -> sqlite3.Connection:
     from src.state.db import apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    return conn
+
+
+def _policy_file_conn(db_path) -> sqlite3.Connection:
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
     return conn
@@ -577,6 +586,84 @@ class TestMetrics:
 
     def test_directional_accuracy_perfect(self):
         assert directional_accuracy([0.8, 0.2, 0.9], [1, 0, 1]) == pytest.approx(1.0)
+
+    def test_riskguard_brier_sample_skips_non_learning_backfill_rows(self):
+        rows = [
+            {
+                "id": "newest-repair-no-snapshot",
+                "learning_snapshot_ready": False,
+                "metric_ready": True,
+                "p_posterior": 0.99,
+                "outcome": 0,
+            },
+            {
+                "id": "learning-ready-1",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.78,
+                "outcome": 1,
+            },
+            {
+                "id": "missing-prob",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": None,
+                "outcome": 1,
+            },
+            {
+                "id": "metric-not-ready",
+                "learning_snapshot_ready": True,
+                "metric_ready": False,
+                "p_posterior": 0.65,
+                "outcome": 1,
+            },
+            {
+                "id": "learning-ready-2",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.31,
+                "outcome": 0,
+            },
+            {
+                "id": "learning-ready-3",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.52,
+                "outcome": 1,
+            },
+        ]
+
+        selected = riskguard_module._riskguard_brier_metric_rows(rows, limit=2)
+
+        assert [row["id"] for row in selected] == ["learning-ready-1", "learning-ready-2"]
+
+
+def _settlement_row(
+    *,
+    trade_id: str,
+    strategy: str,
+    p_posterior: float,
+    outcome: int,
+    pnl: float = 0.0,
+) -> dict:
+    return {
+        "trade_id": trade_id,
+        "strategy": strategy,
+        "p_posterior": p_posterior,
+        "outcome": outcome,
+        "source": "position_events",
+        "authority_level": "VERIFIED",
+        "metric_ready": True,
+        "learning_snapshot_ready": True,
+        "canonical_payload_complete": True,
+        "is_degraded": False,
+        "pnl": pnl,
+        "city": "NYC",
+        "range_label": "29C",
+        "target_date": "2026-04-01",
+        "direction": "buy_yes",
+        "settled_at": "2026-04-02T00:00:00+00:00",
+    }
 
 
 
@@ -1200,6 +1287,81 @@ class TestRiskGuardSettlementSource:
 
         assert level == RiskLevel.RED
 
+    def test_tick_start_attestation_preserves_fresh_full_level_during_long_metrics_pass(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+
+        riskguard_module._persist_tick_in_progress_attestation()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["status"] == "metrics_in_progress_previous_risk_level_preserved"
+        assert details["riskguard_degraded_reason"] == "metrics_refresh_in_progress"
+        assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
+        assert riskguard_module.get_current_level() == RiskLevel.GREEN
+
+        # The in-progress row is not itself a full metrics row and cannot extend
+        # the full-risk freshness chain indefinitely.
+        latest_full = riskguard_module._latest_fresh_full_risk_row(
+            get_connection(risk_db),
+            now=datetime.now(timezone.utc),
+        )
+        assert latest_full is not None
+        assert json.loads(latest_full["details_json"]).get("riskguard_degraded_reason") is None
+
+    def test_tick_start_attestation_does_not_extend_stale_full_level(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+
+        riskguard_module._persist_tick_in_progress_attestation()
+
+        rows = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC"
+        ).fetchall()
+
+        assert len(rows) == 1
+        assert riskguard_module.get_current_level() == RiskLevel.RED
+
     def test_tick_records_canonical_settlement_source(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
@@ -1215,7 +1377,15 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events"}],
+            lambda conn, limit=50, **kwargs: [
+                {
+                    "p_posterior": 0.7,
+                    "outcome": 1,
+                    "source": "position_events",
+                    "metric_ready": True,
+                    "learning_snapshot_ready": True,
+                }
+            ],
         )
 
         riskguard_module.tick()
@@ -1244,7 +1414,15 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.4, "outcome": 0, "source": "decision_log"}],
+            lambda conn, limit=50, **kwargs: [
+                {
+                    "p_posterior": 0.4,
+                    "outcome": 0,
+                    "source": "decision_log",
+                    "metric_ready": True,
+                    "learning_snapshot_ready": True,
+                }
+            ],
         )
 
         riskguard_module.tick()
@@ -1803,6 +1981,70 @@ class TestStrategyPolicyResolver:
         assert "manual_override:threshold_multiplier" in policy.sources
         conn.close()
 
+    def test_trade_control_override_ghost_is_not_strategy_policy_authority(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        now = datetime(2026, 6, 29, 2, 25, tzinfo=timezone.utc)
+        trade_path = tmp_path / "zeus_trades.db"
+        world_path = tmp_path / "zeus-world.db"
+        trade_conn = _policy_file_conn(trade_path)
+        world_conn = _policy_file_conn(world_path)
+        _insert_control_override(
+            trade_conn,
+            override_id="ghost-trade-gate",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        trade_conn.commit()
+        world_conn.commit()
+        world_conn.close()
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+        policy = policy_module.resolve_strategy_policy(trade_conn, "center_buy", now)
+
+        assert policy.gated is False
+        assert "manual_override:gate" not in policy.sources
+        trade_conn.close()
+
+    def test_strategy_policy_reads_attached_world_control_authority(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        now = datetime(2026, 6, 29, 2, 30, tzinfo=timezone.utc)
+        trade_path = tmp_path / "zeus_trades.db"
+        world_path = tmp_path / "zeus-world.db"
+        trade_conn = _policy_file_conn(trade_path)
+        world_conn = _policy_file_conn(world_path)
+        _insert_control_override(
+            world_conn,
+            override_id="world-center-buy-gate",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="gate",
+            value="true",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        trade_conn.commit()
+        world_conn.commit()
+        world_conn.close()
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+        policy = policy_module.resolve_strategy_policy(trade_conn, "center_buy", now)
+
+        assert policy.gated is True
+        assert "manual_override:gate" in policy.sources
+        trade_conn.close()
+
     def test_resolve_strategy_policy_expired_override_restores_automatic_policy(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)
         conn = _policy_conn()
@@ -2139,6 +2381,151 @@ class TestStrategyPolicyResolver:
         assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
         assert details["durable_risk_action_emitted_count"] == 0
         assert details["durable_risk_action_expired_count"] == 0
+
+    def test_tick_localizes_yellow_brier_to_durable_strategy_gate(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.53,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        from src.runtime import bankroll_provider as _bp
+
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        gate_row = get_connection(zeus_db).execute(
+            """
+            SELECT strategy_key, action_type, value, source, status, reason
+            FROM risk_actions
+            WHERE action_id = 'riskguard:gate:opening_inertia'
+            """
+        ).fetchone()
+
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert risk_row["brier"] > 0.25
+        assert details["portfolio_brier_level"] == "YELLOW"
+        assert details["brier_level"] == "GREEN"
+        assert details["brier_strategy_localization"]["status"] == "localized_to_durable_strategy_gates"
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
+        assert details["recommended_strategy_gate_reasons"]["opening_inertia"] == [
+            "brier_degraded(level=YELLOW,brier=0.2809,sample=45)"
+        ]
+        assert details["brier_strategy_breakdown"]["by_strategy"]["center_buy"]["level"] == "GREEN"
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "action_type": "gate",
+            "value": "true",
+            "source": "riskguard",
+            "status": "active",
+            "reason": "brier_degraded(level=YELLOW,brier=0.2809,sample=45)",
+        }
+
+    def test_tick_keeps_global_yellow_when_brier_strategy_gate_cannot_persist(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.53,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db, drop_risk_actions=True)
+        from src.runtime import bankroll_provider as _bp
+
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
+        assert risk_row["brier"] > 0.25
+        assert details["portfolio_brier_level"] == "YELLOW"
+        assert details["brier_level"] == "YELLOW"
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unavailable_global_yellow"
+        )
+        assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
 
     def test_tick_turns_yellow_when_strategy_tracker_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

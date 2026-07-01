@@ -22,14 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ---------------------------------------------------------------------------
 # Destructive opt-in guard — refuse to run without explicit acknowledgement.
-# This script mutates state/zeus-world.db and deletes pause/tombstone files.
+# This script mutates state/zeus-world.db and deletes legacy pause files.
 # ---------------------------------------------------------------------------
 _FLAG = "--i-understand-this-is-destructive"
 _ENV_VAR = "ZEUS_ALLOW_FORCE_CYCLE"
 
 if _FLAG not in sys.argv and os.environ.get(_ENV_VAR) != "1":
     print(
-        f"ERROR: this script mutates the live DB and removes pause/tombstone files.\n"
+        f"ERROR: this script mutates the live DB and removes legacy pause files.\n"
         f"To run, pass '{_FLAG}' or set {_ENV_VAR}=1 in the environment.",
         file=sys.stderr,
     )

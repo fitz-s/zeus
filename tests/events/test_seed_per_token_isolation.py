@@ -21,6 +21,9 @@ from src.state.db import init_schema
 def _conn_writer():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
     return conn, EventWriter(conn)
 
 

@@ -361,31 +361,107 @@ class TestRunCycleFreshnessIntegration:
             f"Expected skip_reason=cycle_skipped_freshness_degraded, got: {result}"
         )
 
-    def test_run_cycle_continues_opening_hunt_with_degraded_flag(self, monkeypatch):
-        """OPENING_HUNT continues but degraded_data=True when ensemble_disabled."""
+    def test_run_cycle_blocks_opening_hunt_entries_when_ensemble_degraded(self, monkeypatch):
+        """OPENING_HUNT monitor path continues, but entries block when ensemble is stale."""
+        import src.engine.cycle_runner as cr_module
         from src.engine.discovery_mode import DiscoveryMode
-        from src.control.freshness_gate import FreshnessVerdict
+        from src.riskguard.risk_level import RiskLevel
+        from src.state.portfolio import PortfolioState
 
-        # Patch evaluate_freshness_mid_run to return ensemble_disabled verdict
         verdict = self._make_stale_verdict(ensemble_disabled=True, day0_disabled=False)
 
-        captured_summary = {}
+        class _DummyConn:
+            def execute(self, *args, **kwargs):
+                class _Cursor:
+                    def fetchall(self):
+                        return []
 
-        def _fake_run_cycle(mode):
-            """Simulate the cycle_runner freshness gate block only."""
-            summary = {"mode": mode.value, "skipped": False}
-            _freshness_verdict = verdict
-            if _freshness_verdict.day0_capture_disabled and mode == DiscoveryMode.DAY0_CAPTURE:
-                summary["skipped"] = True
-                summary["skip_reason"] = "cycle_skipped_freshness_degraded"
-                return summary
-            if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
-                summary["degraded_data"] = True
-            captured_summary.update(summary)
-            return summary
+                    def fetchone(self):
+                        return None
 
-        result = _fake_run_cycle(DiscoveryMode.OPENING_HUNT)
+                return _Cursor()
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        class _DummyClob:
+            def get_balance(self):
+                return 100.0
+
+            def get_positions_from_api(self):
+                return []
+
+            def get_open_orders(self):
+                return []
+
+            def close(self):
+                pass
+
+        class _DummyTracker:
+            def snapshot(self):
+                return {}
+
+        class _ClearRegistry:
+            def enumerate_blocks(self, stage="all"):
+                return []
+
+            def is_clear(self, stage):
+                return True
+
+        monitor_calls = []
+
+        def _monitor(conn, clob, portfolio, artifact, tracker, summary):
+            monitor_calls.append("monitor")
+            summary["monitors"] += 1
+            return False, False
+
+        monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", lambda state_dir: verdict)
+        monkeypatch.setattr(cr_module, "get_current_level", lambda: RiskLevel.GREEN)
+        monkeypatch.setattr(cr_module, "get_force_exit_review", lambda: False)
+        monkeypatch.setattr(cr_module, "get_connection", lambda: _DummyConn())
+        monkeypatch.setattr(cr_module, "load_portfolio", lambda: PortfolioState())
+        monkeypatch.setattr(cr_module, "save_portfolio", lambda state, *args, **kwargs: None)
+        monkeypatch.setattr(cr_module, "PolymarketClient", _DummyClob)
+        monkeypatch.setattr(cr_module, "get_tracker", lambda: _DummyTracker())
+        monkeypatch.setattr(cr_module, "save_tracker", lambda tracker: None)
+        monkeypatch.setattr(
+            cr_module,
+            "_reconcile_pending_positions",
+            lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
+        )
+        monkeypatch.setattr(cr_module, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+        monkeypatch.setattr(cr_module, "_cleanup_orphan_open_orders", lambda *args, **kwargs: 0)
+        monkeypatch.setattr(cr_module, "_cleanup_stale_entry_orders", lambda *args, **kwargs: 0)
+        monkeypatch.setattr(cr_module, "_entry_bankroll_for_cycle", lambda portfolio, clob: (100.0, {}))
+        monkeypatch.setattr(cr_module, "_execute_monitoring_phase", _monitor)
+        monkeypatch.setattr(cr_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(cr_module.cutover_guard, "summary", lambda: {"entry": {"allow_submit": True}})
+        monkeypatch.setattr(cr_module.EntriesBlockRegistry, "from_runtime", lambda deps: _ClearRegistry())
+        monkeypatch.setattr(cr_module, "commit_then_export", lambda conn, *, db_op, json_exports: None)
+        monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+        monkeypatch.setattr("src.control.heartbeat_supervisor.summary", lambda: {"health": "OK", "entry": {"allow_submit": True}})
+        monkeypatch.setattr("src.control.ws_gap_guard.summary", lambda: {"subscription_state": "OK", "entry": {"allow_submit": True}})
+        monkeypatch.setattr("src.risk_allocator.refresh_global_allocator", lambda *args, **kwargs: {"entry": {"allow_submit": True}})
+        monkeypatch.setattr("src.execution.command_recovery.reconcile_unresolved_commands", lambda conn: {})
+        monkeypatch.setattr("src.execution.exit_lifecycle.promote_pending_trades", lambda conn, clob: {})
+        from src.runtime import posture as _posture_mod
+        _posture_mod._clear_cache()
+        monkeypatch.setattr(_posture_mod, "read_runtime_posture", lambda: "NORMAL")
+        monkeypatch.setattr(
+            cr_module,
+            "_execute_discovery_phase",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degraded freshness must block entries")),
+        )
+
+        result = cr_module.run_cycle(DiscoveryMode.OPENING_HUNT)
+
         assert not result.get("skipped"), "OPENING_HUNT must not be skipped for ensemble_disabled"
         assert result.get("degraded_data") is True, (
             "OPENING_HUNT with ensemble_disabled must set degraded_data=True"
         )
+        assert result.get("freshness_entry_blocked") is True
+        assert result.get("entries_blocked_reason") == "freshness_degraded"
+        assert monitor_calls == ["monitor"]

@@ -93,7 +93,6 @@ def main() -> int:
     capture = f_edli("replacement_0_1_bayes_precision_fusion_capture_enabled")
     fusion = f_edli("replacement_0_1_bayes_precision_fusion_enabled")
     fused_q = f_edli("replacement_0_1_fused_q_shape_enabled")
-    coverage = f_edli("q_lcb_settlement_coverage_gate_enabled")
     live = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled")
     kelly = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled")
     flip = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled")
@@ -129,8 +128,6 @@ def main() -> int:
                                "ensure raw_model_forecasts was seeded (scripts/backfill_bayes_precision_fusion_history_from_b0.py)"))
     if fusion and not fused_q:
         issues.append(("CRITICAL", "fusion ON but fused q-shape OFF — live would not use the current single-q replacement kernel."))
-    if live and not coverage:
-        issues.append(("CRITICAL", "replacement live flag ON but q_lcb settlement coverage gate OFF — restart would skip the current reliability guard."))
     if (live or arm) and not fusion:
         issues.append(("WARN", "live/arm ON but fusion OFF — you would trade the single-anchor path, "
                                "not the proven BAYES_PRECISION_FUSION fusion."))
@@ -158,9 +155,6 @@ def main() -> int:
     elif not fused_q:
         nxt = ("replacement_0_1_fused_q_shape_enabled = TRUE",
                "enable the current single-q replacement kernel before live order decisions.")
-    elif not coverage:
-        nxt = ("q_lcb_settlement_coverage_gate_enabled = TRUE",
-               "apply the settlement-graded q_lcb reliability guard used by live restart checks.")
     elif not (live and kelly and flip):
         nxt = ("openmeteo_ecmwf_ifs9_bayes_fusion_{live,kelly_increase,direction_flip}_enabled = TRUE",
                "open live bayes_fusion execution after confirming current live inputs are present.")

@@ -37,7 +37,8 @@ Scope explicitly EXCLUDES:
   `degraded` / `unverified`) — translated INTO grammar A by
   `_TRUTH_AUTHORITY_MAP`. The B vocabulary has its own consumer surface
   inside portfolio/riskguard.
-- Grammar C (`ScanAuthority`: `VERIFIED` / `STALE` / `EMPTY_FALLBACK` /
+- Grammar C (`ScanAuthority`: `VERIFIED` / `STALE` /
+  `FETCH_FAILED_NO_CACHE` / `KEYWORD_DISCOVERY_UNVERIFIED` /
   `NEVER_FETCHED`) — `src/data/market_scanner.py:43`. Wire-collides on the
   literal `"VERIFIED"` only.
 - Grammar D (`AuthorityTier`: `CHAIN` / `VENUE` / `DEGRADED`) —

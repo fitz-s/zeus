@@ -21,14 +21,14 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _import_module():
-    """Import file_arrangement module from either installed or worktree path."""
+    """Import file-arrangement utility from either installed or worktree path."""
     try:
-        from scripts.topology_v_next import file_arrangement
+        from scripts import topology_file_arrangement
     except ImportError:
         import sys
         sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
-        from topology_v_next import file_arrangement  # type: ignore
-    return file_arrangement
+        import topology_file_arrangement  # type: ignore[no-redef]
+    return topology_file_arrangement
 
 
 def _make_minimal_repo(tmp_path: Path) -> Path:

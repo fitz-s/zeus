@@ -10,13 +10,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
@@ -60,6 +62,18 @@ class MarketChannelAction:
 
 
 @dataclass(frozen=True)
+class MarketChannelQuoteResult:
+    """Result for quote evidence that intentionally is not a world opportunity row."""
+
+    event_id: str
+    event_type: str
+    inserted: bool
+    duplicate: bool
+    evidence_written: bool
+    opportunity_event_persisted: bool = False
+
+
+@dataclass(frozen=True)
 class MarketTokenMetadata:
     condition_id: str
     token_id: str
@@ -68,6 +82,7 @@ class MarketTokenMetadata:
     min_order_size: str
     neg_risk: bool
     executable_snapshot_id: str
+    market_end_at: str | None = None
 
 
 @dataclass
@@ -85,6 +100,7 @@ class QuoteCache:
 
 
 RestOrderbookFetch = Callable[[str], dict[str, Any]]
+RestOrderbookBatchFetch = Callable[[list[str]], dict[str, dict]]
 
 
 class MarketChannelIngestor:
@@ -100,22 +116,60 @@ class MarketChannelIngestor:
         feasibility_schema: str = "",
         quote_cache: QuoteCache | None = None,
         coalescer: EventCoalescer | None = None,
+        market_event_sink: Callable[[list[OpportunityEvent]], None] | None = None,
     ) -> None:
         self._writer = writer
         self._feasibility_conn = feasibility_conn or writer.conn
         # INV-37 (PR415 B5): when feasibility writes share the EventWriter's
-        # connection (single-connection atomic cross-DB path, feasibility_conn=None or
+        # connection (single-connection attached cross-DB path, feasibility_conn=None or
         # the same conn), that connection is world-MAIN with zeus_trades.db ATTACHed as
         # 'trades', so the feasibility insert must be schema-qualified 'trades' to reach
-        # the runtime-read table and never the world shadow. Default "" (own trade
+        # the runtime-read table and never the world ghost copy. Default "" (own trade
         # connection, unqualified) preserves every other caller.
         self._feasibility_schema = feasibility_schema
         self._active_token_ids = active_token_ids
         self._token_metadata = token_metadata or {}
         self.quote_cache = quote_cache or QuoteCache()
         self._coalescer = coalescer
+        self._market_event_sink = market_event_sink
+        self._deferred_market_event_sink_depth = 0
+        self._deferred_market_event_sink_events: list[OpportunityEvent] = []
+        self._seen_quote_event_ids: set[str] = set()
+        self._seen_quote_event_order: deque[str] = deque()
+        self._seen_quote_event_limit = 20_000
 
-    def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
+    def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
+        metadata = self._token_metadata.get(str(token_id))
+        if metadata is None or not metadata.market_end_at:
+            return True
+        try:
+            end_at = datetime.fromisoformat(str(metadata.market_end_at).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=UTC)
+        as_of = (now or datetime.now(UTC)).astimezone(UTC)
+        return end_at.astimezone(UTC) > as_of
+
+    def active_token_ids_open_at(
+        self,
+        *,
+        now: datetime | None = None,
+        token_ids: Iterable[str] | None = None,
+    ) -> set[str]:
+        base = (
+            set(self._active_token_ids)
+            if token_ids is None
+            else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
+        )
+        return {token_id for token_id in base if self._token_is_open_at(token_id, now=now)}
+
+    def handle_message(
+        self,
+        message: dict[str, Any],
+        *,
+        received_at: str,
+    ) -> EventWriteResult | MarketChannelAction | MarketChannelQuoteResult | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
         if event_type == "tick_size_change":
             return MarketChannelAction(
@@ -134,18 +188,23 @@ class MarketChannelIngestor:
         event = self.event_from_message(message, received_at=received_at)
         if event is None:
             return None
+        if self._market_top_of_book_unchanged(event):
+            self._cache_event_payload(event)
+            return None
         self._cache_event_payload(event)
         return self._write_market_event(event)
 
-    def flush_coalesced(self, *, market_budget: int | None = None) -> list[EventWriteResult]:
+    def flush_coalesced(
+        self,
+        *,
+        market_budget: int | None = None,
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         if self._coalescer is None:
             return []
         events = self._coalescer.drain(market_budget=market_budget)
         results = []
         for event in events:
-            result = self._writer.write(event)
-            if result.inserted:
-                self._write_feasibility_evidence(event)
+            result = self._commit_market_event(event)
             results.append(result)
         return results
 
@@ -173,7 +232,7 @@ class MarketChannelIngestor:
         received_at: str,
         pre_cached: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """REST-seed current books on connect/reconnect before channel deltas.
 
         LOCK DISCIPLINE (2026-06-04): this method MUST NOT be called while the
@@ -195,12 +254,8 @@ class MarketChannelIngestor:
         """
         from src.state.db import assert_no_world_mutex_held_for_io
 
-        target_token_ids = (
-            set(self._active_token_ids)
-            if token_ids is None
-            else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
-        )
-        results: list[EventWriteResult] = []
+        target_token_ids = self.active_token_ids_open_at(token_ids=token_ids)
+        results: list[EventWriteResult | MarketChannelQuoteResult] = []
         for token_id in sorted(target_token_ids):
             try:
                 if pre_cached is not None and token_id in pre_cached:
@@ -227,8 +282,7 @@ class MarketChannelIngestor:
             if event is None:
                 continue
             self._cache_event_payload(event)
-            result = self._writer.write(event)
-            self._write_feasibility_evidence(event)
+            result = self._commit_market_event(event)
             results.append(result)
         return results
 
@@ -241,7 +295,7 @@ class MarketChannelIngestor:
         gap_start: str | None = None,
     ) -> OpportunityEvent | None:
         token_id = _message_token_id(message)
-        if token_id not in self._active_token_ids:
+        if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
             return None
         metadata = self._metadata_for_message(message, token_id=token_id)
         if metadata is None:
@@ -269,7 +323,7 @@ class MarketChannelIngestor:
         token_id = _message_token_id(message)
         if not token_id and message.get("price_changes"):
             token_id = str(message["price_changes"][0].get("asset_id") or "")
-        if token_id not in self._active_token_ids:
+        if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
             return None
         change = message.get("price_changes", [{}])[0] if message.get("price_changes") else message
         metadata = self._metadata_for_message({**message, **change}, token_id=token_id)
@@ -321,6 +375,35 @@ class MarketChannelIngestor:
             )
         )
 
+    def _market_top_of_book_unchanged(self, event: OpportunityEvent) -> bool:
+        """Suppress append-only BBA rows when the executable touch did not move."""
+
+        if event.event_type != "BEST_BID_ASK_CHANGED":
+            return False
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        token_id = str(payload.get("token_id") or "")
+        if not token_id:
+            return False
+        previous = self.quote_cache.get(token_id)
+        if previous is None:
+            return False
+
+        def _same(a: object, b: object) -> bool:
+            av = _float_or_none(a)
+            bv = _float_or_none(b)
+            if av is None or bv is None:
+                return av is None and bv is None
+            return abs(av - bv) <= 1e-12
+
+        return _same(payload.get("best_bid"), previous.best_bid) and _same(
+            payload.get("best_ask"), previous.best_ask
+        )
+
     def _write_feasibility_evidence(self, event: OpportunityEvent) -> None:
         if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
             return
@@ -341,7 +424,8 @@ class MarketChannelIngestor:
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         token_ids = [str(token) for token in message.get("clob_token_ids") or message.get("assets_ids") or []]
-        if self._active_token_ids and not (set(token_ids) & self._active_token_ids):
+        active_token_ids = self.active_token_ids_open_at()
+        if active_token_ids and not (set(token_ids) & active_token_ids):
             return None
         token_id = token_ids[0] if token_ids else str(message.get("asset_id") or "")
         metadata = self._token_metadata.get(token_id)
@@ -382,9 +466,87 @@ class MarketChannelIngestor:
         if self._coalescer is not None:
             self._coalescer.enqueue(event)
             return None
+        return self._commit_market_event(event)
+
+    def _commit_market_event(self, event: OpportunityEvent) -> EventWriteResult | MarketChannelQuoteResult:
+        if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            if self._quote_event_seen(event.event_id):
+                return MarketChannelQuoteResult(
+                    event_id=event.event_id,
+                    event_type=event.event_type,
+                    inserted=False,
+                    duplicate=True,
+                    evidence_written=False,
+                )
+            self._remember_quote_event(event.event_id)
+            self._write_feasibility_evidence(event)
+            self._notify_market_event_sink([event])
+            return MarketChannelQuoteResult(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                inserted=True,
+                duplicate=False,
+                evidence_written=True,
+            )
         result = self._writer.write(event)
-        self._write_feasibility_evidence(event)
+        if result.inserted:
+            self._write_feasibility_evidence(event)
+            self._notify_market_event_sink([event])
         return result
+
+    def _quote_event_seen(self, event_id: str) -> bool:
+        return event_id in self._seen_quote_event_ids
+
+    def _remember_quote_event(self, event_id: str) -> None:
+        self._seen_quote_event_ids.add(event_id)
+        self._seen_quote_event_order.append(event_id)
+        while len(self._seen_quote_event_order) > self._seen_quote_event_limit:
+            expired = self._seen_quote_event_order.popleft()
+            self._seen_quote_event_ids.discard(expired)
+
+    def _notify_market_event_sink(self, events: list[OpportunityEvent]) -> None:
+        if self._market_event_sink is None or not events:
+            return
+        if self._deferred_market_event_sink_depth > 0:
+            self._deferred_market_event_sink_events.extend(events)
+            return
+        try:
+            self._market_event_sink(events)
+        except Exception as exc:  # noqa: BLE001 - derived sink must not poison ingest.
+            _logger.warning(
+                "market-channel post-write sink failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+
+    @contextlib.contextmanager
+    def defer_market_event_sink(self) -> Iterator[None]:
+        self._deferred_market_event_sink_depth += 1
+        try:
+            yield
+        except BaseException:
+            if self._deferred_market_event_sink_depth == 1:
+                self._deferred_market_event_sink_events.clear()
+            raise
+        finally:
+            self._deferred_market_event_sink_depth -= 1
+
+    def flush_deferred_market_event_sink(self) -> None:
+        if self._market_event_sink is None or not self._deferred_market_event_sink_events:
+            self._deferred_market_event_sink_events.clear()
+            return
+        events = list(self._deferred_market_event_sink_events)
+        self._deferred_market_event_sink_events.clear()
+        try:
+            self._market_event_sink(events)
+        except Exception as exc:  # noqa: BLE001 - post-commit derived sink failure.
+            _logger.warning(
+                "market-channel post-commit sink failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
 
 
 def active_weather_token_ids_from_snapshots(
@@ -471,13 +633,14 @@ def active_weather_token_metadata_from_snapshots(
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
+    market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
     # Latest snapshot per market (condition_id). Without a captured_at column we
     # cannot rank temporally, so fall back to one row per condition by rowid.
     order_expr = "captured_at DESC, rowid DESC" if has_captured_at else "rowid DESC"
     latest_per_condition = f"""
         SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk,
+               min_tick_size, min_order_size, neg_risk, {market_end_expr},
                ROW_NUMBER() OVER (
                    PARTITION BY condition_id ORDER BY {order_expr}
                ) AS _rn
@@ -488,7 +651,7 @@ def active_weather_token_metadata_from_snapshots(
         f"""
         WITH latest AS ({latest_per_condition})
         SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk
+               min_tick_size, min_order_size, neg_risk, market_end_at
         FROM latest
         WHERE _rn = 1
         ORDER BY snapshot_id
@@ -515,7 +678,16 @@ def active_weather_token_metadata_from_snapshots(
         selected.extend(other_rows[: capped_limit - len(selected)])
 
     metadata: dict[str, MarketTokenMetadata] = {}
-    for snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk in selected:
+    for (
+        snapshot_id,
+        condition_id,
+        yes_token_id,
+        no_token_id,
+        min_tick_size,
+        min_order_size,
+        neg_risk,
+        market_end_at,
+    ) in selected:
         if yes_token_id:
             metadata.setdefault(
                 str(yes_token_id),
@@ -527,6 +699,7 @@ def active_weather_token_metadata_from_snapshots(
                     min_order_size=str(min_order_size),
                     neg_risk=bool(neg_risk),
                     executable_snapshot_id=str(snapshot_id),
+                    market_end_at=str(market_end_at) if market_end_at is not None else None,
                 ),
             )
         if no_token_id:
@@ -540,6 +713,7 @@ def active_weather_token_metadata_from_snapshots(
                     min_order_size=str(min_order_size),
                     neg_risk=bool(neg_risk),
                     executable_snapshot_id=str(snapshot_id),
+                    market_end_at=str(market_end_at) if market_end_at is not None else None,
                 ),
             )
     return metadata
@@ -592,6 +766,7 @@ def active_weather_token_metadata_for_tokens(
     extra_params = [now_iso] if "market_end_at" in columns else []
     order_value_expr = "captured_at" if "captured_at" in columns else "rowid"
     order_expr = "captured_at DESC, rowid DESC" if "captured_at" in columns else "rowid DESC"
+    market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
 
     metadata: dict[str, MarketTokenMetadata] = {}
     for token_id in dict.fromkeys(tokens):
@@ -601,7 +776,7 @@ def active_weather_token_metadata_for_tokens(
                 conn.execute(
                     f"""
                     SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-                           min_tick_size, min_order_size, neg_risk, {order_value_expr} AS _order_value
+                           min_tick_size, min_order_size, neg_risk, {market_end_expr}, {order_value_expr} AS _order_value
                     FROM executable_market_snapshots
                     WHERE {token_column} = ?{extra_where}
                     ORDER BY {order_expr}
@@ -613,7 +788,7 @@ def active_weather_token_metadata_for_tokens(
         if not rows:
             continue
         row = max(rows, key=lambda r: str(r[-1] or ""))
-        snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk, _ = row
+        snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk, market_end_at, _ = row
         if str(yes_token_id) == token_id:
             outcome_label = "YES"
         elif str(no_token_id) == token_id:
@@ -628,6 +803,7 @@ def active_weather_token_metadata_for_tokens(
             min_order_size=str(min_order_size),
             neg_risk=bool(neg_risk),
             executable_snapshot_id=str(snapshot_id),
+            market_end_at=str(market_end_at) if market_end_at is not None else None,
         )
     return metadata
 
@@ -638,46 +814,26 @@ def invalidate_executable_snapshots_for_market_channel_action(
     *,
     invalidated_at: datetime,
 ) -> int:
-    """Force event-bound executable snapshots stale after public venue changes.
+    """Append an invalidation fact after public venue changes.
 
     Public market-channel messages are not fill truth, but tick-size and market
-    lifecycle changes are executable-quote authority changes. Until the REST
-    snapshot refresh succeeds, any previously captured snapshot for the affected
-    condition/token must fail the freshness gate.
+    lifecycle changes are executable-quote authority changes. Snapshot evidence
+    is append-only, so invalidation is a separate fact consumed by live readers,
+    never an UPDATE to historical rows.
     """
 
-    if not action.refresh_snapshot or not _table_exists(conn, "executable_market_snapshots"):
+    if not action.refresh_snapshot:
         return 0
-    columns = _table_columns(conn, "executable_market_snapshots")
-    if "freshness_deadline" not in columns:
-        return 0
-    predicates: list[str] = []
-    params: list[object] = []
-    if action.condition_id and "condition_id" in columns:
-        predicates.append("condition_id = ?")
-        params.append(action.condition_id)
-    if action.token_id:
-        token_predicates = []
-        if "yes_token_id" in columns:
-            token_predicates.append("yes_token_id = ?")
-            params.append(action.token_id)
-        if "no_token_id" in columns:
-            token_predicates.append("no_token_id = ?")
-            params.append(action.token_id)
-        if token_predicates:
-            predicates.append("(" + " OR ".join(token_predicates) + ")")
-    if not predicates:
-        return 0
-    stale_deadline = (invalidated_at.astimezone(UTC) - timedelta(seconds=1)).isoformat()
-    cur = conn.execute(
-        f"""
-        UPDATE executable_market_snapshots
-           SET freshness_deadline = ?
-         WHERE {' OR '.join(predicates)}
-        """,
-        (stale_deadline, *params),
+
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    return record_snapshot_invalidation(
+        conn,
+        condition_id=action.condition_id,
+        token_id=action.token_id,
+        reason=action.reason,
+        invalidated_at=invalidated_at.astimezone(UTC),
     )
-    return int(cur.rowcount or 0)
 
 
 @dataclass
@@ -686,6 +842,7 @@ class MarketChannelOnlineService:
 
     ingestor: MarketChannelIngestor
     fetch_orderbook: RestOrderbookFetch | None = None
+    fetch_orderbooks: RestOrderbookBatchFetch | None = None
     invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
     refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
     connected: bool = False
@@ -696,6 +853,8 @@ class MarketChannelOnlineService:
     max_refresh_actions_per_window: int = 5
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: set[str] = field(default_factory=set)
+    rest_seed_backpressure_count: int = 0
+    rest_seed_backpressure_reason: str | None = None
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
 
@@ -704,7 +863,7 @@ class MarketChannelOnlineService:
         *,
         received_at: str,
         pre_captured_books: "dict[str, dict] | None" = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """Seed the book cache on connect.
 
         ``pre_captured_books`` is an optional {token_id: book_dict} map
@@ -747,14 +906,17 @@ class MarketChannelOnlineService:
 
         if self.fetch_orderbook is None:
             return 0
+        self.rest_seed_backpressure_count = 0
+        self.rest_seed_backpressure_reason = None
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
         raw_token_ids = [str(token_id) for token_id in token_ids]
         if isinstance(token_ids, (set, frozenset)):
             raw_token_ids = sorted({str(token_id) for token_id in token_ids})
+        open_token_ids = self.ingestor.active_token_ids_open_at(token_ids=raw_token_ids)
         ordered = [
             token_id
             for token_id in dict.fromkeys(raw_token_ids)
-            if token_id in self.ingestor._active_token_ids
+            if token_id in open_token_ids
         ]
         written = 0
         for offset in range(0, len(ordered), size):
@@ -768,38 +930,51 @@ class MarketChannelOnlineService:
                     )
                 break
             chunk = ordered[offset: offset + size]
-            pre_captured_books: dict[str, dict] = {}
-            for token_id in chunk:
-                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                    if logger is not None:
-                        logger.warning(
-                            "EDLI market-channel REST seed budget exhausted inside chunk: "
-                            "written=%d remaining=%d",
-                            written,
-                            max(0, len(ordered) - offset),
-                        )
-                    break
-                try:
-                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
-                except Exception as exc:
-                    _logger.warning(
-                        "market_channel: REST seed pre-fetch failed for token %s"
-                        " (will skip seed for this token): %s: %s",
-                        token_id,
-                        type(exc).__name__,
+            try:
+                pre_captured_books = self._fetch_rest_seed_books(
+                    chunk,
+                    deadline_monotonic=deadline_monotonic,
+                    logger=logger,
+                    log_prefix="market_channel: REST seed",
+                )
+            except TimeoutError as exc:
+                self.rest_seed_backpressure_count += 1
+                self.rest_seed_backpressure_reason = str(exc)
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel REST seed fetch budget exhausted: "
+                        "written=%d remaining=%d reason=%s",
+                        written,
+                        max(0, len(ordered) - offset),
                         exc,
                     )
+                break
             if not pre_captured_books:
                 continue
-            with world_mutex:
-                results = self.ingestor.seed_from_rest(
-                    self.fetch_orderbook,
-                    received_at=received_at,
-                    pre_cached=pre_captured_books,
-                    token_ids=pre_captured_books.keys(),
-                )
-                if commit is not None:
-                    commit()
+            with self.ingestor.defer_market_event_sink():
+                try:
+                    with world_mutex:
+                        results = self.ingestor.seed_from_rest(
+                            self.fetch_orderbook,
+                            received_at=received_at,
+                            pre_cached=pre_captured_books,
+                            token_ids=pre_captured_books.keys(),
+                        )
+                        if commit is not None:
+                            commit()
+                except TimeoutError as exc:
+                    self.rest_seed_backpressure_count += 1
+                    self.rest_seed_backpressure_reason = str(exc)
+                    if logger is not None:
+                        logger.warning(
+                            "EDLI market-channel REST seed write backpressure: "
+                            "written=%d remaining=%d reason=%s",
+                            written,
+                            max(0, len(ordered) - offset),
+                            exc,
+                        )
+                    break
+                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -808,6 +983,76 @@ class MarketChannelOnlineService:
                     len(results),
                 )
         return written
+
+    def _fetch_rest_seed_books(
+        self,
+        token_ids: list[str],
+        *,
+        deadline_monotonic: float | None = None,
+        logger: Any | None = None,
+        log_prefix: str = "market_channel: REST seed",
+    ) -> dict[str, dict]:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {}
+        if self.fetch_orderbooks is not None:
+            try:
+                books = self.fetch_orderbooks(token_ids)
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                _logger.warning(
+                    "%s batch pre-fetch failed for %d tokens: %s: %s",
+                    log_prefix,
+                    len(token_ids),
+                    type(exc).__name__,
+                    exc,
+                )
+                books = {}
+            if isinstance(books, dict) and books:
+                wanted = set(token_ids)
+                pre_captured_books = {
+                    str(token_id): dict(book)
+                    for token_id, book in books.items()
+                    if str(token_id) in wanted and isinstance(book, dict)
+                }
+                if len(pre_captured_books) == len(wanted):
+                    return pre_captured_books
+                if logger is not None and pre_captured_books:
+                    logger.warning(
+                        "%s batch pre-fetch returned partial books: captured=%d missing=%d",
+                        log_prefix,
+                        len(pre_captured_books),
+                        max(0, len(wanted) - len(pre_captured_books)),
+                    )
+                token_ids = [token_id for token_id in token_ids if str(token_id) not in pre_captured_books]
+            else:
+                pre_captured_books = {}
+        else:
+            pre_captured_books = {}
+
+        for token_id in token_ids:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                if logger is not None:
+                    logger.warning(
+                        "%s budget exhausted inside chunk: captured=%d remaining=%d",
+                        log_prefix,
+                        len(pre_captured_books),
+                        max(0, len(token_ids) - len(pre_captured_books)),
+                    )
+                break
+            try:
+                pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                _logger.warning(
+                    "%s pre-fetch failed for token %s (will skip seed for this token): %s: %s",
+                    log_prefix,
+                    token_id,
+                    type(exc).__name__,
+                    exc,
+                )
+        return pre_captured_books
 
     def on_disconnect(self, *, gap_start: str) -> None:
         self.connected = False
@@ -820,7 +1065,7 @@ class MarketChannelOnlineService:
         pre_captured_books: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
         gap_start: str | None = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """Seed gap-close books on reconnect.
 
         ``pre_captured_books`` is an optional {token_id: book_dict} map
@@ -839,13 +1084,7 @@ class MarketChannelOnlineService:
         from src.state.db import assert_no_world_mutex_held_for_io
 
         gap_start_captured = gap_start or self.gap_start or received_at
-        active_token_ids = self.ingestor._active_token_ids
-        if token_ids is not None:
-            active_token_ids = {
-                str(token_id)
-                for token_id in token_ids
-                if str(token_id) in self.ingestor._active_token_ids
-            }
+        active_token_ids = self.ingestor.active_token_ids_open_at(token_ids=token_ids)
         for token_id in sorted(active_token_ids):
             try:
                 if pre_captured_books is not None and token_id in pre_captured_books:
@@ -872,8 +1111,7 @@ class MarketChannelOnlineService:
                 received_at=received_at,
             )
             if event is not None:
-                result = self.ingestor._writer.write(event)
-                self.ingestor._write_feasibility_evidence(event)
+                result = self.ingestor._commit_market_event(event)
                 results.append(result)
         self.gap_start = None
         return results
@@ -894,37 +1132,32 @@ class MarketChannelOnlineService:
             return 0
         gap_start_captured = self.gap_start or received_at
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
-        ordered = [
-            str(token_id)
-            for token_id in sorted({str(token_id) for token_id in token_ids})
-            if str(token_id) in self.ingestor._active_token_ids
-        ]
+        ordered = sorted(
+            self.ingestor.active_token_ids_open_at(
+                token_ids={str(token_id) for token_id in token_ids}
+            )
+        )
         written = 0
         for offset in range(0, len(ordered), size):
             chunk = ordered[offset: offset + size]
-            pre_captured_books: dict[str, dict] = {}
-            for token_id in chunk:
-                try:
-                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
-                except Exception as exc:
-                    _logger.warning(
-                        "market_channel: reconnect REST pre-fetch failed for token %s"
-                        " (will skip seed for this token): %s: %s",
-                        token_id,
-                        type(exc).__name__,
-                        exc,
-                    )
+            pre_captured_books = self._fetch_rest_seed_books(
+                chunk,
+                logger=logger,
+                log_prefix="market_channel: reconnect REST seed",
+            )
             if not pre_captured_books:
                 continue
-            with world_mutex:
-                results = self.on_reconnect(
-                    received_at=received_at,
-                    pre_captured_books=pre_captured_books,
-                    token_ids=pre_captured_books.keys(),
-                    gap_start=gap_start_captured,
-                )
-                if commit is not None:
-                    commit()
+            with self.ingestor.defer_market_event_sink():
+                with world_mutex:
+                    results = self.on_reconnect(
+                        received_at=received_at,
+                        pre_captured_books=pre_captured_books,
+                        token_ids=pre_captured_books.keys(),
+                        gap_start=gap_start_captured,
+                    )
+                    if commit is not None:
+                        commit()
+                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -944,6 +1177,7 @@ class MarketChannelOnlineService:
         logger: Any | None = None,
         commit: Callable[[], None] | None = None,
         rollback: Callable[[], None] | None = None,
+        world_mutex: Any | None = None,
     ) -> None:
         """Run the public market channel online.
 
@@ -958,17 +1192,16 @@ class MarketChannelOnlineService:
         # process-global world-DB write mutex. Held ONLY around the DB
         # write+commit (never across the WS recv / network I/O), so it stays
         # short and the reactor's per-event writes are never lock-starved.
-        _world_mutex = _world_write_mutex()
+        _world_mutex = world_mutex if world_mutex is not None else _world_write_mutex()
 
         while stop_event is None or not stop_event.is_set():
             received_at = datetime.now(UTC).isoformat()
             try:
+                active_token_ids = self.ingestor.active_token_ids_open_at()
                 seed_first = sorted(
-                    {
-                        str(token_id)
-                        for token_id in self.seed_first_token_ids
-                        if str(token_id) in self.ingestor._active_token_ids
-                    }
+                    str(token_id)
+                    for token_id in self.seed_first_token_ids
+                    if str(token_id) in active_token_ids
                 )
                 if self.fetch_orderbook is not None:
                     if seed_first:
@@ -978,9 +1211,9 @@ class MarketChannelOnlineService:
                             world_mutex=_world_mutex,
                             commit=commit,
                             logger=logger,
-                            chunk_size=max(1, len(seed_first)),
+                            chunk_size=REST_SEED_COMMIT_CHUNK_SIZE,
                         )
-                    remaining = sorted(set(self.ingestor._active_token_ids) - set(seed_first))
+                    remaining = sorted(active_token_ids - set(seed_first))
                     self.seed_rest_books_in_chunks(
                         token_ids=remaining,
                         received_at=received_at,
@@ -994,7 +1227,7 @@ class MarketChannelOnlineService:
                     await ws.send(
                         json.dumps(
                             {
-                                "assets_ids": sorted(self.ingestor._active_token_ids),
+                                "assets_ids": sorted(active_token_ids),
                                 "type": "market",
                                 "custom_feature_enabled": True,
                             },
@@ -1004,7 +1237,7 @@ class MarketChannelOnlineService:
                     if logger is not None:
                         logger.info(
                             "EDLI market-channel connected for %d active weather tokens",
-                            len(self.ingestor._active_token_ids),
+                            len(active_token_ids),
                         )
                     async for raw_message in ws:
                         # Hold the world-DB write mutex ONLY around the DB
@@ -1016,17 +1249,19 @@ class MarketChannelOnlineService:
                         # AFTER release so the world mutex stays short and never
                         # spans a venue fetch.
                         pending_actions: list[MarketChannelAction] = []
-                        with _world_mutex:
-                            for message in _parse_channel_messages(raw_message):
-                                action_or_result = self.ingestor.handle_message(
-                                    message,
-                                    received_at=datetime.now(UTC).isoformat(),
-                                )
-                                if isinstance(action_or_result, MarketChannelAction):
-                                    pending_actions.append(action_or_result)
-                            self.ingestor.flush_coalesced(market_budget=100)
-                            if commit is not None:
-                                commit()
+                        with self.ingestor.defer_market_event_sink():
+                            with _world_mutex:
+                                for message in _parse_channel_messages(raw_message):
+                                    action_or_result = self.ingestor.handle_message(
+                                        message,
+                                        received_at=datetime.now(UTC).isoformat(),
+                                    )
+                                    if isinstance(action_or_result, MarketChannelAction):
+                                        pending_actions.append(action_or_result)
+                                self.ingestor.flush_coalesced(market_budget=100)
+                                if commit is not None:
+                                    commit()
+                            self.ingestor.flush_deferred_market_event_sink()
                         for _action in pending_actions:
                             self._handle_action(_action)
             except Exception as exc:  # noqa: BLE001 - network loop must retry
@@ -1055,7 +1290,7 @@ class MarketChannelOnlineService:
                     _reconnect_at = datetime.now(UTC).isoformat()
                     if self.fetch_orderbook is not None:
                         self.reconnect_rest_books_in_chunks(
-                            token_ids=self.ingestor._active_token_ids,
+                            token_ids=self.ingestor.active_token_ids_open_at(),
                             received_at=_reconnect_at,
                             world_mutex=_world_mutex,
                             commit=commit,
@@ -1116,6 +1351,7 @@ def run_market_channel_service_forever(
     logger: Any | None = None,
     commit: Callable[[], None] | None = None,
     rollback: Callable[[], None] | None = None,
+    world_mutex: Any | None = None,
 ) -> None:
     asyncio.run(
         service.run_websocket_forever(
@@ -1124,6 +1360,7 @@ def run_market_channel_service_forever(
             logger=logger,
             commit=commit,
             rollback=rollback,
+            world_mutex=world_mutex,
         )
     )
 
@@ -1148,9 +1385,9 @@ def assert_user_channel_fill_authority(*, source: str) -> None:
 
 # INV-37 (PR415 B5, 2026-06-20): the schemas this insert may target. When the
 # write runs on a world-MAIN connection with zeus_trades.db ATTACHed as 'trades'
-# (the price-channel atomic cross-DB path), the caller passes schema='trades' so
+# (the price-channel attached cross-DB path), the caller passes schema='trades' so
 # the row lands in the runtime-read trades.execution_feasibility_evidence and NEVER
-# the populated-but-not-read world shadow table. Allowlisted (never interpolate a
+# the populated-but-not-read world ghost table. Allowlisted (never interpolate a
 # caller string into SQL) and defaulted to "" = unqualified for all other callers.
 _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS = {"", "trades", "main"}
 
@@ -1166,7 +1403,18 @@ def insert_execution_feasibility_evidence(
         raise ValueError(
             f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
         )
-    table = "execution_feasibility_evidence" if not schema else f"{schema}.execution_feasibility_evidence"
+    if schema:
+        table = f"{schema}.execution_feasibility_evidence"
+        latest_table = f"{schema}.execution_feasibility_latest"
+    else:
+        # Owner-routed (2026-07-01): both tables are trade-owned; the world copy is an unread ghost (12.9M
+        # stray rows). Route to the owner (trades) when reachable, else SKIP so a world-rooted caller never
+        # writes the ghost. Non-canonical (:memory:/test) conns keep the legacy bare behavior.
+        from src.state.owner_routed_write import owner_write_target
+        table = owner_write_target(conn, "execution_feasibility_evidence")
+        latest_table = owner_write_target(conn, "execution_feasibility_latest")
+        if table is None or latest_table is None:
+            return
     values = dict(row)
     values.setdefault("schema_version", 1)
     values.setdefault("created_at", datetime.now(UTC).isoformat())
@@ -1208,6 +1456,36 @@ def insert_execution_feasibility_evidence(
         """,
         values,
     )
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO {latest_table} (
+                token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (
+                :token_id, :direction, :evidence_id, :event_id, :condition_id, :outcome_label,
+                :quote_seen_at, :book_hash_before, :best_bid_before, :best_ask_before,
+                :depth_before_json, :created_at, :schema_version
+            )
+            ON CONFLICT(token_id, direction) DO UPDATE SET
+                evidence_id = excluded.evidence_id,
+                event_id = excluded.event_id,
+                condition_id = excluded.condition_id,
+                outcome_label = excluded.outcome_label,
+                quote_seen_at = excluded.quote_seen_at,
+                book_hash_before = excluded.book_hash_before,
+                best_bid_before = excluded.best_bid_before,
+                best_ask_before = excluded.best_ask_before,
+                depth_before_json = excluded.depth_before_json,
+                created_at = excluded.created_at,
+                schema_version = excluded.schema_version
+            """,
+            values,
+        )
+    except sqlite3.OperationalError as exc:
+        if "execution_feasibility_latest" not in str(exc):
+            raise
 
 
 def feasibility_evidence_from_quote(

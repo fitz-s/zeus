@@ -56,7 +56,7 @@ CREATE TABLE position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
-    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
+    -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28).
     chain_avg_price REAL,
     chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
@@ -347,6 +347,27 @@ class TestWriterIdempotencyCheck:
         )
         upsert_position_current(conn, p2)
         assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 2
+
+    def test_hard_terminal_same_position_id_is_absorbing(self):
+        """A closed position_id must not be reactivated by later monitor/projection writes."""
+        from src.state.projection import upsert_position_current
+
+        conn = _fresh_conn()
+        terminal = _make_projection(
+            position_id="pos-a", phase="voided", token_id=_LONDON_TOKEN
+        )
+        upsert_position_current(conn, terminal)
+
+        reopened = _make_projection(
+            position_id="pos-a", phase="active", token_id=_LONDON_TOKEN
+        )
+        with pytest.raises(ValueError, match="hard-terminal phase is absorbing"):
+            upsert_position_current(conn, reopened)
+
+        row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-a'"
+        ).fetchone()
+        assert row[0] == "voided"
 
 
 # -------------------------- MIGRATION / INDEX TESTS -------------------------- #

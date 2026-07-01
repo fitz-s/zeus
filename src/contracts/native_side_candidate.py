@@ -12,9 +12,8 @@
 A ``NativeSideCandidate`` is the unified per-bin, per-side candidate object the
 bin-selection upgrade ranks. It is a frozen, pure contract / dataclass with no
 side effects: importing or constructing it changes NO live trading behavior.
-It is DEFAULT-OFF / shadow — the live decision path is not wired to it here
-(that is a later phase per spec §11 Phase 1 rollback: "Feature flag routes back
-to current BinEdge path").
+Live eligibility and submission authority remain with the caller that consumes
+the candidate.
 
 Three spec §4 laws are encoded structurally so the wrong code is unwritable:
 

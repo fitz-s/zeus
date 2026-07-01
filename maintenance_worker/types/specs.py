@@ -6,7 +6,7 @@
 Spec dataclasses — TaskSpec, EngineConfig, TickContext, ProposalManifest,
 AckState.
 
-All frozen=True following scripts/topology_v_next/dataclasses.py P1.1 pattern.
+All dataclasses are frozen so specs remain hashable and immutable across ticks.
 Collections use tuple[...] to remain hashable/frozen.
 Stdlib only (pathlib, dataclasses, datetime).
 

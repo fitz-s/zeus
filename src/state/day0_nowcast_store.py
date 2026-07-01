@@ -15,15 +15,16 @@ Writer pattern mirrors src/state/decision_events.py:
 INV-37 note: all writes go to zeus-forecasts.db (single DB).
 No cross-DB ATTACH needed here; all day0_nowcast tables are forecast-class.
 
-NOT_DAEMON_WIRED: caller-site wiring (evaluator.py + monitor_refresh.py) is a
-separate operator-controlled step. This module exists in src/ but is not imported
-from any daemon hot-path until that wiring lands.
+Live daemon wiring: src.main bootstraps the conservative hpf_v1 identity fit when
+the forecasts DB is empty, and evaluator.py / monitor_refresh.py also ensure it
+on demand before writing nowcast evidence.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
+from datetime import date
 from typing import Optional
 
 import numpy as np
@@ -35,6 +36,165 @@ _NEI_V1_DIGEST_CHARS = 16
 # Sentinel value matching the AFTER INSERT trigger on day0_nowcast_runs.
 # Any NULL writer-bypass will produce this string via the trigger.
 _NEI_V1_BACKSTOP_SENTINEL = "nei_v1_BACKSTOP_NULL_WRITER_BYPASS"
+
+IDENTITY_FIT_RUN_ID = "hpf_v1_identity_conservative_v1"
+IDENTITY_FIT_ARTIFACT_ID = "hpf_v1"
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _clean_identity_part(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _unique_market_slug_from_rows(rows: list[sqlite3.Row] | list[tuple]) -> Optional[str]:
+    slugs = sorted(
+        {
+            _clean_identity_part(row[0])
+            for row in rows
+            if len(row) >= 1 and _clean_identity_part(row[0])
+        }
+    )
+    if len(slugs) == 1:
+        return slugs[0]
+    return None
+
+
+def resolve_market_slug_for_position_identity(
+    *,
+    token_id: object = None,
+    condition_id: object = None,
+    market_id: object = None,
+    city: object = None,
+    target_date: object = None,
+    temperature_metric: object = None,
+    bin_label: object = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[str]:
+    """Resolve a persisted position to its canonical market_events.market_slug.
+
+    ``Position.market_slug`` is JSON-only, while live SQL positions are loaded
+    from ``position_current``. Day0 nowcast writes need the canonical forecast
+    market slug, so recover it from the forecast-class market registry using
+    exact identities only. Returns ``None`` unless one unique slug is proven.
+    """
+    from src.state.db import get_forecasts_connection_read_only
+
+    token = _clean_identity_part(token_id)
+    condition = _clean_identity_part(condition_id) or _clean_identity_part(market_id)
+    city_s = _clean_identity_part(city)
+    target_s = _clean_identity_part(target_date)
+    metric_s = _clean_identity_part(temperature_metric)
+    label_s = _clean_identity_part(bin_label)
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_forecasts_connection_read_only()
+
+    def _filters() -> tuple[str, list[str]]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if city_s:
+            clauses.append("city = ?")
+            params.append(city_s)
+        if target_s:
+            clauses.append("target_date = ?")
+            params.append(target_s)
+        if metric_s:
+            clauses.append("temperature_metric = ?")
+            params.append(metric_s)
+        return (" AND ".join(clauses), params)
+
+    def _lookup(where: str, params: list[str]) -> Optional[str]:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT market_slug
+              FROM market_events
+             WHERE market_slug IS NOT NULL
+               AND market_slug != ''
+               AND {where}
+             ORDER BY market_slug
+             LIMIT 2
+            """,
+            params,
+        ).fetchall()
+        return _unique_market_slug_from_rows(rows)
+
+    try:
+        extra_sql, extra_params = _filters()
+        suffix = f" AND {extra_sql}" if extra_sql else ""
+        if token:
+            slug = _lookup("token_id = ?" + suffix, [token, *extra_params])
+            if slug:
+                return slug
+        if condition:
+            slug = _lookup("condition_id = ?" + suffix, [condition, *extra_params])
+            if slug:
+                return slug
+        if label_s and city_s and target_s and metric_s:
+            return _lookup(
+                """
+                city = ? AND target_date = ? AND temperature_metric = ?
+                AND (range_label = ? OR outcome = ?)
+                """,
+                [city_s, target_s, metric_s, label_s, label_s],
+            )
+        return None
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+
+
+def build_identity_platt_fit():
+    """Documented conservative Day0 horizon fit used to bootstrap live logging.
+
+    This fit claims zero skill: ``predict_proba(p)==p``. It exists so the live
+    nowcast lane can write evidence rows and start the data clock automatically
+    instead of relying on an operator-run script after every empty DB/restart.
+    """
+    from src.calibration.day0_horizon_calibration import HorizonPlattFit
+
+    return HorizonPlattFit(
+        alpha=1.0,
+        beta=0.0,
+        gamma_morning=0.0,
+        gamma_afternoon=0.0,
+        gamma_post_peak=0.0,
+        delta=0.0,
+        epsilon=0.0,
+        fit_artifact_id=IDENTITY_FIT_ARTIFACT_ID,
+        fit_run_id=IDENTITY_FIT_RUN_ID,
+        fit_date=date.today().isoformat(),
+        n_obs=0,
+        sample_period_start="",
+        sample_period_end="",
+    )
+
+
+def ensure_identity_platt_fit(
+    *,
+    fit_artifact_id: str = IDENTITY_FIT_ARTIFACT_ID,
+    conn: Optional[sqlite3.Connection] = None,
+):
+    """Ensure the conservative identity fit exists and return the latest fit.
+
+    Idempotent. With ``conn=None`` this writes through the canonical LIVE forecasts
+    writer path. Tests may pass a temp connection to keep the operation local.
+    """
+    fit = read_latest_platt_fit(fit_artifact_id=fit_artifact_id, conn=conn)
+    if fit is not None:
+        return fit
+    identity = build_identity_platt_fit()
+    write_platt_fit(identity, conn=conn)
+    return read_latest_platt_fit(fit_artifact_id=fit_artifact_id, conn=conn)
 
 
 def nowcast_event_id_v1_hash(
@@ -97,6 +257,9 @@ def write_platt_fit(
 
     try:
         with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+            from src.state.db import _create_day0_horizon_platt_fits
+
+            _create_day0_horizon_platt_fits(conn)
             # The deployed column is `fit_version` (TEXT NOT NULL); the Python
             # contract names the same semantic value `fit_artifact_id` on the
             # HorizonPlattFit dataclass. Map dataclass.fit_artifact_id -> SQL
@@ -296,6 +459,8 @@ def read_latest_platt_fit(
         conn.row_factory = sqlite3.Row
 
     try:
+        if not _table_exists(conn, "day0_horizon_platt_fits"):
+            return None
         # Deployed column is `fit_version` (TEXT NOT NULL); it stores the semantic
         # fit_artifact_id value (e.g. "hpf_v1"). The Python API keeps the
         # fit_artifact_id keyword but must filter on the real SQL column. (The

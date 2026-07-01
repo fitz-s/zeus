@@ -3,9 +3,8 @@ from __future__ import annotations
 # Created: 2026-06-09
 # Last reused or audited: 2026-06-09
 # Authority basis: zero-trade root-cause 2026-06-09 (iron rule 1). The
-#   replacement-forecast cutover flag ``disable_legacy_opendata_forecast_live_jobs``
-#   silently disabled the SOLE producer of the FSR trigger's source and froze the
-#   live pipeline for ~2 days with no alarm.
+#   a replacement-forecast cutover disabled the SOLE producer of the FSR trigger's
+#   source and froze the live pipeline for ~2 days with no alarm.
 #
 # RELATIONSHIP ANTIBODY (Fitz immune-system principle: make the error CATEGORY
 # unconstructable, not the single instance).
@@ -29,39 +28,9 @@ from __future__ import annotations
 # as the FSR trigger source. Disabling the opendata producer while the FSR/reactor
 # pipeline is live is a starvation guarantee, not a cutover.
 #
-# This test fails loudly the moment someone re-disables the opendata producer in
-# the committed settings — turning a silent 2-day freeze into a CI red.
-
-import json
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_committed_settings_keep_opendata_fsr_producer_enabled():
-    """The committed settings MUST keep the opendata baseline producer enabled,
-    because the FSR trigger / EDLI reactor consume its source_run and nothing else
-    produces it. (The replacement forecast is overlay-only — see header.)"""
-    settings = json.loads((ROOT / "config" / "settings.json").read_text(encoding="utf-8"))
-    shadow = settings.get("replacement_forecast_shadow", {})
-    assert isinstance(shadow, dict), "replacement_forecast_shadow section missing"
-    disabled = shadow.get("disable_legacy_opendata_forecast_live_jobs", False)
-    assert disabled is False, (
-        "disable_legacy_opendata_forecast_live_jobs=True starves the FSR trigger: it "
-        "kills the SOLE producer (ecmwf_open_data source_run/ensemble_snapshots) that "
-        "ForecastSnapshotReadyTrigger consumes. The replacement forecast is an overlay "
-        "and produces no source_run — it cannot replace the baseline as the FSR source."
-    )
-
-
-def test_active_forecast_live_jobs_include_opendata_producers_under_committed_settings(monkeypatch):
-    """Runtime check: under the committed settings (and no disabling env override),
-    the daemon's active-job set MUST include the opendata producer cron jobs, not the
-    heartbeat-only set. This tests the actual gate function, not just the raw JSON."""
+def test_active_forecast_live_jobs_include_opendata_producers():
+    """The daemon's active-job set must include the opendata producer cron jobs."""
     from src.ingest import forecast_live_daemon as fld
-
-    # Ensure the env override is not what makes (or breaks) this assertion.
-    monkeypatch.delenv(fld.FORECAST_LIVE_DISABLE_OPENDATA_ENV, raising=False)
 
     active = fld._active_forecast_live_job_ids()
     required_producers = {

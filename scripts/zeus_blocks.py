@@ -2,7 +2,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""zeus_blocks.py — CLI: enumerate all 13 entries-block gates for the operator.
+"""zeus_blocks.py — CLI: enumerate current runtime entry blockers.
 
 Usage:
     .venv/bin/python scripts/zeus_blocks.py
@@ -14,16 +14,13 @@ Exit codes:
     1   One or more DISCOVERY-stage blocks are BLOCKING or UNKNOWN
     2   Registry construction failed (deps build error — check stderr)
 
-RegistryDeps construction is copied from cycle_runner.py:763-811 (the
-REGISTRY-GUARDED SHORT-CIRCUIT block).  If the recipe changes there,
-update this script to match.
+RegistryDeps construction mirrors the cycle_runner block-registry snapshot.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -65,33 +62,26 @@ def _state_coloured(state: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RegistryDeps construction — mirrors cycle_runner.py:763-811 exactly.
+# RegistryDeps construction — mirrors cycle_runner.py block-registry snapshot.
 # One helper so it can be reused if needed.
 # ---------------------------------------------------------------------------
 
 def _build_runtime_deps():
-    """Build a live RegistryDeps using the same recipe as cycle_runner.py:769-788."""
-    from src.config import STATE_DIR
+    """Build a live RegistryDeps using the same recipe as cycle_runner.py."""
     from src.state.db import (
         get_world_connection as _get_world_conn,
         get_connection as _get_db_conn,
         RISK_DB_PATH as _RISK_DB_PATH,
     )
-    from src.riskguard import riskguard as _riskguard_mod
     from src.control import heartbeat_supervisor as _heartbeat_mod
     from src.control import ws_gap_guard as _ws_gap_mod
-    from src.control import entry_forecast_rollout as _rollout_gate_mod
     from src.control.block_adapters._base import RegistryDeps
 
     return RegistryDeps(
-        state_dir=Path(STATE_DIR),
         db_connection_factory=_get_world_conn,
         risk_state_db_connection_factory=lambda: _get_db_conn(_RISK_DB_PATH),
-        riskguard_module=_riskguard_mod,
         heartbeat_module=_heartbeat_mod,
         ws_gap_guard_module=_ws_gap_mod,
-        rollout_gate_module=_rollout_gate_mod,
-        env=dict(os.environ),
     )
 
 
@@ -102,7 +92,7 @@ def _build_runtime_deps():
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="zeus_blocks",
-        description="Enumerate all 13 entries-block gates.",
+        description="Enumerate current runtime entry blockers.",
     )
     parser.add_argument(
         "--json",

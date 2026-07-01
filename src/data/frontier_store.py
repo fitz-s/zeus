@@ -42,8 +42,6 @@ def authority_tier_for_role(role: str) -> str:
         return _LIVE_AUTHORITY
     if role == "backfill":
         return "BACKFILL"
-    if role == "shadow":
-        return "RECONSTRUCTED"
     return "UNVERIFIED"
 
 

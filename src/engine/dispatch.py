@@ -5,10 +5,11 @@
 
 PLAN_v3 §6.P3 migrates strategy/observation dispatch from
 ``DiscoveryMode.DAY0_CAPTURE`` (cycle-axis) to
-``MarketPhase.SETTLEMENT_DAY`` (market-axis). PLAN_v3 §6.P4 unifies the
-two D-A clocks (``cycle_runtime.py`` candidate filter on UTC ``endDate
-- now`` vs DAY0_WINDOW lifecycle transition on city-local
-end-of-target_date) through the same MarketPhase axis.
+``MarketPhase.SETTLEMENT_DAY`` (market-axis). PLAN_v3 §6.P4 originally unified
+the two D-A clocks through ``endDate``. Live venue evidence later proved Gamma
+``endDate`` is a resolution timestamp, not order-entry closure; Day0 dispatch
+therefore now uses the city-local target-day window and only excludes explicit
+venue-closed payloads.
 
 Both migrations are **flag-gated by ``ZEUS_MARKET_PHASE_DISPATCH``,
 default OFF**: with the flag unset, dispatch is byte-equal to pre-P3
@@ -58,12 +59,9 @@ KNOWN OBSERVABILITY-ONLY GAPS (critic R5 A5-M2 / A6-M3 / A7-M4):
   on-chain resolved truth is not wired today. POST_TRADING and RESOLVED
   collapse to the same dispatch behavior. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
   §A5 ships the UMA ``SettlementResolved`` listener.
-- F1 fallback (12:00 UTC of target_date) is the only endDate source
-  for site 1 (monitor loop has no Gamma payload). With flag ON this
-  becomes silent live authority. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
-  §A5 introduces ``MarketPhaseEvidence.phase_source ∈ {verified_gamma,
-  fallback_f1, unknown, onchain_resolved}`` so callers can distinguish
-  + degrade.
+- Site 1 (monitor loop has no Gamma payload) no longer uses F1 fallback as
+  venue-close authority. It uses city-local target-day membership and degrades
+  only on parse/timezone failure.
 - ``market_phase=None`` collapses MISSING + PARSE_FAILED + PRE_FLAG_FLIP
   into a single state. Finding A's "missing = OK" pattern for the
   phase axis. ``task_2026-05-04_oracle_kelly_evidence_rebuild`` §A5
@@ -78,7 +76,9 @@ those sites.
 from __future__ import annotations
 
 import os
+from datetime import date, datetime, time, timezone
 from typing import Optional, TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from src.engine.discovery_mode import DiscoveryMode
 
@@ -165,6 +165,57 @@ def market_phase_dispatch_enabled() -> bool:
             sorted(_TRUTHY_FLAG_VALUES), sorted(_FALSY_FLAG_VALUES),
         )
     return True
+
+
+def _venue_bool(value: object) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "closed"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "open"}:
+            return False
+    return None
+
+
+def _payload_explicitly_venue_closed(market: Optional[dict]) -> bool:
+    if not market:
+        return False
+    closed = _venue_bool(market.get("closed"))
+    if closed is None:
+        closed = _venue_bool(market.get("market_closed"))
+    accepting = _venue_bool(market.get("accepting_orders"))
+    if accepting is None:
+        accepting = _venue_bool(market.get("acceptingOrders"))
+    return closed is True and accepting is False
+
+
+def _is_target_local_day_active(
+    *,
+    target_date_str: str,
+    city_timezone: str,
+    decision_time_utc,
+) -> Optional[bool]:
+    try:
+        target_local_date = date.fromisoformat(target_date_str)
+        tz = ZoneInfo(city_timezone)
+        dt = decision_time_utc
+        if not isinstance(dt, datetime):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        decision_local = dt.astimezone(tz)
+        start = datetime.combine(target_local_date, time.min, tzinfo=tz)
+        end = datetime.combine(target_local_date, time.max, tzinfo=tz)
+    except Exception:
+        return None
+    return start <= decision_local <= end
 
 
 def _reset_dispatch_flag_warning_cache_for_test() -> None:
@@ -267,7 +318,7 @@ def should_fetch_settlement_day_observation(
 
 
 # ---------------------------------------------------------------------- #
-# P4 D-A two-clock unification (PLAN_v3 §6.P4)
+# P4 D-A day0 dispatch unification (PLAN_v3 §6.P4, corrected 2026-06-26)
 #
 # These helpers replace the ad-hoc clock checks at:
 #   1. cycle_runtime.py candidate filter (was: hours_to_resolution <
@@ -276,10 +327,9 @@ def should_fetch_settlement_day_observation(
 #      lead_hours_to_settlement_close <= 6.0, anchored on city-local
 #      end-of-target_date)
 #
-# Both clocks pre-P4 disagreed by (24h - city.utc_offset). Under flag
-# ON they unify on MarketPhase.SETTLEMENT_DAY = [city-local 00:00 of
-# target_date, 12:00 UTC of target_date) — i.e., entry uses city-local
-# anchor, exit uses Polymarket endDate (uniformly 12:00 UTC per F1).
+# Both clocks pre-P4 disagreed by (24h - city.utc_offset). Under the current
+# live rule they unify on the city-local target day. Gamma endDate/F1 12:00Z is
+# not venue-close proof.
 # ---------------------------------------------------------------------- #
 
 
@@ -290,24 +340,12 @@ def _is_settlement_day_phase(
     city_timezone: str,
     decision_time_utc,
 ) -> Optional[bool]:
-    """Return ``True`` iff the (target_date, city_timezone,
-    decision_time) triple resolves to ``MarketPhase.SETTLEMENT_DAY`` at
-    this instant. Returns ``False`` for any other genuine phase
-    (PRE_TRADING, PRE_SETTLEMENT_DAY, POST_TRADING, RESOLVED). Returns
-    ``None`` on parse / arg failure so callers can distinguish "phase
-    says no" (respect it) from "could not determine phase" (fall back
-    to legacy).
+    """Return ``True`` iff the city-local target date is active now.
 
-    When ``market`` is provided, use its ``market_end_at`` /
-    ``market_start_at`` keys (Polymarket Gamma payload-derived).
-    When ``market`` is ``None`` (P4 site 1 — monitor loop has only
-    ``pos.target_date`` + ``city.timezone``, no Gamma payload), fall
-    back to F1: Polymarket weather endDate uniformly 12:00 UTC of
-    target_date (verified across 13 cities — INVESTIGATION_EXTERNAL
-    Q3 contributes 7 cities, CRITIC_REVIEW_R2 spot-check contributes
-    6; full breakdown in
-    docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/
-    CRITIC_REVIEW_R2.md).
+    Gamma ``endDate``/the old F1 12:00Z anchor is a resolution timestamp, not
+    order-entry closure. Day0/monitor dispatch must keep evaluating through the
+    local target day unless venue payload explicitly says ``closed=true`` and
+    ``acceptingOrders=false``.
 
     The tri-state return is critical: collapsing parse-failure to
     ``False`` would silently let a corrupt target_date row exit the
@@ -316,36 +354,13 @@ def _is_settlement_day_phase(
     caller see ``None`` and pick the right fallback is the only
     correctness-preserving option.
     """
-    from datetime import date
-
-    from src.strategy.market_phase import (
-        MarketPhase,
-        _f1_fallback_end_utc,
-        market_phase_for_decision,
-        market_phase_from_market_dict,
+    if _payload_explicitly_venue_closed(market):
+        return False
+    return _is_target_local_day_active(
+        target_date_str=target_date_str,
+        city_timezone=city_timezone,
+        decision_time_utc=decision_time_utc,
     )
-
-    try:
-        if market is not None:
-            phase = market_phase_from_market_dict(
-                market=market,
-                city_timezone=city_timezone,
-                target_date_str=target_date_str,
-                decision_time_utc=decision_time_utc,
-            )
-        else:
-            target_local_date = date.fromisoformat(target_date_str)
-            phase = market_phase_for_decision(
-                target_local_date=target_local_date,
-                city_timezone=city_timezone,
-                decision_time_utc=decision_time_utc,
-                polymarket_start_utc=None,
-                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
-                uma_resolved=False,
-            )
-        return phase == MarketPhase.SETTLEMENT_DAY
-    except Exception:
-        return None
 
 
 def filter_market_to_settlement_day(
@@ -360,13 +375,10 @@ def filter_market_to_settlement_day(
     ``hours_to_resolution`` filter — this function returns ``True``
     so the caller's existing filter is the authority.
 
-    Flag ON: returns ``True`` iff the market is currently in
-    ``MarketPhase.SETTLEMENT_DAY`` per (market_end_at, city.timezone,
-    target_date, decision_time). Replaces the legacy "hours-to-Polymarket-
-    endDate < 6" filter, which silently underran for west-of-UTC cities
-    (LA endDate is 12:00 UTC = 04:00 local of target_date — the legacy
-    filter opened the DAY0_CAPTURE window at 06:00 UTC = before LA's
-    target_date even started locally).
+    Flag ON: returns ``True`` iff the market's city-local target day is active
+    and payload does not explicitly prove venue closure. Replaces the legacy
+    "hours-to-Polymarket-endDate < 6" filter, which silently underruns for
+    west-of-UTC cities and over-closes same-day markets after 12:00Z.
 
     Fail-soft on parse failure: returns ``False`` when flag is ON and
     phase cannot be determined. The legacy filter would have included
@@ -429,11 +441,9 @@ def should_enter_day0_window(
     ``lead_hours_to_settlement_close`` so this helper is pure with
     respect to the time semantic.
 
-    Flag ON: position transitions when its market is in
-    ``MarketPhase.SETTLEMENT_DAY`` (city-local 00:00 of target_date
-    onward, until 12:00 UTC of target_date). This BROADENS the
-    DAY0_WINDOW from the legacy 6h to up to 24h depending on city
-    timezone — the wider window matches the operator framing
+    Flag ON: position transitions when its city-local target date is active.
+    This BROADENS the DAY0_WINDOW from the legacy 6h to the whole local target
+    day — the wider window matches the operator framing
     "day 0 应该交易所有当地市场 0 点前的 24 个小时" and aligns
     with PLAN_v3 §2 axis A semantics.
 
@@ -456,10 +466,9 @@ def should_enter_day0_window(
     if result is True:
         return True
     if result is False:
-        # Phase cleanly says NOT SETTLEMENT_DAY — respect that. Falling
-        # back to the legacy 6h threshold here would re-fire DAY0_WINDOW
-        # for west-of-UTC cities AFTER Polymarket endDate (POST_TRADING),
-        # which is exactly the D-A bug P4 is closing.
+        # Day0 window cleanly says inactive — respect that. Falling back
+        # to the legacy 6h threshold here would re-open positions outside
+        # their local target day.
         return False
     # result is None — phase computation failed. Fail-soft to legacy
     # threshold so a corrupt target_date string doesn't silently freeze

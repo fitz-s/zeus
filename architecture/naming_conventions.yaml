@@ -37,7 +37,6 @@ file_naming:
         - validate_
         - verify_
         - audit_
-        - diagnose_
         - etl_
         - backfill_
         - rebuild_
@@ -68,7 +67,6 @@ file_naming:
         deep_heartbeat.py: established runtime heartbeat helper
         reconcile_realized_fees.py: established reconciliation verb-form (mirrors exchange_reconcile/reconcile_pending_redeems runtime surfaces); fee-evidence artifact writer (2026-06-12)
         deploy_live.py: operator-facing deploy gate command; verb-first name retained because 'deploy' is the operator action (restart-safety gate, PR #407)
-        deprecate_legacy_state_files.py: established repair command name
         digest_profiles_export.py: derived digest profile mirror exporter; name retained because it mirrors the generated artifact module name
         _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
         bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
@@ -99,7 +97,6 @@ file_naming:
         parse_change_log.py: established utility entrypoint
         post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
         resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
-        profit_validation_replay.py: established diagnostic report command
         r3_drift_check.py: R3 packet drift shim name fixed by existing packet/runbook references; read-only validation utility.
         refit_platt.py: established repair command name (canonical)
         regenerate_registries.py: harness-debate manifest audit/update helper; verb retained because docs already cite this command and safe use is audit-only

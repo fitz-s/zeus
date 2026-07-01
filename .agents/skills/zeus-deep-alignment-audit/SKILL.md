@@ -1,6 +1,16 @@
 ---
 name: zeus-deep-alignment-audit
-description: Read-only deep alignment audit for Zeus that finds the issues code review can't catch — data provenance holes, math drift, statistical errors, cross-module invariant violations, silent failures, assumption drift. Invoke ONLY by explicit operator request ("run deep alignment audit", "/skill zeus-deep-alignment-audit", "do a comprehensive correctness audit on zeus"). Do NOT auto-trigger on routine review, debug, fix, plan, PR-comment, or any compound trigger phrase appearing in normal Zeus work — this skill is opt-in only. Self-evolving via sibling LEARNINGS.md: every run reads past learnings to prioritize, writes new heuristics / promotes new categories / demotes dead ones after each run. Not a fixed template.
+description: >-
+  Read-only deep alignment audit for Zeus that finds the issues code review
+  can't catch — data provenance holes, math drift, statistical errors,
+  cross-module invariant violations, silent failures, assumption drift. Invoke
+  ONLY by explicit operator request ("run deep alignment audit",
+  "/skill zeus-deep-alignment-audit", "do a comprehensive correctness audit on
+  zeus"). Do NOT auto-trigger on routine review, debug, fix, plan, PR-comment,
+  or any compound trigger phrase appearing in normal Zeus work — this skill is
+  opt-in only. Self-evolving via sibling LEARNINGS.md: every run reads past
+  learnings to prioritize, writes new heuristics / promotes new categories /
+  demotes dead ones after each run. Not a fixed template.
 model: inherit
 ---
 

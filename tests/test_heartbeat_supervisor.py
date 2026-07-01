@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import plistlib
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -23,7 +25,6 @@ import pytest
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.control.heartbeat_supervisor import (
-    HEARTBEAT_CANCEL_SUSPECTED_REASON,
     ExternalHeartbeatSupervisor,
     HeartbeatHealth,
     HeartbeatNotHealthy,
@@ -44,6 +45,9 @@ from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
 import src.data.substrate_observer as substrate_observer
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_VENUE_HEARTBEAT_PLIST = _REPO_ROOT / "deploy" / "launchd" / "com.zeus.venue-heartbeat.plist"
+
 
 class FakeHeartbeatAdapter:
     def __init__(self, outcomes):
@@ -62,6 +66,20 @@ class FakeHeartbeatAdapter:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_venue_heartbeat_launchd_artifact_has_explicit_clob_signature_type() -> None:
+    assert _VENUE_HEARTBEAT_PLIST.exists(), (
+        "deploy/launchd/com.zeus.venue-heartbeat.plist artifact must exist; "
+        "the live order gate must not depend on a hand-maintained local plist."
+    )
+    with _VENUE_HEARTBEAT_PLIST.open("rb") as fh:
+        parsed = plistlib.load(fh)
+
+    assert parsed.get("Label") == "com.zeus.venue-heartbeat"
+    assert "src.control.heartbeat_supervisor" in parsed.get("ProgramArguments", [])
+    env = parsed.get("EnvironmentVariables") or {}
+    assert env.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE") == "2"
 
 
 def _intent() -> ExecutionIntent:
@@ -392,21 +410,6 @@ def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gt
     assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
 
 
-@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — _write_failclosed_tombstone is now a no-op")
-def test_lost_state_writes_tombstone_with_heartbeat_cancel_suspected_reason(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
-    adapter = FakeHeartbeatAdapter([RuntimeError("miss-1"), RuntimeError("miss-2")])
-    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
-
-    _run(supervisor.run_once())
-    status = _run(supervisor.run_once())
-
-    assert status.health is HeartbeatHealth.LOST
-    tombstone = tmp_path / "auto_pause_failclosed.tombstone"
-    assert tombstone.read_text() == HEARTBEAT_CANCEL_SUSPECTED_REASON
-    assert sorted(p.name for p in tmp_path.glob("*tombstone*")) == ["auto_pause_failclosed.tombstone"]
-
-
 def test_lost_state_blocks_GTC_and_GTD_placement():
     supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
     supervisor.record_failure("miss-1")
@@ -427,18 +430,6 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert heartbeat_required_for(OrderType.FAK) is False
     assert supervisor.gate_for_order_type("FOK") is True
     assert supervisor.gate_for_order_type("FAK") is True
-
-
-@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — recovered heartbeat no longer persists tombstone block")
-def test_recovered_heartbeat_still_blocks_resting_orders_until_tombstone_cleared():
-    supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
-    supervisor.record_failure("miss-1")
-    supervisor.record_failure("miss-2")
-    supervisor.record_success()
-
-    assert supervisor.status().health is HeartbeatHealth.HEALTHY
-    assert supervisor.gate_for_order_type("GTC") is False
-    assert supervisor.gate_for_order_type("FOK") is True
 
 
 def test_executor_blocks_gtc_before_command_persistence_when_heartbeat_lost(monkeypatch):
@@ -1509,7 +1500,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
         def close(self):
             calls.append(("close", None))
 
-    def fake_refresh(conn, *, markets, clob, captured_at, scan_authority):
+    def fake_refresh(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         calls.append(("refresh", (conn, markets, isinstance(clob, FakePolymarketClient), scan_authority)))
         return {"attempted": 1, "inserted": 1, "skipped": 0, "failed": 0, "truncated": 0}
 
@@ -1530,6 +1521,11 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     # P2: force STALE substrate so the producer-local staleness gate falls through to capture
     # (a prior test's successful cycle may leave a fresh time.monotonic() in this global).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     substrate_observer._market_discovery_cycle()
 
@@ -1588,6 +1584,10 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     # P2: force STALE substrate so the staleness gate falls through to capture (the cycle is
     # decoupled from main._cycle_lock — a P1 cycle-lock held must not block this producer).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     assert main._cycle_lock.acquire(blocking=False)
     try:
@@ -1599,7 +1599,6 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
 
 
 def test_market_discovery_scheduler_defers_only_when_previous_refresh_runs(monkeypatch):
-    from src import main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.setattr(

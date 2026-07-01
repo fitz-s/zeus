@@ -1,4 +1,3 @@
-# Shadow-only: outputs are additive facts, not live blockers
 """Decision-group calibration accounting.
 
 `calibration_pairs` is a bin-row table. A single forecast event usually emits
@@ -7,8 +6,6 @@ any future behavior change can safely move away from pair-row counts.
 """
 
 from __future__ import annotations
-
-SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter evaluator/control gate
 
 import sqlite3
 from dataclasses import dataclass
@@ -252,7 +249,6 @@ def summarize_bucket_health(groups: list[CalibrationDecisionGroup]) -> list[dict
         bucket = buckets.setdefault(
             key,
             {
-                "shadow_only": True,
                 "bucket_key": f"{group.cluster}_{group.season}",
                 "cluster": group.cluster,
                 "season": group.season,
@@ -292,7 +288,7 @@ def _maturity_level_from_count(n_samples: int) -> int:
     return 4
 
 
-def summarize_maturity_shadow(groups: list[CalibrationDecisionGroup]) -> list[dict]:
+def summarize_maturity_report(groups: list[CalibrationDecisionGroup]) -> list[dict]:
     """Compare current pair-row maturity with decision-group effective maturity.
 
     This is behavior-neutral: active routing can continue using existing pair

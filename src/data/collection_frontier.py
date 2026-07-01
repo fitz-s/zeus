@@ -41,7 +41,7 @@ _CALENDAR_PATH = Path(__file__).resolve().parents[2] / "config" / "source_releas
 # Role a source plays, derived from its TemporalPolicy authority axes.
 _LIVE = "live"
 _BACKFILL = "backfill"
-_SHADOW = "shadow"
+_DIAGNOSTIC = "diagnostic"
 
 
 def _utcnow() -> datetime:
@@ -65,7 +65,7 @@ def _role_of(policy: TemporalPolicy) -> str:
     if policy.backfill_only:
         return _BACKFILL
     if not policy.live_authorization:
-        return _SHADOW
+        return _DIAGNOSTIC
     return _LIVE
 
 
@@ -76,7 +76,7 @@ class FrontierRow:
     source_id: str
     track: str
     calendar_id: str
-    role: str                                   # live / backfill / shadow
+    role: str                                   # live / backfill / diagnostic / derived
     family: str                                 # forecast / observation / market_topology / ... (PR #329 C)
     target_local_date: Optional[str]
 
@@ -132,7 +132,7 @@ _ACTION = {
     _BLOCK_DOWN: "check source_health; provider/endpoint failing",
     _BLOCK_PARTIAL: "wait for complete run or confirm shorter-horizon target",
     _BLOCK_READINESS: "inspect readiness_state / source_run_coverage reason_codes",
-    _BLOCK_NOT_LIVE: "none — shadow/backfill source, not live-eligible by design",
+    _BLOCK_NOT_LIVE: "none — source is not live-eligible by design",
     _BLOCK_UNKNOWN: "no source_run for this partition — confirm scheduler ran",
     _BLOCK_SHORT_HORIZON: "latest cycle is a 06/18 short horizon (not live-authorized); wait for 00/12 full",
     _BLOCK_COVERAGE_UNKNOWN: "no per-target coverage rows — cannot prove all targets ready",
@@ -411,16 +411,14 @@ def _family_latest_event(conn: sqlite3.Connection, table: str, col: str) -> Opti
 
 
 def _registry_family_role(job_role: str) -> str:
-    """Map a registry job.role onto a frontier role bucket (live/backfill/shadow/derived/diagnostic)."""
+    """Map a registry job.role onto a frontier role bucket."""
     if job_role in ("live", "settlement"):
         return _LIVE
     if job_role == "backfill":
         return _BACKFILL
-    if job_role == "shadow":
-        return _SHADOW
     if job_role == "derived":
         return "derived"
-    return "diagnostic"
+    return _DIAGNOSTIC
 
 
 def _family_frontier_rows(
@@ -484,7 +482,7 @@ def compute_frontier(
 ) -> list[FrontierRow]:
     """Compute the collection frontier for every calendar entry (one row per source/track).
 
-    READ-ONLY. ``role_filter`` limits to 'live'/'backfill'/'shadow'. ``conn`` (a forecasts
+    READ-ONLY. ``role_filter`` limits to a frontier role. ``conn`` (a forecasts
     connection) and ``now`` are injectable for tests; otherwise opened/derived here.
     """
     from src.data.source_time import _calendar_index

@@ -16,7 +16,7 @@ from src.data.calibration_transfer_policy import evaluate_calibration_transfer_p
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
-def test_open_data_high_uses_tigge_high_calibration_shadow_only_by_default() -> None:
+def test_open_data_high_uses_tigge_high_calibration_blocked_by_default() -> None:
     cfg = entry_forecast_config()
 
     decision = evaluate_calibration_transfer_policy(
@@ -25,13 +25,13 @@ def test_open_data_high_uses_tigge_high_calibration_shadow_only_by_default() -> 
         forecast_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
     )
 
-    assert decision.status == "SHADOW_ONLY"
-    assert decision.reason_codes == ("CALIBRATION_TRANSFER_SHADOW_ONLY",)
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == ("CALIBRATION_TRANSFER_BLOCKED",)
     assert decision.calibration_data_version == HIGH_LOCALDAY_MAX.data_version
     assert decision.live_eligible is False
 
 
-def test_open_data_low_uses_tigge_low_calibration_shadow_only_by_default() -> None:
+def test_open_data_low_uses_tigge_low_calibration_blocked_by_default() -> None:
     cfg = entry_forecast_config()
 
     decision = evaluate_calibration_transfer_policy(
@@ -40,7 +40,7 @@ def test_open_data_low_uses_tigge_low_calibration_shadow_only_by_default() -> No
         forecast_data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.calibration_data_version == LOW_LOCALDAY_MIN.data_version
 
 

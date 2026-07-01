@@ -1,15 +1,15 @@
 # Created: 2026-06-14
 # Last reused/audited: 2026-06-14
-# Authority basis: shadow-candidate framework removal
+# Authority basis: retired candidate framework removal
 #                  (extracted verbatim from src/strategy/candidates/__init__.py;
 #                   §19.2/§19.3 deterministic-edge decision contracts retained
 #                   for the live analysis path src/analysis/deterministic_edge_report.py)
 """Deterministic-edge decision contracts (§19.2 / §19.3).
 
 These three frozen dataclasses were originally defined inside the
-shadow-candidate framework (src/strategy/candidates/__init__.py). They are
+retired candidate framework (src/strategy/candidates/__init__.py). They are
 consumed on the LIVE analysis path by src/analysis/deterministic_edge_report.py,
-so they outlive the shadow-candidate framework and were extracted here when that
+so they outlive the retired candidate framework and were extracted here when that
 framework was deleted.
 
   - LegIntent: single-leg fill intent produced by a vector-edge strategy.
@@ -77,7 +77,7 @@ class VectorEdgeDecision:
     Authority: zeus_strategy_spec.md §19.3.
 
     basket_execution_id: nullable UUID until §11.8 multi-leg execution lands;
-      pass empty string "" for shadow rows.
+      pass empty string "" for rows without a basket execution record.
     vector_cost: Σ sweep notional across all legs at q* (excluding fees).
     vector_fee: Σ phi(q*, price, rate) across all legs.
     vector_payoff: deterministic payoff (q* for YES basket; (K-1)*q* for NO).

@@ -25,8 +25,6 @@ from src.strategy.kelly import kelly_size
 from src.strategy.market_fusion import (
     LEGACY_POSTERIOR_MODE,
     MODEL_ONLY_POSTERIOR_MODE,
-    YES_FAMILY_DEVIG_SHADOW_MODE,
-    MarketPriorDistribution,
     compute_posterior,
 )
 
@@ -100,40 +98,6 @@ class TestVigTreatmentSeam:
                 0.5,
                 posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
             )
-
-    def test_corrected_prior_mode_rejects_raw_vwmp_vector(self):
-        with pytest.raises(TypeError, match="raw quote/VWMP vectors are forbidden"):
-            compute_posterior(
-                np.array([0.6, 0.4]),
-                np.array([0.42, 0.58]),
-                0.5,
-                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-            )
-
-    def test_corrected_prior_mode_requires_named_market_prior_identity(self):
-        prior = MarketPriorDistribution(
-            probabilities=(0.45, 0.55),
-            bin_labels=("70-71F", "72-73F"),
-            prior_id="prior:test:complete-yes-family",
-            estimator_version=YES_FAMILY_DEVIG_SHADOW_MODE,
-            source_quote_hashes=("a" * 64,),
-            family_complete=True,
-            side_convention="YES_FAMILY",
-            vig_treatment="yes_family_devig",
-            freshness_status="FRESH",
-            liquidity_filter_status="PASS",
-            neg_risk_policy="none",
-            validated_for_live=False,
-        )
-
-        posterior = compute_posterior(
-            np.array([0.6, 0.4]),
-            prior,
-            0.5,
-            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-        )
-
-        assert posterior == pytest.approx(np.array([0.525, 0.475]))
 
     def test_compute_posterior_rejects_zero_market_vector(self):
         with pytest.raises(ValueError, match="sum <= 0"):

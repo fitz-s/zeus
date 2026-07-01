@@ -95,12 +95,11 @@ blocking_structural:
     severity: blocking
     owner: ci-infra
 
-  - id: stdlib_shadowing_gate
-    description: "Python file in imported package shadows a stdlib module name (PR #306 prevention)"
-    enforcer: scripts/ci/check_stdlib_shadowing.py
+  - id: stdlib_name_collision_gate
+    description: "Python file in imported package collides_with a stdlib module name"
+    enforcer: scripts/ci/check_stdlib_name_collisions.py
     proving_test: tests/topology/test_structural_blockers.py
-    applies_to_surfaces:
-      - topology_v_next
+    applies_to_surfaces: []
     override_allowed: false      # NO_OVERRIDE — direct import crash
     severity: blocking
     owner: ci-infra
@@ -269,6 +268,6 @@ no_override_rules:
   - workflow_refs_exist
   - source_rationale_delta_gate
   - db_table_delta_gate
-  - stdlib_shadowing_gate
+  - stdlib_name_collision_gate
   - expired_override
   - blocking_rule_lacks_enforcer

@@ -77,6 +77,28 @@ _FILL_UP_BLOCKING_PHASES: frozenset[str] = frozenset(
         "review_required",
     }
 )
+_LIVE_CHAIN_SHARE_EPSILON = 0.000001
+
+
+def _live_position_phase_sql(cols: set[str]) -> tuple[str, list[object]]:
+    """Live exposure predicate: open lifecycle OR chain-proven shares.
+
+    A quarantine/void label is not proof the venue exposure is gone. If chain
+    reconciliation still sees positive shares, management lanes must treat the row
+    as live so fill-up/shift can decide against the real portfolio state.
+    """
+
+    clauses: list[str] = []
+    params: list[object] = []
+    if "phase" in cols:
+        clauses.append("phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES)))
+        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    if "chain_shares" in cols:
+        clauses.append("COALESCE(chain_shares, 0) > ?")
+        params.append(_LIVE_CHAIN_SHARE_EPSILON)
+    if not clauses:
+        return "1=1", []
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 @dataclass(frozen=True)
@@ -134,10 +156,35 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {
+    columns = {
         str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
     }
+    if columns:
+        return columns
+    try:
+        for schema_row in conn.execute("PRAGMA database_list").fetchall():
+            schema = schema_row[1] if not isinstance(schema_row, sqlite3.Row) else schema_row["name"]
+            if schema in ("main", "temp"):
+                continue
+            columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+            }
+            if columns:
+                return columns
+    except sqlite3.Error:
+        return set()
+    return set()
+
+
+def _row_get(row: sqlite3.Row | tuple, selected_names: tuple[str, ...], name: str):
+    try:
+        if isinstance(row, sqlite3.Row):
+            return row[name]
+        return row[selected_names.index(name)]
+    except (IndexError, KeyError, ValueError):
+        return None
 
 
 def read_held_same_token_exposure(
@@ -172,20 +219,19 @@ def read_held_same_token_exposure(
         return None
 
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     if not cost_terms:
         return None
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
 
+    selected_names = (
+        "position_id", "bin_label", "direction", "p_posterior",
+        "entry_ci_width", "chain_cost_basis_usd", "cost_basis_usd", "size_usd",
+    )
     select_cols = []
-    for name in ("position_id", "bin_label", "direction", "p_posterior",
-                 "entry_ci_width", "chain_cost_basis_usd", "cost_basis_usd", "size_usd"):
+    for name in selected_names:
         select_cols.append(name if name in cols else f"NULL AS {name}")
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -193,8 +239,7 @@ def read_held_same_token_exposure(
         f"WHERE {phase_sql} AND ({token_sql}){positive_sql} {order_sql} LIMIT 1"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend(token for _ in token_cols)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
@@ -204,10 +249,7 @@ def read_held_same_token_exposure(
         return None
 
     def _g(name: str):
-        try:
-            return row[name] if isinstance(row, sqlite3.Row) else None
-        except (IndexError, KeyError):
-            return None
+        return _row_get(row, selected_names, name)
 
     p_posterior = _g("p_posterior")
     entry_ci_width = _g("entry_ci_width")
@@ -386,28 +428,25 @@ def presubmit_reread_aborts(
         else "metric" if "metric" in cols
         else ""
     )
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     positive_sql = (
         " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
         if cost_terms else ""
     )
+    selected_names = ["position_id", "token_id", "bin_label"]
     select_cols = ["position_id"]
     select_cols.append("token_id" if "token_id" in cols else "NULL AS token_id")
     select_cols.append("bin_label" if "bin_label" in cols else "NULL AS bin_label")
     if metric_col:
+        selected_names.append("metric")
         select_cols.append(f"{metric_col} AS metric")
     sql = (
         f"SELECT {', '.join(select_cols)} FROM position_current "
         f"WHERE {phase_sql} AND city = ? AND target_date = ?{positive_sql}"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend([str(city), str(target_date)])
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()
@@ -415,12 +454,10 @@ def presubmit_reread_aborts(
         return f"PRESUBMIT_REREAD_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}"
 
     metric_norm = _norm_metric(temperature_metric)
+    selected_names_tuple = tuple(selected_names)
     for row in rows:
         def _g(name: str):
-            try:
-                return row[name] if isinstance(row, sqlite3.Row) else None
-            except (IndexError, KeyError):
-                return None
+            return _row_get(row, selected_names_tuple, name)
 
         if metric_col and _norm_metric(_g("metric")) != metric_norm:
             continue

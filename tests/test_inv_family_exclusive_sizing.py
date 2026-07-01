@@ -1,9 +1,9 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-29
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
 #          scalar orders; live selection must use family payoff efficiency.
 # Reuse: Run when family-exclusive optimization, weather bin portfolio selection, or live
-#        family fallback semantics change.
+#        ranked-family selection semantics change.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
 #                  family sizing), family portfolio optimizer.
 
@@ -27,7 +27,7 @@ execution loop - neither module is individually wrong, the relationship across
 the boundary is. Per Fitz §3 this is authored RED before implementation.
 
 RED->GREEN protocol (recorded for the opus critic):
-  * ``test_legacy_baseline_emits_three_independent_orders`` pins the CURRENT
+  * ``test_gate_disabled_emits_three_independent_orders`` pins the CURRENT
     (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins ->
     3 should_trade=True. This is the RED state the gate must fix.
   * ``test_same_city_date_metric_...`` asserts the REQUIRED post-gate behavior:
@@ -66,7 +66,7 @@ from src.strategy.family_exclusive_dedup import (
 from src.engine.evaluator import (
     _expected_profit_usd_for_edge,
     _live_entry_economic_floor_rejection,
-    _projects_exposure_during_family_fallback_sizing,
+    _projects_exposure_during_family_ranked_sizing,
     _source_quality_kelly_haircut,
     _source_quality_policy_rejection,
     _strategy_entry_price_floor_block_reason,
@@ -180,7 +180,7 @@ def _count_trades(decisions: list[EdgeDecision]) -> int:
     return sum(1 for d in decisions if d.should_trade)
 
 
-def test_legacy_baseline_emits_three_independent_orders() -> None:
+def test_gate_disabled_emits_three_independent_orders() -> None:
     """RED baseline: gate OFF == legacy bug == 3 independent scalar orders.
 
     Pins the over-allocation bug so the GREEN test's delta (3 -> 1) is provably
@@ -618,6 +618,47 @@ def test_trade_db_family_exposures_include_open_position_without_command_row(tmp
     ]
 
 
+def test_trade_db_family_exposures_include_quarantined_chain_position(tmp_path) -> None:
+    """Chain-positive quarantined holdings are still real exposure for family gates."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-quarantine.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("pos-quarantined", CITY, TARGET_DATE, METRIC, "20-21°F", "quarantined", 0.0, 7.0, 0.0, 5.53),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="quarantined",
+            position_id="pos-quarantined",
+        )
+    ]
+
+
 def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp_path) -> None:
     import sqlite3
 
@@ -685,6 +726,127 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
             position_id="cmd-1",
         )
     ]
+
+
+def test_trade_db_family_exposure_infers_metric_from_live_market_slug_schema(tmp_path) -> None:
+    """Live trade DB market_events lacks temperature_metric; slug still carries metric."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-live-market-schema.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            envelope_id TEXT,
+            snapshot_id TEXT,
+            market_id TEXT,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE market_events (
+            market_slug TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?, ?, ?, ?)",
+        ("env-1", "cond-1", "tok-yes-1", "YES"),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?)",
+        (
+            "snap-1",
+            "cond-1",
+            "highest-temperature-in-chicago-on-june-1-2026",
+            "tok-yes-1",
+            "YES",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "highest-temperature-in-chicago-on-june-1-2026",
+            CITY,
+            TARGET_DATE,
+            "cond-1",
+            "tok-yes-1",
+            "20-21°F",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("cmd-1", "", "env-1", "snap-1", "cond-1", "ENTRY", "ACKED"),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, "high", "highest-temperature-in-chicago-on-june-1-2026"),
+            bin_label="20-21°F",
+            phase="ACKED",
+            position_id="cmd-1",
+        )
+    ]
+
+
+def test_trade_db_family_exposure_drops_nonblocking_voided_projection(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-voided-projection.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("pos-void", CITY, TARGET_DATE, METRIC, "20-21°F", "voided", 5.0, 0.0, 1.0, 0.0),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?)",
+        ("cmd-void", "pos-void", "ENTRY", "CANCELLED"),
+    )
+
+    assert weather_family_exposures_from_trade_db(conn) == []
 
 
 def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_path) -> None:
@@ -922,14 +1084,14 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.selected_legs == (low_price_tail,)
-    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
+    assert family_decision.portfolio.ranked_candidate_legs == (low_price_tail,)
     assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
     assert [d.dropped_bin for d in family_decision.dropped] == ["22-23°F"]
 
 
-def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decisions() -> None:
-    """Scalar fallback alternatives need a typed ordered intent before they may submit."""
+def test_family_decision_does_not_emit_scalar_ranked_siblings_as_live_decisions() -> None:
+    """Scalar ranked alternatives need a typed ordered intent before they may submit."""
 
     bins = {s[2]: s for s in _BIN_SPECS}
     low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
@@ -947,7 +1109,7 @@ def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decision
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is low_price_tail
-    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
+    assert family_decision.portfolio.ranked_candidate_legs == (low_price_tail,)
     assert [d.dropped_bin for d in family_decision.dropped] == [
         "22-23°F",
         "20-21°F",
@@ -955,8 +1117,8 @@ def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decision
     ]
 
 
-def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monkeypatch) -> None:
-    """Live-disabled buy_no is a structural non-executable leg, not fallback capacity."""
+def test_family_decision_excludes_live_disabled_buy_no_from_ranked_slots(monkeypatch) -> None:
+    """Live-disabled buy_no is a structural non-executable leg, not ranked capacity."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
@@ -969,10 +1131,10 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
         direction="buy_no",
     )
     best_buy_yes = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
-    fallback_buy_yes = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
+    alternative_buy_yes = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
 
     family_decision = build_weather_family_decision(
-        [live_disabled_buy_no, best_buy_yes, fallback_buy_yes],
+        [live_disabled_buy_no, best_buy_yes, alternative_buy_yes],
         city=CITY,
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
@@ -980,8 +1142,8 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is fallback_buy_yes
-    assert family_decision.portfolio.fallback_candidate_legs == (fallback_buy_yes,)
+    assert family_decision.portfolio.selected_leg is alternative_buy_yes
+    assert family_decision.portfolio.ranked_candidate_legs == (alternative_buy_yes,)
     assert [d.dropped_bin for d in family_decision.dropped] == [
         "26°F or above",
         "22-23°F",
@@ -1017,17 +1179,17 @@ def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is buy_no_a
-    assert family_decision.portfolio.fallback_candidate_legs == (buy_no_a,)
+    assert family_decision.portfolio.ranked_candidate_legs == (buy_no_a,)
     assert [d.dropped_bin for d in family_decision.dropped] == ["20-21°F"]
 
 
-def test_runtime_dedup_collapses_scalar_fallback_candidates_before_submit() -> None:
-    """Ranked scalar fallbacks are not one execution intent and must not all submit."""
+def test_runtime_dedup_collapses_scalar_ranked_candidates_before_submit() -> None:
+    """Ranked scalar alternatives are not one execution intent and must not all submit."""
 
     decisions = _family_after_fdr()
     for rank, decision in enumerate(decisions, start=1):
-        decision.family_fallback_rank = rank
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = rank
+        decision.family_ranked_candidate_count = len(decisions)
 
     out = dedup_mutually_exclusive_families(
         decisions,
@@ -1046,8 +1208,8 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
 
     decisions = _family_after_fdr()[:2]
     for decision in decisions:
-        decision.family_fallback_rank = 1
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = 1
+        decision.family_ranked_candidate_count = len(decisions)
         decision.family_portfolio_leg_role = "portfolio_selected"
 
     out = dedup_mutually_exclusive_families(
@@ -1063,24 +1225,50 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
     assert all(d.rejection_stage == "" for d in out)
 
 
-def test_family_fallback_sizing_does_not_accumulate_sibling_exposure() -> None:
-    """Risk sizing sees ranked fallback siblings as alternate attempts, not a basket."""
+def test_existing_acked_family_exposure_blocks_new_scalar_entry() -> None:
+    decisions = [_trade_decision(_BIN_SPECS[2], size_usd=20.0, forward_edge=0.07)]
+    exposures = [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "per-bin-market-slug"),
+            bin_label="20-21°F",
+            phase="ACKED",
+            position_id="cmd-live",
+        )
+    ]
 
-    assert not _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=1,
-        family_fallback_candidate_count=3,
+    out = dedup_mutually_exclusive_families(
+        decisions,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        market_family_id="different-per-bin-market-slug",
+        existing_exposures=exposures,
+        enabled=True,
     )
-    assert not _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=2,
-        family_fallback_candidate_count=3,
+
+    assert _count_trades(out) == 0
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+    assert "existing_position_id='cmd-live'" in out[0].rejection_reason_detail
+
+
+def test_family_ranked_sizing_does_not_accumulate_sibling_exposure() -> None:
+    """Risk sizing sees ranked siblings as alternate attempts, not a basket."""
+
+    assert not _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=1,
+        family_ranked_candidate_count=3,
     )
-    assert _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=0,
-        family_fallback_candidate_count=0,
+    assert not _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=2,
+        family_ranked_candidate_count=3,
     )
-    assert _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=1,
-        family_fallback_candidate_count=1,
+    assert _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=0,
+        family_ranked_candidate_count=0,
+    )
+    assert _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=1,
+        family_ranked_candidate_count=1,
     )
 
 
@@ -1369,10 +1557,10 @@ def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallba
     bins = {s[2]: s for s in _BIN_SPECS}
     edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.20)
     edge_b = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.20)
-    scalar_fallback = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
+    scalar_alternative = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
 
     family_decision = build_weather_family_decision(
-        [edge_a, edge_b, scalar_fallback],
+        [edge_a, edge_b, scalar_alternative],
         city=CITY,
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
@@ -1381,7 +1569,7 @@ def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallba
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_legs == (edge_a, edge_b)
-    assert family_decision.portfolio.fallback_candidate_legs == (edge_a, edge_b)
+    assert family_decision.portfolio.ranked_candidate_legs == (edge_a, edge_b)
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
 
 

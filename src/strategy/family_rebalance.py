@@ -73,6 +73,22 @@ class ShiftBinDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class ActiveRebalanceLease:
+    """One active family-rebalance lease read from durable state."""
+
+    intent_id: str
+    event_id: str
+    family_key: str
+    operation: str
+    status: str
+    held_position_id: str
+    held_token_id: str
+    held_bin_id: str
+    selected_token_id: str
+    selected_bin_id: str
+
+
 def decide_shift_bin(
     *,
     is_redecision_event: bool,
@@ -234,6 +250,11 @@ def acquire_rebalance_lease(
     or None when an ACTIVE lease already holds the family (the partial-unique index
     collision — caller MUST no-op, never emit a second order)."""
 
+    _release_stale_planned_fill_up_without_command(
+        conn,
+        family_key=family_key,
+        now_iso=now_iso,
+    )
     _release_shift_unknown_without_durable_command(
         conn,
         family_key=family_key,
@@ -264,6 +285,64 @@ def acquire_rebalance_lease(
         # An ACTIVE lease already holds this family — fail closed (no second order).
         return None
     return intent_id
+
+
+def active_rebalance_lease_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    operation: str | None = None,
+) -> ActiveRebalanceLease | None:
+    """Return the newest active lease for a family.
+
+    Re-decision is multi-step: a later event may need to continue an existing
+    SHIFT_BIN lease instead of trying to acquire a fresh FILL_UP lease and
+    deadlocking against itself.
+    """
+
+    params: list[object] = [family_key, *sorted(_TERMINAL_LEASE_STATUSES)]
+    operation_sql = ""
+    if operation is not None:
+        operation_sql = " AND operation = ?"
+        params.append(str(operation))
+    row = conn.execute(
+        f"""
+        SELECT intent_id, COALESCE(event_id, '') AS event_id, family_key, operation,
+               status, COALESCE(held_position_id, '') AS held_position_id,
+               COALESCE(held_token_id, '') AS held_token_id,
+               COALESCE(held_bin_id, '') AS held_bin_id,
+               COALESCE(selected_token_id, '') AS selected_token_id,
+               COALESCE(selected_bin_id, '') AS selected_bin_id
+          FROM family_rebalance_intents
+         WHERE family_key = ?
+           AND status NOT IN ({", ".join("?" for _ in _TERMINAL_LEASE_STATUSES)})
+           {operation_sql}
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        return None
+
+    def get(key: str, idx: int) -> object:
+        try:
+            return row[key]
+        except (TypeError, IndexError, KeyError):
+            return row[idx]
+
+    return ActiveRebalanceLease(
+        intent_id=str(get("intent_id", 0)),
+        event_id=str(get("event_id", 1)),
+        family_key=str(get("family_key", 2)),
+        operation=str(get("operation", 3)),
+        status=str(get("status", 4)),
+        held_position_id=str(get("held_position_id", 5)),
+        held_token_id=str(get("held_token_id", 6)),
+        held_bin_id=str(get("held_bin_id", 7)),
+        selected_token_id=str(get("selected_token_id", 8)),
+        selected_bin_id=str(get("selected_bin_id", 9)),
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -336,6 +415,48 @@ def _release_shift_unknown_without_durable_command(
         )
         released += 1
     return released
+
+
+def _release_stale_planned_fill_up_without_command(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    now_iso: str,
+    min_age_seconds: int = 1200,
+) -> int:
+    """Release stale pre-venue FILL_UP leases that never created a command.
+
+    A FILL_UP lease in PLANNED with no ``new_entry_command_id`` is pre-submit
+    state. If it survives beyond the build/retry window, it is not protecting a
+    venue side effect; it is blocking future redecision for that family.
+    """
+
+    try:
+        cur = conn.execute(
+            """
+            UPDATE family_rebalance_intents
+               SET status = 'ABORTED',
+                   updated_at = ?,
+                   abort_reason = COALESCE(
+                       abort_reason,
+                       'FILL_UP_PLANNED_STALE_NO_DURABLE_COMMAND_RECOVERED'
+                   )
+             WHERE family_key = ?
+               AND operation = 'FILL_UP'
+               AND status = 'PLANNED'
+               AND COALESCE(new_entry_command_id, '') = ''
+               AND datetime(updated_at) <= datetime(?, ?)
+            """,
+            (
+                now_iso,
+                family_key,
+                now_iso,
+                f"-{int(min_age_seconds)} seconds",
+            ),
+        )
+        return int(cur.rowcount or 0)
+    except sqlite3.Error:
+        return 0
 
 
 def advance_rebalance_lease(

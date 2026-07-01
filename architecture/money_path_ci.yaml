@@ -131,7 +131,7 @@ invariants:
       - tests/test_evaluator_strategy_key_failclosed.py
       - tests/test_architecture_contracts.py
   MP-STR-002:
-    description: "Shadow replay source field is shadow_decision; replay rows never contaminate live evidence queries."
+    description: "Offline decision evidence remains isolated from live evidence queries."
     tests:
       - tests/analysis/test_evidence_report_cohort_scope.py
       - tests/test_p1_findings_evidence_risk.py
@@ -232,7 +232,6 @@ segments:
       - src/events/live_cap.py
       - src/events/live_order_aggregate.py
       - src/events/live_profit_audit.py
-      - scripts/check_edli_live_canary_gate.py
       - src/decision_kernel/claims.py
       - src/decision_kernel/verifier.py
       - src/decision_kernel/ledger.py
@@ -249,12 +248,11 @@ segments:
       - tests/events/test_live_cap.py
       - tests/events/test_live_order_aggregate.py
       - tests/events/test_live_profit_audit.py
-      - tests/scripts/test_check_edli_live_canary_gate.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py
       - tests/money_path/test_edli_online_invariants.py
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
     future_object_rules:
       new_event_type: requires_idempotency_and_replay_order_test
@@ -267,11 +265,11 @@ segments:
       - src/events/live_order_aggregate.py
       - src/events/live_cap.py
       - src/events/triggers/user_channel_ingestor.py
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
       - tests/events/test_live_order_aggregate.py
       - tests/events/test_reactor.py
     relationship_tests:
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
       - tests/events/test_live_order_aggregate.py
       - tests/events/test_reactor.py
     future_object_rules:

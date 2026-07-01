@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -120,6 +121,39 @@ def test_frozen_guard_via_boot_accessor_no_attributeerror():
         pytest.fail(f"frozen guard still raises AttributeError: {exc}")
 
 
+def test_day0_identity_platt_fit_bootstrap_is_wired(monkeypatch):
+    import src.main as main
+    import src.state.day0_nowcast_store as store
+
+    calls = []
+
+    def _ensure():
+        calls.append(True)
+        return SimpleNamespace(
+            fit_run_id="hpf_v1_identity_conservative_v1",
+            fit_artifact_id="hpf_v1",
+        )
+
+    monkeypatch.setattr(store, "ensure_identity_platt_fit", _ensure)
+
+    main._ensure_day0_identity_platt_fit_at_boot()
+
+    assert calls == [True]
+
+
+def test_day0_identity_platt_fit_bootstrap_fails_closed(monkeypatch):
+    import src.main as main
+    import src.state.day0_nowcast_store as store
+
+    def _raise():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "ensure_identity_platt_fit", _raise)
+
+    with pytest.raises(RuntimeError, match="DAY0_HORIZON_PLATT_FIT_BOOTSTRAP_FAILED"):
+        main._ensure_day0_identity_platt_fit_at_boot()
+
+
 # ---------------------------------------------------------------------------
 # Shape-guard correctness preserved through a REAL-Settings-derived dict.
 # Proves the guard's INTENT (dict/absent -> OK, list -> raise) survives when
@@ -204,7 +238,6 @@ _BASE_SETTINGS = {
     "exit": {},
     "riskguard": {},
     "execution": {},
-    "baseline_bias_correction_enabled": False,
     "feature_flags": {},
 }
 

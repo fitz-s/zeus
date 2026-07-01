@@ -206,6 +206,40 @@ _REGISTRY: dict[tuple[str, DBIdentity], TableEntry] = _load_registry()
 _INTERNAL_TABLES_ALLOWED_ON_ANY_DB = frozenset({"_migrations_applied"})
 
 
+def _drop_known_empty_migration_residue(
+    conn: sqlite3.Connection,
+    db_identity: DBIdentity,
+    live_tables: frozenset[str],
+) -> frozenset[str]:
+    """Drop known empty migration scratch tables before registry equality.
+
+    These names are not live tables and must not be registered or hidden. They
+    can be left behind when a forward migration is interrupted after creating a
+    ``*_new`` table and before the final rename/drop sequence. Only empty,
+    explicitly allowlisted scratch tables are cleaned here; non-empty residue
+    remains a hard registry failure.
+    """
+
+    if db_identity != DBIdentity.WORLD:
+        return live_tables
+    if "decision_events_new" not in live_tables or "decision_events" not in live_tables:
+        return live_tables
+
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM decision_events_new").fetchone()
+        count = int(row[0] if row else 0)
+    except sqlite3.Error:
+        return live_tables
+    if count != 0:
+        return live_tables
+
+    try:
+        conn.execute("DROP TABLE decision_events_new")
+    except sqlite3.Error:
+        return live_tables
+    return frozenset(t for t in live_tables if t != "decision_events_new")
+
+
 # ---------------------------------------------------------------------------
 # Public API (5 functions per PLAN §1.1)
 # ---------------------------------------------------------------------------
@@ -307,6 +341,7 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     )
+    live_tables = _drop_known_empty_migration_residue(conn, db_identity, live_tables)
 
     # Registry-declared tables for this DB (non-legacy_archived only).
     registry_tables = tables_for(db_identity)

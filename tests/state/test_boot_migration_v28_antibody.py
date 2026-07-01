@@ -74,7 +74,6 @@ def _build_v28_no_trade_events(conn: sqlite3.Connection) -> None:
             reason_detail       TEXT,
             strategy_key        TEXT,
             event_source        TEXT,
-            shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
             observed_at         TEXT NOT NULL,
             schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)),
             schema_compatibility TEXT NOT NULL DEFAULT 'current'
@@ -215,7 +214,6 @@ def _build_v29_no_trade_events(conn: sqlite3.Connection) -> None:
             reason_detail       TEXT,
             strategy_key        TEXT,
             event_source        TEXT,
-            shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
             observed_at         TEXT NOT NULL,
             schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)),
             schema_compatibility TEXT NOT NULL DEFAULT 'current'
@@ -295,23 +293,14 @@ class TestEvidenceTierAssignmentsMigrationFromV27:
     def _migrated_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
         _build_v27_evidence_tier_assignments(conn)
-        # ensure_tables creates shadow_experiments + regret_decompositions and
-        # calls _migrate_evidence_tier_assignments_schema on the existing table.
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS shadow_experiments (
-                experiment_id TEXT PRIMARY KEY,
-                strategy_id TEXT NOT NULL,
-                config_hash TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                closed_at TEXT,
-                cohort_tag TEXT NOT NULL,
-                immutable INTEGER NOT NULL DEFAULT 1 CHECK (immutable IN (0,1))
-            )
-        """)
+        # ensure_tables creates regret_decompositions and calls
+        # _migrate_evidence_tier_assignments_schema on the existing table.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS regret_decompositions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                experiment_id TEXT NOT NULL,
+                experiment_id TEXT,
+                strategy_id TEXT NOT NULL DEFAULT '',
+                cohort_tag TEXT NOT NULL DEFAULT '',
                 decision_event_id TEXT NOT NULL,
                 total_regret_usd REAL NOT NULL,
                 computed_at TEXT NOT NULL
@@ -408,7 +397,6 @@ def _build_stale_v30_only_no_trade_events(conn: sqlite3.Connection) -> None:
             reason_detail       TEXT,
             strategy_key        TEXT,
             event_source        TEXT,
-            shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
             observed_at         TEXT NOT NULL,
             schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30)),
             schema_compatibility TEXT NOT NULL DEFAULT 'current'

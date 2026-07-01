@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-06-28
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-28
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -22,8 +22,9 @@ import plistlib
 import sqlite3
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,9 +38,38 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
+CLOB_SIGNATURE_TYPE_SIDECAR_LABELS = (
+    "price-channel-ingest",
+    "post-trade-capital",
+    "venue-heartbeat",
+)
+
+
+@contextmanager
+def _live_trading_plist_environment_overlay():
+    """Temporarily mirror the live LaunchAgent environment for in-process checks."""
+
+    previous: dict[str, str | None] = {}
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+        env_vars = payload.get("EnvironmentVariables")
+        if isinstance(env_vars, dict):
+            for key, value in env_vars.items():
+                key_text = str(key)
+                previous[key_text] = os.environ.get(key_text)
+                os.environ[key_text] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _runtime_state_dir(plist_path: Path = LIVE_TRADING_PLIST_PATH) -> Path:
@@ -89,11 +119,86 @@ FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
+MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS = 300.0
+LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
+LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
+PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT = 12
+PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS = 5.0
+PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT = 25
+LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
+    "ActionableTradeCertificate",
+    "FinalIntentCertificate",
+    "ExecutorExpressibilityCertificate",
+    "PreSubmitRevalidationCertificate",
+    "ExecutionCommandCertificate",
+    "ExecutionReceiptCertificate",
+    "LiveCapTransitionCertificate",
+)
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
     ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
 )
+LIVE_ORDER_RESTART_RELEVANT_STATES = frozenset(
+    {
+        "DECISION_PROOF_ACCEPTED",
+        "SUBMIT_PLAN_BUILT",
+        "PRE_SUBMIT_REVALIDATED",
+        "LIVE_CAP_RESERVED",
+        "EXECUTION_COMMAND_CREATED",
+        "PENDING_RECONCILE",
+    }
+)
+PRE_SUBMIT_ECONOMIC_FIELDS = (
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "size",
+    "min_entry_price",
+    "min_expected_profit_usd",
+    "min_submit_edge_density",
+    "qkernel_execution_economics",
+)
+TERMINAL_VENUE_COMMAND_STATES = frozenset(
+    {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "FAILED", "FILLED"}
+)
+TERMINAL_VENUE_FACT_STATES = frozenset(
+    {
+        "CANCEL_CONFIRMED",
+        "CANCELED",
+        "CANCELLED",
+        "EXPIRED",
+        "VENUE_WIPED",
+        "MATCHED",
+        "FILLED",
+    }
+)
+TERMINAL_NO_FILL_VENUE_FACT_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "VENUE_WIPED"}
+)
+OPEN_ENTRY_REST_FACT_STATES = frozenset(
+    {"LIVE", "OPEN", "RESTING", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+)
+VENUE_POINT_MATCH_STATUSES = frozenset(
+    {"LIVE", "OPEN", "RESTING", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED", "MATCHED", "FILLED", "MINED"}
+)
+VENUE_POINT_TERMINAL_NO_FILL_STATUSES = frozenset(
+    {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
+)
+HARD_TERMINAL_POSITION_PHASES = frozenset(
+    {"voided", "settled", "economically_closed", "admin_closed"}
+)
+HARD_TERMINAL_POSITION_EVENT_TYPES = frozenset(
+    {
+        "ADMIN_VOIDED",
+        "ENTRY_ORDER_VOIDED",
+        "POSITION_VOIDED",
+        "POSITION_SETTLED",
+        "SETTLED",
+        "ECONOMICALLY_CLOSED",
+    }
+)
+OPEN_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
 REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -146,11 +251,179 @@ def _live_main_processes() -> list[str]:
     return rows
 
 
+def _live_trading_launchagent_installed_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "expected_label": "com.zeus.live-trading",
+        "expected_module": "src.main",
+    }
+    if not LIVE_TRADING_PLIST_PATH.exists():
+        return CheckResult(
+            "live_trading_launchagent_installed",
+            False,
+            "active live-trading LaunchAgent plist is missing",
+            evidence,
+        )
+    try:
+        with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_trading_launchagent_installed",
+            False,
+            "active live-trading LaunchAgent plist is unreadable",
+            evidence,
+        )
+    label = payload.get("Label")
+    args = payload.get("ProgramArguments")
+    working_directory = payload.get("WorkingDirectory")
+    args_list = [str(arg) for arg in args] if isinstance(args, list) else []
+    evidence.update(
+        {
+            "label": label,
+            "program_arguments": args_list,
+            "working_directory": working_directory,
+        }
+    )
+    module_ok = "-m" in args_list and "src.main" in args_list
+    ok = label == "com.zeus.live-trading" and module_ok
+    return CheckResult(
+        "live_trading_launchagent_installed",
+        ok,
+        "active live-trading LaunchAgent targets src.main"
+        if ok
+        else "active live-trading LaunchAgent does not target com.zeus.live-trading src.main",
+        evidence,
+    )
+
+
 def _settings() -> dict[str, Any]:
     try:
         return json.loads(SETTINGS_PATH.read_text())
     except Exception:
         return {}
+
+
+def _live_trading_python_executable() -> str:
+    """Return the Python executable launchd will use for ``src.main``.
+
+    Preflight must validate boot with the same interpreter as the live daemon.
+    Do not inspect or echo plist EnvironmentVariables here; they may contain
+    secrets and are not needed to resolve ProgramArguments[0].
+    """
+
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+        args = payload.get("ProgramArguments")
+        if isinstance(args, list) and args:
+            executable = str(args[0]).strip()
+            if executable:
+                return executable
+    except Exception:
+        pass
+    return sys.executable
+
+
+def _plist_env_value(path: Path, key: str) -> tuple[str | None, str | None]:
+    """Read one non-secret launchd environment value from a plist."""
+    try:
+        payload = plistlib.loads(path.read_bytes())
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+    env = payload.get("EnvironmentVariables")
+    if not isinstance(env, dict):
+        return None, "EnvironmentVariables missing or not a dictionary"
+    value = env.get(key)
+    return (str(value).strip() if value is not None else None), None
+
+
+def _live_trading_plist_env_value(key: str) -> tuple[str | None, str | None]:
+    """Read one non-secret launchd environment value from the live-trading plist."""
+
+    return _plist_env_value(LIVE_TRADING_PLIST_PATH, key)
+
+
+def _launchagent_plist_path_for_label(label: str) -> Path:
+    if label == "live-trading":
+        return LIVE_TRADING_PLIST_PATH
+    return Path.home() / "Library" / "LaunchAgents" / f"com.zeus.{label}.plist"
+
+
+def _clob_signature_type_config_check(*, required: bool) -> CheckResult:
+    """Verify CLOB-using live money daemons have an explicit V2 signature type."""
+
+    key = "POLYMARKET_CLOB_V2_SIGNATURE_TYPE"
+    allowed_values = {"0", "1", "2", "3"}
+    labels = ("live-trading", *CLOB_SIGNATURE_TYPE_SIDECAR_LABELS)
+    items: list[dict[str, Any]] = []
+    live_value: str | None = None
+    live_error: str | None = None
+    for label in labels:
+        path = _launchagent_plist_path_for_label(label)
+        value, error = _plist_env_value(path, key)
+        if label == "live-trading":
+            live_value = value
+            live_error = error
+        item: dict[str, Any] = {
+            "label": label,
+            "plist_path": str(path),
+            "present": bool(value),
+            "supported": bool(value in allowed_values) if value else False,
+        }
+        if value:
+            item["configured_value"] = value
+        if error:
+            item["plist_error"] = error
+        items.append(item)
+
+    evidence: dict[str, Any] = {
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "required": required,
+        "present": bool(live_value),
+        "allowed_values": sorted(allowed_values),
+        "items": items,
+    }
+    if live_value:
+        evidence["configured_value"] = live_value
+    if live_error:
+        evidence["plist_error"] = live_error
+
+    if not required:
+        return CheckResult(
+            "clob_signature_type_config",
+            True,
+            "explicit CLOB V2 signature type is not required while live submit is not armed",
+            evidence,
+        )
+
+    failed = [
+        item
+        for item in items
+        if (not item["present"]) or (not item["supported"])
+    ]
+    if failed:
+        missing = [item["label"] for item in failed if not item["present"]]
+        unsupported = [item["label"] for item in failed if item["present"] and not item["supported"]]
+        issue_parts: list[str] = []
+        if missing:
+            issue_parts.append(f"missing: {', '.join(missing)}")
+        if unsupported:
+            issue_parts.append(f"unsupported: {', '.join(unsupported)}")
+        return CheckResult(
+            "clob_signature_type_config",
+            False,
+            "live submit requires explicit supported POLYMARKET_CLOB_V2_SIGNATURE_TYPE "
+            f"in CLOB money-path LaunchAgents ({'; '.join(issue_parts)})",
+            evidence,
+        )
+
+    return CheckResult(
+        "clob_signature_type_config",
+        True,
+        "CLOB money-path LaunchAgents have explicit supported CLOB V2 signature types",
+        evidence,
+    )
 
 
 def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
@@ -165,6 +438,70 @@ def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
             "settings_path": str(SETTINGS_PATH),
             "feature_flags.qkernel_spine_enabled": enabled,
         },
+    )
+
+
+def _src_main_boot_guard_check() -> CheckResult:
+    python_executable = _live_trading_python_executable()
+    command = [
+        python_executable,
+        "-m",
+        "src.main",
+        "--validate-boot",
+        "--settings-path",
+        str(SETTINGS_PATH),
+    ]
+    evidence: dict[str, Any] = {
+        "command": command,
+        "cwd": str(ROOT),
+        "settings_path": str(SETTINGS_PATH),
+        "python_source": (
+            "launchagent_program_arguments"
+            if python_executable != sys.executable
+            else "current_process"
+        ),
+    }
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        evidence["timeout_seconds"] = exc.timeout
+        evidence["stdout_tail"] = (exc.stdout or "")[-2000:] if isinstance(exc.stdout, str) else ""
+        evidence["stderr_tail"] = (exc.stderr or "")[-2000:] if isinstance(exc.stderr, str) else ""
+        return CheckResult(
+            "src_main_boot_guards",
+            False,
+            "src.main --validate-boot timed out before restart",
+            evidence,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "src_main_boot_guards",
+            False,
+            "src.main --validate-boot could not run",
+            evidence,
+        )
+    evidence.update(
+        {
+            "returncode": proc.returncode,
+            "stdout_tail": proc.stdout[-4000:],
+            "stderr_tail": proc.stderr[-4000:],
+        }
+    )
+    ok = proc.returncode == 0
+    return CheckResult(
+        "src_main_boot_guards",
+        ok,
+        "src.main boot guards pass"
+        if ok
+        else "src.main boot guards fail; restart would crash before scheduler",
+        evidence,
     )
 
 
@@ -356,6 +693,24 @@ def _sidecar_heartbeat_check(name: str, filename: str) -> CheckResult:
         )
     age = (datetime.now(timezone.utc) - alive_at).total_seconds()
     evidence["age_seconds"] = age
+    current_git_head = _git_head()
+    heartbeat_git_head = str(payload.get("git_head") or "").strip()
+    evidence["heartbeat_git_head"] = heartbeat_git_head or None
+    evidence["current_git_head"] = current_git_head or None
+    if not heartbeat_git_head:
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat git head is missing",
+            evidence,
+        )
+    if heartbeat_git_head != current_git_head:
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat git head does not match current code",
+            evidence,
+        )
     ok = 0.0 <= age <= SIDECAR_HEARTBEAT_MAX_AGE_SECONDS
     return CheckResult(
         f"{name}_heartbeat",
@@ -434,6 +789,1880 @@ def _collateral_snapshot_freshness_check() -> CheckResult:
     )
 
 
+def _edli_live_order_presubmit_shape_check() -> CheckResult:
+    """Block restart when active live-order aggregates predate submit economics."""
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "required_fields": list(PRE_SUBMIT_ECONOMIC_FIELDS),
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "edli_live_order_presubmit_shape",
+            True,
+            "world DB absent; no EDLI live-order aggregate rows to inspect",
+            evidence,
+        )
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {"edli_live_order_events", "edli_live_order_projection"}.issubset(tables):
+            evidence["tables_present"] = sorted(tables)
+            return CheckResult(
+                "edli_live_order_presubmit_shape",
+                True,
+                "EDLI live-order aggregate tables absent",
+                evidence,
+            )
+        field_checks = " OR ".join(
+            f"json_type(pre.payload_json, '$.{field}') IS NULL"
+            for field in PRE_SUBMIT_ECONOMIC_FIELDS
+        )
+        state_placeholders = ",".join("?" for _ in LIVE_ORDER_RESTART_RELEVANT_STATES)
+        risk_predicate = f"""
+          pre.rn = 1
+          AND proj.current_state IN ({state_placeholders})
+          AND ({field_checks})
+        """
+        params = tuple(sorted(LIVE_ORDER_RESTART_RELEVANT_STATES))
+        risk_cte = f"""
+            WITH latest_pre AS (
+                SELECT
+                    aggregate_id,
+                    payload_json,
+                    occurred_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY aggregate_id
+                        ORDER BY event_sequence DESC
+                    ) AS rn
+                FROM edli_live_order_events
+                WHERE event_type = 'PreSubmitRevalidated'
+            ),
+            risk AS (
+                SELECT
+                    proj.aggregate_id,
+                    proj.current_state,
+                    proj.last_sequence,
+                    proj.pending_reconcile,
+                    proj.venue_order_id,
+                    pre.occurred_at,
+                    json_extract(pre.payload_json, '$.event_id') AS event_id,
+                    json_extract(pre.payload_json, '$.direction') AS direction,
+                    json_extract(pre.payload_json, '$.limit_price') AS limit_price
+                FROM latest_pre pre
+                JOIN edli_live_order_projection proj
+                  ON proj.aggregate_id = pre.aggregate_id
+                WHERE {risk_predicate}
+            ),
+            current_command AS (
+                SELECT
+                    risk.*,
+                    cmd.event_sequence AS command_sequence,
+                    json_extract(cmd.payload_json, '$.execution_command_id') AS execution_command_id
+                FROM risk
+                JOIN edli_live_order_events cmd
+                  ON cmd.aggregate_id = risk.aggregate_id
+                 AND cmd.event_type = 'ExecutionCommandCreated'
+                 AND cmd.event_sequence = risk.last_sequence
+            )
+        """
+        samples = conn.execute(
+            f"""
+            {risk_cte}
+            SELECT
+                aggregate_id,
+                current_state,
+                pending_reconcile,
+                venue_order_id,
+                occurred_at,
+                event_id,
+                direction,
+                limit_price
+            FROM risk
+            ORDER BY occurred_at DESC
+            LIMIT 25
+            """,
+            params,
+        ).fetchall()
+        missing_count = int(
+            conn.execute(
+                f"""
+                WITH latest_pre AS (
+                    SELECT
+                        aggregate_id,
+                        payload_json,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY aggregate_id
+                            ORDER BY event_sequence DESC
+                        ) AS rn
+                    FROM edli_live_order_events
+                    WHERE event_type = 'PreSubmitRevalidated'
+                )
+                SELECT COUNT(*)
+                FROM latest_pre pre
+                JOIN edli_live_order_projection proj
+                  ON proj.aggregate_id = pre.aggregate_id
+                WHERE {risk_predicate}
+                """,
+                params,
+            ).fetchone()[0]
+            or 0
+        )
+        unsafe_count = missing_count
+        unsafe_samples = samples
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "edli_live_order_presubmit_shape",
+            False,
+            "could not inspect EDLI live-order aggregate rows",
+            evidence,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    evidence["missing_count"] = missing_count
+    evidence["boot_recoverable_count"] = 0
+    evidence["unsubmitted_ghost_recoverable_count"] = 0
+    evidence["terminal_command_recoverable_count"] = 0
+    evidence["restart_policy"] = (
+        "fail_closed_restart_relevant_presubmit_requires_current_entry_economics"
+    )
+    evidence["unsafe_count"] = unsafe_count
+    evidence["samples"] = [dict(row) for row in unsafe_samples]
+    return CheckResult(
+        "edli_live_order_presubmit_shape",
+        unsafe_count == 0,
+        "restart-relevant live-order aggregates carry pre-submit economics"
+        if missing_count == 0
+        else (
+            "restart-relevant live-order aggregates predate pre-submit economics"
+        ),
+        evidence,
+    )
+
+
+def _live_actionable_certificate_semantics_check() -> CheckResult:
+    """Re-verify LIVE ActionableTradeCertificate rows with current money law.
+
+    Historical certificates are immutable receipts. A verifier hotfix can make old rows
+    fail current money law, and that is important audit evidence, but it is restart-blocking
+    only when a currently restart-relevant entry command still references the certificate's
+    event/token. Once chain exposure exists, held-position monitoring uses current
+    belief, price, and lifecycle evidence rather than re-adjudicating the entry receipt.
+    """
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "lookback_hours": LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS,
+        "certificate_type": "ActionableTradeCertificate",
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            True,
+            "world DB absent; no actionable certificates to inspect",
+            evidence,
+        )
+    since = datetime.now(timezone.utc) - timedelta(
+        hours=LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS
+    )
+    try:
+        from src.decision_kernel.errors import CertificateVerificationError
+        from src.decision_kernel.verifier import _verify_actionable_payload
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            False,
+            "could not load current actionable certificate verifier",
+            evidence,
+        )
+    quarantined_hashes = _decision_certificate_quarantine_hashes(
+        table_name=DECISION_CERTIFICATES_TABLE,
+        reason_code=REASON_INVALID_LIVE_ACTIONABLE,
+    )
+    evidence["quarantined_count"] = len(quarantined_hashes)
+    restart_relevant_commands = _restart_relevant_entry_command_index()
+    evidence["restart_relevant_entry_command_count"] = sum(
+        len(items) for items in restart_relevant_commands.values()
+    )
+    evidence["restart_relevant_entry_commands"] = [
+        item
+        for items in restart_relevant_commands.values()
+        for item in items[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    ][:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    forecast_parent_payload_by_child: dict[str, dict[str, Any]] = {}
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_certificates"):
+            return CheckResult(
+                "live_actionable_certificate_semantics",
+                True,
+                "decision_certificates table absent",
+                evidence,
+            )
+        rows = conn.execute(
+            """
+            SELECT
+                certificate_id,
+                certificate_hash,
+                decision_time,
+                payload_json
+              FROM decision_certificates
+             WHERE certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+               AND datetime(decision_time) >= datetime(?)
+             ORDER BY datetime(decision_time) DESC, certificate_id DESC
+            """,
+            (since.isoformat(),),
+        ).fetchall()
+        if rows and _table_exists(conn, "main", "decision_certificate_edges"):
+            certificate_ids = [str(row["certificate_id"] or "") for row in rows]
+            placeholders = ",".join("?" for _ in certificate_ids)
+            parent_rows = conn.execute(
+                f"""
+                SELECT
+                    edge.child_certificate_id,
+                    parent.payload_json
+                  FROM decision_certificate_edges edge
+                  JOIN decision_certificates parent
+                    ON parent.certificate_hash = edge.parent_certificate_hash
+                 WHERE edge.child_certificate_id IN ({placeholders})
+                   AND edge.parent_role = 'forecast_authority'
+                   AND edge.parent_certificate_type = 'ForecastAuthorityCertificate'
+                """,
+                tuple(certificate_ids),
+            ).fetchall()
+            for parent_row in parent_rows:
+                try:
+                    parent_payload = json.loads(str(parent_row["payload_json"] or "{}"))
+                    if isinstance(parent_payload, dict):
+                        forecast_parent_payload_by_child[
+                            str(parent_row["child_certificate_id"] or "")
+                        ] = parent_payload
+                except json.JSONDecodeError:
+                    continue
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            False,
+            "could not inspect actionable certificate rows",
+            evidence,
+        )
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+    forecast_conn: sqlite3.Connection | None = None
+    if FORECAST_DB.exists():
+        try:
+            forecast_conn = sqlite3.connect(f"file:{FORECAST_DB}?mode=ro", uri=True)
+            forecast_conn.row_factory = sqlite3.Row
+        except sqlite3.Error as exc:
+            evidence["forecast_db_error"] = str(exc)
+            forecast_conn = None
+
+    risky: list[dict[str, Any]] = []
+    historical_risky: list[dict[str, Any]] = []
+    risky_count = 0
+    historical_risky_count = 0
+    quarantined_risky_count = 0
+    auto_recoverable_invalid_pending_entry_count = 0
+    auto_recoverable_invalid_pending_entries: list[dict[str, Any]] = []
+    auto_recoverable_terminal_no_fill_entry_count = 0
+    auto_recoverable_terminal_no_fill_entries: list[dict[str, Any]] = []
+    checked = 0
+    for row in rows:
+        checked += 1
+        payload: dict[str, Any] = {}
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            if not isinstance(payload, dict):
+                raise CertificateVerificationError("actionable payload must be object")
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+            posterior_reason = _qkernel_parent_posterior_violation_reason(
+                forecast_conn=forecast_conn,
+                payload=payload,
+                forecast_parent_payload=forecast_parent_payload_by_child.get(
+                    str(row["certificate_id"] or "")
+                ),
+            )
+            if posterior_reason is not None:
+                raise CertificateVerificationError(posterior_reason)
+        except Exception as exc:  # noqa: BLE001
+            cert_hash = str(row["certificate_hash"] or "")
+            restart_relevant = _payload_matches_restart_relevant_entry_command(
+                payload,
+                restart_relevant_commands,
+            )
+            if cert_hash in quarantined_hashes and not restart_relevant:
+                quarantined_risky_count += 1
+                continue
+            sample = {
+                "certificate_id": row["certificate_id"],
+                "certificate_hash": cert_hash,
+                "decision_time": row["decision_time"],
+                "risk": "live_actionable_certificate_fails_current_verifier",
+                "reason": str(exc),
+                "restart_relevant": restart_relevant,
+                "quarantined": cert_hash in quarantined_hashes,
+            }
+            if isinstance(payload, dict):
+                sample.update(
+                    {
+                        "event_id": payload.get("event_id"),
+                        "city": payload.get("city"),
+                        "target_date": payload.get("target_date"),
+                        "temperature_metric": payload.get("temperature_metric"),
+                        "direction": payload.get("direction"),
+                        "bin_label": payload.get("bin_label"),
+                        "token_id": payload.get("token_id"),
+                        "q_live": payload.get("q_live"),
+                        "q_lcb_5pct": payload.get("q_lcb_5pct"),
+                    }
+                )
+            if restart_relevant:
+                matched_commands = restart_relevant_commands.get(
+                    str(payload.get("event_id") or ""),
+                    [],
+                )
+                sample["matched_restart_commands"] = matched_commands[
+                    :LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT
+                ]
+                auto_recoverable = bool(matched_commands) and all(
+                    bool(command.get("boot_auto_cancelable_invalid_pending_entry"))
+                    for command in matched_commands
+                )
+                terminal_no_fill_recoverable = bool(matched_commands) and all(
+                    bool(command.get("boot_recoverable_terminal_no_fill_entry"))
+                    for command in matched_commands
+                )
+                if auto_recoverable:
+                    auto_recoverable_invalid_pending_entry_count += len(matched_commands)
+                    sample["restart_relevant"] = False
+                    sample["auto_recoverable_invalid_pending_entry"] = True
+                    sample["restart_recovery"] = (
+                        "boot_invalid_pending_entry_authority_cancel_before_reactor"
+                    )
+                    if len(auto_recoverable_invalid_pending_entries) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        auto_recoverable_invalid_pending_entries.append(sample)
+                elif terminal_no_fill_recoverable:
+                    auto_recoverable_terminal_no_fill_entry_count += len(matched_commands)
+                    sample["restart_relevant"] = False
+                    sample["auto_recoverable_terminal_no_fill_entry"] = True
+                    sample["restart_recovery"] = (
+                        "boot_command_recovery_terminal_no_fill_before_reactor"
+                    )
+                    if len(auto_recoverable_terminal_no_fill_entries) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        auto_recoverable_terminal_no_fill_entries.append(sample)
+                else:
+                    risky_count += 1
+                    if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        risky.append(sample)
+            else:
+                historical_risky_count += 1
+                if len(historical_risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                    historical_risky.append(sample)
+    if forecast_conn is not None:
+        try:
+            forecast_conn.close()
+        except Exception:
+            pass
+    evidence["checked_count"] = checked
+    evidence["risky_count"] = risky_count
+    evidence["historical_risky_count"] = historical_risky_count
+    evidence["quarantined_risky_count"] = quarantined_risky_count
+    evidence["auto_recoverable_invalid_pending_entry_count"] = (
+        auto_recoverable_invalid_pending_entry_count
+    )
+    evidence["auto_recoverable_invalid_pending_entries"] = auto_recoverable_invalid_pending_entries
+    evidence["auto_recoverable_terminal_no_fill_entry_count"] = (
+        auto_recoverable_terminal_no_fill_entry_count
+    )
+    evidence["auto_recoverable_terminal_no_fill_entries"] = (
+        auto_recoverable_terminal_no_fill_entries
+    )
+    evidence["risky"] = risky
+    evidence["historical_risky"] = historical_risky
+    if risky:
+        detail = "restart-relevant actionable certificates fail current qkernel money law"
+    elif auto_recoverable_invalid_pending_entry_count:
+        detail = (
+            "restart-relevant invalid pending entry certificates are covered by "
+            "boot auto-cancel before reactor"
+        )
+    elif auto_recoverable_terminal_no_fill_entry_count:
+        detail = (
+            "restart-relevant invalid pending entry certificates are covered by "
+            "boot terminal no-fill recovery before reactor"
+        )
+    else:
+        detail = "restart-relevant actionable certificates verify under current qkernel money law"
+    return CheckResult(
+        "live_actionable_certificate_semantics",
+        not risky,
+        detail,
+        evidence,
+    )
+
+
+def _qkernel_parent_posterior_violation_reason(
+    *,
+    forecast_conn: sqlite3.Connection | None,
+    payload: dict[str, Any],
+    forecast_parent_payload: dict[str, Any] | None,
+) -> str | None:
+    """Return a reason if a qkernel actionable exceeds its forecast parent.
+
+    The qkernel can rank native route utility, but the executable receipt must not
+    serve a selected-side probability above the ForecastAuthority posterior it cites.
+    For NO, the conservative bound is ``1 - YES_UCB``; never ``1 - YES_LCB``.
+    """
+
+    economics = payload.get("qkernel_execution_economics")
+    if str(payload.get("selection_authority_applied") or "") != "qkernel_spine":
+        return None
+    if not isinstance(economics, dict):
+        return None
+    if forecast_conn is None or forecast_parent_payload is None:
+        return None
+    posterior_hash = str(forecast_parent_payload.get("posterior_identity_hash") or "").strip()
+    if not posterior_hash:
+        return "qkernel forecast_authority posterior_identity_hash missing"
+    try:
+        row = forecast_conn.execute(
+            """
+            SELECT q_json, q_lcb_json, q_ucb_json
+              FROM forecast_posteriors
+             WHERE posterior_identity_hash = ?
+             LIMIT 1
+            """,
+            (posterior_hash,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return f"qkernel forecast parent posterior read failed:{exc}"
+    if row is None:
+        return "qkernel forecast parent posterior row missing"
+    try:
+        q = json.loads(str(row["q_json"] or "{}"))
+        q_lcb = json.loads(str(row["q_lcb_json"] or "{}"))
+        q_ucb = json.loads(str(row["q_ucb_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        return f"qkernel forecast parent posterior json invalid:{exc}"
+    if not isinstance(q, dict) or not isinstance(q_lcb, dict) or not isinstance(q_ucb, dict):
+        return "qkernel forecast parent posterior q/bounds not objects"
+    bin_label = str(payload.get("bin_label") or "").strip()
+    direction = str(payload.get("direction") or "").strip().lower()
+    if not bin_label:
+        return "qkernel actionable bin_label missing"
+    if bin_label not in q:
+        return "qkernel actionable bin_label absent from forecast parent posterior"
+
+    def _prob(value: object) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 <= out <= 1.0):
+            return None
+        return out
+
+    q_yes = _prob(q.get(bin_label))
+    if q_yes is None:
+        return "qkernel forecast parent q invalid"
+    if direction == "buy_yes":
+        q_point_bound = q_yes
+        q_lcb_bound = _prob(q_lcb.get(bin_label))
+        bound_name = "YES:q_lcb"
+    elif direction == "buy_no":
+        q_ucb_yes = _prob(q_ucb.get(bin_label))
+        if q_ucb_yes is None:
+            return "qkernel forecast parent q_ucb missing for NO bound"
+        q_point_bound = 1.0 - q_yes
+        q_lcb_bound = 1.0 - q_ucb_yes
+        bound_name = "NO:1-q_ucb"
+    else:
+        return "qkernel actionable direction invalid for posterior audit"
+    if q_lcb_bound is None:
+        return "qkernel forecast parent q_lcb missing for YES bound"
+    q_lcb_bound = max(0.0, min(float(q_lcb_bound), float(q_point_bound)))
+    observed = {
+        "payload_q_live": payload.get("q_live"),
+        "payload_q_lcb": payload.get("q_lcb_5pct"),
+        "qkernel_q_live": economics.get("payoff_q_point"),
+        "qkernel_q_lcb": economics.get("payoff_q_lcb"),
+    }
+    tolerance = 1e-6
+    for field, raw in observed.items():
+        value = _prob(raw)
+        if value is None:
+            return f"qkernel {field} invalid"
+        bound = q_point_bound if field.endswith("q_live") else q_lcb_bound
+        if value > bound + tolerance:
+            return (
+                "qkernel selected probability exceeds forecast parent posterior:"
+                f"{field}={value:.9f}:bound={bound:.9f}:basis={bound_name}"
+            )
+    return None
+
+
+def _edli_event_id_from_decision_id(decision_id: object) -> str:
+    parts = str(decision_id or "").split(":")
+    if len(parts) >= 2 and parts[0] == "edli_exec_cmd":
+        return parts[1]
+    return ""
+
+
+def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
+    """Current nonterminal ENTRY commands keyed by EDLI event id."""
+
+    if not TRADE_DB.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True, timeout=1)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "venue_commands"):
+            return {}
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        pc_join = ""
+        pc_select = (
+            "NULL AS position_phase, NULL AS position_shares, "
+            "NULL AS position_cost_basis_usd, NULL AS position_chain_shares"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            pc_select = (
+                "pc.phase AS position_phase, pc.shares AS position_shares, "
+                "pc.cost_basis_usd AS position_cost_basis_usd, "
+                "pc.chain_shares AS position_chain_shares"
+            )
+            pc_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
+        fact_join = ""
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
+            "NULL AS latest_fact_remaining_size"
+        )
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA main.table_info(venue_order_facts)").fetchall()
+            }
+            fact_order_terms = []
+            if "local_sequence" in fact_cols:
+                fact_order_terms.append("vof.local_sequence DESC")
+            if "fact_id" in fact_cols:
+                fact_order_terms.append("vof.fact_id DESC")
+            fact_order_terms.append("vof.rowid DESC")
+            fact_order_by = ", ".join(fact_order_terms)
+            fact_select = (
+                "lf.state AS latest_fact_state, "
+                "lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size"
+            )
+            fact_join = f"""
+              LEFT JOIN (
+                SELECT command_id, venue_order_id, state, matched_size, remaining_size
+                  FROM (
+                    SELECT vof.command_id, vof.venue_order_id, vof.state,
+                           vof.matched_size, vof.remaining_size,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id, vof.venue_order_id
+                               ORDER BY {fact_order_by}
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+               AND lf.venue_order_id = cmd.venue_order_id
+            """
+        rows = conn.execute(
+            f"""
+            SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
+                   cmd.state, cmd.venue_order_id, cmd.created_at, cmd.updated_at,
+                   {pc_select},
+                   {fact_select}
+              FROM venue_commands cmd
+              {pc_join}
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+            """,
+            tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        event_id = _edli_event_id_from_decision_id(row["decision_id"])
+        if not event_id:
+            continue
+        item = dict(row)
+        item["event_id"] = event_id
+        item["boot_auto_cancelable_invalid_pending_entry"] = (
+            _restart_relevant_entry_command_boot_auto_cancelable(item)
+        )
+        item["boot_recoverable_terminal_no_fill_entry"] = (
+            _restart_relevant_entry_command_terminal_no_fill_recoverable(item)
+        )
+        index.setdefault(event_id, []).append(item)
+    return index
+
+
+def _decimal_zero_or_missing(value: Any) -> bool:
+    if value in (None, ""):
+        return True
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _restart_relevant_entry_command_boot_auto_cancelable(command: dict[str, Any]) -> bool:
+    state = str(command.get("state") or "").upper()
+    if state not in {"ACKED", "POST_ACKED"}:
+        return False
+    if str(command.get("position_phase") or "") != "pending_entry":
+        return False
+    if not (
+        _decimal_zero_or_missing(command.get("position_shares"))
+        and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
+        and _decimal_zero_or_missing(command.get("position_chain_shares"))
+    ):
+        return False
+    fact_state = str(command.get("latest_fact_state") or "").upper()
+    if fact_state not in OPEN_ENTRY_REST_FACT_STATES:
+        return False
+    if not _decimal_zero_or_missing(command.get("latest_fact_matched_size")):
+        return False
+    return bool(str(command.get("venue_order_id") or "").strip())
+
+
+def _restart_relevant_entry_command_terminal_no_fill_recoverable(command: dict[str, Any]) -> bool:
+    state = str(command.get("state") or "").upper()
+    if state in TERMINAL_VENUE_COMMAND_STATES:
+        return False
+    if str(command.get("position_phase") or "") != "pending_entry":
+        return False
+    if not (
+        _decimal_zero_or_missing(command.get("position_shares"))
+        and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
+        and _decimal_zero_or_missing(command.get("position_chain_shares"))
+    ):
+        return False
+    fact_state = str(command.get("latest_fact_state") or "").upper()
+    if fact_state not in TERMINAL_NO_FILL_VENUE_FACT_STATES:
+        return False
+    if not _decimal_zero_or_missing(command.get("latest_fact_matched_size")):
+        return False
+    return bool(str(command.get("venue_order_id") or "").strip())
+
+
+def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
+    """Current nonterminal ENTRY orders whose venue point truth must match local truth."""
+
+    if not TRADE_DB.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True, timeout=1)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "venue_commands"):
+            return []
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        fact_join = ""
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
+            "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at"
+        )
+        position_join = ""
+        position_select = (
+            "NULL AS position_phase, NULL AS position_shares, "
+            "NULL AS position_cost_basis_usd, NULL AS position_chain_shares"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            position_columns = _table_columns(conn, "main", "position_current")
+            phase_expr = "pc.phase" if "phase" in position_columns else "NULL"
+            shares_expr = "pc.shares" if "shares" in position_columns else "NULL"
+            cost_expr = (
+                "pc.cost_basis_usd"
+                if "cost_basis_usd" in position_columns
+                else "NULL"
+            )
+            chain_expr = "pc.chain_shares" if "chain_shares" in position_columns else "NULL"
+            position_select = (
+                f"{phase_expr} AS position_phase, "
+                f"{shares_expr} AS position_shares, "
+                f"{cost_expr} AS position_cost_basis_usd, "
+                f"{chain_expr} AS position_chain_shares"
+            )
+            position_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_select = (
+                "lf.state AS latest_fact_state, lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size, lf.observed_at AS latest_fact_observed_at"
+            )
+            fact_join = """
+              LEFT JOIN (
+                SELECT command_id, venue_order_id, state, matched_size, remaining_size, observed_at
+                  FROM (
+                    SELECT vof.command_id, vof.venue_order_id, vof.state, vof.matched_size,
+                           vof.remaining_size, vof.observed_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id, vof.venue_order_id
+                               ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+               AND lf.venue_order_id = cmd.venue_order_id
+            """
+        rows = conn.execute(
+            f"""
+            SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
+                   cmd.state, cmd.venue_order_id, cmd.size, cmd.price,
+                   cmd.created_at, cmd.updated_at,
+                   {position_select},
+                   {fact_select}
+              FROM venue_commands cmd
+              {position_join}
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+             LIMIT ?
+            """,
+            (*tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)), PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+
+def _preflight_venue_adapter():
+    from src.data.polymarket_client import PolymarketClient
+
+    with _live_trading_plist_environment_overlay():
+        client = PolymarketClient(public_http_timeout=PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS)
+        return client, client._ensure_v2_adapter()
+
+
+def _venue_payload(value: object | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        payload = dict(value)
+    else:
+        raw = getattr(value, "raw", None)
+        payload = dict(raw) if isinstance(raw, dict) else dict(getattr(value, "__dict__", {}) or {})
+    status = getattr(value, "status", None)
+    if status not in (None, "") and not (payload.get("status") or payload.get("state")):
+        payload["status"] = str(status)
+    order_id = getattr(value, "order_id", None)
+    if order_id not in (None, "") and not (payload.get("id") or payload.get("orderID") or payload.get("order_id")):
+        payload["orderID"] = str(order_id)
+    return payload
+
+
+def _venue_status(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "NOT_FOUND"
+    return str(payload.get("status") or payload.get("state") or "").strip().upper()
+
+
+def _decimal_float(value: object) -> float | None:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
+
+
+def _payload_matched_size(payload: dict[str, Any] | None) -> float | None:
+    if not payload:
+        return None
+    for key in ("size_matched", "matched_size", "matchedAmount", "matched_amount", "filled_size"):
+        value = _decimal_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _venue_order_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    return {
+        "id": payload.get("id") or payload.get("orderID") or payload.get("order_id"),
+        "status": payload.get("status") or payload.get("state"),
+        "size_matched": payload.get("size_matched") or payload.get("matched_size"),
+        "original_size": payload.get("original_size") or payload.get("size"),
+        "price": payload.get("price"),
+        "asset_id": payload.get("asset_id") or payload.get("token_id"),
+        "market": payload.get("market"),
+        "outcome": payload.get("outcome"),
+    }
+
+
+def _venue_payload_order_id(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return ""
+    return str(payload.get("id") or payload.get("orderID") or payload.get("order_id") or "").strip()
+
+
+def _find_open_order_payload(adapter: Any, venue_order_id: str) -> dict[str, Any] | None:
+    get_open_orders = getattr(adapter, "get_open_orders", None)
+    if not callable(get_open_orders):
+        return None
+    for raw in get_open_orders() or []:
+        payload = _venue_payload(raw)
+        if _venue_payload_order_id(payload).lower() == venue_order_id.lower():
+            return payload
+    return None
+
+
+def _venue_point_order_boot_recoverable(item: dict[str, Any]) -> dict[str, Any] | None:
+    risk = str(item.get("risk") or "")
+    if risk == "venue_positive_match_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_matched_order_facts",
+            "repair_owner": "src.execution.command_recovery.reconcile_matched_order_facts",
+        }
+    if risk == "venue_terminal_match_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_terminal_point_orders",
+            "repair_owner": "src.execution.command_recovery.reconcile_terminal_point_orders",
+        }
+    if risk == "venue_terminal_no_fill_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_terminal_no_fill",
+            "repair_owner": "src.execution.command_recovery.reconcile_terminal_point_orders",
+        }
+    return None
+
+
+def _venue_point_order_truth_alignment_check() -> CheckResult:
+    """Classify authenticated venue point truth vs local restart order facts."""
+
+    commands = _restart_relevant_entry_commands_for_venue_audit()
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "command_count": len(commands),
+        "audit_limit": PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT,
+        "venue_read_timeout_seconds": PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS,
+    }
+    if not commands:
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            True,
+            "no restart-relevant entry venue orders require point-order audit",
+            evidence,
+        )
+
+    local_terminal_no_fill_recoverable: list[dict[str, Any]] = []
+    venue_read_commands: list[dict[str, Any]] = []
+    for command in commands:
+        if _restart_relevant_entry_command_terminal_no_fill_recoverable(command):
+            local_terminal_no_fill_recoverable.append(
+                {
+                    "command_id": command.get("command_id"),
+                    "position_id": command.get("position_id"),
+                    "command_state": command.get("state"),
+                    "venue_order_id": command.get("venue_order_id"),
+                    "local_fact_state": command.get("latest_fact_state"),
+                    "local_fact_matched_size": command.get("latest_fact_matched_size"),
+                    "local_fact_remaining_size": command.get("latest_fact_remaining_size"),
+                    "local_fact_observed_at": command.get("latest_fact_observed_at"),
+                    "position_phase": command.get("position_phase"),
+                    "position_shares": command.get("position_shares"),
+                    "position_cost_basis_usd": command.get("position_cost_basis_usd"),
+                    "position_chain_shares": command.get("position_chain_shares"),
+                    "risk": "venue_terminal_no_fill_not_projected_locally",
+                    "restart_resolution": "command_recovery.terminal_order_fact_no_fill",
+                }
+            )
+        else:
+            venue_read_commands.append(command)
+    evidence["venue_read_command_count"] = len(venue_read_commands)
+    evidence["local_terminal_no_fill_boot_recoverable_count"] = len(
+        local_terminal_no_fill_recoverable
+    )
+    risky: list[dict[str, Any]] = []
+    boot_recoverable: list[dict[str, Any]] = [
+        recoverable
+        for item in local_terminal_no_fill_recoverable
+        if (recoverable := _venue_point_order_boot_recoverable(item)) is not None
+    ]
+    covered: list[dict[str, Any]] = []
+    if not venue_read_commands:
+        evidence["covered_count"] = len(covered)
+        evidence["boot_recoverable"] = boot_recoverable
+        evidence["risky"] = risky
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            True,
+            "local terminal no-fill venue facts are boot-recoverable before live order submission",
+            evidence,
+        )
+    try:
+        client, adapter = _preflight_venue_adapter()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = repr(exc)
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            False,
+            "authenticated venue point-order reader unavailable for restart-relevant orders",
+            evidence,
+        )
+    try:
+        for command in venue_read_commands:
+            venue_order_id = str(command.get("venue_order_id") or "").strip()
+            command_id = str(command.get("command_id") or "").strip()
+            try:
+                payload = _venue_payload(adapter.get_order(venue_order_id))
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    payload = _find_open_order_payload(adapter, venue_order_id)
+                except Exception as open_exc:  # noqa: BLE001
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_read_failed",
+                            "point_error": repr(exc),
+                            "open_orders_error": repr(open_exc),
+                        }
+                    )
+                    continue
+                if payload is None:
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_read_failed",
+                            "point_error": repr(exc),
+                            "open_orders_fallback_match": False,
+                        }
+                    )
+                    continue
+            if _venue_status(payload) in {"", "UNKNOWN"}:
+                try:
+                    fallback_payload = _find_open_order_payload(adapter, venue_order_id)
+                except Exception as open_exc:  # noqa: BLE001
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_status_unknown",
+                            "point_status": _venue_status(payload),
+                            "open_orders_error": repr(open_exc),
+                        }
+                    )
+                    continue
+                if fallback_payload is not None:
+                    payload = fallback_payload
+            status = _venue_status(payload)
+            venue_matched = _payload_matched_size(payload)
+            local_matched = _decimal_float(command.get("latest_fact_matched_size")) or 0.0
+            local_state = str(command.get("latest_fact_state") or "").strip().upper()
+            item = {
+                "command_id": command_id,
+                "position_id": command.get("position_id"),
+                "command_state": command.get("state"),
+                "venue_order_id": venue_order_id,
+                "venue_status": status,
+                "venue_matched_size": venue_matched,
+                "local_fact_state": local_state,
+                "local_fact_matched_size": local_matched,
+                "local_fact_remaining_size": command.get("latest_fact_remaining_size"),
+                "local_fact_observed_at": command.get("latest_fact_observed_at"),
+                "venue_order": _venue_order_summary(payload),
+            }
+            if payload is None:
+                risky.append({**item, "risk": "venue_point_order_not_found"})
+            elif status in {"", "UNKNOWN"}:
+                risky.append({**item, "risk": "venue_point_order_status_unknown"})
+            elif venue_matched is None and status in VENUE_POINT_MATCH_STATUSES:
+                risky.append({**item, "risk": "venue_point_order_matched_size_missing"})
+            else:
+                risk = ""
+                if (venue_matched or 0.0) > local_matched + 1e-9:
+                    risk = "venue_positive_match_not_projected_locally"
+                elif (
+                    status in {"MATCHED", "FILLED", "MINED"}
+                    and local_state not in {"MATCHED", "FILLED"}
+                ):
+                    risk = "venue_terminal_match_not_projected_locally"
+                elif (
+                    status in VENUE_POINT_TERMINAL_NO_FILL_STATUSES
+                    and (venue_matched or 0.0) <= 1e-9
+                    and local_state not in TERMINAL_VENUE_FACT_STATES
+                ):
+                    risk = "venue_terminal_no_fill_not_projected_locally"
+                if risk:
+                    risk_item = {**item, "risk": risk}
+                    recoverable = _venue_point_order_boot_recoverable(risk_item)
+                    if recoverable is not None:
+                        boot_recoverable.append(recoverable)
+                    else:
+                        risky.append(risk_item)
+                else:
+                    covered.append(item)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    evidence["covered_count"] = len(covered)
+    evidence["boot_recoverable"] = boot_recoverable
+    evidence["risky"] = risky
+    return CheckResult(
+        "venue_point_order_truth_alignment",
+        not risky,
+        "authenticated venue point-order truth matches local restart-relevant order facts"
+        if not risky and not boot_recoverable
+        else "authenticated venue point-order drift is boot-recoverable before live order submission"
+        if not risky
+        else "authenticated venue point-order truth conflicts with local restart-relevant order facts",
+        evidence,
+    )
+
+
+def _edli_fill_bridge_events_table(conn: sqlite3.Connection) -> str | None:
+    """Return the freshest readable EDLI event stream for fill bridge coverage."""
+
+    candidates: list[str] = []
+    if _table_exists(conn, "main", "edli_live_order_events"):
+        candidates.append("edli_live_order_events")
+    if _table_exists(conn, "world", "edli_live_order_events"):
+        candidates.append("world.edli_live_order_events")
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def _latest_occurred_at(table: str) -> str:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(occurred_at) AS max_occurred_at FROM {table}"
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        try:
+            value = row["max_occurred_at"] if isinstance(row, sqlite3.Row) else row[0]
+        except (IndexError, KeyError):
+            return ""
+        return str(value or "")
+
+    return max(candidates, key=lambda table: (_latest_occurred_at(table), table))
+
+
+def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
+    """Block restart when confirmed user fills have not become EDLI fill events."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "world_db": str(WORLD_DB),
+        "sample_limit": PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT,
+    }
+    if not TRADE_DB.exists():
+        evidence["missing_db"] = str(TRADE_DB)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            True,
+            "trade DB is absent; no confirmed fill bridge surface is inspectable",
+            evidence,
+        )
+    try:
+        conn = _connect_live_ro()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = repr(exc)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            False,
+            "live DBs are unreadable for confirmed fill bridge coverage",
+            evidence,
+        )
+    try:
+        events_table = _edli_fill_bridge_events_table(conn)
+        evidence["events_table"] = events_table
+        required_tables = {
+            "edli_live_order_events": events_table is not None,
+            "venue_commands": _table_exists(conn, "main", "venue_commands"),
+            "venue_trade_facts": _table_exists(conn, "main", "venue_trade_facts"),
+        }
+        evidence["required_tables"] = required_tables
+        if not all(required_tables.values()) or events_table is None:
+            return CheckResult(
+                "edli_confirmed_fill_bridge_coverage",
+                True,
+                "confirmed fill bridge tables are not all present; no gap detected",
+                evidence,
+            )
+
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+        event_columns = _table_columns(
+            conn,
+            "world" if events_table.startswith("world.") else "main",
+            "edli_live_order_events",
+        )
+        required_columns = {
+            "venue_commands": {
+                "command_id",
+                "decision_id",
+                "position_id",
+            },
+            "venue_trade_facts": {
+                "command_id",
+                "venue_order_id",
+                "trade_id",
+                "source",
+                "state",
+                "filled_size",
+                "fill_price",
+                "observed_at",
+            },
+            "edli_live_order_events": {
+                "aggregate_id",
+                "event_type",
+                "occurred_at",
+                "payload_json",
+            },
+        }
+        missing_columns = {
+            "venue_commands": sorted(required_columns["venue_commands"] - command_columns),
+            "venue_trade_facts": sorted(required_columns["venue_trade_facts"] - trade_columns),
+            "edli_live_order_events": sorted(
+                required_columns["edli_live_order_events"] - event_columns
+            ),
+        }
+        evidence["missing_columns"] = missing_columns
+        if any(missing_columns.values()):
+            return CheckResult(
+                "edli_confirmed_fill_bridge_coverage",
+                True,
+                "confirmed fill bridge schema is incomplete in this DB surface; no gap detected",
+                evidence,
+            )
+
+        position_join = ""
+        position_select = (
+            "NULL AS city, NULL AS target_date, NULL AS temperature_metric, "
+            "NULL AS bin_label, NULL AS direction, NULL AS phase"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            position_columns = _table_columns(conn, "main", "position_current")
+            city_expr = "pc.city" if "city" in position_columns else "NULL"
+            target_expr = "pc.target_date" if "target_date" in position_columns else "NULL"
+            metric_expr = (
+                "pc.temperature_metric" if "temperature_metric" in position_columns else "NULL"
+            )
+            label_expr = "pc.bin_label" if "bin_label" in position_columns else "NULL"
+            direction_expr = "pc.direction" if "direction" in position_columns else "NULL"
+            phase_expr = "pc.phase" if "phase" in position_columns else "NULL"
+            position_select = (
+                f"{city_expr} AS city, {target_expr} AS target_date, "
+                f"{metric_expr} AS temperature_metric, {label_expr} AS bin_label, "
+                f"{direction_expr} AS direction, {phase_expr} AS phase"
+            )
+            position_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
+
+        missing_cte = f"""
+            WITH execution_commands AS (
+                SELECT aggregate_id,
+                       json_extract(payload_json, '$.event_id') AS event_id,
+                       json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                       json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+                  FROM {events_table}
+                 WHERE event_type = 'ExecutionCommandCreated'
+            ),
+            submit_acks AS (
+                SELECT aggregate_id,
+                       json_extract(payload_json, '$.venue_order_id') AS venue_order_id
+                  FROM {events_table}
+                 WHERE event_type = 'VenueSubmitAcknowledged'
+            ),
+            missing AS (
+                SELECT exec.aggregate_id,
+                       exec.event_id,
+                       exec.final_intent_id,
+                       exec.execution_command_id,
+                       cmd.command_id,
+                       cmd.position_id,
+                       ack.venue_order_id AS acknowledged_venue_order_id,
+                       trade.trade_id,
+                       trade.venue_order_id,
+                       trade.source,
+                       trade.state,
+                       trade.filled_size,
+                       trade.fill_price,
+                       trade.observed_at,
+                       {position_select}
+                  FROM execution_commands exec
+                  JOIN submit_acks ack
+                    ON ack.aggregate_id = exec.aggregate_id
+                  JOIN venue_commands cmd
+                    ON cmd.decision_id = exec.execution_command_id
+                  {position_join}
+                  JOIN venue_trade_facts trade
+                    ON trade.command_id = cmd.command_id
+                   AND trade.venue_order_id = ack.venue_order_id
+                 WHERE UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
+                   AND trade.source = 'WS_USER'
+                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+                   AND NOT EXISTS (
+                         SELECT 1
+                           FROM {events_table} existing
+                          WHERE existing.aggregate_id = exec.aggregate_id
+                            AND existing.event_type = 'UserTradeObserved'
+                            AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+                            AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+                       )
+            )
+        """
+        count_row = conn.execute(f"{missing_cte} SELECT COUNT(*) AS count FROM missing").fetchone()
+        missing_count = int(count_row["count"] if count_row is not None else 0)
+        samples = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                {missing_cte}
+                SELECT *
+                  FROM missing
+                 ORDER BY datetime(observed_at) DESC, trade_id DESC
+                 LIMIT ?
+                """,
+                (PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT,),
+            ).fetchall()
+        ]
+        evidence.update(
+            {
+                "missing_confirmed_fill_count": missing_count,
+                "samples": samples,
+                "repair_owner": (
+                    "src.ingest.price_channel_ingest._edli_user_channel_reconcile_cycle/"
+                    "src.events.edli_trade_fact_bridge.append_confirmed_trade_facts_to_edli"
+                ),
+                "restart_requirement": (
+                    "run the current price-channel ingest fill bridge and materialize "
+                    "UserTradeObserved(FILL_CONFIRMED) before live-trading restart"
+                ),
+            }
+        )
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            missing_count == 0,
+            "confirmed venue fills are bridged into EDLI UserTradeObserved events"
+            if missing_count == 0
+            else "confirmed venue fills are missing EDLI UserTradeObserved bridge events",
+            evidence,
+        )
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            False,
+            "confirmed fill bridge coverage query failed",
+            evidence,
+        )
+    finally:
+        conn.close()
+
+
+def _payload_matches_restart_relevant_entry_command(
+    payload: dict[str, Any],
+    command_index: dict[str, list[dict[str, Any]]],
+) -> bool:
+    event_id = str(payload.get("event_id") or "").strip()
+    if not event_id:
+        return False
+    commands = command_index.get(event_id)
+    if not commands:
+        return False
+    token_id = str(payload.get("token_id") or "").strip()
+    if not token_id:
+        return True
+    return any(str(command.get("token_id") or "").strip() == token_id for command in commands)
+
+
+def _live_money_certificate_parent_mode_check() -> CheckResult:
+    """Block restart when a LIVE money-boundary certificate has non-LIVE parents."""
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "lookback_hours": LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS,
+        "certificate_types": list(LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES),
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            True,
+            "world DB absent; no money-boundary certificate ancestry to inspect",
+            evidence,
+        )
+    since = datetime.now(timezone.utc) - timedelta(
+        hours=LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS
+    )
+    try:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_PARENT_MODE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            False,
+            "could not load money certificate quarantine constants",
+            evidence,
+        )
+    quarantined_hashes = _decision_certificate_quarantine_hashes(
+        table_name=DECISION_CERTIFICATES_TABLE,
+        reason_code=REASON_INVALID_LIVE_PARENT_MODE,
+    )
+    evidence["quarantined_count"] = len(quarantined_hashes)
+    placeholders = ",".join("?" for _ in LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
+    params = (*LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES, since.isoformat())
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_certificates"):
+            return CheckResult(
+                "live_money_certificate_parent_modes",
+                True,
+                "decision_certificates table absent",
+                evidence,
+            )
+        if not _table_exists(conn, "main", "decision_certificate_edges"):
+            live_count = int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                      FROM decision_certificates
+                     WHERE certificate_type IN ({placeholders})
+                       AND mode = 'LIVE'
+                       AND verifier_status = 'VERIFIED'
+                       AND datetime(decision_time) >= datetime(?)
+                    """,
+                    params,
+                ).fetchone()[0]
+                or 0
+            )
+            evidence["live_money_certificate_count"] = live_count
+            return CheckResult(
+                "live_money_certificate_parent_modes",
+                live_count == 0,
+                "decision_certificate_edges table absent and no recent live money certificates exist"
+                if live_count == 0
+                else "recent live money certificates exist but ancestry edge table is absent",
+                evidence,
+            )
+        rows = conn.execute(
+            f"""
+            SELECT
+                child.certificate_id AS child_certificate_id,
+                child.certificate_hash AS child_certificate_hash,
+                child.certificate_type AS child_certificate_type,
+                child.decision_time AS child_decision_time,
+                COUNT(*) AS bad_parent_count,
+                GROUP_CONCAT(
+                    edge.parent_role || '=' || edge.parent_certificate_type || ':' || COALESCE(parent.mode, 'MISSING'),
+                    ','
+                ) AS bad_parent_modes
+              FROM decision_certificates child
+              JOIN decision_certificate_edges edge
+                ON edge.child_certificate_id = child.certificate_id
+              LEFT JOIN decision_certificates parent
+                ON parent.certificate_hash = edge.parent_certificate_hash
+             WHERE child.certificate_type IN ({placeholders})
+               AND child.mode = 'LIVE'
+               AND child.verifier_status = 'VERIFIED'
+               AND datetime(child.decision_time) >= datetime(?)
+               AND COALESCE(parent.mode, '') != 'LIVE'
+             GROUP BY
+                child.certificate_id,
+                child.certificate_hash,
+                child.certificate_type,
+                child.decision_time
+             ORDER BY datetime(child.decision_time) DESC, child.certificate_id DESC
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            False,
+            "could not inspect live money certificate ancestry",
+            evidence,
+        )
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    risky = [
+        dict(row)
+        for row in rows
+        if str(row["child_certificate_hash"] or "") not in quarantined_hashes
+    ]
+    evidence["risky_count"] = len(risky)
+    evidence["quarantined_risky_count"] = len(rows) - len(risky)
+    evidence["risky"] = risky[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    return CheckResult(
+        "live_money_certificate_parent_modes",
+        not risky,
+        "recent live money-boundary certificates have LIVE parent ancestry"
+        if not risky
+        else "recent live money-boundary certificates include non-LIVE or missing parent ancestry",
+        evidence,
+    )
+
+
+def _decision_certificate_quarantine_hashes(
+    *,
+    table_name: str,
+    reason_code: str,
+) -> set[str]:
+    if not TRADE_DB.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_integrity_quarantine"):
+            return set()
+        rows = conn.execute(
+            """
+            SELECT row_id
+              FROM decision_integrity_quarantine
+             WHERE table_name = ?
+               AND reason_code = ?
+            """,
+            (table_name, reason_code),
+        ).fetchall()
+        return {str(row["row_id"] or "") for row in rows if str(row["row_id"] or "")}
+    except sqlite3.Error:
+        return set()
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+
+def _day0_canonical_observation_evidence(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    city = str(row["city"] or "")
+    target_date = str(row["target_date"] or "")
+    metric = str(row["temperature_metric"] or "high").lower()
+    if not city or not target_date or metric not in {"high", "low"}:
+        return None
+    try:
+        from src.engine.monitor_refresh import _day0_observed_extreme_from_canonical_surface
+    except Exception:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        observed = _day0_observed_extreme_from_canonical_surface(
+            city_name=city,
+            target_date=target_date,
+            metric_is_low=(metric == "low"),
+            now=now,
+            world_conn=conn,
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    if observed is None:
+        return None
+    extreme, observation_time, sample_count = observed
+    return {
+        "city": city,
+        "target_date": target_date,
+        "temperature_metric": metric,
+        "observed_extreme": extreme,
+        "observation_time": observation_time,
+        "sample_count": sample_count,
+        "source": "world.observation_instants",
+    }
+
+
+def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
+    """Block restart when a live venue order is attached to the wrong lifecycle phase."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "terminal_command_states": sorted(TERMINAL_VENUE_COMMAND_STATES),
+    }
+    with _connect_live_ro() as conn:
+        required_tables = ("venue_commands", "position_current")
+        missing_tables = [
+            table
+            for table in required_tables
+            if not _table_exists(conn, "main", table)
+        ]
+        if missing_tables:
+            evidence["missing_tables"] = missing_tables
+            return CheckResult(
+                "resting_venue_command_lifecycle_alignment",
+                True,
+                "venue command tables absent; no resting venue command lifecycle alignment to inspect",
+                evidence,
+            )
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        price_select = "cmd.price" if "price" in command_columns else "NULL"
+        created_at_select = "cmd.created_at" if "created_at" in command_columns else "NULL"
+        fact_join = ""
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_observed_at, "
+            "NULL AS latest_fact_matched_size, NULL AS latest_fact_remaining_size, "
+            "NULL AS latest_fact_raw_payload_json"
+        )
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_columns = _table_columns(conn, "main", "venue_order_facts")
+            matched_select = (
+                "vof.matched_size AS matched_size"
+                if "matched_size" in fact_columns
+                else "NULL AS matched_size"
+            )
+            remaining_select = (
+                "vof.remaining_size AS remaining_size"
+                if "remaining_size" in fact_columns
+                else "NULL AS remaining_size"
+            )
+            raw_select = (
+                "vof.raw_payload_json AS raw_payload_json"
+                if "raw_payload_json" in fact_columns
+                else "NULL AS raw_payload_json"
+            )
+            fact_select = (
+                "lf.state AS latest_fact_state, lf.observed_at AS latest_fact_observed_at, "
+                "lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size, "
+                "lf.raw_payload_json AS latest_fact_raw_payload_json"
+            )
+            fact_join = """
+              LEFT JOIN (
+                SELECT command_id, state, observed_at, matched_size, remaining_size, raw_payload_json
+                  FROM (
+                    SELECT vof.command_id, vof.state, vof.observed_at,
+                           {matched_select}, {remaining_select}, {raw_select},
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id
+                               ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+            """.format(
+                matched_select=matched_select,
+                remaining_select=remaining_select,
+                raw_select=raw_select,
+            )
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        rows = conn.execute(
+            f"""
+            SELECT
+                cmd.command_id,
+                cmd.intent_kind,
+                cmd.position_id,
+                cmd.state AS command_state,
+                cmd.venue_order_id,
+                {price_select} AS price,
+                cmd.size,
+                {created_at_select} AS created_at,
+                cmd.updated_at,
+                pc.phase AS position_phase,
+                pc.city,
+                pc.target_date,
+                pc.bin_label,
+                pc.direction,
+                pc.chain_shares,
+                {fact_select}
+              FROM venue_commands cmd
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC
+             LIMIT 100
+            """,
+            tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
+        ).fetchall()
+        entry_projection_recoverable = _resting_entry_projection_recoverable_commands(conn)
+    if entry_projection_recoverable:
+        evidence["entry_projection_recoverable_count"] = len(entry_projection_recoverable)
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    boot_recoverable: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        intent_kind = str(row["intent_kind"] or "").upper()
+        phase = str(row["position_phase"] or "")
+        fact_state = str(row["latest_fact_state"] or "").upper()
+        risk = ""
+        if fact_state in TERMINAL_VENUE_FACT_STATES and str(row["command_state"] or "").upper() not in TERMINAL_VENUE_COMMAND_STATES:
+            risk = "command_projection_stale_after_terminal_venue_fact"
+        elif intent_kind == "EXIT" and phase != "pending_exit":
+            risk = "resting_exit_order_without_pending_exit_lifecycle"
+        elif intent_kind == "ENTRY" and phase not in {"pending_entry", "active", "day0_window"}:
+            risk = "resting_entry_order_without_entry_lifecycle"
+        elif not phase:
+            risk = "resting_order_missing_position_projection"
+        if risk:
+            recoverable = _resting_venue_command_boot_recoverable(
+                item,
+                risk,
+                entry_projection_recoverable=entry_projection_recoverable,
+            )
+            if recoverable is not None:
+                boot_recoverable.append(recoverable)
+            else:
+                risky.append({**item, "risk": risk})
+        else:
+            covered.append(item)
+    evidence["risky"] = risky
+    evidence["boot_recoverable"] = boot_recoverable
+    evidence["covered_count"] = len(covered)
+    return CheckResult(
+        "resting_venue_command_lifecycle_alignment",
+        not risky,
+        (
+            "resting venue commands are aligned with position lifecycle"
+            if not boot_recoverable
+            else "resting venue command conflicts are boot-recoverable"
+        )
+        if not risky
+        else "resting venue commands conflict with position lifecycle or terminal venue facts",
+        evidence,
+    )
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed > 0.0:
+        return parsed
+    return None
+
+
+def _payload_has_exit_fill_economics(raw: object, fallback_price: object) -> bool:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    submit = payload.get("submit_result")
+    if isinstance(submit, dict):
+        making = _positive_float(submit.get("makingAmount") or submit.get("making_amount"))
+        taking = _positive_float(submit.get("takingAmount") or submit.get("taking_amount"))
+        if making is not None and taking is not None:
+            return True
+    return _positive_float(fallback_price) is not None
+
+
+def _terminal_positive_entry_fact_boot_recoverable(item: dict[str, Any]) -> bool:
+    fact_state = str(item.get("latest_fact_state") or "").upper()
+    if fact_state not in {"MATCHED", "FILLED"}:
+        return False
+    if str(item.get("position_phase") or "") not in {"active", "day0_window"}:
+        return False
+    if _positive_float(item.get("latest_fact_matched_size")) is None:
+        return False
+    if _positive_float(item.get("chain_shares")) is None:
+        return False
+    return True
+
+
+def _resting_entry_projection_recoverable_commands(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    try:
+        from src.execution.command_recovery import (
+            _decision_log_trade_case_for_command,
+            _latest_unprojected_filled_entry_candidates,
+            _latest_unprojected_live_entry_candidates,
+        )
+    except Exception:
+        return {}
+
+    recoverable: dict[str, dict[str, Any]] = {}
+    candidate_sources = (
+        (
+            "command_recovery.live_entry_projection_repair",
+            "project_acknowledged_entry_order_into_pending_entry",
+            _latest_unprojected_live_entry_candidates,
+        ),
+        (
+            "command_recovery.filled_entry_projection_repair",
+            "project_partial_or_filled_entry_order_into_active_position",
+            _latest_unprojected_filled_entry_candidates,
+        ),
+    )
+    for restart_resolution, repair_action, candidate_fn in candidate_sources:
+        try:
+            candidates = candidate_fn(conn)
+        except Exception:
+            continue
+        for candidate in candidates:
+            command_id = str(candidate.get("command_id") or "").strip()
+            if not command_id:
+                continue
+            try:
+                trade_case, _source_id = _decision_log_trade_case_for_command(conn, candidate)
+            except Exception:
+                trade_case = {}
+            if not trade_case:
+                continue
+            recoverable[command_id] = {
+                "restart_resolution": restart_resolution,
+                "repair_action": repair_action,
+                "city": trade_case.get("city"),
+                "target_date": trade_case.get("target_date"),
+                "direction": trade_case.get("direction"),
+                "bin_label": trade_case.get("bin_label") or trade_case.get("range_label"),
+            }
+    return recoverable
+
+
+def _resting_venue_command_boot_recoverable(
+    item: dict[str, Any],
+    risk: str,
+    *,
+    entry_projection_recoverable: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    intent_kind = str(item.get("intent_kind") or "").upper()
+    fact_state = str(item.get("latest_fact_state") or "").upper()
+    phase = str(item.get("position_phase") or "")
+    command_id = str(item.get("command_id") or "").strip()
+    entry_repair = (entry_projection_recoverable or {}).get(command_id)
+    if (
+        entry_repair is not None
+        and risk in {
+            "resting_entry_order_without_entry_lifecycle",
+            "resting_order_missing_position_projection",
+        }
+        and intent_kind == "ENTRY"
+        and fact_state in {"LIVE", "OPEN", "RESTING", "PARTIALLY_MATCHED", "PARTIAL"}
+    ):
+        return {
+            **item,
+            **entry_repair,
+            "risk": risk,
+        }
+    if (
+        risk == "resting_exit_order_without_pending_exit_lifecycle"
+        and intent_kind == "EXIT"
+        and phase in {"active", "day0_window", "quarantined"}
+        and fact_state in {"LIVE", "OPEN", "RESTING", "PARTIALLY_MATCHED", "PARTIAL"}
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
+            "repair_action": "restore_position_pending_exit_for_live_exit_order",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "ENTRY"
+        and _terminal_positive_entry_fact_boot_recoverable(item)
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.matched_cancel_review_required_entries",
+            "repair_action": "terminalize_entry_command_from_positive_match_fact",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "ENTRY"
+        and _restart_relevant_entry_command_terminal_no_fill_recoverable(item)
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.terminal_order_fact_no_fill",
+            "repair_action": "reconcile_terminal_order_facts",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "EXIT"
+        and fact_state in {"MATCHED", "FILLED"}
+        and _positive_float(item.get("latest_fact_matched_size")) is not None
+        and _payload_has_exit_fill_economics(
+            item.get("latest_fact_raw_payload_json"),
+            item.get("price"),
+        )
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
+            "repair_action": "terminalize_exit_command_and_project_economic_close",
+        }
+    return None
+
+
 def _latest_iso_from_covered(rows: list[dict[str, Any]], key: str) -> str | None:
     latest: datetime | None = None
     for row in rows:
@@ -468,6 +2697,34 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
             "no open exposures require execution feasibility evidence",
             evidence,
         )
+    canonical_covered: list[dict[str, Any]] = []
+    quote_required_rows: list[sqlite3.Row] = []
+    for row in rows:
+        canonical = _day0_canonical_observation_evidence(row, now=now)
+        if canonical is not None:
+            canonical_covered.append(
+                {
+                    **_exposure_stub(_open_exposure_identity(row)),
+                    "freshness_basis": "day0_canonical_observation_no_execution_quote_required",
+                    "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+                    "canonical_observation": canonical,
+                }
+            )
+        else:
+            quote_required_rows.append(row)
+    if not quote_required_rows:
+        evidence["row_count"] = "not_scanned_no_quote_required_after_canonical_day0"
+        evidence["scoped_exposure_count"] = len(rows)
+        evidence["risky"] = []
+        evidence["covered"] = canonical_covered
+        evidence["latest_observed_at"] = None
+        evidence["latest_quote_seen_at"] = None
+        return CheckResult(
+            "execution_feasibility_evidence_freshness",
+            True,
+            "all open exposures are covered by canonical Day0 observations",
+            evidence,
+        )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "execution_feasibility_evidence"):
             return CheckResult(
@@ -480,9 +2737,11 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
         exposure_results = _execution_feasibility_exposure_freshness(
             conn,
             columns=columns,
-            exposures=[_open_exposure_identity(row) for row in rows],
+            exposures=[_open_exposure_identity(row) for row in quote_required_rows],
             now=now,
         )
+    exposure_results["covered"] = canonical_covered + list(exposure_results["covered"])
+    exposure_results["scoped_exposure_count"] = len(rows)
     latest = _latest_iso_from_covered(exposure_results["covered"], "latest_observed_at")
     latest_dt = _parse_dt(latest)
     evidence["row_count"] = "not_scanned_append_only_hot_path"
@@ -563,6 +2822,14 @@ def _execution_feasibility_exposure_freshness(
             "freshness_basis": observed_expr,
         }
         if latest_dt is None:
+            snapshot_evidence = _fresh_executable_snapshot_quote_for_exposure(
+                conn,
+                exposure=exposure,
+                now=now,
+            )
+            if snapshot_evidence is not None:
+                covered.append(snapshot_evidence)
+                continue
             risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
             continue
         age = (now - latest_dt).total_seconds()
@@ -571,15 +2838,106 @@ def _execution_feasibility_exposure_freshness(
             evidence["clock_skew_tolerated_seconds"] = min(
                 abs(age), EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
             )
-        covered.append(evidence)
         if not _execution_feasibility_age_is_fresh(age):
-            risk = (
-                "future_execution_feasibility_evidence"
-                if age < 0
-                else "stale_execution_feasibility_evidence"
+            snapshot_evidence = _fresh_executable_snapshot_quote_for_exposure(
+                conn,
+                exposure=exposure,
+                now=now,
             )
-            risky.append({**evidence, "risk": risk})
+            if snapshot_evidence is not None:
+                snapshot_evidence["execution_feasibility_latest_observed_at"] = latest_observed
+                snapshot_evidence["execution_feasibility_latest_quote_seen_at"] = latest_quote
+                snapshot_evidence["execution_feasibility_age_seconds"] = age
+                covered.append(snapshot_evidence)
+            else:
+                covered.append(evidence)
+                risk = (
+                    "future_execution_feasibility_evidence"
+                    if age < 0
+                    else "stale_execution_feasibility_evidence"
+                )
+                risky.append({**evidence, "risk": risk})
+            continue
+        covered.append(evidence)
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
+
+
+def _fresh_executable_snapshot_quote_for_exposure(
+    conn: sqlite3.Connection,
+    *,
+    exposure: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    if not _table_exists(conn, "main", "executable_market_snapshots"):
+        return None
+    columns = _table_columns(conn, "main", "executable_market_snapshots")
+    predicate = _freshness_predicate_for_exposure(
+        columns=columns,
+        exposure=exposure,
+        token_columns=("token_id", "yes_token_id", "no_token_id", "selected_outcome_token_id"),
+    )
+    if predicate is None:
+        return None
+    where_sql, params = predicate
+    freshness_terms: list[str] = []
+    if "active" in columns:
+        freshness_terms.append("COALESCE(active, 0) = 1")
+    if "closed" in columns:
+        freshness_terms.append("COALESCE(closed, 0) = 0")
+    if "accepting_orders" in columns:
+        freshness_terms.append("COALESCE(accepting_orders, 0) = 1")
+    active_sql = " AND " + " AND ".join(freshness_terms) if freshness_terms else ""
+    selected_token_select = (
+        "selected_outcome_token_id"
+        if "selected_outcome_token_id" in columns
+        else "NULL AS selected_outcome_token_id"
+    )
+    outcome_select = "outcome_label" if "outcome_label" in columns else "NULL AS outcome_label"
+    bid_select = "orderbook_top_bid" if "orderbook_top_bid" in columns else "NULL AS orderbook_top_bid"
+    ask_select = "orderbook_top_ask" if "orderbook_top_ask" in columns else "NULL AS orderbook_top_ask"
+    snapshot_id_select = "snapshot_id" if "snapshot_id" in columns else "NULL AS snapshot_id"
+    row = conn.execute(
+        f"""
+        SELECT {snapshot_id_select},
+               {selected_token_select},
+               {outcome_select},
+               {bid_select},
+               {ask_select},
+               captured_at AS latest_observed_at,
+               captured_at AS latest_quote_seen_at,
+               freshness_deadline AS latest_freshness_deadline
+          FROM executable_market_snapshots
+         WHERE {where_sql}
+           {active_sql}
+         ORDER BY captured_at DESC
+         LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    captured_dt = _parse_dt(row["latest_observed_at"])
+    deadline_dt = _parse_dt(row["latest_freshness_deadline"])
+    if captured_dt is None:
+        return None
+    age = (now - captured_dt).total_seconds()
+    deadline_ok = deadline_dt is not None and deadline_dt >= now
+    if not (0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS or deadline_ok):
+        return None
+    return {
+        **_exposure_stub(exposure),
+        "snapshot_id": row["snapshot_id"],
+        "selected_outcome_token_id": row["selected_outcome_token_id"],
+        "outcome_label": row["outcome_label"],
+        "orderbook_top_bid": row["orderbook_top_bid"],
+        "orderbook_top_ask": row["orderbook_top_ask"],
+        "latest_observed_at": row["latest_observed_at"],
+        "latest_quote_seen_at": row["latest_quote_seen_at"],
+        "latest_freshness_deadline": row["latest_freshness_deadline"],
+        "freshness_basis": "executable_market_snapshots.captured_at",
+        "age_seconds": age,
+        "freshness_deadline_ok": deadline_ok,
+    }
 
 
 def _full_family_executable_substrate_redecision_check(rows: list[sqlite3.Row]) -> CheckResult:
@@ -710,19 +3068,17 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _harvester_live_enabled() -> tuple[bool, dict[str, Any]]:
     """Return whether the restart target will run the settlement P&L resolver.
 
-    The preflight usually runs from an operator shell, not inside launchd, so the
-    shell environment alone is not enough evidence. Prefer the current process
-    env when present, then inspect the launchd plist that owns src.main.
+    The preflight usually runs from an operator shell, not inside launchd. The
+    shell environment is therefore not restart-target evidence and must not
+    override the active live-trading LaunchAgent.
     """
     env_value = os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED")
     evidence: dict[str, Any] = {
-        "env_value": env_value,
+        "shell_env_value_ignored": env_value,
         "plist_path": str(LIVE_TRADING_PLIST_PATH),
         "plist_value": None,
-        "source": "env" if env_value is not None else "plist",
+        "source": "live_trading_launchagent_plist",
     }
-    if env_value is not None:
-        return env_value == "1", evidence
 
     try:
         with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
@@ -763,6 +3119,9 @@ def _forecast_sidecar_health() -> CheckResult:
         running_age = None
         if last_started is not None:
             running_age = (now - last_started).total_seconds()
+        business_liveness = entry.get("business_liveness")
+        if not isinstance(business_liveness, dict):
+            business_liveness = {}
         item = {
             "status": status,
             "last_run_at": entry.get("last_run_at"),
@@ -770,6 +3129,9 @@ def _forecast_sidecar_health() -> CheckResult:
             "last_success_at": entry.get("last_success_at"),
             "last_failure_at": entry.get("last_failure_at"),
             "last_failure_reason": entry.get("last_failure_reason"),
+            "last_skip_at": entry.get("last_skip_at"),
+            "last_skip_reason": entry.get("last_skip_reason"),
+            "business_liveness": business_liveness,
             "running_age_seconds": running_age,
         }
         job_evidence[job_name] = item
@@ -783,6 +3145,12 @@ def _forecast_sidecar_health() -> CheckResult:
                 risky.append({"job": job_name, "risk": "scheduler_job_running_clock_invalid", **item})
             elif running_age > REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS:
                 risky.append({"job": job_name, "risk": "scheduler_job_running_stale", **item})
+            continue
+        if (
+            job_name == "bayes_precision_fusion_capture"
+            and status == "SKIPPED"
+            and business_liveness.get("transport_degraded") is True
+        ):
             continue
         if status != "OK":
             risky.append({"job": job_name, "risk": "scheduler_job_not_ok", **item})
@@ -876,14 +3244,38 @@ def _posterior_summary() -> CheckResult:
             """
         ).fetchone()
     latest_dt = _parse_dt(latest["computed_at"]) if latest else None
+    source_cycle_dt = _parse_dt(latest["source_cycle_time"]) if latest else None
     age_hours = None
     if latest_dt is not None:
         age_hours = (now - latest_dt).total_seconds() / 3600.0
-    non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
-    from src.engine.position_belief import monitor_belief_max_age_hours
+    source_cycle_age_hours = None
+    source_cycle_fresh = False
+    if source_cycle_dt is not None:
+        try:
+            from src.data.replacement_forecast_cycle_policy import (
+                cycle_age_exceeds_bound,
+                cycle_age_hours,
+                replacement_source_cycle_max_age_hours,
+            )
 
-    max_age_hours = monitor_belief_max_age_hours()
-    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= max_age_hours
+            source_cycle_age_hours = cycle_age_hours(now, source_cycle_dt)
+            max_age_hours = replacement_source_cycle_max_age_hours()
+            source_cycle_fresh = (
+                0.0 <= source_cycle_age_hours
+                and not cycle_age_exceeds_bound(now, source_cycle_dt, max_age_hours=max_age_hours)
+            )
+        except Exception:
+            source_cycle_age_hours = (now - source_cycle_dt).total_seconds() / 3600.0
+            source_cycle_fresh = False
+            from src.engine.position_belief import monitor_belief_max_age_hours
+
+            max_age_hours = monitor_belief_max_age_hours()
+    else:
+        from src.engine.position_belief import monitor_belief_max_age_hours
+
+        max_age_hours = monitor_belief_max_age_hours()
+    non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
+    ok = non_live == 0 and source_cycle_fresh
     return CheckResult(
         "live_posterior_freshness",
         ok,
@@ -892,18 +3284,105 @@ def _posterior_summary() -> CheckResult:
             "runtime_layers": runtime_rows,
             "latest_live_computed_at": latest["computed_at"] if latest else None,
             "latest_live_age_hours": age_hours,
+            "latest_live_source_cycle_time": latest["source_cycle_time"] if latest else None,
+            "latest_live_source_cycle_age_hours": source_cycle_age_hours,
             "non_live_rows": non_live,
+            "freshness_basis": "source_cycle_time" if source_cycle_dt is not None else "computed_at",
             "fresh_age_limit_hours": max_age_hours,
         },
     )
 
 
-def _open_positions() -> list[Any]:
+_POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+_RESTART_REDECISION_POSITION_PHASES = frozenset(
+    {"active", "day0_window", "pending_exit"}
+)
+_RESTART_REDECISION_CHAIN_EXPOSURE_PHASES = frozenset(
+    {"quarantined", "voided"}
+)
+
+
+def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
     with _connect_live_ro() as conn:
         columns = _table_columns(conn, "main", "position_current")
         optional_selects = []
-        for column in ("condition_id", "token_id", "no_token_id"):
+        for column in (
+            "condition_id",
+            "token_id",
+            "no_token_id",
+            "entry_method",
+            "chain_state",
+            "p_posterior",
+            "cost_basis_usd",
+            "order_id",
+        ):
             optional_selects.append(column if column in columns else f"NULL AS {column}")
+        phase_sql_params: list[object] = []
+        if "phase" in columns:
+            phase_sql = "phase IN ({})".format(
+                ",".join("?" for _ in _RESTART_REDECISION_POSITION_PHASES)
+            )
+            phase_sql_params.extend(sorted(_RESTART_REDECISION_POSITION_PHASES))
+            if "chain_state" in columns:
+                state_placeholders = ",".join(
+                    "?" for _ in CURRENT_MONEY_RISK_CHAIN_STATES
+                )
+                phase_sql = f"({phase_sql} AND chain_state IN ({state_placeholders}))"
+                phase_sql_params.extend(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        else:
+            phase_sql = "1=1"
+        if "chain_shares" in columns:
+            exposure_terms = ["COALESCE(chain_shares, 0) > ?"]
+            for name in ("shares", "chain_cost_basis_usd", "cost_basis_usd"):
+                if name in columns:
+                    exposure_terms.append(
+                        f"(chain_shares IS NULL AND COALESCE({name}, 0) > ?)"
+                    )
+        else:
+            exposure_terms = [
+                f"COALESCE({name}, 0) > ?"
+                for name in ("shares", "chain_cost_basis_usd", "cost_basis_usd")
+                if name in columns
+            ]
+        chain_positive_sql = "0"
+        chain_positive_params: list[object] = []
+        if "chain_shares" in columns:
+            chain_truth_terms: list[str] = []
+            if "phase" in columns:
+                chain_truth_terms.append(
+                    "phase IN ({})".format(
+                        ",".join(
+                            "?"
+                            for _ in _RESTART_REDECISION_CHAIN_EXPOSURE_PHASES
+                        )
+                    )
+                )
+                chain_positive_params.extend(
+                    sorted(_RESTART_REDECISION_CHAIN_EXPOSURE_PHASES)
+                )
+            if "chain_state" in columns:
+                chain_truth_terms.append(
+                    "chain_state IN ({})".format(
+                        ",".join("?" for _ in CURRENT_MONEY_RISK_CHAIN_STATES)
+                    )
+                )
+                chain_positive_params.extend(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+            if chain_truth_terms:
+                chain_positive_sql = (
+                    "COALESCE(chain_shares, 0) > ? AND ("
+                    + " AND ".join(chain_truth_terms)
+                    + ")"
+                )
+                chain_positive_params.insert(0, _POSITIVE_CHAIN_EXPOSURE_EPS)
+        exposure_filter = (
+            "AND (" + " OR ".join(exposure_terms) + ")"
+            if positive_chain_only and exposure_terms
+            else ""
+        )
+        params: list[object] = list(phase_sql_params)
+        params.extend(chain_positive_params)
+        if positive_chain_only and exposure_terms:
+            params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS] * len(exposure_terms))
         return list(
             conn.execute(
                 f"""
@@ -915,13 +3394,361 @@ def _open_positions() -> list[Any]:
                        updated_at,
                        {", ".join(optional_selects)}
                   FROM position_current
-                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                   AND COALESCE(chain_shares, shares, 0) > 0
+                 WHERE ({phase_sql} OR {chain_positive_sql})
+                   {exposure_filter}
                  ORDER BY CASE phase WHEN 'pending_exit' THEN 0 ELSE 1 END,
                           city, target_date, bin_label
                 """
+                ,
+                tuple(params),
             )
         )
+
+
+def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Block restart when canonical live positions contradict terminal or EDLI authority."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "hard_terminal_phases": sorted(HARD_TERMINAL_POSITION_PHASES),
+        "edli_entry_method_required": "qkernel_spine",
+    }
+    if not rows:
+        return CheckResult(
+            "position_current_projection_integrity",
+            True,
+            "no open positive-share positions require projection integrity checks",
+            evidence,
+        )
+
+    position_ids = [
+        str(row["position_id"] or "")
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    ]
+    terminal_by_position: dict[str, dict[str, Any]] = {}
+    latest_entry_by_position: dict[str, dict[str, Any]] = {}
+    with _connect_live_ro() as conn:
+        if position_ids and _table_exists(conn, "main", "position_events"):
+            event_columns = _table_columns(conn, "main", "position_events")
+            event_conditions: list[str] = []
+            event_params: list[str] = []
+            if "phase_after" in event_columns:
+                phase_placeholders = ",".join("?" for _ in HARD_TERMINAL_POSITION_PHASES)
+                event_conditions.append(f"LOWER(COALESCE(phase_after, '')) IN ({phase_placeholders})")
+                event_params.extend(sorted(HARD_TERMINAL_POSITION_PHASES))
+            if "event_type" in event_columns:
+                event_placeholders = ",".join("?" for _ in HARD_TERMINAL_POSITION_EVENT_TYPES)
+                event_conditions.append(f"UPPER(COALESCE(event_type, '')) IN ({event_placeholders})")
+                event_params.extend(sorted(HARD_TERMINAL_POSITION_EVENT_TYPES))
+            if not event_conditions:
+                event_rows = []
+            else:
+                phase_before_select = (
+                    "phase_before" if "phase_before" in event_columns else "NULL AS phase_before"
+                )
+                phase_after_select = (
+                    "phase_after" if "phase_after" in event_columns else "NULL AS phase_after"
+                )
+                payload_select = (
+                    "payload_json" if "payload_json" in event_columns else "NULL AS payload_json"
+                )
+                event_type_select = (
+                    "event_type" if "event_type" in event_columns else "NULL AS event_type"
+                )
+                occurred_at_select = (
+                    "occurred_at" if "occurred_at" in event_columns else "NULL AS occurred_at"
+                )
+                sequence_select = (
+                    "sequence_no" if "sequence_no" in event_columns else "0 AS sequence_no"
+                )
+                event_id_select = (
+                    "event_id" if "event_id" in event_columns else "NULL AS event_id"
+                )
+                placeholders = ",".join("?" for _ in position_ids)
+                event_rows = conn.execute(
+                    f"""
+                    WITH terminal_events AS (
+                        SELECT
+                            {event_id_select},
+                            position_id,
+                            {event_type_select},
+                            {phase_before_select},
+                            {phase_after_select},
+                            {sequence_select},
+                            {occurred_at_select},
+                            {payload_select},
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                            ) AS rn
+                          FROM position_events
+                         WHERE position_id IN ({placeholders})
+                           AND ({" OR ".join(event_conditions)})
+                    ),
+                    latest_any AS (
+                        SELECT
+                            {event_id_select},
+                            position_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                            ) AS rn
+                          FROM position_events
+                         WHERE position_id IN ({placeholders})
+                    )
+                    SELECT terminal_events.position_id, event_type, phase_before, phase_after,
+                           sequence_no, occurred_at, payload_json
+                      FROM terminal_events
+                      JOIN latest_any
+                        ON latest_any.position_id = terminal_events.position_id
+                       AND latest_any.rn = 1
+                       AND COALESCE(latest_any.event_id, '') = COALESCE(terminal_events.event_id, '')
+                     WHERE terminal_events.rn = 1
+                    """,
+                    tuple(position_ids) + tuple(event_params) + tuple(position_ids),
+                ).fetchall()
+            terminal_by_position = {
+                str(row["position_id"]): dict(row)
+                for row in event_rows
+            }
+
+        if position_ids and _table_exists(conn, "main", "venue_commands"):
+            placeholders = ",".join("?" for _ in position_ids)
+            command_columns = _table_columns(conn, "main", "venue_commands")
+            if "intent_kind" not in command_columns or "position_id" not in command_columns:
+                command_rows = []
+            else:
+                decision_select = (
+                    "decision_id" if "decision_id" in command_columns else "NULL AS decision_id"
+                )
+                state_select = "state" if "state" in command_columns else "NULL AS state"
+                venue_order_select = (
+                    "venue_order_id" if "venue_order_id" in command_columns else "NULL AS venue_order_id"
+                )
+                size_select = "size" if "size" in command_columns else "NULL AS size"
+                price_select = "price" if "price" in command_columns else "NULL AS price"
+                created_select = (
+                    "created_at" if "created_at" in command_columns else "updated_at AS created_at"
+                )
+                command_order_time = (
+                    "COALESCE(created_at, updated_at)"
+                    if "created_at" in command_columns
+                    else "updated_at"
+                )
+                command_rows = conn.execute(
+                    f"""
+                    WITH latest_entry AS (
+                        SELECT
+                            position_id,
+                            command_id,
+                            {decision_select},
+                            {state_select},
+                            {venue_order_select},
+                            {price_select},
+                            {size_select},
+                            {created_select},
+                            updated_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY datetime({command_order_time}) DESC,
+                                         command_id DESC
+                            ) AS rn
+                          FROM venue_commands
+                         WHERE intent_kind = 'ENTRY'
+                           AND position_id IN ({placeholders})
+                    )
+                    SELECT position_id, command_id, decision_id, state, venue_order_id,
+                           price, size, created_at, updated_at
+                      FROM latest_entry
+                     WHERE rn = 1
+                    """,
+                    tuple(position_ids),
+                ).fetchall()
+            latest_entry_by_position = {
+                str(row["position_id"]): dict(row)
+                for row in command_rows
+            }
+
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for row in rows:
+        phase = str(row["phase"] or "")
+        try:
+            chain_shares = float(row["chain_shares"] or 0.0)
+        except (TypeError, ValueError):
+            chain_shares = 0.0
+        legacy_monitor_only = phase in {"quarantined", "voided"} and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
+        position_id = str(row["position_id"] or "")
+        item = {
+            "position_id": position_id,
+            "phase": phase,
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "bin_label": row["bin_label"],
+            "direction": row["direction"],
+            "shares": row["shares"],
+            "chain_shares": chain_shares,
+            "entry_method": row["entry_method"],
+            "p_posterior": row["p_posterior"],
+            "cost_basis_usd": row["cost_basis_usd"],
+        }
+        terminal = terminal_by_position.get(position_id)
+        if terminal is not None:
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_terminal_projection",
+                        "terminal_event": terminal,
+                    }
+                )
+                continue
+            risky.append(
+                {
+                    **item,
+                    "risk": "open_position_after_hard_terminal_event",
+                    "terminal_event": terminal,
+                }
+            )
+            continue
+
+        latest_entry = latest_entry_by_position.get(position_id)
+        decision_id = str((latest_entry or {}).get("decision_id") or "")
+        entry_method = str(row["entry_method"] or "")
+        try:
+            p_posterior = float(row["p_posterior"])
+        except (TypeError, ValueError):
+            p_posterior = None
+        if decision_id.startswith("edli_exec_cmd:") and entry_method != "qkernel_spine":
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_non_qkernel_entry",
+                        "entry_command": latest_entry,
+                        "required_entry_method": "qkernel_spine",
+                    }
+                )
+                continue
+            risky.append(
+                {
+                    **item,
+                    "risk": "edli_entry_projected_without_qkernel_authority",
+                    "entry_command": latest_entry,
+                    "required_entry_method": "qkernel_spine",
+                }
+            )
+            continue
+        if decision_id.startswith("edli_exec_cmd:") and (
+            p_posterior is None or p_posterior <= 0.0
+        ):
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_zero_probability_projection",
+                        "entry_command": latest_entry,
+                    }
+                )
+                continue
+            risky.append(
+                {
+                    **item,
+                    "risk": "edli_entry_zero_probability_projection",
+                    "entry_command": latest_entry,
+                }
+            )
+            continue
+        covered.append(item)
+
+    evidence["risky"] = risky
+    evidence["covered"] = covered
+    evidence["covered_count"] = len(covered)
+    return CheckResult(
+        "position_current_projection_integrity",
+        not risky,
+        "open position projections align with terminal and EDLI authority"
+        if not risky
+        else "open position projections contradict terminal events or EDLI authority",
+        evidence,
+    )
+
+
+def _economically_closed_sell_projection_exposure_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "sample_limit": LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT,
+    }
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "position_current"):
+                return CheckResult(
+                    "economically_closed_sell_projection_exposure",
+                    True,
+                    "position_current table is absent",
+                    evidence,
+                )
+            columns = _table_columns(conn, "main", "position_current")
+            required = {"position_id", "phase", "order_status", "chain_shares"}
+            missing = sorted(required - columns)
+            if missing:
+                evidence["missing_columns"] = missing
+                return CheckResult(
+                    "economically_closed_sell_projection_exposure",
+                    False,
+                    "position_current is missing closed-exposure projection columns",
+                    evidence,
+                )
+            optional_selects = []
+            for column in (
+                "city",
+                "target_date",
+                "temperature_metric",
+                "bin_label",
+                "direction",
+                "chain_state",
+                "shares",
+                "exit_price",
+                "exit_reason",
+                "updated_at",
+            ):
+                optional_selects.append(column if column in columns else f"NULL AS {column}")
+            rows = conn.execute(
+                f"""
+                SELECT position_id, phase, order_status, chain_shares,
+                       {", ".join(optional_selects)}
+                  FROM position_current
+                 WHERE LOWER(COALESCE(phase, '')) = 'economically_closed'
+                   AND LOWER(COALESCE(order_status, '')) = 'sell_filled'
+                   AND COALESCE(chain_shares, 0) > ?
+                 ORDER BY updated_at DESC
+                 LIMIT ?
+                """,
+                (_POSITIVE_CHAIN_EXPOSURE_EPS, LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "economically_closed_sell_projection_exposure",
+            False,
+            "closed sell projection exposure check failed",
+            evidence,
+        )
+    risky = [dict(row) for row in rows]
+    evidence["risky"] = risky
+    evidence["risky_count"] = len(risky)
+    return CheckResult(
+        "economically_closed_sell_projection_exposure",
+        not risky,
+        (
+            "economically closed sell-filled projections carry no current chain exposure"
+            if not risky
+            else "economically closed sell-filled projections still carry positive chain exposure"
+        ),
+        evidence,
+    )
 
 
 def _requires_executable_quote(row: sqlite3.Row, *, now_utc: datetime) -> bool:
@@ -1014,6 +3841,9 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     tolerated: list[dict[str, Any]] = []
     full_fill_repairable = _exit_full_fill_repairable_by_position()
     retry_resumable = _exit_retry_resumable_by_position()
+    stranded_intent_recoverable = _stranded_exit_intent_recoverable_by_position()
+    phantom_sell_releaseable = _phantom_pending_exit_sell_projection_releaseable_by_position()
+    active_exit_monitorable = _pending_exit_active_command_monitorable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -1039,10 +3869,37 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
             }
             tolerated.append(item)
         elif str(row["position_id"] or "") in retry_resumable:
+            _retry_evidence = retry_resumable[str(row["position_id"] or "")]
             item = {
                 **item,
-                "restart_resolution": "exit_lifecycle_retry_resume",
-                "repair_evidence": retry_resumable[str(row["position_id"] or "")],
+                "restart_resolution": _retry_evidence.get(
+                    "restart_resolution", "exit_lifecycle_retry_resume"
+                ),
+                "repair_evidence": _retry_evidence,
+            }
+            tolerated.append(item)
+        elif str(row["position_id"] or "") in stranded_intent_recoverable:
+            _intent_evidence = stranded_intent_recoverable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_stranded_intent_recovery",
+                "repair_evidence": _intent_evidence,
+            }
+            tolerated.append(item)
+        elif str(row["position_id"] or "") in phantom_sell_releaseable:
+            _phantom_evidence = phantom_sell_releaseable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_pending_exit_no_order_release",
+                "repair_evidence": _phantom_evidence,
+            }
+            tolerated.append(item)
+        elif str(row["position_id"] or "") in active_exit_monitorable:
+            _active_evidence = active_exit_monitorable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_active_exit_command_monitor",
+                "repair_evidence": _active_evidence,
             }
             tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
@@ -1059,6 +3916,262 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _pending_exit_active_command_monitorable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "venue_commands")
+        ):
+            return {}
+        position_columns = _table_columns(conn, "main", "position_current")
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        required_command_columns = {
+            "command_id",
+            "position_id",
+            "intent_kind",
+            "side",
+            "state",
+            "venue_order_id",
+            "size",
+            "price",
+            "updated_at",
+        }
+        if not required_command_columns.issubset(command_columns):
+            return {}
+        order_id_select = "pc.order_id" if "order_id" in position_columns else "NULL"
+        created_at_order = "datetime(cmd.created_at) DESC," if "created_at" in command_columns else ""
+        rows = conn.execute(
+            f"""
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, {created_at_order} cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+            )
+            SELECT pc.position_id,
+                   pc.order_status,
+                   {order_id_select} AS projected_order_id,
+                   latest_exit.command_id,
+                   latest_exit.state AS command_state,
+                   latest_exit.venue_order_id,
+                   latest_exit.side,
+                   latest_exit.size,
+                   latest_exit.price,
+                   latest_exit.updated_at
+              FROM position_current pc
+              JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+             WHERE pc.phase = 'pending_exit'
+            """
+        ).fetchall()
+    monitorable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        state = str(row["command_state"] or "").upper()
+        side = str(row["side"] or "").upper()
+        venue_order_id = str(row["venue_order_id"] or "")
+        projected_order_id = str(row["projected_order_id"] or "")
+        if state in TERMINAL_VENUE_COMMAND_STATES:
+            continue
+        if side != "SELL" or not venue_order_id:
+            continue
+        if projected_order_id and projected_order_id != venue_order_id:
+            continue
+        try:
+            size = float(row["size"] or 0.0)
+            price = float(row["price"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0.0 or price <= 0.0:
+            continue
+        monitorable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "command_state": row["command_state"],
+            "venue_order_id": venue_order_id,
+            "projected_order_id": projected_order_id,
+            "side": side,
+            "size": size,
+            "price": price,
+            "command_updated_at": row["updated_at"],
+            "order_status": row["order_status"],
+        }
+    return monitorable
+
+
+def _phantom_pending_exit_sell_projection_releaseable_by_position() -> dict[str, dict[str, Any]]:
+    """Find pending-exit sell projections that have no durable venue truth behind them."""
+
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return {}
+        position_columns = _table_columns(conn, "main", "position_current")
+        order_id_select = "pc.order_id" if "order_id" in position_columns else "NULL"
+        rows = conn.execute(
+            f"""
+            SELECT pc.position_id,
+                   pc.order_status,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   {order_id_select} AS projected_order_id,
+                   SUM(CASE WHEN UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT' THEN 1 ELSE 0 END)
+                       AS exit_command_count,
+                   SUM(CASE WHEN pe.event_type = 'EXIT_ORDER_POSTED' THEN 1 ELSE 0 END)
+                       AS exit_order_posted_count
+              FROM position_current pc
+              LEFT JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+              LEFT JOIN position_events pe
+                ON pe.position_id = pc.position_id
+             WHERE pc.phase = 'pending_exit'
+             GROUP BY pc.position_id, pc.order_status, pc.exit_retry_count,
+                      pc.next_exit_retry_at, projected_order_id
+            """
+        ).fetchall()
+        releaseable: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            order_status = str(row["order_status"] or "")
+            if not _pending_exit_order_status_looks_like_sell_projection(order_status):
+                continue
+            try:
+                exit_command_count = int(row["exit_command_count"] or 0)
+                posted_count = int(row["exit_order_posted_count"] or 0)
+                retry_count = int(row["exit_retry_count"] or 0)
+            except (TypeError, ValueError):
+                continue
+            projected_order_id = str(row["projected_order_id"] or "")
+            order_fact_count = _venue_fact_count_for_order(
+                conn,
+                table="venue_order_facts",
+                venue_order_id=projected_order_id,
+            )
+            trade_fact_count = _venue_fact_count_for_order(
+                conn,
+                table="venue_trade_facts",
+                venue_order_id=projected_order_id,
+            )
+            if exit_command_count or order_fact_count or trade_fact_count:
+                continue
+            if posted_count and retry_count <= 0:
+                continue
+            releaseable[str(row["position_id"])] = {
+                "order_status": order_status,
+                "projected_order_id": projected_order_id,
+                "exit_command_count": exit_command_count,
+                "exit_order_posted_count": posted_count,
+                "venue_order_fact_count": order_fact_count,
+                "venue_trade_fact_count": trade_fact_count,
+                "exit_retry_count": retry_count,
+                "next_exit_retry_at": row["next_exit_retry_at"],
+            }
+        return releaseable
+
+
+def _pending_exit_order_status_looks_like_sell_projection(order_status: str) -> bool:
+    normalized = order_status.strip().lower()
+    return normalized.startswith("sell_") or normalized in {"selling", "exit_intent"}
+
+
+def _venue_fact_count_for_order(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    venue_order_id: str,
+) -> int:
+    if not venue_order_id or not _table_exists(conn, "main", table):
+        return 0
+    columns = _table_columns(conn, "main", table)
+    if "venue_order_id" not in columns:
+        return 0
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE venue_order_id = ?",
+            (venue_order_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    try:
+        return int(row["count"] or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stranded_exit_intent_recoverable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            ),
+            latest_exit_event AS (
+                SELECT pe.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pe.position_id
+                           ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+                       ) AS rn
+                  FROM position_events pe
+                 WHERE pe.event_type IN (
+                       'EXIT_INTENT',
+                       'EXIT_ORDER_POSTED',
+                       'EXIT_ORDER_REJECTED',
+                       'EXIT_ORDER_FILLED',
+                       'EXIT_ORDER_VOIDED',
+                       'EXIT_RETRY_SCHEDULED',
+                       'EXIT_BACKOFF_EXHAUSTED'
+                 )
+            )
+            SELECT pc.position_id,
+                   pc.order_status,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_exit_event.event_id,
+                   latest_exit_event.event_type,
+                   latest_exit_event.venue_status,
+                   latest_exit_event.occurred_at
+              FROM position_current pc
+              LEFT JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+              JOIN latest_exit_event
+                ON latest_exit_event.position_id = pc.position_id
+               AND latest_exit_event.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND latest_exit.command_id IS NULL
+               AND latest_exit_event.event_type = 'EXIT_INTENT'
+            """
+        ).fetchall()
+    recoverable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        recoverable[str(row["position_id"])] = {
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "venue_status": row["venue_status"],
+            "event_occurred_at": row["occurred_at"],
+            "order_status": row["order_status"],
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+        }
+    return recoverable
 
 
 def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
@@ -1167,6 +4280,69 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
             "next_exit_retry_at": row["next_exit_retry_at"],
             "command_updated_at": row["command_updated_at"],
         }
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return resumable
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            ),
+            latest_event AS (
+                SELECT pe.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pe.position_id
+                           ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+                       ) AS rn
+                  FROM position_events pe
+                 WHERE pe.event_type IN ('EXIT_ORDER_REJECTED', 'EXIT_INTENT', 'EXIT_ORDER_POSTED')
+            )
+            SELECT pc.position_id,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_event.event_id,
+                   latest_event.event_type,
+                   latest_event.venue_status,
+                   latest_event.occurred_at
+              FROM position_current pc
+              LEFT JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+              JOIN latest_event
+                ON latest_event.position_id = pc.position_id
+               AND latest_event.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND latest_exit.command_id IS NULL
+               AND latest_event.event_type = 'EXIT_ORDER_REJECTED'
+               AND LOWER(COALESCE(latest_event.venue_status, '')) = 'retry_pending'
+               AND COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') != ''
+            """
+        ).fetchall()
+    for row in rows:
+        resumable[str(row["position_id"])] = {
+            "command_id": None,
+            "command_state": "NO_EXIT_COMMAND_RETRY_PENDING",
+            "venue_order_id": "",
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+            "command_updated_at": None,
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "venue_status": row["venue_status"],
+            "event_occurred_at": row["occurred_at"],
+            "restart_resolution": "exit_lifecycle_pre_submit_retry_resume",
+        }
     return resumable
 
 
@@ -1240,9 +4416,11 @@ def _latest_monitor_projection_evidence(
 
     Non-Day0 held positions may refresh belief through the canonical replacement
     read-through path before the durable forecast_posteriors row is re-materialized.
-    Day0 positions are stricter: only the observation remaining-window or absorbing
-    hard-fact monitor lanes count, never a forecast posterior stamped during the
-    settlement day.
+    Day0 positions are stricter, but the live monitor has a defined fallback when
+    the Day0 observation source is temporarily unavailable: a fresh replacement
+    posterior is acceptable only when the same monitor receipt explicitly records
+    ``day0_observation_unavailable:replacement_posterior_fresh``. A bare forecast
+    posterior does not satisfy a Day0 monitor belief.
     """
 
     now = datetime.now(timezone.utc)
@@ -1277,16 +4455,24 @@ def _latest_monitor_projection_evidence(
     validations_raw = payload.get("applied_validations") if isinstance(payload, dict) else None
     validations = [str(item) for item in validations_raw] if isinstance(validations_raw, list) else []
     if day0_required:
-        accepted = any(
+        accepted_day0_observation = any(
             item == "day0_observation_remaining_window"
             or item == "day0_absorbing_hard_fact"
             or item.startswith("belief_source=day0_observation_remaining_window")
             or item.startswith("belief_source=day0_absorbing_hard_fact")
             for item in validations
         )
-        if not accepted:
+        accepted_replacement_fallback = (
+            "day0_observation_unavailable:replacement_posterior_fresh" in validations
+            and any(item.startswith("belief_source=forecast_posteriors") for item in validations)
+        )
+        if not (accepted_day0_observation or accepted_replacement_fallback):
             return None
-        source = "day0_monitor_observation_authority"
+        source = (
+            "day0_monitor_observation_authority"
+            if accepted_day0_observation
+            else "day0_monitor_replacement_fallback"
+        )
     else:
         accepted = any(
             item == "replacement_posterior"
@@ -1307,6 +4493,7 @@ def _latest_monitor_projection_evidence(
             if item == "replacement_posterior"
             or item == "day0_observation_remaining_window"
             or item == "day0_absorbing_hard_fact"
+            or item == "day0_observation_unavailable:replacement_posterior_fresh"
             or item.startswith("belief_source=")
         ][:6],
         "max_age_seconds": MONITOR_PROJECTION_MAX_AGE_SECONDS,
@@ -1315,12 +4502,14 @@ def _latest_monitor_projection_evidence(
 
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
+    from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     repairable: list[dict[str, Any]] = []
     settlement_recoverable: list[dict[str, Any]] = []
     max_age = monitor_belief_max_age_hours()
+    source_cycle_max_age = replacement_source_cycle_max_age_hours()
     settlement_truth = _verified_settlement_truth_for(rows)
     harvester_enabled, harvester_evidence = _harvester_live_enabled()
     for row in rows:
@@ -1370,6 +4559,18 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                     }
                 )
                 continue
+            canonical_evidence = _day0_canonical_observation_evidence(row, now=datetime.now(timezone.utc))
+            if canonical_evidence is not None:
+                covered.append(
+                    {
+                        **item,
+                        "fresh": True,
+                        "freshness_basis": "day0_canonical_observation_boot_redecision",
+                        "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+                        "canonical_observation": canonical_evidence,
+                    }
+                )
+                continue
             risky.append({**item, "risk": "day0_monitor_observation_belief_missing_or_stale"})
             continue
 
@@ -1401,7 +4602,14 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             repair = _single_family_reseed_repair_evidence(item)
             if repair is not None:
                 repairable.append(repair)
-                risky.append({**item, "risk": "missing_live_belief_repairable_only_not_materialized"})
+                covered.append(
+                    {
+                        **repair,
+                        "fresh": False,
+                        "freshness_basis": "restart_single_family_reseed_repairable",
+                        "restart_resolution": "single_family_cycle_advance_reseed_before_monitor_exit",
+                    }
+                )
                 continue
             risky.append({**item, "risk": "missing_live_belief"})
             continue
@@ -1420,18 +4628,23 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         if not belief.fresh:
             repair = _single_family_reseed_repair_evidence({**item, **evidence})
             if repair is not None:
-                repairable.append(
+                repair_evidence = {
+                    **repair,
+                    "risk": "stale_live_belief_repairable_by_single_family_reseed",
+                    "posterior_id": belief.posterior_id,
+                    "computed_at": belief.computed_at,
+                    "age_hours": belief.age_hours,
+                    "source_cycle_age_hours": belief.source_cycle_age_hours,
+                    "freshness_basis": belief.freshness_basis,
+                }
+                repairable.append(repair_evidence)
+                covered.append(
                     {
-                        **repair,
-                        "risk": "stale_live_belief_repairable_by_single_family_reseed",
-                        "posterior_id": belief.posterior_id,
-                        "computed_at": belief.computed_at,
-                        "age_hours": belief.age_hours,
-                        "source_cycle_age_hours": belief.source_cycle_age_hours,
-                        "freshness_basis": belief.freshness_basis,
+                        **repair_evidence,
+                        "fresh": False,
+                        "restart_resolution": "single_family_cycle_advance_reseed_before_monitor_exit",
                     }
                 )
-                risky.append({**evidence, "risk": "stale_live_belief_repairable_only_not_materialized"})
                 continue
             risky.append({**evidence, "risk": "stale_live_belief"})
     return CheckResult(
@@ -1445,10 +4658,99 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             "covered": covered,
             "repairable": repairable,
             "settlement_recoverable": settlement_recoverable,
-            "max_age_hours": max_age,
+            "computed_at_fallback_max_age_hours": max_age,
+            "source_cycle_max_age_hours": source_cycle_max_age,
+            "freshness_contract": (
+                "source_cycle_time uses replacement source-cycle staleness; "
+                "computed_at max age is only the fallback for rows without source_cycle_time"
+            ),
             "harvester_live_enabled": harvester_enabled,
             "harvester_evidence": harvester_evidence,
         },
+    )
+
+
+def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Surface stale held-position monitor cadence without deadlocking restart.
+
+    ``position_current.updated_at`` may move because chain reconciliation refreshed a
+    projection.  The continuous monitor/redecision proof is the latest canonical
+    ``MONITOR_REFRESHED`` event.  During a restart preflight ``src.main`` is
+    expected to be absent, so a stale cadence is a recovery obligation rather than
+    a reason to keep the daemon stopped forever.  If a main process is already
+    running and the cadence is stale, fail closed.
+    """
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "preflight_open_position_count": len(rows),
+        "max_age_seconds": MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
+        "source": "position_events.MONITOR_REFRESHED",
+        "position_current_updated_at_is_not_monitor_cadence": True,
+    }
+
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "position_current"):
+                return CheckResult(
+                    "monitor_cadence_restart_evidence",
+                    False,
+                    "position_current table is missing; monitor cadence cannot be proven",
+                    evidence,
+                )
+            cadence = collect_monitor_cadence_evidence(
+                conn,
+                now=datetime.now(timezone.utc),
+                max_age_seconds=MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
+            )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "could not inspect monitor cadence evidence",
+            evidence,
+        )
+
+    evidence.update(cadence)
+    if not cadence["open_position_count"]:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "no open positions require monitor cadence recovery evidence",
+            evidence,
+        )
+    main_processes = _live_main_processes()
+    evidence["live_main_processes"] = main_processes
+    if cadence["future_monitor_event_count"]:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "held-position monitor cadence has future-dated events",
+            evidence,
+        )
+    if not cadence["stale_or_missing_position_count"]:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "all held-position monitor cadence evidence is fresh",
+            evidence,
+        )
+    evidence["restart_recovery_obligation"] = (
+        "post-start health must observe fresh per-position MONITOR_REFRESHED events before live is considered recovered"
+    )
+    if not main_processes:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "held-position monitor cadence is stale or missing per position; restart is expected to recover it and post-start health must verify",
+            evidence,
+        )
+    return CheckResult(
+        "monitor_cadence_restart_evidence",
+        False,
+        "src.main is running but held-position monitor cadence is stale",
+        evidence,
     )
 
 
@@ -1456,6 +4758,7 @@ def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
     rows = _open_positions()
+    projection_rows = _open_positions(positive_chain_only=False)
     quote_rows = _open_positions_requiring_executable_quote(rows)
     edli_cfg = cfg.get("edli") or {}
     reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
@@ -1465,6 +4768,7 @@ def evaluate() -> dict[str, Any]:
     real_submit_effective = real_submit and reactor_mode == "live"
     submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
     checks = [
+        _live_trading_launchagent_installed_check(),
         CheckResult(
             "live_trading_process_absent",
             not _live_main_processes(),
@@ -1489,17 +4793,28 @@ def evaluate() -> dict[str, Any]:
                 "real_submit_effective": real_submit_effective,
             },
         ),
+        _clob_signature_type_config_check(required=real_submit_effective),
         _qkernel_spine_cutover_check(cfg),
+        _src_main_boot_guard_check(),
         _family_portfolio_single_leg_check(),
         _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
+        _edli_live_order_presubmit_shape_check(),
+        _live_actionable_certificate_semantics_check(),
+        _live_money_certificate_parent_mode_check(),
+        _venue_point_order_truth_alignment_check(),
+        _edli_confirmed_fill_bridge_coverage_check(),
+        _position_current_projection_integrity_check(projection_rows),
+        _economically_closed_sell_projection_exposure_check(),
+        _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),
+        _monitor_cadence_restart_evidence_check(rows),
     ]
     blockers = [asdict(check) for check in checks if not check.ok]
     return {
@@ -1509,6 +4824,7 @@ def evaluate() -> dict[str, Any]:
         "trade_db": str(TRADE_DB),
         "forecast_db": str(FORECAST_DB),
         "open_position_count": len(rows),
+        "runtime_open_projection_count": len(projection_rows),
         "open_positions_requiring_executable_quote_count": len(quote_rows),
         "real_order_submit_enabled": real_submit,
         "checks": [asdict(check) for check in checks],

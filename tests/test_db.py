@@ -289,11 +289,29 @@ def test_init_schema_creates_all_tables():
     expected = {
         "settlements", "observations", "market_events", "token_price_log",
         "ensemble_snapshots", "calibration_pairs", "platt_models",
-        "trade_decisions", "shadow_signals", "probability_trace_fact", "chronicle", "position_events", "solar_daily",
+        "trade_decisions", "probability_trace_fact", "chronicle", "position_events", "solar_daily",
         "observation_instants", "diurnal_peak_prob", "daily_observation_revisions"
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
     conn.close()
+
+
+def test_init_schema_world_does_not_create_trade_latest_snapshot_mirror():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    init_schema(conn)
+
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+
+    assert "executable_market_snapshots" in tables
+    assert "executable_market_snapshot_latest" not in tables
 
 
 def test_init_schema_creates_daily_observation_revision_indexes():
@@ -1552,10 +1570,24 @@ def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
                 "PRAGMA index_list('execution_feasibility_evidence')"
             ).fetchall()
         }
+        latest_tables = {
+            row[0]
+            for row in reopened.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='execution_feasibility_latest'"
+            ).fetchall()
+        }
+        latest_indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('execution_feasibility_latest')"
+            ).fetchall()
+        }
     finally:
         reopened.close()
 
     assert "idx_execution_feasibility_evidence_token_created" in indexes
+    assert "execution_feasibility_latest" in latest_tables
+    assert "idx_execution_feasibility_latest_token_created" in latest_indexes
 
 
 def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
@@ -1800,6 +1832,36 @@ def test_status_views_use_real_exit_event_status_over_newer_non_exit_noise(tmp_p
     assert loader_view["positions"][0]["exit_state"] == "retry_pending"
 
 
+def test_status_views_restore_stranded_exit_intent_from_canonical_event(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "stranded-exit-intent-status.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="stranded-exit-intent-pos",
+        phase="pending_exit",
+        order_status="filled",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="stranded-exit-intent-pos",
+        event_type="EXIT_INTENT",
+        status="exit_intent",
+        occurred_at="2026-04-01T00:05:00+00:00",
+        sequence_no=1,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert status_view["positions"][0]["exit_state"] == "exit_intent"
+    assert status_view["exit_state_counts"]["exit_intent"] == 1
+    assert loader_view["positions"][0]["exit_state"] == "exit_intent"
+
+
 def test_status_views_clear_exit_state_on_retry_release(tmp_path):
     from src.state.db import query_portfolio_loader_view, query_position_current_status_view
 
@@ -2002,6 +2064,63 @@ def test_position_current_views_prefer_chain_corrected_projection_over_stale_fil
     assert loader_position["entry_economics_source"] == "position_current_chain_corrected"
 
     conn.close()
+
+
+def test_position_current_views_use_chain_cost_when_bridge_was_zero_sized(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "chain-observed-zero-bridge-size.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="chain-observed-zero-size-pos",
+        submitted_size_usd=0.0,
+        projected_cost_basis_usd=0.0,
+        shares=0.0,
+        entry_price=0.0,
+        mark_price=0.5989832190544929,
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET fill_authority = 'venue_confirmed_full',
+               chain_state = 'synced',
+               chain_shares = 3.57,
+               chain_avg_price = 0.65,
+               chain_cost_basis_usd = 2.3205,
+               chain_seen_at = '2026-07-01T13:06:16+00:00'
+         WHERE position_id = ?
+        """,
+        ("chain-observed-zero-size-pos",),
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+
+    assert status_view["total_exposure_usd"] == pytest.approx(2.32)
+    assert status_position["size_usd"] == pytest.approx(2.3205)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(2.3205)
+    assert status_position["submitted_size_usd"] == pytest.approx(0.0)
+    assert status_position["shares"] == pytest.approx(3.57)
+    assert status_position["entry_price"] == pytest.approx(0.65)
+    assert status_position["entry_economics_authority"] == "corrected_executable_cost_basis"
+    assert status_position["entry_economics_source"] == "position_current_chain_observed"
+    assert status_position["fill_authority"] == "venue_confirmed_full"
+    assert status_position["entry_fill_verified"] is True
+    assert status_position["unrealized_pnl"] == pytest.approx(-0.18)
+
+    assert loader_position["size_usd"] == pytest.approx(2.3205)
+    assert loader_position["cost_basis_usd"] == pytest.approx(2.3205)
+    assert loader_position["effective_cost_basis_usd"] == pytest.approx(2.3205)
+    assert loader_position["projection_cost_basis_usd"] == pytest.approx(0.0)
+    assert loader_position["shares"] == pytest.approx(3.57)
+    assert loader_position["entry_price"] == pytest.approx(0.65)
+    assert loader_position["entry_economics_source"] == "position_current_chain_observed"
 
 
 def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact(tmp_path):
@@ -2345,7 +2464,6 @@ def test_log_trade_entry_tolerates_forecast_class_snapshot_ids(tmp_path):
     )
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_entry_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events
     from src.state.portfolio import Position
@@ -2395,7 +2513,6 @@ def test_log_trade_entry_emits_position_event(tmp_path):
 
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     from src.state.db import log_trade_exit, query_position_events
     from src.state.portfolio import Position
@@ -2482,7 +2599,6 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.12}'
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_update_trade_lifecycle_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events, update_trade_lifecycle
     from src.state.portfolio import Position
@@ -2536,7 +2652,6 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
     assert lifecycle_events[0]["details"]["chain_state"] == "synced"
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_fill_telemetry(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -2605,7 +2720,6 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -3161,7 +3275,6 @@ def test_log_execution_report_clears_stale_missing_status_fill_authority(tmp_pat
     assert summary["execution"]["avg_fill_quality"] is None
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_settlement_event_emits_durable_record(tmp_path):
     from src.state.db import log_settlement_event, query_position_events
     from src.state.portfolio import Position
@@ -3287,7 +3400,6 @@ def test_log_settlement_event_preserves_prior_exit_time_in_outcome_fact(tmp_path
     assert row["hold_duration_hours"] == pytest.approx(18.0)
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     from src.state.db import log_settlement_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -3340,7 +3452,7 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     assert rows[0]["exit_reason"] == "SETTLEMENT"
 
 
-def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path):
+def test_query_authoritative_settlement_rows_ignores_decision_log_records(tmp_path):
     from src.state.db import query_authoritative_settlement_rows
     from src.state.decision_chain import SettlementRecord, store_settlement_records
 
@@ -3372,24 +3484,7 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     rows = query_authoritative_settlement_rows(conn, limit=10)
     conn.close()
 
-    assert len(rows) == 1
-    assert rows[0]["trade_id"] == "legacy-settle"
-    assert rows[0]["source"] == "decision_log"
-    assert rows[0]["authority_level"] == "legacy_decision_log_fallback"
-    assert rows[0]["is_degraded"] is True
-    assert rows[0]["canonical_payload_complete"] is False
-    assert rows[0]["metric_ready"] is False
-    assert rows[0]["learning_snapshot_ready"] is False
-    assert rows[0]["settlement_authority"] == "LEGACY_UNKNOWN"
-    assert rows[0]["settlement_truth_source"] == "decision_log"
-    assert {
-        "winning_bin",
-        "position_bin",
-        "won",
-        "exit_price",
-        "exit_reason",
-    }.issubset(set(rows[0]["contract_missing_fields"]))
-    assert rows[0]["outcome"] == 1
+    assert rows == []
     assert rows[0]["pnl"] == pytest.approx(12.5)
 
 
@@ -3793,7 +3888,6 @@ def test_query_learning_surface_summary_excludes_metric_unready_settlement_rows(
     assert summary["by_strategy"]["center_buy"]["settlement_pnl"] == pytest.approx(4.2)
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_path):
     from src.state.db import (
         log_position_event,
@@ -3880,62 +3974,6 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
     assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
-def test_query_legacy_settlement_records_reads_live_only_rows(tmp_path):
-    from src.state.decision_chain import query_legacy_settlement_records
-
-    db_path = tmp_path / "test.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
-    diagnostic_artifact = {
-        "mode": "settlement",
-        "settlements": [
-            {
-                "trade_id": "diagnostic-legacy",
-                "city": "NYC",
-                "target_date": "2026-04-01",
-                "range_label": "39-40°F",
-                "direction": "buy_yes",
-                "p_posterior": 0.6,
-                "outcome": 1,
-                "pnl": 6.0,
-                "settled_at": "2026-04-01T23:00:00Z",
-            }
-        ],
-    }
-    live_artifact = {
-        "mode": "settlement",
-        "settlements": [
-            {
-                "trade_id": "live-legacy",
-                "city": "NYC",
-                "target_date": "2026-04-01",
-                "range_label": "41-42°F",
-                "direction": "buy_yes",
-                "p_posterior": 0.7,
-                "outcome": 1,
-                "pnl": 7.0,
-                "settled_at": "2026-04-01T23:00:00Z",
-            }
-        ],
-    }
-    conn.execute(
-        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(diagnostic_artifact), "2026-04-01T23:00:00Z", "diagnostic"),
-    )
-    conn.execute(
-        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(live_artifact), "2026-04-01T23:00:00Z", "live"),
-    )
-    conn.commit()
-
-    rows = query_legacy_settlement_records(conn, limit=10)
-    conn.close()
-
-    assert [row["trade_id"] for row in rows] == ["live-legacy"]
-
-
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -4011,7 +4049,6 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     assert rows[0]["details"]["pnl"] == pytest.approx(-2.5)
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -4108,7 +4145,6 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
     assert latest_dup["details"]["pnl"] == pytest.approx(-2.5)
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):
     from src.state.db import log_position_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -4169,7 +4205,6 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
     assert rows[0]["settled_at"] == "2026-04-02T00:00:00Z"
     assert rows[0]["source"] == "position_events"
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     from src.state.db import log_position_event, query_execution_event_summary
     from src.state.portfolio import Position
@@ -4492,7 +4527,6 @@ def test_query_lifecycle_funnel_report_applies_hours_to_position_events(tmp_path
     assert report["by_strategy"]["center_buy"]["evaluated"] == 1
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_combines_settlement_no_trade_and_execution(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -4637,7 +4671,6 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
     assert [case["decision_id"] for case in cases] == ["newer"]
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -4754,7 +4787,6 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -4846,7 +4878,6 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 205
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
@@ -4952,7 +4983,6 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
     from src.state.db import log_exit_retry_event, query_position_events
     from src.state.portfolio import Position

@@ -108,6 +108,43 @@ def test_recent_no_value_refutation_suppresses_same_evidence_only():
     ) is None
 
 
+def test_recent_no_value_refutation_ignores_operational_duplicate_summary():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    prior = _event_for_refutation()
+    store.insert_or_ignore(prior)
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  '2026-06-18T00:00:10+00:00', 'Shanghai', '2026-06-19', 'low',
+                  'family-shanghai-low', ?, '2026-06-18T00:00:10+00:00', 1)
+        """,
+        (
+            "regret-" + prior.event_id,
+            prior.event_id,
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=24C buy_yes missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:condition_id=0xabc"
+            ),
+            prior.causal_snapshot_id,
+        ),
+    )
+
+    same = _event_for_refutation()
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        same,
+        decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
+    ) is None
+
+
 def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapshot_id: str = "snap1"):
     """Cache a 2-bin belief where the YES side of bin 'b30' has p_posterior_yes."""
     cr.cache_belief(
@@ -149,7 +186,7 @@ def test_latest_belief_reader_uses_bounded_sql_latest_window():
     assert "sorted(" not in src
 
 
-def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
+def test_latest_belief_reader_filters_forecast_only_inadmissible_families():
     conn = _mem_world()
     _cache_yes_belief(
         conn,
@@ -173,6 +210,7 @@ def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
     beliefs = cr._all_latest_beliefs(
         conn,
         decision_time="2026-06-01T13:00:00+00:00",
+        forecast_only_admissible=True,
     )
 
     assert {belief.target_date for belief in beliefs} == {"2026-06-02"}
@@ -264,6 +302,109 @@ def test_executable_price_reader_preserves_native_min_tick_size():
 
     assert quotes[("cid-1", "buy_yes")].price == 0.002
     assert quotes[("cid-1", "buy_yes")].tick_size == pytest.approx(0.001)
+
+
+def test_executable_price_reader_uses_fresh_feasibility_quote_when_snapshot_stale():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            min_tick_size TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, min_tick_size,
+            enable_orderbook, active, closed, accepting_orders
+        ) VALUES ('stale-no', 'cid-1', 0.70, 0.71,
+                  '2026-06-01T12:00:00+00:00',
+                  '2026-06-01T11:59:00+00:00', 'no-1',
+                  'yes-1', 'no-1', 'NO', '0.001', 1, 1, 0, 1)
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            outcome_label TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            created_at TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            condition_id, token_id, outcome_label, direction, quote_seen_at,
+            created_at, best_bid_before, best_ask_before
+        ) VALUES ('cid-1', 'no-1', 'NO', 'buy_no',
+                  '2026-06-01T13:00:00+00:00',
+                  '2026-06-01T13:00:02+00:00', 0.74, 0.75)
+        """
+    )
+
+    asks = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+    bids = cr.read_freshest_resting_best_bids(trade, condition_ids={"cid-1"})
+
+    assert asks[("cid-1", "buy_no")].price == pytest.approx(0.75)
+    assert asks[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
+    assert bids[("cid-1", "buy_no")].price == pytest.approx(0.74)
+    assert bids[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
+
+
+def test_feasibility_quote_overlay_rejects_crossed_books():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            outcome_label TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            created_at TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            condition_id, token_id, outcome_label, direction, quote_seen_at,
+            created_at, best_bid_before, best_ask_before
+        ) VALUES ('cid-1', 'no-1', 'NO', 'buy_no',
+                  '2026-06-01T13:00:00+00:00',
+                  '2026-06-01T13:00:02+00:00', 0.80, 0.75)
+        """
+    )
+
+    assert cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"}) == {}
+    assert cr.read_freshest_resting_best_bids(trade, condition_ids={"cid-1"}) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1074,6 +1215,88 @@ def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
     )
 
 
+def test_operational_all_candidates_rejected_row_is_not_family_no_value_backoff():
+    conn = _mem_world()
+    label = "Will the highest temperature in Milan be 37°C on June 27?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_milan_hash",
+        city="Milan",
+        target_date="2026-06-27",
+        temperature_metric="high",
+        snapshot_id="snap-milan",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.25],
+        q_lcb_yes_vec=[0.14],
+        q_lcb_no_vec=[0.60],
+        recorded_at="2026-06-26T13:00:00+00:00",
+    )
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_milan_hash",
+            "Milan",
+            "2026-06-27",
+            "high",
+            None,
+            None,
+            "TRADE_SCORE",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=Will the highest temperature in Milan be 37°C on June 27? "
+                "buy_yes reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:condition_id=0xabc"
+            ),
+            None,
+            None,
+            None,
+            "2026-06-26T13:01:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    assert ("family", "Milan", "2026-06-27", "high") not in rejections
+    price_lookup = {
+        ("edli_family_milan_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.10,
+            freshness_deadline="2026-06-26T13:10:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T13:02:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
+    )
+
+
 def test_candidate_rejected_row_is_candidate_backoff_not_family_backoff():
     conn = _mem_world()
     conn.execute(
@@ -1332,6 +1555,105 @@ def test_execution_quality_rejection_cools_entry_until_economics_improve():
         price_lookup=improved_price,
         min_edge=0.01,
         recent_full_economics_rejections=rejections,
+    )
+
+
+def test_recapture_edge_reversal_cools_entry_until_economics_improve():
+    conn = _mem_world()
+    label = "Will the highest temperature in Wellington be 9°C on June 27?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_wellington_hash",
+        city="Wellington",
+        target_date="2026-06-27",
+        temperature_metric="high",
+        snapshot_id="snap-wellington",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.0455121228],
+        q_lcb_yes_vec=[0.0004764563],
+        q_lcb_no_vec=[0.90],
+        recorded_at="2026-06-26T10:39:00+00:00",
+    )
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_live REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT,
+            executable_snapshot_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_live,
+            q_lcb_5pct, trade_score, created_at, executable_snapshot_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_wellington_hash",
+            "Wellington",
+            "2026-06-27",
+            "high",
+            label,
+            "buy_yes",
+            "TRADE_SCORE",
+            "SUBMIT_ABORTED_EDGE_REVERSED:recaptured robust marginal utility nonpositive",
+            0.005,
+            0.0455121228,
+            0.0004764563,
+            -0.0055224416,
+            "2026-06-26T10:39:51+00:00",
+            "ems2-stale-book",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+    stable_key = ("Wellington", "2026-06-27", "high", label, "buy_yes")
+    assert stable_key in rejections
+    same_economics = {
+        ("edli_family_wellington_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.005,
+            freshness_deadline="2026-06-26T10:50:00+00:00",
+            tick_size=0.001,
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T10:40:00+00:00",
+        price_lookup=same_economics,
+        min_edge=-0.01,
+        recent_full_economics_rejections=rejections,
+    ) == []
+
+    improved_belief = {
+        stable_key: cr.FullEconomicsReject(
+            execution_price=0.010,
+            q_lcb_5pct=0.0001,
+            trade_score=-0.0055224416,
+            created_at="2026-06-26T10:39:51+00:00",
+            rejection_reason="SUBMIT_ABORTED_EDGE_REVERSED:old",
+        )
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T10:40:00+00:00",
+        price_lookup=same_economics,
+        min_edge=-0.01,
+        recent_full_economics_rejections=improved_belief,
     )
 
 

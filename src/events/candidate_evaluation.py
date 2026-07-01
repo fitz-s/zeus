@@ -42,10 +42,10 @@ class CandidateEvaluation:
     low_volume_usd: float | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage VERDICT status, copied from the proof so this receipt projection's
-    # admission view (live_buy_no_conservative_evidence_*) matches the proof-
-    # generation gate's verdict-aware outcome. None on canonical/legacy paths.
+    # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
+    # settlement-backward coverage VERDICT status for this exact condition+direction,
+    # copied from the proof so this receipt projection's admission view matches the
+    # proof-generation gate's verdict-aware outcome. None on canonical/legacy paths.
     settlement_coverage_status: str | None = None
     # FIX C (mode-consistent EV, 2026-06-10): the per-candidate maker/taker mode
     # decision and BOTH EVs (trade_score == the chosen mode's EV). Receipt-level
@@ -108,9 +108,7 @@ class CandidateEvaluation:
             return 0.0
         if self.kelly_size_usd > 0.0:
             return self.robust_ev_per_dollar * float(self.kelly_size_usd)
-        if self.max_executable_shares is not None and self.max_executable_shares > 0.0:
-            return float(self.trade_score) * float(self.max_executable_shares)
-        return float(self.trade_score)
+        return 0.0
 
     @property
     def live_win_rate_floor_reason(self) -> str | None:
@@ -168,10 +166,15 @@ class CandidateEvaluation:
 
     @property
     def _raw_side_prob(self) -> float:
-        """The RAW point probability of THIS candidate's side (q_posterior is the YES-in-bin belief;
-        NO raw prob = 1 - q_posterior). Used to resolve the calibrator cell."""
+        """The RAW point probability of THIS candidate's executable side.
+
+        ``q_posterior`` on ``CandidateEvaluation`` is already side-native:
+        buy_yes carries P(YES), buy_no carries P(NO). Do not flip buy_no here;
+        the selector/calibrator cell must see the same side probability that
+        live_lcb_consistency and q_lcb admission compare against.
+        """
         q = max(0.0, min(1.0, float(self.q_posterior)))
-        return (1.0 - q) if str(self.direction or "").lower() == "buy_no" else q
+        return q
 
     @property
     def calibrated_admission_q_lcb(self) -> float:
@@ -211,28 +214,6 @@ class CandidateEvaluation:
     def city_skill_admissible(self) -> bool:
         return self.city_skill_block_reason is None
 
-    def shadow_log(self, *, path: str | None = None) -> bool:
-        """Record this candidate to the optional observational admit log."""
-        from src.strategy.live_inference.live_admission import shadow_log_admission
-
-        return shadow_log_admission(
-            path=path,
-            decision_time=str(self.decision_time or ""),
-            city=str(self.city or ""),
-            target_date=str(self.target_date or ""),
-            condition_id=str(self.condition_id or ""),
-            bin_id=str(self.bin_id or self.bin_label or ""),
-            direction=self.direction,
-            raw_side_prob=self._raw_side_prob,
-            q_lcb=float(self.q_lcb_5pct),
-            own_side_cost=float(self.execution_price) if self.execution_price is not None else 1.0,
-            native_quote_available=bool(self.native_quote_available),
-            quote_fresh=bool(self.quote_fresh),
-            posterior_version=str(self.posterior_version or ""),
-            city_skill_admit=self.city_skill_admissible,
-            selection_calibrator_q_safe=float(self.calibrated_admission_q_lcb),
-        )
-
     @property
     def admitted(self) -> bool:
         return (
@@ -242,6 +223,7 @@ class CandidateEvaluation:
             and self.passed_prefilter
             and self.missing_reason is None
             and self.quote_fresh
+            and self.live_win_rate_admissible
             and self.live_lcb_consistency_admissible
             and self.live_capital_efficiency_admissible
             and self.live_buy_no_conservative_evidence_admissible

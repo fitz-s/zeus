@@ -546,11 +546,11 @@ invariants:
 
   - id: INV-27
     zones: [K2_runtime]
-    statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
-    why: Without explicit operator visibility into execution-truth gaps, positions in unsafe states (quarantined without command authority, pending without order_id) silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Surfacing must not block entries (operator decision 2026-04-26) so entry-decision logic remains driven by risk_level / posture / quarantine, not by surface-warning side effects.
+    statement: Cycle summary must surface execution-truth warnings for pending_* positions without order_id. Quarantined positions must not be duplicated as warnings because they are already covered by the canonical quarantine entry blocker.
+    why: Without explicit operator visibility into pending command-truth gaps, pending positions without order_id silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Quarantine remains a real entry blocker through _has_quarantined_positions instead of a duplicate observability warning.
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_uses_canonical_entry_gate_not_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
@@ -652,14 +652,12 @@ invariants:
 
   - id: INV-33
     zones: [K2_runtime, K3_extension]
-    statement: Corrected posterior construction must consume calibrated model belief plus either no market input or a named complete MarketPriorDistribution; raw executable quote/VWMP vectors are legacy-only.
+    statement: Corrected posterior construction must consume calibrated model belief only; raw executable quote/VWMP vectors are legacy-only.
     why: Token quotes, VWMP, and held-side monitor prices are microstructure facts, not calibrated epistemic priors. Letting them enter corrected posterior computation silently changes the meaning of probability and corrupts edge attribution.
     enforced_by:
       negative_constraints: [NC-20]
       tests:
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
     capability_tags: []
     relationship_tests: []
     sunset_date: 2027-05-06

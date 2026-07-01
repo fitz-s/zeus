@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
@@ -221,6 +222,8 @@ class PolymarketV2AdapterProtocol(Protocol):
     def get_pusd_balance_micro(self) -> int: ...
 
     def get_collateral_payload(self) -> dict[str, Any]: ...
+
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]: ...
 
     def get_balance(self, conn=None) -> Any: ...
 
@@ -527,10 +530,29 @@ class PolymarketV2Adapter:
             captured_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def _bind_runtime_submission_envelope(
+        self,
+        envelope: VenueSubmissionEnvelope,
+    ) -> VenueSubmissionEnvelope:
+        envelope_funder = str(envelope.funder_address or "").strip()
+        adapter_funder = str(self.funder_address or "").strip()
+        if envelope_funder in {"", "UNRESOLVED_PRE_SUBMIT_FUNDER"}:
+            raise ValueError("submission envelope missing pre-bound funder_address")
+        if envelope_funder.lower() != adapter_funder.lower():
+            raise ValueError(
+                "submission envelope funder_address does not match adapter funder_address"
+            )
+        return envelope.with_updates(
+            sdk_version=self.sdk_version,
+            host=self.host,
+            chain_id=self.chain_id,
+        )
+
     def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult:
         # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
         # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
         try:
+            envelope = self._bind_runtime_submission_envelope(envelope)
             envelope.assert_live_submit_bound()
         except ValueError as exc:
             _cnt_inc("placeholder_envelope_blocked_total")
@@ -574,38 +596,69 @@ class PolymarketV2Adapter:
             )
         signed_order = None
         signed_hash = None
-        if callable(getattr(client, "create_and_post_order", None)):
-            raw_response = client.create_and_post_order(
-                order_args,
-                options=options,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
-            )
-        elif callable(getattr(client, "create_order", None)) and callable(getattr(client, "post_order", None)):
-            try:
-                signed_order = client.create_order(order_args, options=options)
-                signed_bytes = _signed_order_bytes(signed_order)
+
+        def _submit_once(active_client: Any) -> Any:
+            nonlocal signed_order, signed_hash
+            signed_order = None
+            signed_hash = None
+            create_order = getattr(active_client, "create_order", None)
+            post_order = getattr(active_client, "post_order", None)
+            if callable(create_order) and callable(post_order):
+                local_signed_order = create_order(order_args, options=options)
+                signed_bytes = _signed_order_bytes(local_signed_order)
                 signed_hash = hashlib.sha256(signed_bytes).hexdigest()
-            except Exception as exc:
-                return _rejected_submit_result(
-                    envelope,
-                    error_code="V2_PRE_SUBMIT_EXCEPTION",
-                    error_message=str(exc),
+                signed_order = signed_bytes
+                return post_order(
+                    local_signed_order,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
                 )
-            raw_response = client.post_order(
-                signed_order,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
+            create_and_post = getattr(active_client, "create_and_post_order", None)
+            if callable(create_and_post):
+                return create_and_post(
+                    order_args,
+                    options=options,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
+                )
+            raise V2AdapterError(
+                "SDK client exposes neither two-step nor one-step order submission"
             )
-            signed_order = signed_bytes
-        else:
+
+        if not (
+            callable(getattr(client, "create_order", None))
+            and callable(getattr(client, "post_order", None))
+        ) and not callable(getattr(client, "create_and_post_order", None)):
             return _rejected_submit_result(
                 envelope,
                 error_code="V2_SUBMIT_UNSUPPORTED",
                 error_message="SDK client exposes neither one-step nor two-step order submission",
             )
+
+        try:
+            raw_response = _submit_once(client)
+        except Exception as exc:
+            if _is_polymarket_invalid_safe_signature_error(exc):
+                logger.error(
+                    "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
+                    "order signature; not retrying through L2 credential refresh"
+                )
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_auth_invalid_signature_400",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
+            if signed_order is None:
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_message=str(exc),
+                )
+            raise
         return _submit_result_from_response(
             envelope,
             raw_response,
@@ -699,13 +752,22 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
-    def _pusd_collateral_payload_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+    def _pusd_collateral_payload_from_raw(
+        self,
+        raw: dict[str, Any],
+        *,
+        allow_chain_allowance_fallback: bool = True,
+    ) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
         allowance_source = "clob_balance_allowance"
         if allowance_int is None or allowance_int == 0:
-            chain_allowance = self._chain_collateral_allowance_micro()
+            chain_allowance = (
+                self._chain_collateral_allowance_micro()
+                if allow_chain_allowance_fallback
+                else None
+            )
             if chain_allowance is not None:
                 pusd_allowance_raw = chain_allowance
                 allowance_source = "chain_erc20_allowance"
@@ -728,11 +790,14 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": allowance_source,
         }
 
-    def get_pusd_collateral_payload(self) -> dict[str, Any]:
+    def get_pusd_collateral_payload(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Return pUSD balance/allowance facts without CTF position enumeration."""
 
-        raw = self._collateral_balance_allowance_raw()
-        return self._pusd_collateral_payload_from_raw(raw)
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=refresh_allowance)
+        return self._pusd_collateral_payload_from_raw(
+            raw,
+            allow_chain_allowance_fallback=refresh_allowance,
+        )
 
     def get_collateral_payload(self) -> dict[str, Any]:
         """Return SDK-derived collateral facts for CollateralLedger.refresh().
@@ -741,7 +806,7 @@ class PolymarketV2Adapter:
         ledger receives plain dictionaries and never depends on SDK types.
         """
 
-        raw = self._collateral_balance_allowance_raw()
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
         payload = self._pusd_collateral_payload_from_raw(raw)
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
@@ -800,7 +865,47 @@ class PolymarketV2Adapter:
         payload["ctf_token_allowances_units"] = allowances
         return payload
 
-    def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]:
+        """Return pUSD facts plus CTF balance/allowance only for requested tokens.
+
+        Exit submit needs inventory proof for the token being sold, not a full
+        wallet fanout across every weather position. Full enumeration can exceed
+        the submit deadline and then leave the sell path reading a pUSD-only
+        snapshot. This targeted surface keeps sell preflight exact while making
+        its runtime proportional to the order being submitted.
+        """
+
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
+        payload = self._pusd_collateral_payload_from_raw(raw)
+        balances: dict[str, int] = {}
+        allowances: dict[str, int] = {}
+        for token_id in dict.fromkeys(str(t or "").strip() for t in token_ids):
+            if not token_id:
+                continue
+            conditional_raw = self._conditional_balance_allowance_raw(token_id)
+            conditional_balance_units = _micro_int_or_none(conditional_raw.get("balance"))
+            balance_units = conditional_balance_units if conditional_balance_units is not None else 0
+            balances[token_id] = balance_units
+            allowance_raw = conditional_raw.get("allowance")
+            allowance_units: int
+            if allowance_raw is not None:
+                allowance_micro = _micro_int_or_none(allowance_raw)
+                allowance_units = (
+                    allowance_micro
+                    if allowance_micro is not None
+                    else _ctf_balance_units(allowance_raw)
+                )
+            elif conditional_balance_units is not None:
+                allowance_units = conditional_balance_units
+            else:
+                allowance_units = 0
+            allowances[token_id] = allowance_units
+        payload["ctf_token_balances_units"] = balances
+        payload["ctf_token_allowances_units"] = allowances
+        payload["ctf_token_scope"] = "targeted"
+        return payload
+
+    def _collateral_balance_allowance_raw(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Read the CLOB collateral balance/allowance surface once."""
 
         client = self._sdk_client()
@@ -822,7 +927,7 @@ class PolymarketV2Adapter:
         update_balance_allowance = getattr(client, "update_balance_allowance", None)
 
         def _read_once() -> Any:
-            if callable(update_balance_allowance):
+            if refresh_allowance and callable(update_balance_allowance):
                 update_balance_allowance(params)
             return get_balance_allowance(params)
 
@@ -2554,6 +2659,11 @@ def _is_l2_auth_error(exc: BaseException) -> bool:
     return "unauthorized" in text or "invalid api key" in text or "status_code=401" in text
 
 
+def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
+    text = " ".join(f"{type(exc).__name__}:{exc}".split())
+    return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
+
+
 def _api_creds_from_runtime() -> Any | None:
     return _api_creds_from_keychain() or _api_creds_from_env()
 
@@ -3000,7 +3110,7 @@ def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
         )
     canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
     status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
-    if _nonempty(canceled) or status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"} or raw_dict.get("success") is True:
+    if _nonempty(canceled) or is_cancel_confirmed_status(status) or raw_dict.get("success") is True:
         return CancelResult(
             status="CANCELED",
             order_id=_extract_order_id(raw_dict) or order_id,

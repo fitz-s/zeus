@@ -34,7 +34,7 @@ DT = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 
 
 def _event():
-    from tests.money_path.test_edli_live_canary import _forecast_event
+    from tests.money_path.test_edli_live_readiness import _forecast_event
 
     return _forecast_event()
 

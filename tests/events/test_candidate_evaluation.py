@@ -6,7 +6,27 @@ from __future__ import annotations
 
 import pytest
 
+from src.decision import selection_calibrator as sc
 from src.events.candidate_evaluation import CandidateEvaluation
+from src.events.opportunity_book import build_family_opportunity_book
+
+
+def _selection_artifact(*, direction: str, raw_side_prob: float, hit_rate: float = 0.99):
+    side = "NO" if str(direction).lower() == "buy_no" else "YES"
+    key = sc.cell_key(
+        side=side,
+        lead_days=1.0,
+        bin_class="nonmodal",
+        raw_side_prob=raw_side_prob,
+    )
+    return {
+        "_meta": {
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+        },
+        "cells": {key: {"n": 10000, "hit_rate": hit_rate}},
+    }
 
 
 def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars():
@@ -15,7 +35,7 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
         family_id="family-1",
         condition_id="condition-1",
         token_id="token-1",
-        direction="buy_no",
+        direction="buy_yes",
         bin_label="16C",
         execution_price=0.80,
         q_posterior=0.90,
@@ -29,6 +49,10 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
         kelly_size_usd=10.0,
         low_volume_usd=5.0,
         same_bin_yes_posterior=0.10,
+        selection_calibrator_artifact=_selection_artifact(
+            direction="buy_yes",
+            raw_side_prob=0.90,
+        ),
     )
 
     assert evaluation.admitted is True
@@ -37,6 +61,30 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
     assert evaluation.robust_kelly_growth_score == pytest.approx(0.04, abs=1e-12)
     assert evaluation.expected_robust_dollars == pytest.approx(1.0)
     assert evaluation.capital_weighted_growth_score == pytest.approx(0.04)
+
+
+def test_candidate_evaluation_expected_dollars_uses_actual_sized_capital_not_depth():
+    evaluation = CandidateEvaluation(
+        candidate_id="cand-depth",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_yes",
+        bin_label="tail",
+        execution_price=0.04,
+        q_posterior=0.12,
+        q_lcb_5pct=0.06,
+        c_cost_95pct=0.041,
+        p_fill_lcb=0.9,
+        trade_score=0.02,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        max_executable_shares=100_000.0,
+    )
+
+    assert evaluation.expected_robust_dollars == 0.0
+    assert evaluation.capital_weighted_growth_score == 0.0
 
 
 def test_candidate_evaluation_low_volume_is_not_an_admission_reject():
@@ -58,13 +106,17 @@ def test_candidate_evaluation_low_volume_is_not_an_admission_reject():
         native_quote_available=True,
         low_volume_usd=0.0,
         same_bin_yes_posterior=0.05,
+        selection_calibrator_artifact=_selection_artifact(
+            direction="buy_no",
+            raw_side_prob=0.95,
+        ),
     )
 
     assert evaluation.admitted is True
     assert evaluation.to_receipt_dict()["low_volume_usd"] == 0.0
 
 
-def test_candidate_evaluation_low_win_rate_positive_ev_can_be_ranked_when_capital_efficient():
+def test_candidate_evaluation_low_win_rate_positive_ev_is_not_live_admitted():
     evaluation = CandidateEvaluation(
         candidate_id="cand-1",
         family_id="family-1",
@@ -85,7 +137,7 @@ def test_candidate_evaluation_low_win_rate_positive_ev_can_be_ranked_when_capita
 
     receipt = evaluation.to_receipt_dict()
 
-    assert evaluation.admitted is True
+    assert evaluation.admitted is False
     assert evaluation.live_win_rate_admissible is False
     assert receipt["live_win_rate_admissible"] is False
     assert receipt["live_win_rate_floor"] == 0.51
@@ -109,11 +161,49 @@ def test_candidate_evaluation_keeps_positive_ev_low_payout_for_ranking():
         passed_prefilter=True,
         native_quote_available=True,
         same_bin_yes_posterior=0.03,
+        selection_calibrator_artifact=_selection_artifact(
+            direction="buy_no",
+            raw_side_prob=0.97,
+        ),
     )
 
     assert evaluation.admitted is True
     assert evaluation.live_capital_efficiency_reason is None
     assert evaluation.max_payout_roi < 0.10
+
+
+def test_opportunity_book_keeps_admission_separate_from_live_selection():
+    evaluation = CandidateEvaluation(
+        candidate_id="cand-positive-edge",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_yes",
+        bin_label="31C",
+        execution_price=0.07,
+        q_posterior=0.12,
+        q_lcb_5pct=0.10,
+        c_cost_95pct=0.08,
+        p_fill_lcb=0.8,
+        trade_score=0.03,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+    )
+
+    book = build_family_opportunity_book(
+        family_id="family-1",
+        evaluations=(evaluation,),
+        event_id="event-1",
+        decided_candidate_id=None,
+    ).to_receipt_dict()
+    receipt = book["candidates"][0]
+
+    assert evaluation.admitted is False
+    assert receipt["legacy_admitted"] is False
+    assert receipt["admitted"] is False
+    assert receipt["live_decision_selected"] is False
+    assert book["admitted_count"] == 0
 
 
 def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():

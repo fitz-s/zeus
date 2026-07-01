@@ -6,8 +6,7 @@
 #   the grade_receipt-backed backward-coverage loader (_settlement_coverage_observations).
 #   The loader now pairs each settled day with the PER-DAY ACTUAL claimed q_lcb (read from
 #   edli_no_submit_receipts), NOT one constant stamped on every day (the climatology defect).
-#   Proves: (1) flag OFF -> the live q_lcb carrier is byte-identical (no DB even read);
-#   (2) flag ON + PROVEN-overconfident per-day calibration record -> the carrier entry
+#   Proves: (1) PROVEN-overconfident per-day calibration record -> the carrier entry
 #   shrinks and its calibration_source flips to SETTLEMENT_ISOTONIC; (3) absent per-day
 #   claim history -> INSUFFICIENT_DATA -> unchanged (inert). The settled win/loss is
 #   produced ONLY through the spine grade_receipt. Per-day claims are injected via a
@@ -79,14 +78,6 @@ def _patch_per_day_claims(monkeypatch, claims_by_date):
     )
 
 
-def _set_flag(monkeypatch, enabled: bool):
-    from src.config import settings
-
-    edli = dict(settings._data["edli"])
-    edli["q_lcb_settlement_coverage_gate_enabled"] = enabled
-    monkeypatch.setitem(settings._data, "edli", edli)
-
-
 def _family(city, metric, bin_obj, condition_id="cond0"):
     return SimpleNamespace(
         city=city,
@@ -145,32 +136,11 @@ def test_observations_empty_without_per_day_claim_history(tmp_path, monkeypatch)
     assert obs == []
 
 
-def test_flag_off_live_application_is_byte_identical(tmp_path, monkeypatch):
-    """Flag OFF: _maybe_apply_settlement_coverage_to_lcb is an immediate no-op; the
-    q_lcb carrier is byte-identical (the settled record is never even read)."""
-    _set_flag(monkeypatch, False)
-    bin_f = Bin(low=64.0, high=65.0, unit="F", label="64-65°F")
-    conn, _td = _settlement_db(tmp_path, "San Francisco", "high", "F",
-                               in_bin_value=64.0, out_bin_value=70.0, n_in=10, n_out=20)
-    lcb = _typed_lcb("cond0", yes_q=0.10, no_q=0.90)
-    before_yes = lcb[("cond0", "buy_yes")].q_lcb
-    before_no = lcb[("cond0", "buy_no")].q_lcb
-
-    adapter._maybe_apply_settlement_coverage_to_lcb(
-        family=_family("San Francisco", "high", bin_f),
-        forecast_conn=conn, lcb_by_direction=lcb,
-    )
-    assert lcb[("cond0", "buy_yes")].q_lcb == before_yes
-    assert lcb[("cond0", "buy_no")].q_lcb == before_no
-    assert lcb[("cond0", "buy_no")].calibration_source == "FORECAST_BOOTSTRAP"  # unchanged
-
-
-def test_flag_on_proven_overconfident_shrinks_with_isotonic_source(tmp_path, monkeypatch):
-    """Flag ON + PROVEN overconfident per-day record: the model CLAIMED ~0.90 each of 30
+def test_proven_overconfident_shrinks_with_isotonic_source(tmp_path, monkeypatch):
+    """PROVEN overconfident per-day record: the model CLAIMED ~0.90 each of 30
     settled days but the band realized only 20/30=0.667 -> UNLICENSED -> shrunk below the
     claim, source SETTLEMENT_ISOTONIC. (Per-day claims clustered near 0.90 so the isotonic
     reads ~0.667 at the live 0.90 claim.)"""
-    _set_flag(monkeypatch, True)
     bin_f = Bin(low=64.0, high=65.0, unit="F", label="64-65°F")
     conn, target_dates = _settlement_db(
         tmp_path, "San Francisco", "high", "F",
@@ -190,9 +160,8 @@ def test_flag_on_proven_overconfident_shrinks_with_isotonic_source(tmp_path, mon
     assert no_entry.n_settlement_observations == 30
 
 
-def test_flag_on_insufficient_data_keeps_lcb(tmp_path, monkeypatch):
-    """Flag ON but < min_n=30 settled CLAIM days: INSUFFICIENT_DATA -> q_lcb unchanged."""
-    _set_flag(monkeypatch, True)
+def test_insufficient_data_keeps_lcb(tmp_path, monkeypatch):
+    """< min_n=30 settled CLAIM days: INSUFFICIENT_DATA -> q_lcb unchanged."""
     bin_f = Bin(low=64.0, high=65.0, unit="F", label="64-65°F")
     conn, target_dates = _settlement_db(
         tmp_path, "San Francisco", "high", "F",
@@ -209,12 +178,11 @@ def test_flag_on_insufficient_data_keeps_lcb(tmp_path, monkeypatch):
     assert lcb[("cond0", "buy_no")].calibration_source == "FORECAST_BOOTSTRAP"
 
 
-def test_flag_on_calibrated_record_does_not_shrink(tmp_path, monkeypatch):
+def test_calibrated_record_does_not_shrink(tmp_path, monkeypatch):
     """REBUILD RED-on-revert: a CALIBRATED per-day record (claimed ~= realized over 30
     settled days) is LICENSED -> q_lcb UNCHANGED. The OLD climatology loader stamped one
     constant claim and graded a fixed bin -> shrank this calibrated case to the bin base
     rate. Here the buy_no claimed ~0.667 each day and realized 20/30=0.667 -> calibrated."""
-    _set_flag(monkeypatch, True)
     bin_f = Bin(low=64.0, high=65.0, unit="F", label="64-65°F")
     conn, target_dates = _settlement_db(
         tmp_path, "San Francisco", "high", "F",
@@ -242,8 +210,8 @@ def test_deep_otm_bin_forecast_bootstrap_write_does_not_collapse_family():
     bin (p_posterior~0) the edge CI lower bound is negative, so the restored q_lcb
     is NEGATIVE. Pre-fix, QlcbProvenance raised ValueError on the out-of-range value;
     that propagated to the family catch (adapter:732) -> LIVE_INFERENCE_INPUTS_MISSING
-    and collapsed the WHOLE family even with the K3 shadow flag OFF (the unconditional
-    type, not the flag). Legacy (origin/main, plain dict) tolerated it: the bin lost
+    and collapsed the WHOLE family (the unconditional type caused the failure).
+    Legacy (origin/main, plain dict) tolerated it: the bin lost
     selection, the family still formed.
 
     This drives the SAME write helper the family scan uses with a negative deep-tail

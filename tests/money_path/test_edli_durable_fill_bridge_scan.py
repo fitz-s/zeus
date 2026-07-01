@@ -335,6 +335,7 @@ class TestDurableFillBridgeScan:
         bridged = _edli_durable_fill_bridge_scan(
             conn,
             now=datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc),
+            already_bridged_repair_limit=1,
         )
         conn.commit()
 
@@ -356,6 +357,89 @@ class TestDurableFillBridgeScan:
         assert provenance is not None
         assert "short-mf1d" in provenance["payload_json"]
         assert position_id in provenance["payload_json"]
+
+    def test_default_scan_does_not_repair_already_bridged_historical_projection(self):
+        """Live hot path must not rewrite already-materialised historical rows.
+
+        The durable scan's default responsibility is confirmed-fill recoverability:
+        bridge FILL_CONFIRMED aggregates that still have no position_current row.
+        Historical projection/link repairs remain available as explicit maintenance
+        work through ``already_bridged_repair_limit``; they are not allowed to run
+        every reconcile cycle and contend with fresh substrate/redecision writes.
+        """
+        from src.events.edli_position_bridge import edli_bridge_position_id
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
+        conn = _make_conn()
+        aggregate_id = "evtMF1hot:fiMF1hot"
+        execution_command_id = "edli_exec_cmd:evtMF1hot:fiMF1hot"
+        _seed_confirmed_fill_aggregate(
+            conn,
+            aggregate_id=aggregate_id,
+            execution_command_id=execution_command_id,
+        )
+        position_id = edli_bridge_position_id(aggregate_id)
+        conn.execute(
+            """INSERT INTO position_current
+               (position_id, phase, trade_id, strategy_key, p_posterior,
+                entry_method, updated_at, temperature_metric)
+               VALUES (?, 'active', ?, 'opening_inertia', 0.0,
+                       'ens_member_counting', '2026-06-01T00:00:00+00:00', 'high')""",
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at, updated_at,
+                review_required_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+            """,
+            (
+                "cmd-mf1hot",
+                "snap-mf1hot",
+                "env-mf1hot",
+                "legacy-mf1hot",
+                execution_command_id,
+                "idem-mf1hot",
+                "ENTRY",
+                "mkt-MF1",
+                "0xNOTOKEN",
+                "BUY",
+                120.0,
+                0.42,
+                "vo-MF1hot",
+                "FILLED",
+                "2026-06-01T00:00:00+00:00",
+                "2026-06-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        bridged = _edli_durable_fill_bridge_scan(
+            conn,
+            now=datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc),
+        )
+        conn.commit()
+
+        assert bridged == 0
+        position = conn.execute(
+            """
+            SELECT p_posterior, entry_method, updated_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert float(position["p_posterior"]) == 0.0
+        assert position["entry_method"] == "ens_member_counting"
+        assert position["updated_at"] == "2026-06-01T00:00:00+00:00"
+        command = conn.execute(
+            "SELECT position_id, updated_at FROM venue_commands WHERE command_id = 'cmd-mf1hot'"
+        ).fetchone()
+        assert command["position_id"] == "legacy-mf1hot"
+        assert command["updated_at"] == "2026-06-01T00:00:00+00:00"
 
     def test_existing_position_command_link_noop_does_not_require_strategy_identity(self):
         """Already-linked historical aggregates must not re-parse entry strategy.

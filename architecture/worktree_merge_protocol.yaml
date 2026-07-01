@@ -94,7 +94,8 @@ escalation:
   on_advisory_only: "Document conflict-first handling in branch handoff when conflicts existed"
 
 cross_references:
-  - .claude/hooks/pre-merge-contamination-check.sh
+  - .claude/hooks/pre-merge-commit
+  - .claude/hooks/dispatch.py pre_merge_contamination
   - .agents/skills/zeus-ai-handoff/SKILL.md §8.8
   - root AGENTS.md "Cross-session merge protocol"
   - docs/operations/task_2026-04-28_contamination_remediation/verdict.md §6 Stage 4

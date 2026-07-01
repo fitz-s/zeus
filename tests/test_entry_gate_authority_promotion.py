@@ -36,11 +36,9 @@ Antibody contracts (sed-flip verifiable):
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
 import pytest
 
 from src.engine.cycle_runner import _discovery_gates_allow_entries
-from src.control.entries_block_registry import BlockStage
 from src.riskguard.risk_level import RiskLevel
 
 
@@ -67,12 +65,6 @@ def test_authority_promotion_sentinel_present_in_cycle_runner():
     )
 
 
-def _make_clear_registry() -> MagicMock:
-    r = MagicMock()
-    r.is_clear.return_value = True
-    return r
-
-
 def _ok_kwargs() -> dict:
     return dict(
         risk_level=RiskLevel.GREEN,
@@ -84,10 +76,10 @@ def _ok_kwargs() -> dict:
         chain_ready=True,
         has_quarantine=False,
         force_exit=False,
+        freshness_allows_entries=True,
         entry_bankroll=1000.0,
         exposure_gate_hit=False,
         entries_paused=False,
-        block_registry=_make_clear_registry(),
     )
 
 
@@ -95,6 +87,7 @@ _BLOCKER_CASES: list[tuple[str, dict]] = [
     ("chain_sync_unavailable", {"chain_ready": False}),
     ("portfolio_quarantined", {"has_quarantine": True}),
     ("force_exit_review_daily_loss_red", {"force_exit": True}),
+    ("freshness_degraded", {"freshness_allows_entries": False}),
     ("entry_bankroll_unavailable", {"entry_bankroll": None}),
     ("entry_bankroll_non_positive", {"entry_bankroll": 0}),
     ("entry_bankroll_negative", {"entry_bankroll": -1.0}),

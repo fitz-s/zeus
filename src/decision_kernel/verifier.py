@@ -12,8 +12,20 @@ from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
+from src.decision.family_decision_engine import (
+    EntryPriceFloorDecision,
+    entry_price_floor_decision,
+    live_entry_min_price_floor,
+    native_curve_side_for_direction,
+    roi_frontier_useful_values,
+)
+from src.events.day0_authority import (
+    Day0AuthorityError,
+    assert_live_day0_payload_authority,
+)
 
 FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+DAY0_ACTIONABLE_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 FORECAST_ACTIONABLE_EVENT_TYPES = frozenset(
     {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}
 )
@@ -58,10 +70,16 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 # by the settlement-backward coverage verdict. A live-admissible authority (the live gate
 # _assert_event_bound_calibration_live_admitted lets it through), so the certificate must
 # round-trip it through verification. Its UNEVALUATED sibling
-# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded — like IDENTITY_FALLBACK
-# it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
-# certificate, so it is not in the approved set.
+# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded: it is evidence-only
+# and is not minted onto an admitted live certificate. Thin settlement-coverage history
+# is not an unevaluated authority: the fused bootstrap q_lcb is its own live credential,
+# while settlement coverage remains a refutation/shrink overlay when enough claim-days exist.
+FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY = "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB"
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+DAY0_OBSERVATION_CALIBRATION_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
+FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
+FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
+FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
 # K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
 # ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
 # existed as two independent tuples (verifier + compiler); when FUSED_BOOTSTRAP was added
@@ -71,7 +89,9 @@ FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
     {
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
 )
 
@@ -93,11 +113,15 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
         "LIVE",
         "APPROVED",
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
+_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
+_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
 
 def verify_certificate(
@@ -151,6 +175,7 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
         raise CertificateVerificationError("expected ActionableTradeCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("actionable trade must use LIVE mode")
+    _require_live_parent_modes("actionable trade", parent_tuple)
     _verify_actionable_payload(cert)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.ACTIONABLE_REQUIRED_TYPES - parent_types
@@ -159,15 +184,56 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     event_type = cert.payload.get("event_type")
     if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
-    elif event_type == "DAY0_EXTREME_UPDATED":
+    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
     else:
         raise CertificateVerificationError(f"unsupported actionable event_type: {event_type!r}")
     missing_source = source_required - parent_types
     if missing_source:
         raise CertificateVerificationError(f"actionable trade missing source parents: {sorted(missing_source)}")
+    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
+        _verify_actionable_live_calibration(parent_tuple)
     _forbid_public_market_channel_fill(parent_tuple)
     _verify_actionable_parent_consistency(cert, parent_tuple)
+
+
+def _verify_actionable_live_calibration(parent_tuple: tuple[DecisionCertificate, ...]) -> None:
+    """Actionable live entries require calibration evidence strong enough for submit.
+
+    FUSED_BOOTSTRAP has two valid non-Platt authorities: settlement coverage when
+    enough claim-days exist, and conservative q_lcb when the typed coverage verdict is
+    INSUFFICIENT_DATA. Unknown/missing coverage is still non-live.
+    """
+
+    parent = _parents_by_type(parent_tuple)
+    calibration = _required_parent_payload(parent, claims.CALIBRATION)
+    authority = str(calibration.get("authority") or "").strip()
+    if authority == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY:
+        coverage_status = str(calibration.get("coverage_status") or "").strip()
+        if coverage_status != "INSUFFICIENT_DATA":
+            raise CertificateVerificationError("actionable conservative q_lcb coverage status invalid")
+        if calibration.get("q_lcb_basis") != "fused_center_bootstrap_p05":
+            raise CertificateVerificationError("actionable conservative q_lcb basis invalid")
+        try:
+            bootstrap_draws = int(calibration.get("bootstrap_draws"))
+        except (TypeError, ValueError) as exc:
+            raise CertificateVerificationError("actionable conservative q_lcb bootstrap draws missing") from exc
+        if bootstrap_draws < FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS:
+            raise CertificateVerificationError("actionable conservative q_lcb bootstrap draw floor not met")
+        return
+    if authority != FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY:
+        return
+    coverage_status = str(calibration.get("coverage_status") or "").strip()
+    if coverage_status == "INSUFFICIENT_DATA":
+        raise CertificateVerificationError("actionable calibration coverage insufficient")
+    if coverage_status not in FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES:
+        raise CertificateVerificationError("actionable calibration coverage not live-admitted")
+    try:
+        n_samples = int(calibration.get("n_samples"))
+    except (TypeError, ValueError) as exc:
+        raise CertificateVerificationError("actionable calibration n_samples missing") from exc
+    if n_samples < FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES:
+        raise CertificateVerificationError("actionable calibration sample floor not met")
 
 
 def verify_execution_command(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
@@ -177,6 +243,7 @@ def verify_execution_command(cert: DecisionCertificate, parents: Iterable[Decisi
         raise CertificateVerificationError("expected ExecutionCommandCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("execution command must use LIVE mode")
+    _require_live_parent_modes("execution command", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTION_COMMAND_REQUIRED_TYPES - parent_types
     if missing:
@@ -191,6 +258,7 @@ def verify_final_intent(cert: DecisionCertificate, parents: Iterable[DecisionCer
         raise CertificateVerificationError("expected FinalIntentCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("final intent must use LIVE mode")
+    _require_live_parent_modes("final intent", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.FINAL_INTENT_REQUIRED_TYPES - parent_types
     if missing:
@@ -205,6 +273,7 @@ def verify_executor_expressibility(cert: DecisionCertificate, parents: Iterable[
         raise CertificateVerificationError("expected ExecutorExpressibilityCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("executor expressibility must use LIVE mode")
+    _require_live_parent_modes("executor expressibility", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTOR_EXPRESSIBILITY_REQUIRED_TYPES - parent_types
     if missing:
@@ -219,6 +288,7 @@ def verify_execution_receipt(cert: DecisionCertificate, parents: Iterable[Decisi
         raise CertificateVerificationError("expected ExecutionReceiptCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("execution receipt must use LIVE mode")
+    _require_live_parent_modes("execution receipt", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTION_RECEIPT_REQUIRED_TYPES - parent_types
     if missing:
@@ -233,6 +303,7 @@ def verify_live_cap_transition(cert: DecisionCertificate, parents: Iterable[Deci
         raise CertificateVerificationError("expected LiveCapTransitionCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("live cap transition must use LIVE mode")
+    _require_live_parent_modes("live cap transition", parent_tuple)
     _verify_live_cap_transition_payload(cert, parent_tuple)
 
 
@@ -261,6 +332,18 @@ def _verify_parent_edges(cert: DecisionCertificate, parents: tuple[DecisionCerti
             raise CertificateVerificationError(f"missing parent for role {edge.role}")
         if parent.certificate_type != edge.certificate_type:
             raise CertificateVerificationError(f"parent type mismatch for role {edge.role}")
+
+
+def _require_live_parent_modes(scope: str, parents: tuple[DecisionCertificate, ...]) -> None:
+    non_live = sorted(
+        f"{parent.certificate_type}:{parent.header.mode}"
+        for parent in parents
+        if parent.header.mode != "LIVE"
+    )
+    if non_live:
+        raise CertificateVerificationError(
+            f"{scope} requires LIVE parent certificates: {', '.join(non_live)}"
+        )
 
 
 def _verify_time_filtration(cert: DecisionCertificate) -> None:
@@ -313,10 +396,13 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
     for field in ("action_score", "trade_score", "p_fill_lcb"):
         if _finite_float(payload.get(field), field) <= 0.0:
             raise CertificateVerificationError(f"actionable {field} must be positive")
-    for field in ("q_live", "q_lcb_5pct"):
-        value = _finite_float(payload.get(field), field)
+    q_live = _finite_float(payload.get("q_live"), "q_live")
+    q_lcb = _finite_float(payload.get("q_lcb_5pct"), "q_lcb_5pct")
+    for field, value in (("q_live", q_live), ("q_lcb_5pct", q_lcb)):
         if value < 0.0 or value > 1.0:
             raise CertificateVerificationError(f"actionable {field} must be in [0, 1]")
+    if q_lcb > q_live:
+        raise CertificateVerificationError("actionable q_lcb_5pct exceeds q_live")
     for field in ("c_fee_adjusted", "c_cost_95pct"):
         value = _finite_float(payload.get(field), field)
         if value <= 0.0 or value >= 1.0:
@@ -342,6 +428,117 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
     for field in required:
         if payload.get(field) in (None, ""):
             raise CertificateVerificationError(f"actionable {field} missing")
+    _verify_actionable_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_actionable_probability_authority(
+    payload: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+        _verify_day0_observation_payload_authority(payload, label="actionable")
+        _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
+        return
+    _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_day0_observation_payload_authority(payload: dict, *, label: str) -> None:
+    try:
+        assert_live_day0_payload_authority(payload)
+    except Day0AuthorityError as exc:
+        raise CertificateVerificationError(
+            f"{label} day0 observation authority required:{exc}"
+        ) from None
+
+
+def _verify_actionable_qkernel_economics(
+    payload: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    if str(payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError(
+            "actionable selection_authority_applied must be qkernel_spine"
+        )
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        raise CertificateVerificationError("actionable qkernel_execution_economics missing")
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
+    _verify_qkernel_selection_guard(economics, label="actionable qkernel")
+    native_side = native_curve_side_for_direction(payload.get("direction"))
+    qkernel_side = str(economics.get("side") or "").upper()
+    if native_side is not None and qkernel_side != native_side:
+        raise CertificateVerificationError("actionable qkernel side must match direction")
+    payoff_q_point = _probability_float(
+        economics.get("payoff_q_point"), "actionable qkernel payoff_q_point"
+    )
+    payoff_q_lcb = _probability_float(
+        economics.get("payoff_q_lcb"), "actionable qkernel payoff_q_lcb"
+    )
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("actionable qkernel payoff_q_point mismatches q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
+    cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
+    edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
+    optimal_delta_u = _finite_float(
+        economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
+    )
+    delta_u_at_min = _finite_float(
+        economics.get("delta_u_at_min"), "actionable qkernel delta_u_at_min"
+    )
+    optimal_stake_usd = _finite_float(
+        economics.get("optimal_stake_usd"), "actionable qkernel optimal_stake_usd"
+    )
+    false_edge_rate = _finite_float(
+        economics.get("false_edge_rate"), "actionable qkernel false_edge_rate"
+    )
+    if cost <= 0.0 or cost >= 1.0:
+        raise CertificateVerificationError("actionable qkernel cost must be in (0, 1)")
+    if edge_lcb <= 0.0:
+        raise CertificateVerificationError("actionable qkernel edge_lcb must be positive")
+    if optimal_delta_u <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel optimal_delta_u must be positive"
+        )
+    if delta_u_at_min <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel delta_u_at_min must be positive"
+        )
+    if optimal_stake_usd <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel optimal_stake_usd must be positive"
+        )
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if not (0.0 < false_edge_rate <= max_false_edge_rate):
+        raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
+    if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
+        raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
+    if not roi_frontier_useful_values(
+        side=qkernel_side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake_usd,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        raise CertificateVerificationError(
+            "actionable qkernel roi frontier not useful"
+        )
+    if not _qkernel_direction_admitted(economics, direction=payload.get("direction")):
+        raise CertificateVerificationError("actionable qkernel direction admission missing")
+    if economics.get("coherence_allows") is not True:
+        raise CertificateVerificationError("actionable qkernel coherence_allows must be true")
 
 
 def _verify_actionable_parent_consistency(
@@ -451,6 +648,29 @@ def _verify_execution_command_payload(
     _require_equal("final_intent.strategy_key", final_intent.get("strategy_key"), "actionable.strategy_key", actionable.get("strategy_key"))
     _require_equal("expressibility.strategy_key", expressibility.get("strategy_key"), "final_intent.strategy_key", final_intent.get("strategy_key"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
+    for field in (
+        "side",
+        "direction",
+        "order_type",
+        "time_in_force",
+        "post_only",
+        "limit_price",
+        "size",
+        "min_order_size",
+        "neg_risk",
+    ):
+        _require_equal(
+            f"execution_command.{field}",
+            payload.get(field),
+            f"final_intent.{field}",
+            final_intent.get(field),
+        )
+        _require_equal(
+            f"execution_command.{field}",
+            payload.get(field),
+            f"executor_expressibility.{field}",
+            expressibility.get(field),
+        )
     _verify_pre_submit_revalidation_for_command(payload, pre_submit, final_intent, live_cap)
     size = _finite_float(payload.get("size"), "execution command size")
     min_order_size = _finite_float(payload.get("min_order_size"), "execution command min_order_size")
@@ -570,6 +790,69 @@ def _verify_pre_submit_revalidation_for_command(
     max_quote_age_ms = _finite_float(pre_submit.get("max_quote_age_ms", quote_age_ms), "pre-submit max_quote_age_ms")
     if quote_age_ms > max_quote_age_ms:
         raise CertificateVerificationError("pre-submit revalidation quote_age_ms exceeds max_quote_age_ms")
+    q_live = _probability_float(pre_submit.get("q_live"), "pre-submit q_live")
+    q_lcb = _probability_float(pre_submit.get("q_lcb_5pct"), "pre-submit q_lcb_5pct")
+    if q_lcb > q_live:
+        raise CertificateVerificationError("pre-submit revalidation q_lcb_5pct exceeds q_live")
+    limit_price = _finite_float(pre_submit.get("limit_price"), "pre-submit limit_price")
+    expected_edge = _finite_float(pre_submit.get("expected_edge"), "pre-submit expected_edge")
+    size = _finite_float(pre_submit.get("size"), "pre-submit size")
+    min_entry_price = _finite_float(
+        pre_submit.get("min_entry_price"), "pre-submit min_entry_price"
+    )
+    min_expected_profit_usd = _finite_float(
+        pre_submit.get("min_expected_profit_usd"), "pre-submit min_expected_profit_usd"
+    )
+    min_submit_edge_density = _finite_float(
+        pre_submit.get("min_submit_edge_density"), "pre-submit min_submit_edge_density"
+    )
+    if expected_edge <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation expected_edge must be positive")
+    if min_entry_price < 0.0:
+        raise CertificateVerificationError("pre-submit revalidation min_entry_price must be non-negative")
+    submit_edge = q_lcb - limit_price
+    if submit_edge <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
+    if expected_edge > submit_edge + 1e-6:
+        raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
+    floor_decision = _entry_price_floor_decision_for_payload(
+        pre_submit,
+        declared_min_entry_price=min_entry_price,
+        limit_price=limit_price,
+    )
+    effective_min_entry_price = floor_decision.effective_min_entry_price
+    floors = _effective_live_entry_quality_floors(pre_submit)
+    effective_min_expected_profit_usd = max(
+        min_expected_profit_usd,
+        floors["min_expected_profit_usd"],
+    )
+    effective_min_submit_edge_density = max(
+        min_submit_edge_density,
+        floors["min_submit_edge_density"],
+    )
+    if _entry_floor_applies(pre_submit) and limit_price + 1e-12 < effective_min_entry_price:
+        raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
+    if size <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation size must be positive")
+    if submit_edge * size + 1e-9 < effective_min_expected_profit_usd:
+        raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
+    if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
+        raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
+    _verify_pre_submit_probability_authority(pre_submit, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_pre_submit_probability_authority(
+    pre_submit: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(pre_submit.get("event_type") or "").strip()
+    if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+        _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
+        _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
+        return
+    _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
 
 
 def _verify_final_intent_payload(
@@ -620,6 +903,20 @@ def _verify_final_intent_payload(
         raise CertificateVerificationError("final intent limit_price must be in (0, 1)")
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
+    if _entry_floor_applies(payload):
+        min_entry_price = _finite_float(
+            payload.get("min_entry_price"), "final intent min_entry_price"
+        )
+        if min_entry_price < 0.0:
+            raise CertificateVerificationError("final intent min_entry_price must be non-negative")
+        floor_decision = _entry_price_floor_decision_for_payload(
+            payload,
+            declared_min_entry_price=min_entry_price,
+            limit_price=limit_price,
+        )
+        effective_min_entry_price = floor_decision.effective_min_entry_price
+        if limit_price + 1e-12 < effective_min_entry_price:
+            raise CertificateVerificationError("final intent limit_price below strategy entry floor")
     # Integrity guard (NOT a cap): the order notional must not exceed the
     # Kelly-sized notional that was reserved for this event. This runs
     # unconditionally now that the tiny_live cap-enabled flag is deleted — it is a
@@ -686,7 +983,19 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility reason_code must be empty or OK")
     if payload.get("executor_native_intent_hash") in (None, ""):
         raise CertificateVerificationError("executor expressibility requires executor_native_intent_hash")
-    for field in ("final_intent_id", "token_id", "condition_id", "direction", "order_type", "time_in_force"):
+    for field in (
+        "final_intent_id",
+        "token_id",
+        "condition_id",
+        "direction",
+        "order_type",
+        "time_in_force",
+        "side",
+        "limit_price",
+        "size",
+        "post_only",
+        "maker_intent",
+    ):
         _require_equal(f"executor_expressibility.{field}", payload.get(field), f"final_intent.{field}", final_intent.get(field))
     if executable.get("condition_id") not in (None, ""):
         _require_equal("executor_expressibility.condition_id", payload.get("condition_id"), "executable.condition_id", executable.get("condition_id"))
@@ -705,6 +1014,19 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility tick_size must be positive")
     if not _is_tick_aligned(limit_price, tick_size):
         raise CertificateVerificationError("executor expressibility limit_price not tick-aligned")
+    if _entry_floor_applies(final_intent):
+        min_entry_price = _finite_float(
+            final_intent.get("min_entry_price"),
+            "final intent min_entry_price",
+        )
+        floor_decision = _entry_price_floor_decision_for_payload(
+            final_intent,
+            declared_min_entry_price=min_entry_price,
+            limit_price=limit_price,
+        )
+        effective_min_entry_price = floor_decision.effective_min_entry_price
+        if limit_price + 1e-12 < effective_min_entry_price:
+            raise CertificateVerificationError("executor expressibility limit_price below strategy entry floor")
     if size < min_order_size:
         raise CertificateVerificationError("executor expressibility size below min_order_size")
     _assert_order_type_tuple_coherent(
@@ -1144,6 +1466,159 @@ def _finite_float(value: object, field_name: str) -> float:
     if not math.isfinite(parsed):
         raise CertificateVerificationError(f"{field_name} must be finite")
     return parsed
+
+
+def _entry_floor_applies(payload: dict) -> bool:
+    direction = str(payload.get("direction") or "").strip().lower()
+    return direction in {"buy_yes", "buy_no"}
+
+
+def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
+    """Current entry floors for certificate verification.
+
+    Older durable payloads may carry stale strategy floors. Verification must
+    consume the current live registry/hard floor and can only strengthen, never
+    weaken, from payload values.
+    """
+
+    floors = {
+        "min_entry_price": _live_entry_min_price_floor(payload),
+        "min_expected_profit_usd": _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+        "min_submit_edge_density": _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+    }
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    if not strategy_key:
+        return floors
+    try:
+        from src.strategy.strategy_profile import try_get
+
+        profile = try_get(strategy_key)
+    except Exception:  # noqa: BLE001 - registry failure cannot lower live floors.
+        profile = None
+    if profile is None:
+        return floors
+    for field in tuple(floors):
+        try:
+            value = float(getattr(profile, field))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            floors[field] = max(floors[field], value)
+    return floors
+
+
+def _entry_price_floor_decision_for_payload(
+    payload: dict,
+    *,
+    declared_min_entry_price: object,
+    limit_price: object,
+) -> EntryPriceFloorDecision:
+    floors = _effective_live_entry_quality_floors(payload)
+    try:
+        declared_floor = max(float(declared_min_entry_price), floors["min_entry_price"])
+    except (TypeError, ValueError):
+        declared_floor = floors["min_entry_price"]
+    return entry_price_floor_decision(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+        declared_min_entry_price=declared_floor,
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        economics=(
+            payload.get("qkernel_execution_economics")
+            if isinstance(payload.get("qkernel_execution_economics"), dict)
+            else None
+        ),
+        q_live=payload.get("q_live"),
+        q_lcb=payload.get("q_lcb_5pct"),
+        limit_price=limit_price,
+    )
+
+
+def _live_entry_min_price_floor(payload: dict) -> float:
+    return live_entry_min_price_floor(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+    )
+
+
+def _probability_float(value: object, field_name: str) -> float:
+    parsed = _finite_float(value, field_name)
+    if parsed < 0.0 or parsed > 1.0:
+        raise CertificateVerificationError(f"{field_name} must be in [0, 1]")
+    return parsed
+
+
+def _qkernel_direction_admitted(economics: dict, *, direction: object) -> bool:
+    if economics.get("direction_law_ok") is not True:
+        return False
+    side = str(economics.get("side") or "").strip().upper()
+    if side not in {"YES", "NO"}:
+        return False
+    native_side = native_curve_side_for_direction(direction)
+    if native_side is not None and side != native_side:
+        return False
+    return True
+
+
+def _verify_qkernel_selection_guard(economics: dict, *, label: str) -> None:
+    basis = str(economics.get("selection_guard_basis") or "").strip()
+    if not basis:
+        raise CertificateVerificationError(f"{label} selection_guard_basis missing")
+    if economics.get("selection_guard_abstained") is not False:
+        raise CertificateVerificationError(f"{label} selection_guard_abstained must be false")
+    if basis == "SIDE_NOT_ARMED":
+        raise CertificateVerificationError(f"{label} selection_guard_basis blocks side")
+    q_safe = _finite_float(
+        economics.get("selection_guard_q_safe"),
+        f"{label} selection_guard_q_safe",
+    )
+    if not (0.0 < q_safe <= 1.0):
+        raise CertificateVerificationError(f"{label} selection_guard_q_safe must be in (0, 1]")
+
+
+def _verify_pre_submit_qkernel_economics(
+    pre_submit: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    economics = pre_submit.get("qkernel_execution_economics")
+    if economics in (None, ""):
+        raise CertificateVerificationError("pre-submit qkernel_execution_economics missing")
+    if not isinstance(economics, dict):
+        raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
+    if str(pre_submit.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError("pre-submit qkernel selection authority missing")
+    route_id = str(economics.get("route_id") or "").upper()
+    route_type = str(economics.get("route_type") or "").lower()
+    explicit_non_direct = (
+        route_type
+        and route_type != "direct"
+        and route_id
+        and not route_id.startswith("DIRECT_")
+    )
+    if explicit_non_direct:
+        return
+    _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
+    route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
+    native_side = native_curve_side_for_direction(pre_submit.get("direction"))
+    qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
+    if qkernel_side and native_side is not None and qkernel_side != native_side:
+        raise CertificateVerificationError("pre-submit qkernel side must match submit direction")
+    payoff_q_point = _probability_float(
+        economics.get("payoff_q_point"), "pre-submit qkernel payoff_q_point"
+    )
+    payoff_q_lcb = _probability_float(
+        economics.get("payoff_q_lcb"), "pre-submit qkernel payoff_q_lcb"
+    )
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_point mismatches q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb mismatches q_lcb_5pct")
+    if not _qkernel_direction_admitted(economics, direction=pre_submit.get("direction")):
+        raise CertificateVerificationError("pre-submit qkernel direction admission missing")
+    if economics.get("coherence_allows") is not True:
+        raise CertificateVerificationError("pre-submit qkernel coherence_allows must be true")
 
 
 def _is_tick_aligned(price: float, tick_size: float) -> bool:

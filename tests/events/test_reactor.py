@@ -80,6 +80,35 @@ def _day0_event(key_suffix: str = "a"):
     )
 
 
+def _day0_event_for_target(key_suffix: str, target_date: str, available_at: str):
+    payload = Day0ExtremeUpdatedPayload(
+        city="Chicago",
+        target_date=target_date,
+        metric="high",
+        settlement_source="WU",
+        station_id="KMDW",
+        observation_time=available_at,
+        observation_available_at=available_at,
+        raw_value=74.2,
+        rounded_value=74,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    return make_day0_extreme_updated_event(
+        entity_key=f"Chicago|{target_date}|high|{key_suffix}",
+        source="day0_observation",
+        observed_at=payload.observation_time,
+        received_at=available_at,
+        payload=payload,
+    )
+
+
 def _forecast_event(key_suffix: str = "a", target_date: str = "2026-05-24"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
@@ -440,6 +469,11 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
     assert result.processed == 0
     assert result.rejected == 0
     assert result.retried == 1
+    assert result.rejection_reasons == [
+        "EXECUTABLE_SNAPSHOT_STALE:"
+        "freshness_deadline=2026-05-24T06:09:59+00:00:"
+        "decision_time=2026-05-24T06:10:00+00:00"
+    ]
     assert _terminal_surfaces(conn, event.event_id) == {
         "verified_no_submit": 0,
         "execution_receipt": 0,
@@ -660,6 +694,7 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
     assert result.processed == 0
     assert result.dead_lettered == 0
     assert result.retried == 1
+    assert result.rejection_reasons == ["WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"]
     assert _terminal_surfaces(conn, event.event_id) == {
         "verified_no_submit": 0,
         "execution_receipt": 0,
@@ -668,6 +703,45 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
         "dead_letter": 0,
     }
     assert _processing_status(conn, event.event_id) == "processing"
+
+
+def test_sqlite_lock_during_pre_submit_gate_is_retryable_not_dead_lettered():
+    """A Window-A lock before any venue submit must leave the event retryable."""
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+
+    def _locked_source_truth(_event):
+        raise sqlite3.OperationalError("database is locked")
+
+    def _submit(_event, _decision_time):
+        raise AssertionError("pre-submit lock must not reach submit")
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=_locked_source_truth,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.processed == 0
+    assert result.dead_lettered == 0
+    assert result.retried == 1
+    assert result.rejection_reasons == ["WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT"]
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    assert _processing_status(conn, event.event_id) == "pending"
 
 
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
@@ -1444,6 +1518,7 @@ def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
                         "source": "qkernel_spine",
                         "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                         "route_id": "DIRECT_NO:bin-33@proof",
+                        "payoff_q_point": 0.779,
                         "payoff_q_lcb": 0.748,
                         "edge_lcb": -0.00162,
                         "point_ev": 0.031,
@@ -1644,6 +1719,73 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
         (event.event_id,),
     ).fetchone()[0]
     assert status == "processed"
+
+
+def test_terminal_trade_score_no_submit_receipt_is_persisted_before_rejection():
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
+            bin_label="80F",
+            direction="buy_yes",
+            q_live=0.51,
+            q_lcb_5pct=0.47,
+            c_fee_adjusted=0.56,
+            c_cost_95pct=0.56,
+            p_fill_lcb=1.0,
+            trade_score=-0.09,
+            trade_score_positive=False,
+            reason="TRADE_SCORE_NON_POSITIVE",
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.rejected == 1
+    assert _processing_status(conn, event.event_id) == "processed"
+    receipt_row = conn.execute(
+        """
+        SELECT side_effect_status, receipt_json, trade_score
+        FROM edli_no_submit_receipts
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert receipt_row is not None
+    assert receipt_row[0] == "NO_SUBMIT"
+    assert '"reason":"TRADE_SCORE_NON_POSITIVE"' in receipt_row[1]
+    assert receipt_row[2] == -0.09
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 1,
+        "regret": 1,
+        "dead_letter": 0,
+    }
 
 
 def test_submit_disabled_live_receipt_bridges_to_no_submit_receipt_table():
@@ -2733,6 +2875,50 @@ def test_market_channel_events_do_not_starve_fsr():
     assert fsr.event_id in fetched_ids, (
         f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
         f"Fetched types: {[e.event_type for e in fetched][:10]}"
+    )
+
+
+def test_reactor_overfetches_before_lane_interleave_under_day0_flood():
+    """A small process limit must not truncate the forecast lane before interleave.
+
+    Live regression: ``reactor_process_limit`` was ~10 while fetch_pending returned
+    12+ tradeable Day0 rows before the first FORECAST/REDECISION row.  The reactor
+    interleave never saw the forecast lane, so ordinary entry/redecision work
+    starved even though the fairness helper was correct for a full page.
+    """
+
+    conn, store = _store()
+    available_at = "2026-05-25T06:00:00+00:00"
+    for i in range(12):
+        store.insert_or_ignore(
+            _day0_event_for_target(
+                key_suffix=f"day0-{i}",
+                target_date="2026-05-25",
+                available_at=available_at,
+            )
+        )
+    fsr = _forecast_event(key_suffix="fsr-behind-day0", target_date="2026-05-25")
+    store.insert_or_ignore(fsr)
+
+    requested_limits: list[int] = []
+    original_fetch = store.fetch_pending
+
+    def _recording_fetch(**kwargs):
+        requested_limits.append(int(kwargs["limit"]))
+        return original_fetch(**kwargs)
+
+    store.fetch_pending = _recording_fetch  # type: ignore[method-assign]
+    reactor, _rejected, submitted = _reactor(
+        store,
+        config=ReactorConfig(day0_is_tradeable=True),
+    )
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert requested_limits and requested_limits[0] > 1
+    assert submitted == [fsr.event_id], (
+        "forecast/redecision lane must receive the guaranteed first processed "
+        f"slot even when Day0 occupies the first small fetch page; submitted={submitted}"
     )
 
 

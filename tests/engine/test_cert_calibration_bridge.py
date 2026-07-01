@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-26
 # Authority basis: Operator-gated funnel #1 unlock (2026-06-10) — first-class calibration
 #   authority for replacement-chain candidates (FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE). Tears
 #   down the Platt-cohort wall: replacement candidates' q never passes through Platt, so the
@@ -7,9 +7,11 @@
 #   RELATIONSHIP tests (Fitz methodology): they assert the cross-function invariant
 #   credential-state -> certificate-authority -> live-gate-verdict holds across the boundary
 #   between the calibration-authority builder, the live admission gate, and the verifier.
-#   pr408 review C1+C2 #1 CRITICAL (2026-06-14): the credential now HONORS the K3 design —
-#   INSUFFICIENT_DATA is admitted-by-default (was UNEVALUATED→blocked, the cold-cell submit
-#   blocker), and UNLICENSED admits ONLY when the shrink was actually applied to the leg.
+#   Typed coverage verdicts license settlement coverage only when they carry enough
+#   settled evidence. INSUFFICIENT_DATA is thin-history provenance and admits through
+#   the conservative fused-bootstrap q_lcb authority, not through the settlement-coverage
+#   authority. UNLICENSED still admits ONLY when the shrink was actually applied to the
+#   leg; no verdict / unknown verdict remains blocked.
 """Quadrant relationship matrix for the replacement calibration credential.
 
 The credential bridges three modules whose boundary the bug lived at:
@@ -18,11 +20,14 @@ The credential bridges three modules whose boundary the bug lived at:
   (3) `_assert_event_bound_calibration_live_admitted` (the live gate) admits/rejects it,
   (4) the verifier's APPROVED_CALIBRATION_AUTHORITIES round-trips the admitted authority.
 
-The quadrants (pr408 #1 corrected):
-  Q1 replacement + bounds + LICENSED / INSUFFICIENT_DATA / UNLICENSED-shrunk -> admitted,
-     FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (INSUFFICIENT_DATA is license-by-default)
+The quadrants:
+  Q1 replacement + bounds + LICENSED / UNLICENSED-shrunk -> admitted,
+     FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE
+  Q1b replacement + bounds + INSUFFICIENT_DATA -> admitted,
+      FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB
   Q2 replacement + NO bounds                   -> IDENTITY_FALLBACK reject (unchanged)
-  Q3 replacement + bounds, NO verdict (None) OR UNLICENSED-unshrunk -> UNEVALUATED reject
+  Q3 replacement + bounds, NO verdict (None) / unknown status OR UNLICENSED-unshrunk
+     -> UNEVALUATED reject
   Q4 legacy candidate, no Platt bucket         -> IDENTITY_FALLBACK reject (unchanged)
 """
 from __future__ import annotations
@@ -34,10 +39,14 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import runtime_cities_by_name, settings
-from src.decision_kernel.verifier import APPROVED_CALIBRATION_AUTHORITIES
+from src.decision_kernel.verifier import (
+    APPROVED_CALIBRATION_AUTHORITIES,
+    DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+)
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
     FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
     FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY,
     _REPLACEMENT_CALIBRATION_CREDENTIAL_KEY,
     _assert_event_bound_calibration_live_admitted,
@@ -47,14 +56,6 @@ from src.engine.event_reactor_adapter import (
 )
 from src.types.market import Bin
 
-
-@pytest.fixture
-def _coverage_gate_on(monkeypatch):
-    """Turn the K3 coverage SHRINK flag ON so an UNLICENSED verdict's shrink is 'applied'
-    (the credential licenses UNLICENSED only when the shrink actually moved the live leg)."""
-    edli = dict(settings._data["edli"])
-    edli["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli)
 
 DECISION_TIME = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 _CITY = "Chicago"
@@ -120,11 +121,11 @@ def _render_payload(credential):
 
 # ---------------------------------------------------------------------------
 # Q1 — replacement + bounds + an ADMITTING coverage verdict -> new authority
-#   LICENSED: admitted unconditionally.
-#   UNLICENSED-shrunk (flag on + q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
+#   LICENSED: admitted at the cert layer.
+#   UNLICENSED-shrunk (q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("status", ["LICENSED", "UNLICENSED"])
-def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_gate_on):
+def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -132,11 +133,11 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_g
     )
     # UNLICENSED admits ONLY when the shrink was actually applied: a real downward shrink
     # (q_lcb_out < q_lcb_in) with the coverage gate ON. LICENSED needs no shrink.
-    verdict = (
-        _coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66)
-        if status == "UNLICENSED"
-        else _coverage_verdict("LICENSED")
-    )
+    if status == "UNLICENSED":
+        verdict = _coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66)
+    else:
+        verdict = _coverage_verdict("LICENSED")
+    expected_samples = 60
     credential = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_FULL",
@@ -153,7 +154,7 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_g
     assert cal_payload["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert cal_payload["coverage_status"] == status
     assert cal_payload["posterior_id"] == 4242
-    assert cal_payload["n_samples"] == 60
+    assert cal_payload["n_samples"] == expected_samples
     assert cal_payload["season"] is not None
 
     # the live gate ADMITS it (no raise)
@@ -164,11 +165,7 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_g
     assert FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
 
 
-def test_q1_insufficient_data_is_admitted_by_default():
-    """pr408 #1 CRITICAL: a thin-history INSUFFICIENT_DATA verdict (n=0, no realized backing)
-    is admitted-by-default — authority FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE, the live gate does
-    NOT raise, and the empty-sample guard does NOT block on n_samples==0. RED-on-revert:
-    restoring the {LICENSED,UNLICENSED} mapping sends this to UNEVALUATED→REJECTED."""
+def test_insufficient_data_coverage_uses_conservative_bootstrap_authority():
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -180,44 +177,79 @@ def test_q1_insufficient_data_is_admitted_by_default():
         coverage_verdict=_coverage_verdict("INSUFFICIENT_DATA", n=0, ratio=None, realized=None),
         family=_family(),
     )
+    assert credential is not None
+
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
-    assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"  # preserved for observability
+    assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
     assert cal_payload["n_samples"] == 0
-    cert = SimpleNamespace(payload=cal_payload)
-    _assert_event_bound_calibration_live_admitted(cert)  # must NOT raise (admitted-by-default)
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
+    assert cal_payload["q_lcb_basis"] == "fused_center_bootstrap_p05"
+    assert cal_payload["bootstrap_draws"] == 200
+
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    assert FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
+
+
+def test_day0_live_observation_hard_fact_calibration_authority_admits():
+    """Day0 hard facts do not need a legacy Platt bucket.
+
+    A DAY0_EXTREME_UPDATED payload has already passed live source/station/date/rounding
+    authority. The certificate must carry that Day0 observation authority directly instead
+    of falling through to IDENTITY_FALLBACK_NO_PLATT_BUCKET.
+    """
+
+    payload = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "raw_value": 72.0,
+        "rounded_value": 72,
+        "station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "horizon_profile": "full",
+    }
+    cal_payload, _clock = _calibration_authority_payload_and_clock(
+        sqlite3.connect(":memory:"),
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        family=SimpleNamespace(city=_CITY, metric=_METRIC, target_date=_TARGET_DATE),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    assert cal_payload["authority"] == DAY0_OBSERVATION_CALIBRATION_AUTHORITY
+    assert cal_payload["input_space"] == "day0_live_observation_hard_fact"
+    assert cal_payload["n_samples"] == 0
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    assert DAY0_OBSERVATION_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
+
+    from src.decision_kernel.compiler import _validate_calibration_payload  # type: ignore[attr-defined]
+
+    _validate_calibration_payload(
+        cal_payload,
+        {"calibration_input_space": "day0_live_observation_hard_fact"},
+        {"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
 
 
 def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):
-    """An UNLICENSED verdict whose shrink was NOT applied to the live leg is the unshrunk
-    overconfident bound serving live — it must BLOCK as UNEVALUATED, not license. Two
-    unshrunk shapes, both blocked: (1) the coverage gate is OFF (the shrink never reached
-    the leg) even with q_lcb_out<q_lcb_in; (2) the gate is ON but the verdict produced no
-    real shrink (q_lcb_out == q_lcb_in)."""
+    """An UNLICENSED verdict with no real shrink is an overconfident bound serving live."""
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
         q_mode="FUSED_NORMAL_FULL",
     )
-    # (1) gate OFF → shrink_applied False even though q_lcb_out < q_lcb_in.
-    edli_off = dict(settings._data["edli"])
-    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli", edli_off)
-    credential = _build_replacement_calibration_credential(
-        replacement_bundle=bundle,
-        q_mode="FUSED_NORMAL_FULL",
-        coverage_verdict=_coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66),
-        family=_family(),
-    )
-    cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
-
-    # (2) gate ON but the verdict produced no real shrink (q_lcb_out == q_lcb_in).
-    edli_on = dict(settings._data["edli"])
-    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli_on)
     credential2 = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_FULL",
@@ -237,7 +269,7 @@ def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):
         (None, "fused_center_bootstrap_p05", "FUSED_NORMAL_FULL"),          # q_lcb_json null
         ({}, "fused_center_bootstrap_p05", "FUSED_NORMAL_FULL"),            # empty bounds map
         ({"bin-a": 0.8}, "wilson_member_vote", "FUSED_NORMAL_FULL"),        # wrong basis
-        ({"bin-a": 0.8}, "fused_center_bootstrap_p05", "SOFT_ANCHOR_FALLBACK"),  # bounds-missing mode
+        ({"bin-a": 0.8}, "fused_center_bootstrap_p05", "FUSED_CENTER_ONLY_NORMAL"),
     ],
 )
 def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, q_mode):
@@ -255,9 +287,9 @@ def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, 
 
 
 # ---------------------------------------------------------------------------
-# Q3 — replacement + bounds, NO coverage verdict (None) -> UNEVALUATED reject (distinct).
-#   pr408 #1: INSUFFICIENT_DATA is NO LONGER here (it admits-by-default, see Q1). Only the
-#   absence of ANY verdict (None — the machinery could not evaluate the scope) blocks.
+# Q3 — replacement + bounds, no evaluated coverage verdict -> UNEVALUATED reject
+#   (distinct). INSUFFICIENT_DATA is evaluated thin history and therefore takes the
+#   conservative-bootstrap authority path tested above.
 # ---------------------------------------------------------------------------
 def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked():
     bundle = _replacement_bundle(
@@ -343,7 +375,32 @@ def test_strictness_fused_bootstrap_empty_sample_still_blocks():
     cert = SimpleNamespace(
         payload={"authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY, "n_samples": 0}
     )
-    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED"):
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_SAMPLE_FLOOR_BLOCKED"):
+        _assert_event_bound_calibration_live_admitted(cert)
+
+
+def test_fused_bootstrap_missing_coverage_status_blocks_even_with_samples():
+    cert = SimpleNamespace(
+        payload={
+            "authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+            "n_samples": 60,
+        }
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:missing"):
+        _assert_event_bound_calibration_live_admitted(cert)
+
+
+def test_fused_bootstrap_unknown_coverage_status_blocks_even_with_samples():
+    cert = SimpleNamespace(
+        payload={
+            "authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+            "coverage_status": "UNKNOWN",
+            "n_samples": 60,
+        }
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:UNKNOWN"):
         _assert_event_bound_calibration_live_admitted(cert)
 
 
@@ -385,10 +442,8 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
     )
     assert verdict is not None
     assert verdict.status == "INSUFFICIENT_DATA"
-    # pr408 #1 CRITICAL: an INSUFFICIENT_DATA verdict is admitted-by-default — the credential
-    # is FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (NOT UNEVALUATED). The cold thin-history cell now
-    # reaches live admission instead of being blocked. RED-on-revert: restoring the old
-    # mapping sends it to UNEVALUATED.
+    # INSUFFICIENT_DATA is preserved for provenance and admits through the conservative
+    # bootstrap q_lcb authority, not through settlement-coverage licensing.
     credential = _build_replacement_calibration_credential(
         replacement_bundle=_replacement_bundle(
             q_lcb={"bin-a": 0.80},
@@ -400,10 +455,71 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
         family=family,
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
-    # the live gate ADMITS it even with n_samples==0 (empty-sample guard honors INSUFFICIENT_DATA)
     _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+
+
+def test_selected_leg_coverage_verdict_controls_replacement_credential(monkeypatch):
+    """Coverage credentials are scoped to the selected bin+direction, not the family.
+
+    The first candidate's buy_yes can be LICENSED while the selected buy_no leg is still
+    thin. The selected buy_no must use FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB, not inherit
+    the sibling YES settlement-coverage license.
+    """
+
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    from src.calibration.settlement_backward_coverage import CoverageObservation
+
+    def fake_observations(*, direction, claimed_q_lcb, **_kwargs):
+        if direction == "buy_yes":
+            return [CoverageObservation(q_lcb=float(claimed_q_lcb), won=True) for _ in range(40)]
+        if direction == "buy_no":
+            return []
+        raise AssertionError(direction)
+
+    monkeypatch.setattr(adapter, "_settlement_coverage_observations", fake_observations)
+    candidate = SimpleNamespace(condition_id="cond-1", bin=Bin(70, 71, "F", "70-71°F"))
+    family = SimpleNamespace(
+        city=_CITY, metric=_METRIC, target_date=_TARGET_DATE, candidates=(candidate,)
+    )
+    lcb = QlcbByDirection()
+    _set_qlcb_provenance(lcb, ("cond-1", "buy_yes"), 0.80, source="FORECAST_BOOTSTRAP")
+    _set_qlcb_provenance(lcb, ("cond-1", "buy_no"), 0.70, source="FORECAST_BOOTSTRAP")
+
+    verdicts = adapter._maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=sqlite3.connect(":memory:"),
+        lcb_by_direction=lcb,
+    )
+
+    assert verdicts[("cond-1", "buy_yes")].status == "LICENSED"
+    assert verdicts[("cond-1", "buy_no")].status == "INSUFFICIENT_DATA"
+    bundle = _replacement_bundle(
+        q_lcb={"bin-a": 0.80},
+        q_lcb_basis="fused_center_bootstrap_p05",
+        q_mode="FUSED_NORMAL_FULL",
+    )
+    yes_payload, _ = _render_payload(
+        _build_replacement_calibration_credential(
+            replacement_bundle=bundle,
+            q_mode="FUSED_NORMAL_FULL",
+            coverage_verdict=verdicts[("cond-1", "buy_yes")],
+            family=family,
+        )
+    )
+    no_payload, _ = _render_payload(
+        _build_replacement_calibration_credential(
+            replacement_bundle=bundle,
+            q_mode="FUSED_NORMAL_FULL",
+            coverage_verdict=verdicts[("cond-1", "buy_no")],
+            family=family,
+        )
+    )
+
+    assert yes_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert no_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=no_payload))
 
 
 def test_family_coverage_verdict_none_when_no_candidate_lcb():
@@ -447,13 +563,10 @@ def _family_one_yes_lcb():
 
 
 def test_structural_coverage_fault_raises_not_insufficient_data(monkeypatch):
-    """A structural settlement read/schema fault, with the coverage SAFETY gate ON, raises
+    """A structural settlement read/schema fault raises
     QLCB_COVERAGE_AUTHORITY_FAULT (fail closed) — it must NOT degrade to INSUFFICIENT_DATA
     (which would mask a broken read as thin data and admit-by-default an unverified bound).
     RED-on-revert: swallowing the fault to None/INSUFFICIENT_DATA removes the raise."""
-    edli_on = dict(settings._data["edli"])
-    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli_on)
     # claim history present so the path REACHES the settlement query (not short-circuited thin)
     monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
     family, lcb = _family_one_yes_lcb()
@@ -462,20 +575,6 @@ def test_structural_coverage_fault_raises_not_insufficient_data(monkeypatch):
             family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
         )
 
-
-def test_structural_coverage_fault_inert_when_gate_off(monkeypatch):
-    """Gate OFF: a structural fault stays inert (the legacy fail-open default) — the verdict is
-    a non-blocking INSUFFICIENT_DATA, byte-identical to today. The fail-closed behavior is
-    scoped to the SAFETY gate being ON."""
-    edli_off = dict(settings._data["edli"])
-    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli", edli_off)
-    monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
-    family, lcb = _family_one_yes_lcb()
-    verdict = _replacement_family_coverage_verdict(
-        family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
-    )
-    assert verdict is not None and verdict.status == "INSUFFICIENT_DATA"
 
 
 # ---------------------------------------------------------------------------

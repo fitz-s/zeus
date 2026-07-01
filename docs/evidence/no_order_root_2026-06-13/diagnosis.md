@@ -12,7 +12,7 @@ Status: DIAGNOSIS. Supersedes the gate-mass framing of melodic-orbiting-pearl.md
 
 ## Verdict: the no-order incident is TWO independent blockers — NEITHER is the Layer-A gate-mass
 
-The approved K-cut plan (and `docs/operations/kcut_decision_path_collapse_2026-06-13.md`)
+The approved K-cut plan (and `docs/archive/2026-Q2/operations_historical/kcut_decision_path_collapse_2026-06-13.md`)
 held that ~174 Layer-A gates wrongly kill +EV near-center buy_no. **Code reading +
 live receipts refute that premise.** The two real blockers:
 

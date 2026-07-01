@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     idempotency_key TEXT UNIQUE,
     venue_status TEXT,
     source_module TEXT NOT NULL,
-    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest','shadow')),
+    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest')),
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
-    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     -- economics columns. Balance-only rescue writes the chain aggregate
     -- here instead of mutating entry_price / cost_basis_usd / size_usd /
     -- shares. Additive on legacy DBs via

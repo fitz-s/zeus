@@ -91,6 +91,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMITTING", "SUBMIT_TIMEOUT_UNKNOWN"): "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("SUBMITTING", "CLOSED_MARKET_UNKNOWN"):  "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("SUBMITTING", "CANCEL_REQUESTED"):       "CANCEL_PENDING",
+    ("SUBMITTING", "EXPIRED"):                "EXPIRED",
     ("SUBMITTING", "REVIEW_REQUIRED"):        "REVIEW_REQUIRED",
 
     # from ACKED
@@ -149,6 +150,23 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
 _PROVENANCE_SOURCES = frozenset(
     {"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN", "OPERATOR", "FAKE_VENUE"}
 )
+_ENTRY_SUBMIT_REQUIRED_COMPONENTS = frozenset(
+    {"entry_economics", "entry_actionable_certificate"}
+)
+_ENTRY_SUBMIT_ECONOMICS_DETAIL_FIELDS = (
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "min_entry_price",
+    "limit_price",
+    "submit_edge",
+    "expected_profit_usd",
+    "min_expected_profit_usd",
+    "submit_edge_density",
+    "min_submit_edge_density",
+    "shares",
+    "qkernel_side",
+)
 _PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
     "pre_submit_collateral_reservation_failed",
     # Legacy pre-fix commands could fail before SDK submission, remain in
@@ -177,9 +195,9 @@ _ORDER_FACT_STATES = frozenset(
         "CANCEL_FAILED",
         "EXPIRED",
         "VENUE_WIPED",
-        "HEARTBEAT_CANCEL_SUSPECTED",
     }
-)
+)  # HEARTBEAT_CANCEL_SUSPECTED removed 2026-06-29: 0 live rows, no writer (dead value).
+# DB CHECK in db.py still permits it; it is narrowed out in the CHECK-narrowing step.
 _TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES = frozenset(
     {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
@@ -1020,7 +1038,7 @@ def _assert_snapshot_gate(
         StaleMarketSnapshotError,
         assert_snapshot_executable,
     )
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
 
     if not isinstance(snapshot_id, str) or not snapshot_id.strip():
         raise StaleMarketSnapshotError("venue command requires executable market snapshot_id")
@@ -1031,13 +1049,18 @@ def _assert_snapshot_gate(
         raise StaleMarketSnapshotError(
             "executable_market_snapshots table is unavailable; cannot validate venue command"
         ) from exc
+    checked_at = _coerce_snapshot_checked_at(checked_at)
+    if snapshot is not None and snapshot_is_invalidated(conn, snapshot, checked_at=checked_at):
+        raise StaleMarketSnapshotError(
+            f"ExecutableMarketSnapshot {snapshot.snapshot_id} was invalidated before submit"
+        )
     assert_snapshot_executable(
         snapshot,
         token_id=token_id,
         side=side,
         price=price,
         size=size,
-        now=_coerce_snapshot_checked_at(checked_at),
+        now=checked_at,
         expected_min_tick_size=expected_min_tick_size,
         expected_min_order_size=expected_min_order_size,
         expected_neg_risk=expected_neg_risk,
@@ -1075,19 +1098,25 @@ def append_event(
     with _savepoint_atomic(conn):
         with _row_factory_as(conn, None):
             row = conn.execute(
-                "SELECT state FROM venue_commands WHERE command_id = ?",
+                "SELECT state, intent_kind FROM venue_commands WHERE command_id = ?",
                 (command_id,),
             ).fetchone()
         if row is None:
             raise ValueError(f"Unknown command_id: {command_id!r}")
 
         current_state = row[0]
+        intent_kind = row[1]
         key = (current_state, event_type)
         if key not in _TRANSITIONS:
             raise ValueError(
                 f"Illegal command-event grammar transition: "
                 f"state={current_state!r} event={event_type!r}"
             )
+        _validate_entry_submit_payload(
+            intent_kind=intent_kind,
+            event_type=event_type,
+            payload=payload,
+        )
         _validate_review_clearance_payload(
             conn=conn,
             current_state=current_state,
@@ -1154,8 +1183,65 @@ def append_event(
 
             release_reservation_for_command_state(conn, command_id, state_after)
             release_exit_mutex_for_command_state(conn, command_id, state_after)
+        elif state_after == "REVIEW_REQUIRED":
+            # REVIEW_REQUIRED remains a durable proof/recovery blocker for new
+            # replacement sells, but it must not keep the short-lived exit
+            # mutex held across restarts. The venue command row itself owns the
+            # unresolved-side-effect guard.
+            from src.execution.exit_safety import release_exit_mutex_for_command_state
+
+            release_exit_mutex_for_command_state(conn, command_id, state_after)
 
     return event_id
+
+
+def _validate_entry_submit_payload(
+    *,
+    intent_kind: str,
+    event_type: str,
+    payload: Optional[dict],
+) -> None:
+    if intent_kind != "ENTRY" or event_type != "SUBMIT_REQUESTED":
+        return
+    if not isinstance(payload, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability payload")
+    capability = payload.get("execution_capability")
+    if not isinstance(capability, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability")
+    if capability.get("allowed") is not True:
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires allowed execution_capability")
+    components = capability.get("components")
+    if not isinstance(components, list):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability.components")
+    by_name = {
+        str(component.get("component") or ""): component
+        for component in components
+        if isinstance(component, dict)
+    }
+    missing = sorted(_ENTRY_SUBMIT_REQUIRED_COMPONENTS.difference(by_name))
+    if missing:
+        raise ValueError(
+            "ENTRY SUBMIT_REQUESTED missing live submit proof components: "
+            + ",".join(missing)
+        )
+    for name in sorted(_ENTRY_SUBMIT_REQUIRED_COMPONENTS):
+        component = by_name[name]
+        if component.get("allowed") is not True:
+            raise ValueError(f"ENTRY SUBMIT_REQUESTED {name} component is not allowed")
+    economics = by_name["entry_economics"]
+    details = economics.get("details")
+    if not isinstance(details, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED entry_economics requires details")
+    detail_missing = [
+        field
+        for field in _ENTRY_SUBMIT_ECONOMICS_DETAIL_FIELDS
+        if details.get(field) in (None, "")
+    ]
+    if detail_missing:
+        raise ValueError(
+            "ENTRY SUBMIT_REQUESTED entry_economics missing details: "
+            + ",".join(detail_missing)
+        )
 
 
 def _validate_review_clearance_payload(
@@ -1931,6 +2017,8 @@ def _validate_review_confirmed_fill_payload(
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
+        "review_required_matched_order_fact_with_positive_trade_fact",
+        "review_required_terminal_order_fact_with_held_projection",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -1960,6 +2048,21 @@ def _validate_review_confirmed_fill_payload(
             "residual_size_is_dust",
             "active_projection_matches_confirmed_fill",
         )
+    elif proof_class == "review_required_matched_order_fact_with_positive_trade_fact":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "positive_trade_fact",
+            "matched_order_fact_positive",
+        )
+    elif proof_class == "review_required_terminal_order_fact_with_held_projection":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "matched_order_fact_positive",
+            "residual_size_is_dust",
+            "active_projection_matches_confirmed_fill",
+        )
     else:
         required_true = (
             "latest_event_is_review_required",
@@ -1983,6 +2086,7 @@ def _validate_review_confirmed_fill_payload(
         "command_recovery._review_required_cancel_unknown_live_order_recovery",
         "command_recovery._reconcile_row",
         "command_recovery.reconcile_matched_cancel_review_required_entries",
+        "command_recovery.reconcile_matched_order_facts",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
@@ -2321,7 +2425,7 @@ def _actual_review_confirmed_fill_predicates(
             (command_id, venue_order_id),
         ).fetchone()
         command = conn.execute(
-            "SELECT position_id FROM venue_commands WHERE command_id = ?",
+            "SELECT position_id, state FROM venue_commands WHERE command_id = ?",
             (command_id,),
         ).fetchone()
         position_rows = conn.execute(
@@ -2338,6 +2442,7 @@ def _actual_review_confirmed_fill_predicates(
             ),
         ).fetchall()
     latest_event_type = str(events[-1]["event_type"] or "") if events else ""
+    command_state = str(command["state"] or "") if command is not None else ""
     prior_fill_confirmed = False
     for event in events[:-1]:
         if str(event["event_type"] or "") != "FILL_CONFIRMED":
@@ -2407,10 +2512,27 @@ def _actual_review_confirmed_fill_predicates(
         and payload_filled is not None
         and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
     )
+    order_fact_matched = _decimal_or_none(order_fact["matched_size"]) if order_fact is not None else None
+    order_fact_remaining = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
+    matched_order_fact_positive = (
+        order_fact is not None
+        and payload_filled is not None
+        and order_fact_matched is not None
+        and order_fact_matched > 0
+        and abs(order_fact_matched - payload_filled) <= Decimal("0.000001")
+        and order_fact_remaining is not None
+        and Decimal("0") <= order_fact_remaining <= Decimal("0.011")
+    )
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         required_predicates = {}
     return {
+        "command_state_review_required": command_state == "REVIEW_REQUIRED",
+        "latest_event_is_review_boundary": latest_event_type in {
+            "REVIEW_REQUIRED",
+            "CANCEL_FAILED",
+            "CANCEL_REPLACE_BLOCKED",
+        },
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
         "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
@@ -2419,6 +2541,7 @@ def _actual_review_confirmed_fill_predicates(
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
+        "matched_order_fact_positive": matched_order_fact_positive,
         "positive_trade_facts": aggregate_positive_trade_facts,
         "cancel_response_not_canceled_because_matched": (
             "not_canceled" in cancel_text and "matched" in cancel_text
@@ -2829,6 +2952,7 @@ def append_order_fact(
                     TERMINAL_NO_FILL,
                     VenueOrderTruthReducer,
                 )
+                from src.state.canonical_projections import is_open_order_fact
 
                 reduced = VenueOrderTruthReducer.reduce(
                     order_facts=[
@@ -2840,7 +2964,7 @@ def append_order_fact(
                         prior_terminal,
                     ],
                     trade_filled_size="0",
-                    open_order_present=state in {"LIVE", "RESTING", "PARTIALLY_MATCHED"},
+                    open_order_present=is_open_order_fact(state),
                 )
                 if reduced.proof_class in {TERMINAL_NO_FILL, TERMINAL_PARTIAL}:
                     return int(prior_terminal["fact_id"])

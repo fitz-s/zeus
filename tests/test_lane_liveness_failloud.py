@@ -7,7 +7,7 @@
 #   failures were swallowed silently and a dead lane looked identical to a
 #   quiet one. These unit tests pin: (a) a swallowed lane-write failure now
 #   FAILS LOUD (logger.error naming the lane) + is COUNTED on the summary while
-#   preserving the legacy degraded flag; (b) the heartbeat lane-liveness check
+#   marking explicit observability degradation; (b) the heartbeat lane-liveness check
 #   emits a WARNING naming a failed / zero-write lane and stays SILENT when all
 #   expected lanes wrote. Unit-level: no engine boot, no live DB; summaries are
 #   constructed directly.
@@ -31,21 +31,21 @@ from src.control.heartbeat_supervisor import data_lane_health_check
 # --------------------------------------------------------------------------- #
 # Part 1: _record_lane_write_failure / _record_lane_write_success (cycle_runtime)
 # --------------------------------------------------------------------------- #
-def test_record_lane_write_failure_counts_sets_degraded_and_logs_error(caplog):
+def test_record_lane_write_failure_counts_sets_observability_degraded_and_logs_error(caplog):
     summary: dict = {}
     exc = RuntimeError("db is locked")
 
     with caplog.at_level(logging.ERROR, logger="src.engine.cycle_runtime"):
-        _record_lane_write_failure(summary, "shadow_signal_build", exc)
+        _record_lane_write_failure(summary, "decision_signal_build", exc)
 
     # (a) per-lane failure counter incremented
-    assert summary["lane_write_failures"] == {"shadow_signal_build": 1}
-    # (b) legacy behavior preserved: degraded still set
-    assert summary["degraded"] is True
+    assert summary["lane_write_failures"] == {"decision_signal_build": 1}
+    # (b) telemetry/write degradation is explicit and not confused with RiskGuard.
+    assert summary["observability_degraded"] is True
     # (c) failed LOUD: an ERROR was logged naming the lane
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert error_records, "expected a logger.error on lane write failure"
-    assert any("shadow_signal_build" in r.getMessage() for r in error_records)
+    assert any("decision_signal_build" in r.getMessage() for r in error_records)
     assert any("LANE WRITE FAILED" in r.getMessage() for r in error_records)
 
 
@@ -59,7 +59,7 @@ def test_record_lane_write_failure_accumulates_per_lane():
         "forward_market_substrate": 2,
         "opportunity_fact": 1,
     }
-    assert summary["degraded"] is True
+    assert summary["observability_degraded"] is True
 
 
 def test_record_lane_write_success_counts_per_lane():
@@ -72,8 +72,8 @@ def test_record_lane_write_success_counts_per_lane():
         "opportunity_fact": 2,
         "probability_trace": 1,
     }
-    # success path does NOT flip degraded
-    assert "degraded" not in summary
+    # success path does NOT flip observability degradation.
+    assert "observability_degraded" not in summary
 
 
 # --------------------------------------------------------------------------- #

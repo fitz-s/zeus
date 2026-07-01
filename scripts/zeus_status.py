@@ -48,6 +48,15 @@ STATE = "/Users/leofitz/zeus/state"
 WORLD_DB = f"{STATE}/zeus-world.db"
 TRADES_DB = f"{STATE}/zeus_trades.db"
 FORECASTS_DB = f"{STATE}/zeus-forecasts.db"
+EVENT_REACTOR_CONSUMER = "edli_reactor_v1"
+EVENT_PROCESSING_STATUSES = (
+    "processed",
+    "ignored",
+    "expired",
+    "dead_letter",
+    "pending",
+    "processing",
+)
 
 # Substrate-transient vs honest-economics classification for BLOCKS.
 # Substring sets (case-insensitive) — display-only, not authority.
@@ -57,14 +66,14 @@ FORECASTS_DB = f"{STATE}/zeus-forecasts.db"
 # (e.g. LIVE_INFERENCE_INPUTS_MISSING = a missing q_ucb input, which is a
 # data-availability problem, NOT honest "no edge"). The reason text is the
 # decisive signal; transient patterns are checked first because a missing
-# input / blocked snapshot / shadow-scope gate means we never even got to
+# input / blocked snapshot / non-submit scope gate means we never even got to
 # weigh the economics.
 _TRANSIENT_TOKENS = (
     "TRANSIENT", "STALE", "LOCK", "NOT_COMPLETE", "NOT_LIVE_ELIGIBLE",
     "SNAPSHOT_BLOCKED", "EXHAUSTED", "SOURCE_RUN", "FSR_",
     "NATIVE_ASK_MISSING", "INPUTS_MISSING", "MISSING", "BUSY", "TIMEOUT",
     "RETRY", "DEGRADED", "REVIEW_REQUIRED", "AVAILABILITY", "FRESH",
-    "SHADOW_ONLY", "SCOPE", "UNAVAILABLE", "RISK_GUARD",  # riskguard storms = substrate (memory 2026-06-12)
+    "SCOPE", "UNAVAILABLE", "RISK_GUARD",
 )
 _ECONOMIC_TOKENS = (
     "NON_POSITIVE", "NEGATIVE", "EDGE", "NO_EDGE", "Q_LCB",
@@ -131,7 +140,7 @@ def classify_block(stage: str | None, reason: str | None) -> str:
     """transient | economic | unknown — reason-led substring heuristic, display only.
 
     The REASON dominates the stage name: a substrate cause (missing input,
-    blocked snapshot, shadow-scope gate, riskguard storm) means the trade
+    blocked snapshot, non-submit scope gate, riskguard storm) means the trade
     never reached an honest economic verdict, so transient is checked first
     and against the reason text. The stage name is only a weak tiebreaker.
     """
@@ -188,22 +197,29 @@ def section_events() -> dict:
         try:
             c1 = iso_cutoff(hours=1)
             c24 = iso_cutoff(hours=24)
-            # Pending = events with no terminal processing row.
+            # Current backlog = reactor-owned rows currently marked pending.
+            #
+            # Do not scan opportunity_events with a NOT EXISTS over the full
+            # processing history here. That answers a historical data-shape
+            # question, not the operator's current runtime question, and it
+            # hangs on live DBs with millions of ignored cache events.
             out["pending"] = conn.execute(
-                "SELECT count(*) FROM opportunity_events e "
-                "WHERE NOT EXISTS (SELECT 1 FROM opportunity_event_processing p "
-                "  WHERE p.event_id = e.event_id "
-                "    AND p.processing_status IN "
-                "        ('processed','dead_letter','ignored','expired'))"
+                "SELECT count(*) FROM opportunity_event_processing "
+                "WHERE consumer_name=? AND processing_status='pending'",
+                (EVENT_REACTOR_CONSUMER,),
             ).fetchone()[0]
 
             def _proc_counts(cut: str) -> dict:
-                rows = conn.execute(
-                    "SELECT processing_status, count(*) FROM opportunity_event_processing "
-                    "WHERE updated_at > ? GROUP BY processing_status",
-                    (cut,),
-                ).fetchall()
-                return {r[0]: r[1] for r in rows}
+                counts: dict[str, int] = {}
+                for status in EVENT_PROCESSING_STATUSES:
+                    n = conn.execute(
+                        "SELECT count(*) FROM opportunity_event_processing "
+                        "WHERE consumer_name=? AND processing_status=? AND updated_at > ?",
+                        (EVENT_REACTOR_CONSUMER, status, cut),
+                    ).fetchone()[0]
+                    if n:
+                        counts[status] = int(n)
+                return counts
 
             out["proc_1h"] = _proc_counts(c1)
             out["proc_24h"] = _proc_counts(c24)
@@ -313,19 +329,22 @@ def section_surface() -> dict:
         tr = ro(TRADES_DB)
         fc2 = ro(FORECASTS_DB)
         try:
-            # price-cache coverage: distinct condition_ids with a snapshot today
+            # price-cache coverage: latest current surface, not the full historical
+            # snapshot ledger. The historical table is audit evidence; status must
+            # answer the current operator question in bounded time.
             cov = tr.execute(
-                "SELECT count(DISTINCT condition_id) FROM executable_market_snapshots "
+                "SELECT count(DISTINCT condition_id) FROM executable_market_snapshot_latest "
                 "WHERE captured_at > ?",
                 (iso_cutoff(hours=24),),
             ).fetchone()[0]
             out["price_cache_conditions_24h"] = cov
-            # captured_at age percentiles (cheap: order by captured_at desc per condition)
+            # captured_at age percentiles over latest condition surface.
             ages = tr.execute(
-                "SELECT captured_at FROM ("
-                "  SELECT condition_id, max(captured_at) AS captured_at "
-                "  FROM executable_market_snapshots WHERE captured_at > ? "
-                "  GROUP BY condition_id) ORDER BY captured_at",
+                "SELECT max(captured_at) AS captured_at "
+                "FROM executable_market_snapshot_latest "
+                "WHERE captured_at > ? "
+                "GROUP BY condition_id "
+                "ORDER BY captured_at",
                 (iso_cutoff(hours=24),),
             ).fetchall()
             if ages:
@@ -382,7 +401,7 @@ def _screen_edges(fc: sqlite3.Connection, tr: sqlite3.Connection, today: str) ->
             if not cond or label not in qlcb:
                 continue
             row = tr.execute(
-                "SELECT orderbook_top_ask FROM executable_market_snapshots "
+                "SELECT orderbook_top_ask FROM executable_market_snapshot_latest "
                 "WHERE condition_id=? AND outcome_label='YES' "
                 "ORDER BY captured_at DESC LIMIT 1",
                 (cond,),
@@ -412,7 +431,7 @@ def section_selection() -> dict:
     slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
     edge (winner's curse corrected); slope << 1 means still under-shrinking;
     intercept != 0 means residual center bias. This is the settlement-graded
-    winner's-curse diagnostic over the EB-shrinkage SHADOW columns (the
+    winner's-curse diagnostic over the EB-shrinkage audit columns (the
     decision-replacement flag was removed 2026-06-13; the live selection gate is
     the BH/FDR pass unconditionally — these columns remain settlement telemetry).
 
@@ -449,7 +468,7 @@ def section_selection() -> dict:
                 authority_by_token[r["token_id"]] = r["selection_authority"]
         out["receipts_with_edge_shrunk"] = len(shrunk_by_token)
         if not shrunk_by_token:
-            out["status"] = "no receipts carry edge_shrunk yet (shadow not populated)"
+            out["status"] = "no receipts carry edge_shrunk yet (audit column not populated)"
             return out
 
         tconn = ro(TRADES_DB)
@@ -897,7 +916,8 @@ def section_price_holes() -> dict:
         out["cities_total"] = 0
         return out
 
-    # 2. Freshest captured_at per condition_id from trades DB (no cross-DB JOIN).
+    # 2. Freshest captured_at per condition_id from the current latest table
+    #    (no cross-DB JOIN). Do not scan the historical snapshot ledger here.
     #    Use a single query with IN over all condition_ids across all open cities.
     all_conds = [c for conds in city_to_conds.values() for c in conds]
     try:
@@ -906,7 +926,7 @@ def section_price_holes() -> dict:
             placeholders = ",".join("?" * len(all_conds))
             cond_snap_rows = tr.execute(
                 f"SELECT condition_id, max(captured_at) AS freshest "
-                f"FROM executable_market_snapshots "
+                f"FROM executable_market_snapshot_latest "
                 f"WHERE condition_id IN ({placeholders}) "
                 f"GROUP BY condition_id",
                 all_conds,

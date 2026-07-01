@@ -89,11 +89,35 @@ _REGISTRY: dict[str, DisseminationEntry] = {
         provenance=AvailabilityProvenance.RECONSTRUCTED,
         schedule_url="https://www.dwd.de/EN/ourservices/nwp_forecast_data/nwp_forecast_data.html",
     ),
+    "icon_d2_previous_runs": DisseminationEntry(
+        source_name="icon_d2_previous_runs",
+        derive=_reconstructed_available_at,
+        provenance=AvailabilityProvenance.RECONSTRUCTED,
+        schedule_url="https://www.dwd.de/EN/ourservices/nwp_forecast_data/nwp_forecast_data.html",
+    ),
     "ukmo_previous_runs": DisseminationEntry(
         source_name="ukmo_previous_runs",
         derive=_reconstructed_available_at,
         provenance=AvailabilityProvenance.RECONSTRUCTED,
         schedule_url="https://www.metoffice.gov.uk/research/approach/modelling-systems/unified-model/weather-forecasting",
+    ),
+    "gem_previous_runs": DisseminationEntry(
+        source_name="gem_previous_runs",
+        derive=_reconstructed_available_at,
+        provenance=AvailabilityProvenance.RECONSTRUCTED,
+        schedule_url="https://weather.gc.ca/grib/index_e.html",
+    ),
+    "jma_previous_runs": DisseminationEntry(
+        source_name="jma_previous_runs",
+        derive=_reconstructed_available_at,
+        provenance=AvailabilityProvenance.RECONSTRUCTED,
+        schedule_url="https://www.jma.go.jp/jma/en/Activities/nwp.html",
+    ),
+    "arome_previous_runs": DisseminationEntry(
+        source_name="arome_previous_runs",
+        derive=_reconstructed_available_at,
+        provenance=AvailabilityProvenance.RECONSTRUCTED,
+        schedule_url="https://meteofrance.com/",
     ),
     "openmeteo_previous_runs": DisseminationEntry(
         source_name="openmeteo_previous_runs",

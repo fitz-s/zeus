@@ -30,7 +30,7 @@ def _evidence() -> dict[str, object]:
         "replacement suite 228 passed",
         "live-root simple-switch bundle preview captured",
     ]
-    payload["notes"] = ["shadow/veto only; no trade authority"]
+    payload["notes"] = ["audit evidence only; no trade authority"]
     return payload
 
 

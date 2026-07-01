@@ -6,7 +6,7 @@
 # 2026-05-26 FT-ship F2: init_ens_bias_schema now also applies canonical-extension
 #   ALTERs idempotently so init_schema (world.db boot) yields a runtime-ready table
 #   without requiring a separate one-off migration call.
-#   Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+#   Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
 # 2026-05-26 FT-ship F4: read_bias_model now requires error_model_family and filters
 #   AND authority = 'VERIFIED' so STAGING/LEGACY rows can never leak into the
 #   live FT path (no `is_active` column exists; authority + family are the
@@ -643,7 +643,7 @@ def read_bias_model(
     applied only when the canonical-extension columns are present (PRAGMA guard);
     on a schema that predates F2 migration the call degrades to the base filter.
     No ``is_active`` column exists — authority + family are the discriminators.
-    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
+    Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
 
     Domain-canonicality antibody (2026-05-28):
       * ``require_gate_set_hash``: when supplied, the row is REJECTED (returns None)

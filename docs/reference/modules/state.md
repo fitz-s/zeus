@@ -38,6 +38,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 
 ## 7. Public interfaces
 - DB connection and write helpers in `db.py`
+- DB-set write leases and single-DB transaction coordination in `write_coordinator.py`
 - Projection rebuild/read helpers
 - Portfolio read models and lifecycle-manager transitions
 - Truth-file emitters and readers where still needed for compatibility
@@ -52,6 +53,9 @@ This is the strongest code truth surface after executable tests. Delivery law al
 | File / surface | Role |
 |---|---|
 | `db.py` | Canonical write API and high-blast-radius state anchor, including R3 M5 `exchange_reconcile_findings` and R3 R1 `settlement_commands` schema. |
+| `write_coordinator.py` | Runtime DB write coordinator: one writer gate per DB file across LIVE/BULK classes, canonical DB-set lease order, single-DB `BEGIN IMMEDIATE` transactions, and lease telemetry. Price-channel world+trade write units are migrated; remaining production writers still need coverage. |
+| `schema/execution_feasibility_evidence_schema.py` | Trade quote evidence append table plus compact latest-state mirror for hot pre-submit freshness reads. |
+| `snapshot_repo.py` | Append-only executable market snapshot journal plus `executable_market_snapshot_latest`, a compact latest-state mirror for bounded refresh-priority reads. |
 | `ledger.py` | Append-only economic/lifecycle event substrate. |
 | `projection.py` | Deterministic fold/rebuild layer. |
 | `lifecycle_manager.py` | Legal transition enforcement. |
@@ -83,6 +87,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - tests/test_source_run_schema.py
 - tests/test_readiness_state_schema.py
 - tests/test_market_topology_state_schema.py
+- tests/state/test_write_coordinator.py
 
 ## 11. Invariants
 - Append event before projection; never let derived JSON outrank canonical DB/event truth.

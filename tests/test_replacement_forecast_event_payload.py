@@ -181,7 +181,7 @@ def test_replacement_live_payload_carries_product_and_dependency_identity() -> N
     }
 
 
-def test_replacement_live_payload_rejects_shadow_bundle_unready_or_mismatched_identity() -> None:
+def test_replacement_live_payload_rejects_blocked_bundle_unready_or_mismatched_identity() -> None:
     readiness = _readiness()
     bad_bundle = ReplacementForecastPosteriorBundle(
         **{**_bundle().__dict__, "source_id": "different_source_id"}

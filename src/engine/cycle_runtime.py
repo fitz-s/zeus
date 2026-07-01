@@ -24,12 +24,18 @@ from types import SimpleNamespace
 from typing import Any
 
 from src.config import get_mode, state_path
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.position_truth import (
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+    has_current_money_risk_chain_state,
+)
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
+    TERMINAL_STATES,
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
     is_terminal_state,
@@ -42,11 +48,14 @@ from src.state.portfolio import (
     FILL_AUTHORITY_NONE,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     INACTIVE_RUNTIME_STATES,
+    get_open_positions,
 )
 
 logger = logging.getLogger(__name__)
 
 SOURCE_WRITER_FRONTIER_STALE_SECONDS = 5 * 60
+_REDECISION_QUARANTINE_CHAIN_STATES = REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
+_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS = 12 * 3600
 
 
 # H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
@@ -61,9 +70,8 @@ def _canonical_strategy_keys() -> frozenset[str]:
     """Strategies cycle_runtime treats as canonical for telemetry/attribution.
 
     Equals the registry's ``live_safe_keys()`` — every boot-allowed strategy
-    (live + shadow) is canonical because shadow strategies still emit
-    decisions that need attribution. Recomputed on every call so registry
-    swaps in tests propagate without import-order surprises.
+    is canonical for attribution. Recomputed on every call so registry swaps
+    in tests propagate without import-order surprises.
     """
     from src.strategy.strategy_profile import live_safe_keys
     return live_safe_keys()
@@ -90,9 +98,7 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
-_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(
-    {"settled", "voided", "admin_closed", "quarantined"}
-)
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES)
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
 )
@@ -330,6 +336,15 @@ def _exit_evidence_gate_allows_statistical_exit(
     summary: dict,
     deps,
 ) -> tuple[bool, str | None]:
+    day0_immature_reason = _day0_immature_exit_authority_reason(pos)
+    if day0_immature_reason and _exit_trigger_requires_mature_day0_authority(exit_trigger):
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason=f"DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:{day0_immature_reason}",
+        )
     if exit_trigger not in _D4_ASYMMETRIC_EXIT_TRIGGERS:
         return True, None
     if conn is None:
@@ -568,7 +583,7 @@ def _attach_corrected_pricing_authority(
     tokens = dict(getattr(decision, "tokens", {}) or {})
     edge = getattr(decision, "edge", None)
     if edge is None:
-        raise ValueError("corrected pricing shadow requires edge")
+        raise ValueError("corrected pricing authority requires edge")
     setattr(decision, "final_execution_intent", None)
     decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip()
     if not decision_snapshot_id:
@@ -577,7 +592,7 @@ def _attach_corrected_pricing_authority(
             or ""
         ).strip()
     if not decision_snapshot_id:
-        raise ValueError("corrected pricing shadow requires decision_snapshot_id")
+        raise ValueError("corrected pricing authority requires decision_snapshot_id")
 
     candidate_limit = Decimal(str(candidate_limit_price))
     candidate_expected_fill = Decimal(str(candidate_expected_fill_price_before_fee))
@@ -603,7 +618,7 @@ def _attach_corrected_pricing_authority(
             limit_price=candidate_limit,
         )
         if sweep.average_price is None:
-            raise ValueError("corrected pricing shadow sweep produced no executable fill")
+            raise ValueError("corrected pricing sweep produced no executable fill")
         candidate_expected_fill = sweep.average_price
         depth_status = sweep.depth_status
         sweep_payload = {
@@ -840,7 +855,7 @@ def _ensure_fresh_executable_snapshot(
 ):
     """Return a snapshot that satisfies the 30s freshness gate, re-capturing if stale.
 
-    Root cause (2026-05-24, docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    Root cause (2026-05-24, docs/archive/2026-Q2/operations_historical/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
     the 5-min mode run's discovery→reprice latency exceeds the 30s freshness window,
     so the persisted cycle snapshot is already stale at submit and reprice raised
     ``executable_snapshot_stale`` — killing real above-floor edges. The 30s gate is
@@ -911,9 +926,7 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "conditionId": condition_id,
         "questionID": question_id,
         "tradability_authority": "persisted_snapshot_reconstruction",
-        "active": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
-        "closed": False,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
-        "enableOrderBook": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
+        "identity_only": True,
         "negRisk": neg_risk,
         "clobTokenIds": [yes_token, no_token],
     }
@@ -924,13 +937,7 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "market_id": condition_id,
         "question_id": question_id,
         "gamma_market_id": gamma_market_id,
-        # Tradability flags hardcoded True for Gamma-identity pass only.
-        # capture_executable_market_snapshot re-checks tradeability_status, crossed-book,
-        # and _assert_clob_identity against live CLOB — those are the authoritative gates.
-        "active": True,
-        "closed": False,
-        "enable_orderbook": True,
-        "executable": True,
+        "identity_only": True,
         "neg_risk": neg_risk,
         "market_start_at": _iso(getattr(snapshot, "market_start_at", None)),
         "market_end_at": _iso(getattr(snapshot, "market_end_at", None)),
@@ -969,7 +976,7 @@ def _propagate_recaptured_snapshot_fields(snapshot_fields, fresh_snapshot) -> No
 def _reprice_recapture_fresh_snapshot(conn, snapshot_id, *, decision, stale_snapshot, now):
     """Open a short-lived public CLOB client and re-capture a fresh snapshot for ONE market.
 
-    Activates the fresh-at-submit path (see docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    Activates the fresh-at-submit path (see docs/archive/2026-Q2/operations_historical/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
     the persisted cycle snapshot is stale because the mode run's discovery->reprice latency
     exceeds the 30s window. PolymarketClient() public orderbook reads need no auth/keychain
     (httpx _public_http), so this is a read-only fresh price fetch — it places no orders.
@@ -2064,7 +2071,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                 str(command_id),
                 lambda venue_order_id: clob.cancel_order(venue_order_id),
             )
-            if outcome.status == "CANCELED":
+            if is_cancel_confirmed_status(outcome.status):
                 cancelled += 1
         except Exception as exc:
             deps.logger.warning("Orphan open-order durable cancel failed for %s: %s", order_id, exc)
@@ -2234,7 +2241,7 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
         except Exception as exc:
             deps.logger.warning("Stale entry-order cancel failed for %s: %s", command_id, exc)
             continue
-        if outcome.status == "CANCELED":
+        if is_cancel_confirmed_status(outcome.status):
             cancelled += 1
             deps.logger.info(
                 "Stale entry order %s canceled for reprice: old_price=%s latest_best_bid=%s",
@@ -2281,6 +2288,10 @@ def _increment_summary_counter(summary: dict, key: str, amount: int = 1) -> None
     summary[key] = int(summary.get(key, 0) or 0) + amount
 
 
+def _mark_observability_degraded(summary: dict) -> None:
+    summary["observability_degraded"] = True
+
+
 def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException) -> None:
     """Fail loud + count a swallowed decision/telemetry-lane write failure.
 
@@ -2288,7 +2299,7 @@ def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException
     INDISTINGUISHABLE from a lane that simply had nothing to write — that
     blindness is what let edli_no_submit_receipts sit dead from 2026-06-06
     with nobody noticing. This preserves the existing fail-soft behavior
-    (``summary['degraded']`` is still set exactly as before, the cycle is NOT
+    (``summary['observability_degraded']`` is set, the cycle is NOT
     blocked) but additionally (a) emits a logger.error naming the lane and the
     exception, and (b) increments a per-lane failure counter on the summary so
     a downstream liveness check can name a lane that is failing every cycle.
@@ -2296,7 +2307,7 @@ def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException
     failures = summary.setdefault("lane_write_failures", {})
     if isinstance(failures, dict):
         failures[lane_name] = int(failures.get(lane_name, 0) or 0) + 1
-    summary["degraded"] = True  # preserve existing behavior
+    _mark_observability_degraded(summary)
     logger.error("LANE WRITE FAILED lane=%s err=%r", lane_name, exc)
 
 
@@ -2365,9 +2376,9 @@ def _record_final_intent_frontier(
         maybe_reprice = tokens.get("executable_snapshot_reprice")
         if isinstance(maybe_reprice, dict):
             reprice_payload = maybe_reprice
-    snapshot_shadow = reprice_payload.get("corrected_pricing_evidence")
-    if not isinstance(snapshot_shadow, dict):
-        snapshot_shadow = {}
+    corrected_pricing_evidence = reprice_payload.get("corrected_pricing_evidence")
+    if not isinstance(corrected_pricing_evidence, dict):
+        corrected_pricing_evidence = {}
     fields = snapshot_fields or {}
     attempt = {
         "family_key": _family_key_for_frontier(candidate, city_name),
@@ -2375,9 +2386,9 @@ def _record_final_intent_frontier(
         "target_date": str(getattr(candidate, "target_date", "") or ""),
         "temperature_metric": str(getattr(candidate, "temperature_metric", "") or ""),
         "decision_id": str(getattr(decision, "decision_id", "") or ""),
-        "rank": int(getattr(decision, "family_fallback_rank", 0) or 0),
-        "family_fallback_candidate_count": int(
-            getattr(decision, "family_fallback_candidate_count", 0) or 0
+        "rank": int(getattr(decision, "family_ranked_candidate_rank", 0) or 0),
+        "family_ranked_candidate_count": int(
+            getattr(decision, "family_ranked_candidate_count", 0) or 0
         ),
         "bin": str(getattr(getattr(edge, "bin", None), "label", "") or ""),
         "direction": str(getattr(edge, "direction", "") or ""),
@@ -2389,12 +2400,12 @@ def _record_final_intent_frontier(
         "executable_snapshot_id": str(fields.get("executable_snapshot_id") or ""),
         "book_semantics": str(
             reprice_payload.get("book_semantics")
-            or snapshot_shadow.get("book_semantics")
+            or corrected_pricing_evidence.get("book_semantics")
             or ""
         ),
         "market_prior_status": str(
             reprice_payload.get("market_prior_status")
-            or snapshot_shadow.get("market_prior_status")
+            or corrected_pricing_evidence.get("market_prior_status")
             or ""
         ),
     }
@@ -2538,16 +2549,16 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     reported_fill_price = float(result.fill_price or 0.0)
     submitted_limit_price = float(result.submitted_price or 0.0)
     fallback_edge_price = float(decision.edge.entry_price or 0.0)
-    corrected_shadow = {}
+    corrected_pricing_evidence = {}
     try:
-        corrected_shadow = (
+        corrected_pricing_evidence = (
             decision.tokens.get("executable_snapshot_reprice", {})
             .get("corrected_pricing_evidence", {})
         )
     except AttributeError:
-        corrected_shadow = {}
+        corrected_pricing_evidence = {}
     pricing_semantics_id = str(
-        corrected_shadow.get("pricing_semantics_id")
+        corrected_pricing_evidence.get("pricing_semantics_id")
         or "legacy_unclassified"
     )
     command_state = str(getattr(result, "command_state", "") or "")
@@ -2635,14 +2646,14 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         shares_submitted=submitted_shares,
         shares_filled=shares_filled,
         shares_remaining=shares_remaining,
-        entry_cost_basis_id=str(corrected_shadow.get("cost_basis_id") or ""),
-        entry_cost_basis_hash=str(corrected_shadow.get("cost_basis_hash") or ""),
+        entry_cost_basis_id=str(corrected_pricing_evidence.get("cost_basis_id") or ""),
+        entry_cost_basis_hash=str(corrected_pricing_evidence.get("cost_basis_hash") or ""),
         entry_economics_authority=entry_economics_authority,
         fill_authority=fill_authority,
         pricing_semantics_id=pricing_semantics_id,
         execution_cost_basis_version=str(
-            corrected_shadow.get("execution_cost_basis_version")
-            or corrected_shadow.get("cost_basis_id")
+            corrected_pricing_evidence.get("execution_cost_basis_version")
+            or corrected_pricing_evidence.get("cost_basis_id")
             or ""
         ),
         corrected_executable_economics_eligible=corrected_executable_economics_eligible,
@@ -2743,7 +2754,7 @@ def _emit_day0_window_entered_canonical_if_available(
             (getattr(pos, "trade_id", ""),),
         ).fetchone()
         next_seq = int((row[0] if row else 0) or 0) + 1
-        # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): DAY0_WINDOW
+        # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): DAY0_WINDOW
         # transition target is the event's defining phase; pass explicitly.
         events, projection = build_day0_window_entered_canonical_write(
             pos,
@@ -2771,6 +2782,8 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
         return LifecyclePhase.DAY0_WINDOW.value
     if state == "pending_exit":
         return LifecyclePhase.PENDING_EXIT.value
+    if state == "quarantined":
+        return LifecyclePhase.QUARANTINED.value
     return LifecyclePhase.ACTIVE.value
 
 
@@ -2840,6 +2853,246 @@ def _family_direct_sell_advantage_threshold_usd(sell_value: float) -> float:
     )
 
 
+def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | None:
+    """Return the entry-time qkernel selection guard for a live position.
+
+    The position projection does not currently carry the qkernel cert. The
+    durable venue command does carry the EDLI decision id, and the append-only
+    EDLI stream carries the pre-submit qkernel economics. Monitor uses this to
+    avoid treating an entry admitted under an unarmed selection cell as a valid
+    raw-posterior hold.
+    """
+
+    if conn is None:
+        return None
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        return None
+    try:
+        command_row = conn.execute(
+            """
+            SELECT decision_id
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'ENTRY'
+             ORDER BY created_at DESC, updated_at DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if command_row is None:
+        return None
+    decision_id = str(
+        command_row["decision_id"] if hasattr(command_row, "keys") else command_row[0]
+        or ""
+    ).strip()
+    if not decision_id:
+        return None
+    try:
+        event_row = conn.execute(
+            """
+            SELECT payload_json
+              FROM edli_live_order_events
+             WHERE event_type = 'PreSubmitRevalidated'
+               AND ? LIKE '%' || aggregate_id || '%'
+             ORDER BY occurred_at DESC, event_sequence DESC
+             LIMIT 1
+            """,
+            (decision_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if event_row is None:
+        return None
+    payload_json = event_row["payload_json"] if hasattr(event_row, "keys") else event_row[0]
+    try:
+        payload = json.loads(payload_json or "{}")
+    except Exception:
+        return None
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return None
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return None
+    basis = str(economics.get("selection_guard_basis") or "").strip()
+    raw_abstained = economics.get("selection_guard_abstained")
+    if isinstance(raw_abstained, bool):
+        abstained = raw_abstained
+    else:
+        abstained = str(raw_abstained).strip().lower() in {"1", "true", "yes"}
+    try:
+        q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        q_safe = float("nan")
+    invalid_reason = ""
+    if not basis:
+        invalid_reason = "selection_guard_missing"
+    elif basis == "SIDE_NOT_ARMED":
+        invalid_reason = "selection_guard_side_not_armed"
+    elif abstained:
+        invalid_reason = "selection_guard_abstained"
+    elif not (math.isfinite(q_safe) and q_safe > 0.0):
+        invalid_reason = "selection_guard_q_safe_non_positive"
+    return {
+        "invalid_reason": invalid_reason,
+        "selection_guard_basis": basis,
+        "selection_guard_abstained": abstained,
+        "selection_guard_q_safe": q_safe if math.isfinite(q_safe) else None,
+        "selection_guard_cell_key": str(economics.get("selection_guard_cell_key") or ""),
+        "payoff_q_lcb": economics.get("payoff_q_lcb"),
+        "cost": economics.get("cost"),
+        "edge_lcb": economics.get("edge_lcb"),
+    }
+
+
+def _entry_selection_guard_exit_decision(
+    *,
+    conn,
+    pos,
+    exit_context,
+    summary: dict,
+    exit_decision=None,
+) -> object | None:
+    verdict = _entry_qkernel_selection_guard_verdict(conn, pos)
+    if verdict is None:
+        return None
+    if not verdict.get("invalid_reason"):
+        return None
+
+    summary["entry_selection_guard_invalid_positions"] = (
+        summary.get("entry_selection_guard_invalid_positions", 0) + 1
+    )
+    summary.setdefault("entry_selection_guard_invalid_details", []).append(
+        {
+            "position_id": str(getattr(pos, "trade_id", "") or ""),
+            "reason": verdict.get("invalid_reason"),
+            "basis": verdict.get("selection_guard_basis"),
+            "q_safe": verdict.get("selection_guard_q_safe"),
+            "cell_key": verdict.get("selection_guard_cell_key"),
+        }
+    )
+
+    if exit_decision is not None and bool(getattr(exit_decision, "should_exit", False)):
+        summary["entry_selection_guard_invalid_existing_exit_preserved"] = (
+            summary.get("entry_selection_guard_invalid_existing_exit_preserved", 0) + 1
+        )
+        return None
+
+    day0_immature_reason = _day0_immature_exit_authority_reason(pos, exit_context, exit_decision)
+    if day0_immature_reason:
+        summary["entry_selection_guard_invalid_day0_immature_holds"] = (
+            summary.get("entry_selection_guard_invalid_day0_immature_holds", 0) + 1
+        )
+        from src.state.portfolio import ExitDecision as _ExitDecision
+
+        return _ExitDecision(
+            False,
+            (
+                "ENTRY_SELECTION_GUARD_INVALID_HOLD_DAY0_IMMATURE "
+                f"({verdict.get('invalid_reason')}; {day0_immature_reason})"
+            ),
+            urgency="normal",
+            trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_DAY0_IMMATURE",
+            selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "entry_selection_guard_invalid_day0_immature_hold",
+                    ]
+                )
+            ),
+        )
+
+    current_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+    current_prob_fresh = bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+    current_price_fresh = bool(getattr(pos, "last_monitor_market_price_is_fresh", False))
+    if (
+        current_prob_fresh
+        and current_price_fresh
+        and current_edge is not None
+        and current_edge > 0.0
+    ):
+        summary["entry_selection_guard_invalid_current_ev_holds"] = (
+            summary.get("entry_selection_guard_invalid_current_ev_holds", 0) + 1
+        )
+        from src.state.portfolio import ExitDecision as _ExitDecision
+
+        return _ExitDecision(
+            False,
+            (
+                "ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE "
+                f"({verdict.get('invalid_reason')}; current_edge={current_edge:.4f})"
+            ),
+            urgency="normal",
+            trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE",
+            selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "entry_selection_guard_invalid_current_edge_hold",
+                    ]
+                )
+            ),
+        )
+
+    shares = _position_real_exposure_shares(pos)
+    try:
+        best_bid = float(getattr(exit_context, "best_bid", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        best_bid = 0.0
+    sell_value = shares * best_bid if math.isfinite(best_bid) and best_bid > 0.0 else 0.0
+    threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
+
+    from src.state.portfolio import ExitDecision as _ExitDecision
+
+    if shares <= 0.0 or sell_value + 1e-9 < threshold:
+        return _ExitDecision(
+            False,
+            (
+                "ENTRY_SELECTION_GUARD_INVALID_HOLD_NO_EXECUTABLE_BID "
+                f"({verdict.get('invalid_reason')})"
+            ),
+            urgency="normal",
+            trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_NO_EXECUTABLE_BID",
+            selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "entry_selection_guard_invalid_no_executable_bid",
+                    ]
+                )
+            ),
+        )
+
+    summary["entry_selection_guard_invalid_independent_exit_required"] = (
+        summary.get("entry_selection_guard_invalid_independent_exit_required", 0) + 1
+    )
+    return _ExitDecision(
+        False,
+        (
+            "ENTRY_SELECTION_GUARD_INVALID_HOLD_REQUIRES_CURRENT_EXIT "
+            f"({verdict.get('invalid_reason')}; sell_value_usd={sell_value:.4f}; "
+            f"q_safe={verdict.get('selection_guard_q_safe')})"
+        ),
+        urgency="normal",
+        trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_REQUIRES_CURRENT_EXIT",
+        selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+        applied_validations=list(
+            dict.fromkeys(
+                [
+                    *(getattr(pos, "applied_validations", []) or []),
+                    "entry_selection_guard_invalid_requires_current_exit",
+                ]
+            )
+        ),
+    )
+
+
 def _family_monitor_key(pos) -> tuple[str, str, str] | None:
     city = str(getattr(pos, "city", "") or "").strip()
     target_date = str(getattr(pos, "target_date", "") or "").strip()
@@ -2858,11 +3111,21 @@ def _family_monitor_positions(portfolio, pos) -> list:
     if key is None or portfolio is None:
         return [pos]
     out: list = []
-    for other in getattr(portfolio, "positions", None) or ():
+    candidates: list = []
+    seen_ids: set[int] = set()
+    for other in get_open_positions(portfolio):
+        candidates.append(other)
+        seen_ids.add(id(other))
+    for other in list(getattr(portfolio, "positions", []) or []):
+        if id(other) in seen_ids:
+            continue
+        if _quarantined_position_can_redecision(other):
+            candidates.append(other)
+            seen_ids.add(id(other))
+    for other in candidates:
         if _family_monitor_key(other) != key:
             continue
-        phase = _position_state_value(other)
-        if phase not in {"entered", "holding", "day0_window", "pending_exit"}:
+        if not _family_monitor_position_has_live_risk(other):
             continue
         try:
             if float(getattr(other, "effective_shares", getattr(other, "shares", 0.0)) or 0.0) <= 0.0:
@@ -2871,6 +3134,49 @@ def _family_monitor_positions(portfolio, pos) -> list:
             continue
         out.append(other)
     return out or [pos]
+
+
+def _family_monitor_position_has_live_risk(pos) -> bool:
+    phase = _position_state_value(pos)
+    if phase in {"entered", "holding", "active", "day0_window", "pending_exit"}:
+        return True
+    if phase != "quarantined":
+        return False
+    try:
+        chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        chain_shares = 0.0
+    return chain_shares > 0.01 and has_current_money_risk_chain_state(
+        getattr(pos, "chain_state", "")
+    )
+
+
+_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
+    "day0_high_extreme_not_mature:",
+    "day0_low_extreme_not_terminal:",
+    "day0_extreme_maturity_unavailable:",
+)
+
+
+def _day0_immature_exit_authority_reason(*sources) -> str | None:
+    for source in sources:
+        for validation in getattr(source, "applied_validations", []) or []:
+            text = str(validation or "")
+            if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
+                return text
+    return None
+
+
+def _exit_trigger_requires_mature_day0_authority(exit_trigger: str) -> bool:
+    trigger = str(exit_trigger or "")
+    if trigger == "FAMILY_DIRECT_SELL_DOMINATES_HOLD":
+        return True
+    if trigger == "DAY0_OBSERVATION_REVERSAL":
+        return True
+    return any(
+        trigger.startswith(prefix)
+        for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS
+    )
 
 
 def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:
@@ -2901,6 +3207,27 @@ def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
     return any(trigger.startswith(prefix) for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS)
 
 
+def _block_immature_day0_exit_authority(
+    *,
+    pos,
+    payload: dict[str, object],
+    summary: dict,
+    exit_reason: str,
+    day0_maturity_block: str,
+) -> tuple[bool, str]:
+    payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    payload["blocked_exit_reason"] = exit_reason
+    payload["day0_maturity_block"] = day0_maturity_block
+    setattr(pos, "_monitor_family_redecision", payload)
+    validations = list(getattr(pos, "applied_validations", []) or [])
+    validations.append("family_day0_immature_exit_authority_blocked")
+    pos.applied_validations = list(dict.fromkeys(validations))
+    summary["family_redecision_day0_immature_exits_blocked"] = (
+        summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
+    )
+    return False, "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+
+
 def _apply_family_monitor_overlay(
     *,
     portfolio,
@@ -2913,7 +3240,7 @@ def _apply_family_monitor_overlay(
     """Require a family value check before a statistical single-leg exit.
 
     This is live monitor logic over already-refreshed held-side probabilities and
-    held-side bids. It does not read replay/shadow data and it never creates a
+    held-side bids. It does not read replay data and it never creates a
     new entry; it records the current family value evidence for every held
     position and only prevents a single leg from liquidating when the current
     family vector's hold value dominates its direct-sell value.
@@ -2970,6 +3297,18 @@ def _apply_family_monitor_overlay(
         leg_payloads.append(leg_payload)
 
     payload["legs"] = leg_payloads
+    day0_maturity_block = _day0_immature_exit_authority_reason(pos, exit_decision)
+    if day0_maturity_block is not None and _is_statistical_single_leg_exit(exit_decision, exit_reason):
+        if missing:
+            payload["missing"] = missing
+        return _block_immature_day0_exit_authority(
+            pos=pos,
+            payload=payload,
+            summary=summary,
+            exit_reason=exit_reason,
+            day0_maturity_block=day0_maturity_block,
+        )
+
     if missing:
         payload["decision"] = "FAMILY_VALUE_EVIDENCE_UNAVAILABLE"
         payload["missing"] = missing
@@ -3012,6 +3351,18 @@ def _apply_family_monitor_overlay(
         and float(_cur_belief) < float(_entry_belief)
     )
     if (not should_exit) and sell_advantage > sell_advantage_threshold and _belief_reversed_below_entry:
+        if day0_maturity_block is not None:
+            payload["decision"] = "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
+            payload["suppressed_exit_reason"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+            payload["day0_maturity_block"] = day0_maturity_block
+            setattr(pos, "_monitor_family_redecision", payload)
+            validations = list(getattr(pos, "applied_validations", []) or [])
+            validations.append("family_direct_sell_blocked_day0_immature")
+            pos.applied_validations = list(dict.fromkeys(validations))
+            summary["family_redecision_day0_immature_exits_blocked"] = (
+                summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
+            )
+            return should_exit, exit_reason
         payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
         payload["promoted_exit_reason"] = exit_reason
         payload["belief_reversed_below_entry"] = True
@@ -3056,7 +3407,7 @@ def _dual_write_canonical_entry_if_available(
     # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
     # the payload simply omits the key, preserving pre-slice wire format.
     #
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): caller supplies
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): caller supplies
     # the explicit ``phase_after`` so the canonical builder does not derive
     # it from runtime Position.state strings. PENDING_ENTRY when the order
     # is pending; ACTIVE / DAY0_WINDOW when the order has filled.
@@ -3178,6 +3529,88 @@ def _position_chain_state_value(pos) -> str:
 
 def _position_direction_value(pos) -> str:
     return _semantic_value(getattr(pos, "direction", ""))
+
+
+def _requires_quarantine_monitor_resolution(pos) -> bool:
+    return (
+        _position_state_value(pos) == "quarantined"
+        or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
+    )
+
+
+def _position_real_exposure_shares(pos) -> float:
+    for attr in ("chain_shares", "shares_filled", "shares"):
+        try:
+            value = float(getattr(pos, attr, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return value
+    return 0.0
+
+
+def _position_timestamp_recent(value, *, max_age_seconds: int) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return 0.0 <= age_seconds <= max_age_seconds
+
+
+def _chain_absent_quarantine_is_fresh_enough_for_redecision(pos) -> bool:
+    return (
+        _position_timestamp_recent(
+            getattr(pos, "chain_verified_at", "") or "",
+            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
+        )
+        or _position_timestamp_recent(
+            getattr(pos, "last_chain_absence_observed_at", "") or "",
+            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
+        )
+    )
+
+
+def _quarantined_position_can_redecision(pos) -> bool:
+    if _position_state_value(pos) != "quarantined":
+        return False
+    chain_state = _position_chain_state_value(pos)
+    if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
+        return False
+    if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
+        return False
+    if _position_real_exposure_shares(pos) <= 0.01:
+        return False
+    if getattr(pos, "is_quarantine_placeholder", False):
+        return False
+    if chain_state == "entry_authority_quarantined":
+        return True
+    return _chain_absent_quarantine_is_fresh_enough_for_redecision(pos)
+
+
+def _day0_hard_fact_position_eligible(pos) -> bool:
+    return _position_state_value(pos) == "day0_window" or _quarantined_position_can_redecision(pos)
+
+
+def _monitoring_phase_positions(portfolio) -> list:
+    """Open positions plus quarantine rows that need explicit monitor receipts."""
+
+    out = []
+    seen: set[int] = set()
+    for pos in list(get_open_positions(portfolio)):
+        out.append(pos)
+        seen.add(id(pos))
+    for pos in list(getattr(portfolio, "positions", []) or []):
+        if id(pos) in seen:
+            continue
+        if _requires_quarantine_monitor_resolution(pos):
+            out.append(pos)
+            seen.add(id(pos))
+    return out
 
 
 def _market_info_value(info, *keys):
@@ -3737,6 +4170,8 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        release_backoff_exhausted_pending_exit_for_redecision,
+        release_pending_exit_without_order_if_retryable,
         release_market_closed_pending_exit_hold,
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
@@ -3777,7 +4212,7 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    for pos in list(portfolio.positions):
+    for pos in _monitoring_phase_positions(portfolio):
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)
@@ -3830,6 +4265,11 @@ def execute_monitoring_phase(
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
                     )
+                elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_released_backoff_exhausted_for_redecision"] = (
+                        summary.get("monitor_released_backoff_exhausted_for_redecision", 0) + 1
+                    )
                 else:
                     summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                     continue
@@ -3838,6 +4278,11 @@ def execute_monitoring_phase(
                 continue
             if run_exit_preflight:
                 check_pending_retries(pos, conn=conn)
+            if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                portfolio_dirty = True
+                summary["monitor_released_pending_exit_without_order"] = (
+                    summary.get("monitor_released_pending_exit_without_order", 0) + 1
+                )
             if pos.state == "pending_exit":
                 pending_exit_monitor_only = True
                 summary["monitor_pending_exit_phase_evaluated"] = (
@@ -3853,28 +4298,30 @@ def execute_monitoring_phase(
         if run_exit_preflight:
             check_pending_retries(pos, conn=conn)
 
-        if (
-            _position_state_value(pos) == "quarantined"
-            or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
-        ):
-            if not pos.admin_exit_reason:
-                pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
-                pos.exit_reason = pos.admin_exit_reason
-                pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
-                portfolio_dirty = True
-                summary["quarantine_resolution_marked"] = summary.get("quarantine_resolution_marked", 0) + 1
-            artifact.add_monitor_result(
-                deps.MonitorResult(
-                    position_id=pos.trade_id,
-                    fresh_prob=None,
-                    fresh_edge=None,
-                    should_exit=False,
-                    exit_reason=pos.admin_exit_reason,
-                    neg_edge_count=pos.neg_edge_count,
+        if _requires_quarantine_monitor_resolution(pos):
+            if _quarantined_position_can_redecision(pos):
+                summary["quarantined_exposure_routed_to_redecision"] = (
+                    summary.get("quarantined_exposure_routed_to_redecision", 0) + 1
                 )
-            )
-            summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
-            continue
+            else:
+                if not pos.admin_exit_reason:
+                    pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
+                    pos.exit_reason = pos.admin_exit_reason
+                    pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
+                    portfolio_dirty = True
+                    summary["quarantine_resolution_marked"] = summary.get("quarantine_resolution_marked", 0) + 1
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=None,
+                        fresh_edge=None,
+                        should_exit=False,
+                        exit_reason=pos.admin_exit_reason,
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
+                summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
+                continue
 
         review_fact = _blocking_review_fact_for_position(portfolio, pos)
         if review_fact is not None:
@@ -4005,14 +4452,31 @@ def execute_monitoring_phase(
                         boundary="day0_window_entered",
                     )
 
-            closed_market_info = None
-            if _position_state_value(pos) == "day0_window":
-                closed_market_info = _closed_non_accepting_market_info(
-                    clob,
-                    pos,
-                    conn,
-                    decision_time=deps._utcnow(),
-                )
+            # Day0 hard facts are settlement/observation truth, not venue
+            # executability.  Compute them before the closed-market gate so a
+            # CLOB closed/non-accepting state cannot hide an already-dead bin or
+            # a structurally won hold behind a generic awaiting-settlement
+            # receipt.
+            _hard_fact = None
+            if _day0_hard_fact_position_eligible(pos) and city is not None:
+                try:
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    # Pass conn as world_conn so the METAR kill-memo cold-start
+                    # recovery does not open per-city independent world connections
+                    # (connection-burst antibody 2026-06-13).
+                    _hard_fact = evaluate_hard_fact_exit(
+                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
+                    )
+                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
+                    deps.logger.warning(
+                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
+                    )
+            closed_market_info = _closed_non_accepting_market_info(
+                clob,
+                pos,
+                conn,
+                decision_time=deps._utcnow(),
+            )
             # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
             # evidence source.
             #   * source="clob_market_info" → the VENUE itself reports
@@ -4032,6 +4496,86 @@ def execute_monitoring_phase(
                     deferred_static_closed_market_info = closed_market_info
                     closed_market_info = None
             if closed_market_info is not None:
+                if _hard_fact is not None and _hard_fact.action in {
+                    "EXIT_DEAD_BIN",
+                    "HOLD_STRUCTURAL_WIN",
+                }:
+                    from src.state.portfolio import ExitDecision as _ExitDecision
+
+                    hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                    if _position_state_value(pos) != "quarantined":
+                        pos.state = "day0_window"
+                        pos.pre_exit_state = ""
+                        pos.exit_state = ""
+                        pos.next_exit_retry_at = ""
+                        pos.exit_retry_count = 0
+                        pos.exit_reason = ""
+                        pos.last_exit_error = (
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT:"
+                            f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
+                        )[:500]
+                    pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
+                    pos.last_monitor_prob_is_fresh = True
+                    pos.last_monitor_edge = None
+                    pos.last_monitor_market_price = None
+                    pos.last_monitor_market_price_is_fresh = False
+                    pos.last_monitor_best_bid = None
+                    pos.last_monitor_best_ask = None
+                    pos.last_monitor_market_vig = None
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                (
+                                    "day0_hard_fact_structural_win_closed_hold"
+                                    if hard_fact_win
+                                    else "day0_hard_fact_bin_dead_closed_market"
+                                ),
+                            ]
+                        )
+                    )
+                    exit_decision = _ExitDecision(
+                        False,
+                        (
+                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED "
+                            if hard_fact_win
+                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED "
+                        )
+                        + f"({_hard_fact.reason}; source={_hard_fact.source})",
+                        urgency="normal",
+                        trigger=(
+                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
+                            if hard_fact_win
+                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+                        ),
+                        selected_method=pos.selected_method or pos.entry_method,
+                        applied_validations=list(pos.applied_validations),
+                    )
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        exit_decision=exit_decision,
+                        final_should_exit=False,
+                        final_exit_reason=exit_decision.reason,
+                        final_exit_trigger=exit_decision.trigger,
+                    )
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=pos.last_monitor_prob,
+                            fresh_edge=None,
+                            should_exit=False,
+                            exit_reason=exit_decision.reason,
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    portfolio_dirty = True
+                    summary["day0_hard_fact_closed_market_monitors"] = (
+                        summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
+                    )
+                    summary["monitors"] += 1
+                    continue
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
                 mark_market_closed_hold_to_settlement(
@@ -4044,7 +4588,7 @@ def execute_monitoring_phase(
                 artifact.add_monitor_result(
                     deps.MonitorResult(
                         position_id=pos.trade_id,
-                        fresh_prob=None,
+                        fresh_prob=pos.last_monitor_prob,
                         fresh_edge=None,
                         should_exit=False,
                         exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
@@ -4066,25 +4610,9 @@ def execute_monitoring_phase(
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
-            # === DAY0 HARD-FACT verdict — computed before the exit decision.
-            # Settlement-authority hard facts must not depend on estimator
-            # evidence, but the final MONITOR_REFRESHED event is written after
-            # hold/exit evaluation so the canonical row carries the actual
-            # decision for this monitor tick.
-            _hard_fact = None
-            if _position_state_value(pos) == "day0_window" and city is not None:
-                try:
-                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-                    # Pass conn as world_conn so the METAR kill-memo cold-start
-                    # recovery does not open per-city independent world connections
-                    # (connection-burst antibody 2026-06-13).
-                    _hard_fact = evaluate_hard_fact_exit(
-                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
-                    )
-                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
-                    deps.logger.warning(
-                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
-                    )
+            # === DAY0 HARD-FACT verdict — computed before the exit decision and
+            # before closed-market pre-emption above. Settlement-authority hard
+            # facts must not depend on estimator evidence.
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -4161,6 +4689,21 @@ def execute_monitoring_phase(
                 # structurally-won position would defeat the purpose of holding.
             else:
                 exit_decision = pos.evaluate_exit(exit_context)
+            entry_selection_guard_forced_exit = False
+            if not (
+                _hard_fact is not None
+                and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+            ):
+                selection_guard_decision = _entry_selection_guard_exit_decision(
+                    conn=conn,
+                    pos=pos,
+                    exit_context=exit_context,
+                    summary=summary,
+                    exit_decision=exit_decision,
+                )
+                if selection_guard_decision is not None:
+                    exit_decision = selection_guard_decision
+                    entry_selection_guard_forced_exit = bool(selection_guard_decision.should_exit)
             if _summary_risk_level(summary) == "ORANGE" and not (
                 _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
             ):
@@ -4182,7 +4725,7 @@ def execute_monitoring_phase(
             if not (
                 _hard_fact is not None
                 and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
-            ):
+            ) and not entry_selection_guard_forced_exit:
                 should_exit, exit_reason = _apply_family_monitor_overlay(
                     portfolio=portfolio,
                     pos=pos,
@@ -4857,19 +5400,24 @@ def _observation_time_to_local_date(observation_time, timezone_name: str):
 
 def _normalize_observation_coverage_status(raw: str) -> str:
     """Map the two runtime coverage/availability vocabularies onto the canonical
-    MISSING / STALE / LOW / OK set the operator audit query expects.
+    MISSING / STALE / NON_SETTLEMENT_SOURCE / LOW / OK set the operator audit
+    query expects.
 
-    Success path emits OK / DIAGNOSTIC_FALLBACK (obs.coverage_status); failure
-    path emits DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED / CHAIN_UNAVAILABLE
-    (_availability_status_for_exception). The raw value is preserved in
-    payload_json; this is only the canonical column value.
+    Settlement-bound observation paths emit OK / LOW_COVERAGE /
+    WINDOW_INCOMPLETE. Explicitly requested non-settlement observation paths emit
+    NON_SETTLEMENT_SOURCE. Failure paths emit DATA_UNAVAILABLE / DATA_STALE /
+    RATE_LIMITED / CHAIN_UNAVAILABLE (_availability_status_for_exception). The
+    raw value is preserved in payload_json; this is only the canonical column
+    value.
     """
     value = str(raw or "").strip().upper()
     if value in {"OK"}:
         return "OK"
     if value in {"DATA_STALE", "STALE", "RATE_LIMITED"}:
         return "STALE"
-    if value in {"DIAGNOSTIC_FALLBACK", "LOW"}:
+    if value in {"NON_SETTLEMENT_SOURCE"}:
+        return "NON_SETTLEMENT_SOURCE"
+    if value in {"LOW", "LOW_COVERAGE", "WINDOW_INCOMPLETE"}:
         return "LOW"
     if value in {"DATA_UNAVAILABLE", "CHAIN_UNAVAILABLE", "MISSING", "", "UNKNOWN"}:
         return "MISSING"
@@ -4917,8 +5465,8 @@ def build_settlement_day_observation_authority_row(
 
     Field semantics:
       source_authorized_for_settlement — 1 when the obs came from the
-        settlement-bound source path (coverage_status == "OK"); 0 for diagnostic
-        fallbacks; None when no obs was fetched.
+        settlement-bound source path (coverage_status == "OK"); 0 for
+        non-settlement sources; None when no obs was fetched.
       local_date_matches_target — 1 when the observation timestamp's local date
         (city tz) equals target_date. The whole-point field for catching
         wrong-date/source fakes. None when un-computable or no obs.
@@ -4972,7 +5520,7 @@ def build_settlement_day_observation_authority_row(
     sample_count = getattr(observation, "sample_count", None)
 
     # source_authorized_for_settlement: settlement-bound path yields
-    # coverage_status="OK"; diagnostic fallbacks yield "DIAGNOSTIC_FALLBACK".
+    # coverage_status="OK"; non-settlement sources yield NON_SETTLEMENT_SOURCE.
     source_authorized = 1 if obs_coverage == "OK" else 0
 
     # local_date_matches_target: compare obs timestamp local date to target_date.
@@ -4985,8 +5533,8 @@ def build_settlement_day_observation_authority_row(
         except (ValueError, TypeError):
             local_match = None
 
-    # freshness_status: derived from coverage. OK obs is FRESH; diagnostic or
-    # other coverage is DEGRADED (the settlement source did not produce it).
+    # freshness_status: derived from coverage. OK obs is FRESH; non-settlement
+    # or incomplete coverage is DEGRADED (not execution-authorizing truth).
     freshness = "FRESH" if obs_coverage == "OK" else "DEGRADED"
 
     def _f(value):
@@ -5110,7 +5658,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         if int(family_frontier.get("blocked_existing_family_exposure", 0) or 0) > 0:
             return "family_exposure_block"
         if (
-            int(family_frontier.get("fallback_candidates", 0) or 0) > 0
+            int(family_frontier.get("ranked_candidates", 0) or 0) > 0
             and int(execution_frontier.get("final_intent_built", 0) or 0) == 0
         ):
             return "execution_viability_failure"
@@ -5176,10 +5724,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             except Exception as exc:  # noqa: BLE001 - derived telemetry is fail-soft.
                 # AB3: every queued decision/telemetry-lane write (opportunity_fact,
                 # probability_trace, microstructure, forward_market_substrate,
-                # shadow_signal, settlement_day_observation_authority, ...) flows
+                # signal evidence, settlement_day_observation_authority, ...) flows
                 # through here. A swallowed exception is indistinguishable from a
                 # lane with nothing to write; name + count it so a dead lane fails
-                # loud. Behavior preserved: degraded still set, cycle not blocked.
+                # loud. Observability degradation is recorded; the cycle is not blocked.
                 deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)
                 _record_lane_write_failure(summary, name, exc)
             else:
@@ -5373,12 +5921,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             return str(getter() or "NEVER_FETCHED").strip().upper()
         except Exception as exc:
             deps.logger.warning("Market scan authority read failed: %s", exc)
-            return "EMPTY_FALLBACK"
+            return "SCAN_AUTHORITY_READ_FAILED"
 
     def _market_scan_availability_status(authority: str) -> str:
         if authority == "STALE":
             return "DATA_STALE"
-        if authority == "EMPTY_FALLBACK":
+        if authority in {
+            "FETCH_FAILED_NO_CACHE",
+            "KEYWORD_DISCOVERY_UNVERIFIED",
+            "SCAN_AUTHORITY_READ_FAILED",
+        }:
             return "DATA_UNAVAILABLE"
         if authority == "NEVER_FETCHED":
             return "DATA_UNAVAILABLE"
@@ -5416,7 +5968,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
             if status in {"written_with_conflicts", "skipped_invalid_schema"}:
                 deps.logger.warning("Forward market substrate degraded: %s", result)
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
 
             from src.state.db import log_market_source_contract_topology_facts
 
@@ -5443,7 +5995,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 deps.logger.warning(
                     "Market source-contract topology degraded: %s", source_contract_result
                 )
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
 
         def _write_guarded() -> None:
             try:
@@ -5452,8 +6004,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 # AB3: record the substrate-specific status fields, then RE-RAISE so
                 # the central _flush_derived_writes handler is the single place that
                 # logs + counts the failure (no double-count, no false success).
-                # Net behavior is identical to the prior internal swallow: degraded
-                # gets set and the cycle is not blocked — the swallow simply moves
+                # Net behavior is identical to the prior internal swallow: observability
+                # degradation is recorded and the cycle is not blocked — the swallow simply moves
                 # up one frame to the uniform fail-loud path.
                 summary["forward_market_substrate_status"] = "error"
                 summary["forward_market_substrate_error"] = str(exc)
@@ -5585,10 +6137,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             )
             summary["forward_market_price_linkage_status"] = str(linkage_result.get("status", ""))
             if _forward_price_linkage_status_degraded(summary["forward_market_price_linkage_status"]):
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
         except Exception as exc:
             # AB3: direct (non-queued) price-linkage telemetry-lane write. Was
-            # logged but uncounted; now counted. degraded + status preserved.
+            # logged but uncounted; now counted with explicit observability degradation.
             deps.logger.warning(
                 "Executable snapshot price linkage write failed for %s %s %s: %s",
                 city_name,
@@ -5892,7 +6444,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 summary["cycle_backpressure_elapsed_seconds"] = elapsed
                 summary["cycle_backpressure_markets_evaluated"] = market_index
                 summary["cycle_backpressure_markets_skipped"] = markets_skipped
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
                 deps.logger.warning(
                     "Discovery cycle backpressure: truncated %s after %.1fs budget=%.1fs evaluated=%s skipped=%s",
                     mode.value,
@@ -6211,7 +6763,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # one underlying event. This single structural hook (NOT a
             # per-callsite cap) admits one coherent optimized family intent:
             # either one scalar best leg or all selected legs of a typed
-            # multi-leg portfolio. Ranked fallback siblings are not parallel
+            # multi-leg portfolio. Ranked scalar alternatives are not parallel
             # live submit intents. Gate default ON in live; fail-safe (only
             # ever removes entries). Authority: operator P0-1 live-money spec
             # 2026-05-20/21 (mutually-exclusive weather family sizing).
@@ -6261,7 +6813,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _frontier_increment("family_frontier", "families_seen")
                 _frontier_increment(
                     "family_frontier",
-                    "fallback_candidates",
+                    "ranked_candidates",
                     sum(1 for _d in decisions if getattr(_d, "should_trade", False)),
                 )
                 _frontier_increment(
@@ -6333,7 +6885,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     conn=_no_trade_conn,
                                     strategy_key=str(getattr(_nd, "strategy_key", "") or "") or None,
                                     event_source=str(getattr(_nd, "edge_source", "") or "") or None,
-                                    shadow_runtime=str(env).lower() != "live",
                                 )
                             except Exception as _nte_exc:
                                 logger.warning(
@@ -6353,8 +6904,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         _no_trade_conn.close()
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
-                if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):
-                    summary["fdr_fallback_fired"] = True
+                if any(getattr(d, "fdr_family_scan_unavailable", False) for d in decisions):
+                    summary["fdr_family_scan_unavailable"] = True
                 family_sizes = [getattr(d, "fdr_family_size", 0) for d in decisions if getattr(d, "fdr_family_size", 0) > 0]
                 if family_sizes:
                     summary["fdr_family_size"] = summary.get("fdr_family_size", 0) + family_sizes[0]
@@ -6376,54 +6927,36 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    evidence_payload = {
-                        "city": city.name,
-                        "target_date": candidate.target_date,
-                        "timestamp": decision_time.isoformat(),
-                        "decision_snapshot_id": first.decision_snapshot_id,
-                        "p_raw_json": json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
-                        "p_cal_json": json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
-                        "edges_json": json.dumps(edges_payload),
-                        "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
-                    }
-
-                    def _write_shadow_signal(payload=evidence_payload) -> None:
-                        from src.state.db import log_shadow_signal
-
-                        log_shadow_signal(conn, **payload)
-
-                    _queue_derived_write(
-                        f"shadow_signal:{city.name}:{candidate.target_date}",
-                        _write_shadow_signal,
-                    )
+                    _ = edges_payload
                 except Exception as exc:
-                    # AB3: shadow-signal telemetry-lane build/queue failure. Was
-                    # logged but uncounted; now counted so a chronically-failing
-                    # shadow lane is detectable downstream. degraded preserved.
-                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
-                    _record_lane_write_failure(summary, "shadow_signal_build", exc)
-            family_fallback_submit_satisfied = False
+                    deps.logger.error(
+                        "telemetry write failed, cycle observability degraded: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    _record_lane_write_failure(summary, "decision_evidence_build", exc)
+            family_ranked_submit_satisfied = False
             for d in decisions:
                 if False:
                     _ = d.calibration
                 strategy_key = _resolve_strategy_key(d) if d.edge else ""
                 if d.should_trade and d.edge and d.tokens:
                     is_live_env = str(env or "").strip().lower() == "live"
-                    family_fallback_candidate_count = int(
-                        getattr(d, "family_fallback_candidate_count", 0) or 0
+                    family_ranked_candidate_count = int(
+                        getattr(d, "family_ranked_candidate_count", 0) or 0
                     )
                     family_portfolio_leg_role = str(
                         getattr(d, "family_portfolio_leg_role", "") or ""
                     )
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_submit_satisfied
+                        family_ranked_candidate_count > 1
+                        and family_ranked_submit_satisfied
                         and family_portfolio_leg_role != "portfolio_selected"
                     ):
                         summary["no_trades"] += 1
                         rejection_stage = "ANTI_CHURN"
                         rejection_reasons = [
-                            "mutually_exclusive_family_fallback_not_attempted_after_submit"
+                            "mutually_exclusive_family_ranked_alternative_not_attempted_after_submit"
                         ]
                         _record_opportunity_fact(
                             candidate,
@@ -6455,7 +6988,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 edge_context_json=d.edge_context_json,
                                 applied_validations=[
                                     *list(d.applied_validations),
-                                    "family_ranked_executable_fallback_skipped_after_submit",
+                                    "family_ranked_alternative_skipped_after_submit",
                                 ],
                                 bin_labels=parseable_labels,
                                 p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
@@ -6905,7 +7438,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_reasons=[],
                     )
                     result = None
-                    family_fallback_attempt_accepted = False
+                    family_ranked_attempt_accepted = False
                     live_frontier_stage = "final_intent_contract"
                     live_frontier_attempt_counted = False
                     try:
@@ -7002,7 +7535,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                             submitted_limit = float(final_limit_decimal)
                             submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
-                            family_fallback_attempt_accepted = not submit_rejected
+                            family_ranked_attempt_accepted = not submit_rejected
                             if submit_rejected:
                                 submit_rejected_reason = getattr(result, "reason", None) or "submit_rejected"
                                 _increment_summary_counter(summary, "submit_rejected")
@@ -7105,7 +7638,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 d.edge.bin.label,
                                 decision_id=str(d.decision_id) if d.decision_id else "",
                             )
-                            family_fallback_attempt_accepted = (
+                            family_ranked_attempt_accepted = (
                                 str(getattr(result, "status", "") or "") != "rejected"
                             )
                     except Exception as exc:
@@ -7195,7 +7728,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
-                    if family_fallback_attempt_accepted:
+                    if family_ranked_attempt_accepted:
                         shoulder_ledger_error = _record_submitted_shoulder_exposure(
                             conn=conn,
                             city_name=city.name,
@@ -7211,14 +7744,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 d.decision_id,
                                 shoulder_ledger_error,
                             )
-                            summary["degraded"] = True
+                            _mark_observability_degraded(summary)
                             summary["entries_paused"] = True
                             pause_error = _freeze_entries_after_shoulder_ledger_failure(
                                 shoulder_ledger_error,
                                 logger=deps.logger,
                             )
                             if pause_error:
-                                summary["degraded"] = True
+                                _mark_observability_degraded(summary)
                                 summary["shoulder_exposure_pause_error"] = pause_error
                             if isinstance(getattr(d, "tokens", None), dict):
                                 d.tokens.setdefault("shoulder_exposure_ledger_error", shoulder_ledger_error)
@@ -7271,22 +7804,22 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                     )
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                     ):
-                        family_fallback_submit_satisfied = True
+                        family_ranked_submit_satisfied = True
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                         and family_portfolio_leg_role != "portfolio_selected"
                     ):
-                        summary["family_fallback_selected_rank"] = int(
-                            getattr(d, "family_fallback_rank", 0) or 0
+                        summary["family_ranked_selected_rank"] = int(
+                            getattr(d, "family_ranked_candidate_rank", 0) or 0
                         )
-                        summary["family_fallback_candidate_count"] = family_fallback_candidate_count
+                        summary["family_ranked_candidate_count"] = family_ranked_candidate_count
                     elif (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                         and family_portfolio_leg_role == "portfolio_selected"
                     ):
                         summary["family_portfolio_selected_submits"] = (
@@ -7309,6 +7842,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             _cmd_state or "missing",
                         )
                         runtime_order_status = "pending"
+                    if _cmd_state == "PARTIAL" and runtime_order_status == "pending":
+                        if _cmd_durable:
+                            _record_entry_order_summary(
+                                summary,
+                                runtime_order_status="partial",
+                                command_state=_cmd_state,
+                            )
+                        logger.info(
+                            "run_cycle: skipping legacy pending-entry materialization for "
+                            "partial fill command trade_id=%s command_id=%s; venue_trade_facts "
+                            "drive active exposure projection",
+                            getattr(result, "trade_id", ""),
+                            getattr(result, "command_id", ""),
+                        )
+                        continue
                     if _cmd_durable:
                         _record_entry_order_summary(
                             summary,
@@ -7342,7 +7890,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             # with explicit nested SAVEPOINT, so placing the
                             # dual-write here no longer releases sp_candidate_*
                             # on commit. Closes torn-state window per T4.0 F3.
-                            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28):
+                            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28):
                             # derive phase_after from the runtime_order_status
                             # (mapped to the runtime state via
                             # initial_entry_runtime_state_for_order_status above)

@@ -2,7 +2,7 @@
 # Created: 2026-06-11
 # Last reused or audited: 2026-06-11
 # Authority basis: operator directive 2026-06-11 ~05:00Z (cycle policy + 06/18Z deep offline
-#   investigation), docs/operations/consolidated_systemic_overhaul_2026-06-11.md §OPERATOR
+#   investigation), docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md §OPERATOR
 #   DIRECTIVES + K4.0b(d). PURE OFFLINE study: live DBs READ-ONLY, no daemon/flag/src-live edits.
 #   Writes ONLY to a scratch DB (state/cycle_phase_study.db). NEVER live zeus-forecasts.db.
 """Offline 06Z/18Z cycle-phase qualification study.

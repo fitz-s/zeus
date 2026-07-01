@@ -16,7 +16,7 @@ Paths are derived to be portable:
 """
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.6b
+# Authority basis: docs/archive/2026-Q2/operations_historical/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.6b
 
 from __future__ import annotations
 import argparse, os, re, sys

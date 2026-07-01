@@ -8,8 +8,11 @@
 """Relationship tests for the per-cycle re-emission seam (src.events.triggers.forecast_snapshot_ready)."""
 from __future__ import annotations
 
+import dataclasses
 import inspect
+import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -606,6 +609,27 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     )
 
 
+def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
+    """Refresh summary is not live authority; scoped condition freshness is."""
+
+    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+
+    assert "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate" in screen_src
+    assert "confirmation_refresh_verified" in screen_src
+    assert screen_src.index("_edli_confirmation_refresh_unavailable") < screen_src.index(
+        "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate"
+    )
+    no_fresh_idx = screen_src.index("confirmation refresh produced no fresh")
+    assert screen_src.rindex(
+        "_edli_expire_unadmitted_redecision_pending",
+        0,
+        no_fresh_idx,
+    ) > screen_src.index(
+        "if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope"
+    )
+    assert "fresh_events.append(event)" not in screen_src
+
+
 def test_unadmitted_redecision_pending_is_expired():
     """Pending redecisions must remain backed by current edge/rest/held admission."""
 
@@ -616,7 +640,7 @@ def test_unadmitted_redecision_pending_is_expired():
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
         entity_key="San Francisco|2026-06-17|high|run-stale",
-        source="escalation_cross-stale",
+        source="cycle-stale",
         observed_at="2026-06-17T15:00:00+00:00",
         available_at="2026-06-17T15:00:00+00:00",
         received_at="2026-06-17T15:00:00+00:00",
@@ -733,6 +757,416 @@ def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
     ).fetchone()
     assert expired == 0
     assert tuple(row) == ("pending", None)
+
+
+def test_stale_admitted_redecision_pending_is_superseded_for_fresh_screen():
+    """A current family must not be suppressed forever by an old pending row.
+
+    The default expiry path preserves admitted rows; the screen can explicitly
+    supersede an admitted row after the claim grace when it has just re-confirmed
+    fresh scoped price substrate and is ready to emit a replacement event.
+    """
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Shenzhen|2026-06-27|high|run-stale",
+        source="cycle-stale",
+        observed_at="2026-06-26T10:00:00+00:00",
+        available_at="2026-06-26T10:00:00+00:00",
+        received_at="2026-06-26T10:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=_ready_payload(
+            city="Shenzhen",
+            target_date="2026-06-27",
+            metric="high",
+            source_run_id="run-stale",
+            snapshot_id="snap-stale",
+        ),
+        priority=50,
+        created_at="2026-06-26T10:00:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+
+    admitted = {("Shenzhen", "2026-06-27", "high")}
+    preserved = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-26T10:06:00+00:00",
+    )
+    assert preserved == 0
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-26T10:06:00+00:00",
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (stale.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
+def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
+    """A fresh screen should replace an admitted blocker once the short claim window passes."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Istanbul|2026-06-29|high|run-stale",
+        source="cycle-stale",
+        observed_at="2026-06-28T10:00:00+00:00",
+        available_at="2026-06-28T10:00:00+00:00",
+        received_at="2026-06-28T10:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=_ready_payload(
+            city="Istanbul",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-stale",
+            snapshot_id="snap-stale",
+        ),
+        priority=50,
+        created_at="2026-06-28T10:00:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+
+    admitted = {("Istanbul", "2026-06-29", "high")}
+    too_soon = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-28T10:01:14+00:00",
+        supersede_stale_admitted=True,
+    )
+    assert too_soon == 0
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-28T10:01:16+00:00",
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (stale.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
+def test_fresh_screen_supersedes_stale_processing_redecision_after_short_grace():
+    """A stale reactor claim must not block a fresh family screen indefinitely."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    decision_time = datetime(2026, 6, 28, 10, 2, tzinfo=timezone.utc)
+    processing = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Istanbul|2026-06-29|high|run-processing",
+        source="cycle-processing",
+        observed_at="2026-06-28T10:00:00+00:00",
+        available_at="2026-06-28T10:00:00+00:00",
+        received_at="2026-06-28T10:00:00+00:00",
+        causal_snapshot_id="snap-processing",
+        payload=_ready_payload(
+            city="Istanbul",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-processing",
+            snapshot_id="snap-processing",
+        ),
+        priority=50,
+        created_at="2026-06-28T10:00:00+00:00",
+    )
+    store.insert_or_ignore(processing)
+    assert store.claim(
+        processing.event_id,
+        claimed_at=(decision_time - timedelta(seconds=76)).isoformat(),
+    )
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        {("Istanbul", "2026-06-29", "high")},
+        decision_time=decision_time.isoformat(),
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (processing.event_id,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
+def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
+    """Cancel/reprice continuity must survive after the rest leaves the open-rest set."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Paris",
+            target_date="2026-06-19",
+            metric="low",
+            source_run_id="run-rest-pull",
+            snapshot_id="snap-rest-pull",
+        )
+    )
+    payload["redecision_origin"] = "rest_pull"
+    rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-06-19|low|run-rest-pull",
+        source="cycle-rest-pull",
+        observed_at="2026-06-17T15:45:00+00:00",
+        available_at="2026-06-17T15:45:00+00:00",
+        received_at="2026-06-17T15:45:00+00:00",
+        causal_snapshot_id="snap-rest-pull",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-17T15:45:00+00:00",
+    )
+    store.insert_or_ignore(rest_pull)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (rest_pull.entity_key,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("pending", None)
+
+
+def test_rest_pull_supersedes_generic_pending_redecision_blocker():
+    """A live rest-pull must not be suppressed by an older generic pending row."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    generic_payload = dataclasses.asdict(
+        _ready_payload(
+            city="Ankara",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-generic",
+            snapshot_id="snap-generic",
+        )
+    )
+    generic_payload["redecision_origin"] = "market_price"
+    generic = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-generic",
+        source="market-channel",
+        observed_at="2026-06-28T04:20:00+00:00",
+        available_at="2026-06-28T04:20:00+00:00",
+        received_at="2026-06-28T04:20:00+00:00",
+        causal_snapshot_id="snap-generic",
+        payload=generic_payload,
+        priority=50,
+        created_at="2026-06-28T04:20:00+00:00",
+    )
+    rest_payload = dict(generic_payload)
+    rest_payload["source_run_id"] = "run-rest"
+    rest_payload["snapshot_id"] = "snap-rest"
+    rest_payload["redecision_origin"] = "rest_pull"
+    rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-rest",
+        source="rest-pull",
+        observed_at="2026-06-28T04:21:00+00:00",
+        available_at="2026-06-28T04:21:00+00:00",
+        received_at="2026-06-28T04:21:00+00:00",
+        causal_snapshot_id="snap-rest",
+        payload=rest_payload,
+        priority=50,
+        created_at="2026-06-28T04:21:00+00:00",
+    )
+    store.insert_or_ignore(generic)
+    store.insert_or_ignore(rest_pull)
+
+    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+        world,
+        {("Ankara", "2026-06-29", "high")},
+        decision_time="2026-06-28T04:22:00+00:00",
+    )
+
+    rows = dict(
+        world.execute(
+            """
+            SELECT e.entity_key, p.processing_status || ':' || COALESCE(p.last_error, '')
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE p.consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert expired == 1
+    assert rows[generic.entity_key] == (
+        "expired:REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice"
+    )
+    assert rows[rest_pull.entity_key] == "pending:"
+
+
+def test_rest_pull_supersede_leaves_processing_redecision_alone():
+    """The rest-pull blocker cleanup must not terminalize an in-flight reactor claim."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Ankara",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-processing",
+            snapshot_id="snap-processing",
+        )
+    )
+    payload["redecision_origin"] = "market_price"
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-processing",
+        source="market-channel",
+        observed_at="2026-06-28T04:20:00+00:00",
+        available_at="2026-06-28T04:20:00+00:00",
+        received_at="2026-06-28T04:20:00+00:00",
+        causal_snapshot_id="snap-processing",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-28T04:20:00+00:00",
+    )
+    store.insert_or_ignore(event)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processing',
+               claimed_at = '2026-06-28T04:21:00+00:00',
+               updated_at = '2026-06-28T04:21:00+00:00'
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    )
+
+    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+        world,
+        {("Ankara", "2026-06-29", "high")},
+        decision_time="2026-06-28T04:22:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("processing", None)
+
+
+def test_old_rest_pull_redecision_still_expires_without_current_edge():
+    """The rest-pull grace is a continuity window, not an infinite pending queue."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Paris",
+            target_date="2026-06-19",
+            metric="low",
+            source_run_id="run-old-rest-pull",
+            snapshot_id="snap-old-rest-pull",
+        )
+    )
+    payload["redecision_origin"] = "rest_pull"
+    old_rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-06-19|low|run-old-rest-pull",
+        source="cycle-old-rest-pull",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-old-rest-pull",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    store.insert_or_ignore(old_rest_pull)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (old_rest_pull.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value",
+    )
 
 
 def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
@@ -933,6 +1367,77 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
         main._edli_expire_unadmitted_redecision_pending
     )
+
+
+def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
+    """Open maker-rest pulls must not disappear when the entry belief subset is empty."""
+
+    from src.events.continuous_redecision import OpenRest, RepriceDecision
+
+    rest = OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="family-rest",
+        bin_label="20C",
+        side="buy_yes",
+        condition_id="cond-rest",
+        resting_posterior=0.7,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.4,
+        quote_age_ms=301_000,
+        city="Paris",
+        target_date="2026-06-20",
+        metric="low",
+    )
+    decision = RepriceDecision(
+        family_id="family-rest",
+        bin_label="20C",
+        side="buy_yes",
+        action="CANCEL_REPLACE",
+        reason="BOOK_MOVED",
+        detail=0.02,
+    )
+
+    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+        ("Paris", "2026-06-20", "low"): {"cond-rest"}
+    }
+
+
+def test_rest_pull_condition_scope_includes_family_optimum_replacement_condition():
+    """Replacement pulls must refresh the sibling condition before redecision emits."""
+
+    from src.events.continuous_redecision import OpenRest, RepriceDecision
+
+    rest = OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="family-rest",
+        bin_label="29C",
+        side="buy_no",
+        condition_id="cond-old",
+        resting_posterior=0.7,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.6,
+        quote_age_ms=301_000,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+    decision = RepriceDecision(
+        family_id="family-rest",
+        bin_label="29C",
+        side="buy_no",
+        action="CANCEL_REPLACE",
+        reason="FAMILY_OPTIMUM_SHIFT",
+        detail=0.12,
+        replacement_condition_id="cond-new",
+        replacement_bin_label="30C",
+        replacement_side="buy_yes",
+    )
+
+    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+        ("Shanghai", "2026-06-20", "high"): {"cond-old", "cond-new"}
+    }
 
 
 def test_entry_redecision_excludes_current_held_families(monkeypatch):
@@ -1171,6 +1676,8 @@ def test_held_position_family_provider_excludes_closed_phases():
             ("Hong Kong", "2026-06-08", "high", 10.0, 10.0, 8.0, 8.0, 8.0, "synced", "economically_closed"),
             ("Warsaw", "2026-06-08", "high", 15.75, 15.75, 9.0, 9.0, 9.0, "synced", "admin_closed"),
             ("Seoul", "2026-06-08", "high", 7.0, 7.0, 5.0, 5.0, 5.0, "synced", "quarantined"),
+            ("Munich", "2026-06-30", "high", 29.14, 29.14, 21.27, 21.27, 21.27, "chain_absent_confirmed_position_unattributed", "quarantined"),
+            ("Lucknow", "2026-06-28", "high", 19.88, 19.88, 0.12, 0.12, 0.12, "entry_authority_quarantined", "quarantined"),
             ("Busan", "2026-06-20", "high", 22.0, 22.0, 15.0, 15.0, 15.0, "synced", "pending_entry"),
             ("Osaka", "2026-06-21", "high", 12.0, 12.0, 0.0, 0.0, 0.0, "synced", "active"),
             ("Paris", "2026-06-22", "low", 10.0, 0.0, 8.0, 0.0, 8.0, "local_only", "active"),
@@ -1181,6 +1688,8 @@ def test_held_position_family_provider_excludes_closed_phases():
     assert _held_position_families(conn) == {
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
+        ("Seoul", "2026-06-08", "high"),
+        ("Lucknow", "2026-06-28", "high"),
     }
 
 
@@ -1249,7 +1758,7 @@ def test_held_position_family_provider_includes_market_closed_hold_exposure():
                 "synced",
                 "pending_exit",
                 "backoff_exhausted",
-                "MODEL_DIVERGENCE_PANIC",
+                "FLASH_CRASH_PANIC",
             ),
         ],
     )
@@ -1291,11 +1800,223 @@ def test_held_position_family_provider_accepts_chain_confirmed_quantity():
     assert _held_position_families(conn) == {("Shenzhen", "2026-06-19", "high")}
 
 
+def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Hong Kong", "2026-06-09", "high", "ghost-cond", "local_only", 0.0, "active"),
+            ("Hong Kong", "2026-06-26", "low", "live-cond", "synced", 5.0, "day0_window"),
+            ("Singapore", "2026-06-26", "high", "exit-cond", "exit_pending_missing", 1.0, "pending_exit"),
+            (
+                "Munich",
+                "2026-06-30",
+                "high",
+                "chain-absent-cond",
+                "chain_absent_confirmed_position_unattributed",
+                29.14,
+                "quarantined",
+            ),
+            (
+                "Lucknow",
+                "2026-06-28",
+                "high",
+                "entry-authority-cond",
+                "entry_authority_quarantined",
+                19.88,
+                "quarantined",
+            ),
+            ("Seoul", "2026-06-28", "high", "quarantine-ghost", "synced", 7.0, "quarantined"),
+            ("Paris", "2026-06-26", "low", "zero-cond", "synced", 0.0, "active"),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
+
+    assert main._edli_current_held_position_condition_scope() == {
+        ("Hong Kong", "2026-06-26", "low"): {"live-cond"},
+        ("Singapore", "2026-06-26", "high"): {"exit-cond"},
+        ("Lucknow", "2026-06-28", "high"): {"entry-authority-cond"},
+        ("Seoul", "2026-06-28", "high"): {"quarantine-ghost"},
+    }
+
+
+def test_held_condition_scope_excludes_latest_non_executable_snapshot(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            active INTEGER,
+            closed INTEGER,
+            enable_orderbook INTEGER,
+            accepting_orders INTEGER,
+            captured_at TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Lucknow", "2026-06-28", "high", "closed-cond", "synced", 20.0, "active"),
+            ("Manila", "2026-06-29", "high", "open-cond", "synced", 5.0, "day0_window"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("snap-closed", "closed-cond", 0, 1, 0, 0, "2026-06-29T05:00:00+00:00"),
+            ("snap-open", "open-cond", 1, 0, 1, 1, "2026-06-29T05:00:00+00:00"),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
+
+    assert main._edli_current_held_position_condition_scope() == {
+        ("Manila", "2026-06-29", "high"): {"open-cond"},
+    }
+
+
+def test_held_family_condition_scope_refreshes_siblings_for_shift_selection(monkeypatch):
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            range_label TEXT,
+            token_id TEXT
+        )
+        """
+    )
+    forecasts.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("Munich", "2026-06-30", "high", "cond-28", "28C", "yes-28"),
+            ("Munich", "2026-06-30", "high", "cond-29", "29C", "yes-29"),
+            ("Munich", "2026-06-30", "high", "cond-30", "30C", "yes-30"),
+        ],
+    )
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            captured_at TEXT,
+            closed INTEGER,
+            enable_orderbook INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("snap-28", "cond-28", "2026-06-30T00:00:00+00:00", 0, 1, 1),
+            ("snap-29", "cond-29", "2026-06-30T00:00:00+00:00", 0, 1, 1),
+            ("snap-30", "cond-30", "2026-06-30T00:00:00+00:00", 1, 0, 0),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade)
+
+    assert main._edli_current_held_position_family_condition_scope(
+        {("Munich", "2026-06-30", "high")}
+    ) == {
+        ("Munich", "2026-06-30", "high"): {"cond-28", "cond-29"},
+    }
+
+
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
     """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
 
     src = inspect.getsource(main._edli_event_reactor_cycle)
     assert src.index("_edli_prune_pending_working_set(") < src.index("_edli_pending_entity_keys(")
+
+
+def test_redecision_screen_opens_pending_snapshot_after_expiry_commit():
+    """The screen must not snapshot pending keys from a connection opened before expiry."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert src.index("world_prune.commit()") < src.index(
+        "world_scan_ro = get_world_connection_read_only()"
+    )
+    assert src.index("world_scan_ro = get_world_connection_read_only()") < src.index(
+        "_edli_pending_entity_keys(world_scan_ro"
+    )
+
+
+def test_reactor_emit_lock_is_bounded_and_does_not_rescan_pending_under_lock():
+    """The reactor must not let emit-stage backlog starve monitor/redecision cadence."""
+
+    src = inspect.getsource(main._edli_event_reactor_cycle)
+    emit_block = src[src.index("_emit_mutex = _world_write_mutex()") : src.index(
+        "trade_conn = get_trade_connection_with_world_required"
+    )]
+    assert "_edli_emit_lock_timeout_seconds(edli_cfg)" in emit_block
+    assert "_edli_acquire_mutex(_emit_mutex" in emit_block
+    assert "_edli_pending_entity_keys(" not in emit_block
+
+
+def test_false_forecast_emit_limit_resolves_to_bounded_default_not_unbounded():
+    for raw in (False, "false", "none", "default"):
+        resolved = main._edli_positive_int_or_unbounded(
+            {"forecast_snapshot_emit_limit": raw},
+            "forecast_snapshot_emit_limit",
+            default=12,
+            maximum=20,
+        )
+        assert resolved == 12
+    assert (
+        main._edli_positive_int_or_unbounded(
+            {"forecast_snapshot_emit_limit": "unbounded"},
+            "forecast_snapshot_emit_limit",
+            default=12,
+            maximum=20,
+        )
+        is None
+    )
+
+
+def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pending():
+    """Rest-pull and held-position redecision must retry quickly instead of blocking."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert "_edli_acquire_mutex(prune_mutex" in src
+    assert "_edli_acquire_mutex(emit_mutex" in src
+    emit_block = src[src.rindex("world = get_world_connection()") : src.index(
+        "# 3) CANCEL the pulled rests"
+    )]
+    assert "_edli_pending_entity_keys(world" not in emit_block
+    assert "if event.entity_key in pending:" in emit_block
 
 
 def test_reactor_prune_archives_orphan_processing_rows():
@@ -1304,3 +2025,214 @@ def test_reactor_prune_archives_orphan_processing_rows():
     src = inspect.getsource(main._edli_prune_pending_working_set)
     assert "archive_orphan_processing_rows" in src
     assert src.index("archive_orphan_processing_rows") < src.index("archive_expired_candidates")
+    assert src.index("archive_expired_candidates") < src.index("repair_missing_processing_rows")
+
+
+def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
+    """Maintenance prune may skip remaining work, but must not poison later claim waits."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    world.execute("PRAGMA busy_timeout = 30000")
+    store = EventStore(world)
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda name, default=None: {
+            "reactor_prune_interval_seconds": 0,
+            "reactor_prune_batch_limit": 10,
+            "reactor_prune_budget_seconds": 0.001,
+            "reactor_prune_busy_timeout_ms": 1,
+        }
+        if name == "edli"
+        else (default if default is not None else {}),
+    )
+
+    def _slow_first_step(*, batch_limit):
+        time.sleep(0.01)
+        return 0
+
+    monkeypatch.setattr(store, "archive_orphan_processing_rows", _slow_first_step)
+    monkeypatch.setattr(
+        store,
+        "requeue_misclassified_local_pre_submit_rejections",
+        lambda *, batch_limit: pytest.fail("budget exhaustion should skip later prune steps"),
+    )
+
+    main._edli_prune_pending_working_set(
+        store,
+        decision_time=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert world.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
+def test_sqlite_deadline_interrupts_and_clears():
+    """Reactor maintenance budgets must interrupt SQLite itself, not only Python between steps."""
+
+    conn = sqlite3.connect(":memory:")
+    deadline = time.monotonic() - 0.001
+    main._edli_install_sqlite_deadline(conn, deadline_monotonic=deadline)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                """
+                WITH RECURSIVE x(n) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT n + 1 FROM x WHERE n < 1000000
+                )
+                SELECT sum(n) FROM x
+                """
+            ).fetchone()
+    finally:
+        main._edli_clear_sqlite_progress_handler(conn)
+
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_forecast_snapshot_build_is_reactor_budgeted():
+    """FSR event build is before process_pending; it must not be an unbounded reactor stage."""
+
+    src = inspect.getsource(main._edli_event_reactor_cycle)
+    assert "reactor_forecast_snapshot_build_budget_seconds" in inspect.getsource(
+        main._edli_forecast_snapshot_build_budget_seconds
+    )
+    assert "budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg)" in src
+
+
+def test_day0_emit_is_reactor_budgeted():
+    """Day0 catch-up runs under the world mutex, so it needs a hard SQLite deadline."""
+
+    cycle_src = inspect.getsource(main._edli_event_reactor_cycle)
+    emit_src = inspect.getsource(main._edli_emit_day0_extreme_events)
+    assert "reactor_day0_emit_budget_seconds" in inspect.getsource(
+        main._edli_day0_emit_budget_seconds
+    )
+    assert "reactor_day0_emit_busy_timeout_ms" in inspect.getsource(
+        main._edli_day0_emit_busy_timeout_ms
+    )
+    assert "budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg)" in cycle_src
+    assert "_edli_install_sqlite_deadline(world_conn" in emit_src
+    assert "_edli_install_sqlite_deadline(trade_conn" in emit_src
+    assert "_edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)" in emit_src
+    assert "_edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)" in emit_src
+    assert "EDLI day0 emit budget exhausted" in emit_src
+
+
+def test_redecision_screen_belief_read_filters_forecast_only_inadmissible_families():
+    """Continuous entry refresh must not spend money-path refresh on stale target-day beliefs."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert "forecast_only_admissible=True" in src
+    assert "_all_latest_beliefs(world_ro)" not in src
+
+
+def test_decision_triggered_refresh_delegates_to_substrate_sidecar():
+    """Decision-time stale snapshots mark sidecar priority instead of writing live substrate."""
+
+    src = inspect.getsource(main._edli_decision_family_snapshot_refresher)
+    assert "mark_money_path_substrate_priority(" in src
+    assert 'reason="decision_triggered_targeted_refresh"' in src
+    assert "_edli_money_path_substrate_priority_cycle()" not in src
+    assert "refresh_executable_market_substrate_snapshots(" not in src
+    assert "get_trade_connection" not in src
+    assert "PolymarketClient" not in src
+
+
+def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_changes():
+    """SQLite CTE UPDATE rowcount can be -1; live logs need the real change count."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    now = datetime.now(timezone.utc).isoformat()
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Paris|2026-06-26|high|run-1",
+        source="forecast",
+        observed_at=now,
+        available_at=now,
+        received_at=now,
+        payload=ForecastSnapshotReadyPayload(
+            city="Paris",
+            target_date="2026-06-26",
+            metric="high",
+            source_id="ecmwf-open-data",
+            source_run_id="run-1",
+            cycle="00",
+            track="ens",
+            snapshot_id="snap-1",
+            snapshot_hash="snap-1",
+            captured_at="2026-06-26T10:00:00+00:00",
+            available_at="2026-06-26T10:00:00+00:00",
+            required_fields_present=True,
+            required_steps_present=True,
+            member_count=51,
+            min_members_floor=40,
+            completeness_status="COMPLETE",
+            required_steps=[0, 3, 6],
+            observed_steps=[0, 3, 6],
+            expected_members=51,
+            source_run_status="COMMITTED",
+            source_run_completeness_status="COMPLETE",
+            coverage_completeness_status="COMPLETE",
+            coverage_readiness_status="LIVE_ELIGIBLE",
+        ),
+        created_at=now,
+    )
+    store.insert_or_ignore(event)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed',
+               processed_at = ?,
+               updated_at = ?
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (now, now, store.consumer_name, event.event_id),
+    )
+    payload = {
+        "event_id": event.event_id,
+        "reason_code": "entries_paused:operator",
+        "pre_submit_rejection": 0,
+        "venue_order_id": "",
+    }
+    world.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agg-event-1",
+            "agg-1",
+            1,
+            "SubmitRejected",
+            None,
+            "hash-1",
+            json.dumps(payload, sort_keys=True),
+            "payload-hash-1",
+            "existing_executor",
+            now,
+            now,
+            1,
+        ),
+    )
+
+    assert store.requeue_misclassified_local_pre_submit_rejections(batch_limit=10) == 1
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert row["processing_status"] == "pending"
+    assert row["last_error"] == "RECOVERED_MISCLASSIFIED_LOCAL_PRESUBMIT_REJECTION"

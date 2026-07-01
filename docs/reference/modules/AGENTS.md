@@ -32,7 +32,7 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 | `supervisor_api.md` | Dense module book for Zeus/Venus typed boundary contracts |
 | `strategy.md` | Dense module book for edge selection, FDR, Kelly, and posterior fusion |
 | `signal.md` | Dense module book for P_raw, Day0, and diurnal signal generation |
-| `calibration.md` | Dense module book for Platt calibration, maturity gates, and shadow metrics |
+| `calibration.md` | Dense module book for Platt calibration, maturity gates, and diagnostic baseline metrics |
 | `observability.md` | Dense module book for derived operator read models and health views |
 | `types.md` | Dense module book for unit safety, market types, and observation atoms |
 | `analysis.md` | Dense module book for placeholder/derived analysis utilities |

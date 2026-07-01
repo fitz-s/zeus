@@ -94,15 +94,11 @@ transform in place):
      ``executable=False`` with an honest ``NO_DEPTH``-class reason, NOT clamped to a
      smaller size behind the caller's back.
 
-  4. Conversion routes (``CONVERSION_SELL_BASKET``) are built ``executable=False`` —
-     NOT because a cap rejects them, but because the on-chain neg-risk
-     convert/merge/split venue primitive they would require is ABSENT (drift-ledger
-     BLOCKER; the grep mandated by spec line 730 was re-run for this build and found
-     ZERO executable convert/merge/split methods in src/venue or src/execution). The
-     route is enumerated for shadow accounting and its ``reason`` cites the missing
-     primitive. This is honoring the venue-primitive BLOCKER, not a bolted-on shadow
-     flag over a working transform — there is genuinely no transform that could execute
-     it. ``DIRECT_*`` / ``SYNTHETIC_*`` / ``*_ARB`` routes proceed live via independent
+  4. Conversion routes (``CONVERSION_SELL_BASKET``) are omitted until the on-chain
+     neg-risk convert/merge/split venue primitive exists (drift-ledger BLOCKER;
+     the grep mandated by spec line 730 was re-run for this build and found ZERO
+     executable convert/merge/split methods in src/venue or src/execution).
+     ``DIRECT_*`` / ``SYNTHETIC_*`` / ``*_ARB`` routes proceed live via independent
      native ``submit()`` orders (each a ``RouteLeg``), which require no conversion.
 
 WHAT STAYS LEAF:
@@ -138,13 +134,11 @@ RouteType = Literal[
     "CONVERSION_SELL_BASKET",
 ]
 
-# The venue-primitive BLOCKER reason (drift-ledger §7-19; spec lines 728-732). Cited on
-# every CONVERSION_SELL_BASKET route's ``reason`` so a shadow receipt records WHY it
-# cannot go live: the on-chain convert/merge/split primitive is not wired.
+# The venue-primitive BLOCKER reason (drift-ledger §7-19; spec lines 728-732).
 CONVERSION_VENUE_PRIMITIVE_ABSENT = (
     "CONVERSION_VENUE_PRIMITIVE_ABSENT: on-chain neg-risk convert/merge/split is not "
     "wired in src/venue (only redeem/submit/cancel exist). A CONVERSION_SELL_BASKET "
-    "route has no venue primitive to execute and stays SHADOW until a convert/merge/"
+    "route has no venue primitive to execute until a convert/merge/"
     "split method is added to PolymarketV2Adapter + NegRiskAdapter calldata encoders."
 )
 
@@ -203,7 +197,7 @@ class RouteLeg:
 
 @dataclass(frozen=True)
 class RouteCost:
-    """One executable (or shadow) way to acquire a claim, priced size-aware (658-676).
+    """One way to acquire a claim, priced size-aware (658-676).
 
     Field names are verbatim from consult_build_spec.md.
 
@@ -784,50 +778,6 @@ def _full_yes_basket_arb_route(
     )
 
 
-def _conversion_route(
-    family_book: FamilyBook, *, bin_id: str, shares: Decimal
-) -> RouteCost:
-    """Conversion sell basket — ALWAYS shadow (venue primitive absent; 715-720, 728-732).
-
-    The conversion check (spec lines 715-720) requires:
-
-        cost_or_value(NO_i -> YES_j basket) must be executable by a VENUE PRIMITIVE
-        ask_no_i(s) + conversion_friction < Σ_{j != i} bid_yes_j(s)
-
-    The economic edge (right-hand inequality) may well hold, but the FIRST condition is
-    unsatisfiable on the live venue: the on-chain neg-risk convert/merge/split primitive
-    is ABSENT (drift-ledger BLOCKER; the grep mandated by spec line 730 found ZERO
-    executable convert/merge/split methods in src/venue / src/execution — only redeem/
-    submit/cancel are wired). So a CONVERSION_SELL_BASKET route has no venue primitive to
-    execute and is built ``executable=False`` with ``reason`` citing the missing
-    primitive. This is honoring the venue BLOCKER, NOT a cap over a working transform:
-    there is genuinely no transform that could execute it until a convert/merge/split
-    method lands in PolymarketV2Adapter + NegRiskAdapter.
-
-    The route is still ENUMERATED (for shadow accounting / receipts) and carries the NO_i
-    instrument and the bin's sibling-bid legs as the orders it WOULD execute, so a shadow
-    receipt records the full intended route — but it can never go live.
-    """
-    market = family_book.markets[bin_id]
-    instrument = Instrument(
-        instrument_id=f"NO:{bin_id}",
-        bin_id=bin_id,
-        side="NO",
-        direct_token_id=market.no_token_id,
-    )
-    return RouteCost(
-        route_id=f"CONVERSION_SELL_BASKET:{bin_id}@{shares}",
-        route_type="CONVERSION_SELL_BASKET",
-        instrument=instrument,
-        shares=shares,
-        avg_cost=_zero_cost("SHADOW"),
-        max_shares=Decimal("0"),
-        legs=(),
-        executable=False,
-        reason=CONVERSION_VENUE_PRIMITIVE_ABSENT,
-    )
-
-
 # ---------------------------------------------------------------------------
 # The route-set builder — the family route engine entry point.
 # ---------------------------------------------------------------------------
@@ -843,7 +793,7 @@ def build_negrisk_route_set(
     For each sibling bin it builds the direct YES and direct NO routes; for neg-risk
     siblings it ALSO builds the synthetic NO_i = sibling-YES basket route (spec lines
     696-699). It runs the pair arb per bin (line 707) and the single full-YES-basket arb
-    (line 713), and enumerates the conversion routes as SHADOW (lines 715-720, 728-732).
+    (line 713). Conversion routes are omitted until the venue primitive exists.
 
     Every cost is SIZE-AWARE on the executable ladder via the leaf ``executable_cost``
     walker — never a midpoint, last, or NO-complement price.
@@ -887,13 +837,6 @@ def build_negrisk_route_set(
         pair = _pair_arb_route(family_book, bin_id=bin_id, shares=shares)
         if pair is not None:
             pair_arbs.append(pair)
-
-        # Conversion routes are enumerated only for neg-risk siblings (the conversion is
-        # a neg-risk venue operation). Always shadow.
-        if family_book.markets[bin_id].neg_risk:
-            conversion_routes.append(
-                _conversion_route(family_book, bin_id=bin_id, shares=shares)
-            )
 
     full_basket_arbs: list[RouteCost] = []
     if enable_negrisk_routes:

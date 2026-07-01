@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-29
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -333,9 +333,13 @@ class TestLoadReplacementBelief:
         assert belief.freshness_basis == "source_cycle_time"
         assert belief.source_cycle_age_hours == pytest.approx(24.0)
 
-    def test_newer_raw_cycle_marks_posterior_stale_until_materialized(self, forecasts_db):
-        """Monitor authority must not treat an older posterior as fresh when
-        newer live-input raw cycles already exist for the same family."""
+    def test_newer_raw_model_without_anchor_does_not_make_belief_stale(self, forecasts_db):
+        """A partial single-model row is not a materializable live family cycle.
+
+        The monitor freshness clock must not fault/reseed a held position from
+        a raw_model high-water mark that the replacement materializer cannot
+        consume yet. The anchor artifact is the family-cycle authority.
+        """
         _insert(
             forecasts_db,
             posterior_id="p1",
@@ -353,14 +357,97 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
 
         assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.latest_raw_cycle_time is None
+        assert belief.raw_cycle_lag_hours is None
+        validation = belief.freshness_validation()
+        assert "latest_raw_cycle_time=" not in validation
+        assert validation.endswith(";fresh")
+
+    def test_newer_anchor_qualified_raw_model_cycle_marks_posterior_stale(self, forecasts_db):
+        """An anchor-qualified raw_model cycle is a live upstream input and stales old belief."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        for model in ("ecmwf_ifs", "gfs", "icon"):
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Karachi",
+                    "2026-06-12",
+                    "high",
+                    (NOW - timedelta(hours=6)).isoformat(),
+                    "single_runs",
+                    "COVERED",
+                    (NOW - timedelta(hours=5, minutes=30)).isoformat(),
+                    (NOW - timedelta(hours=5, minutes=45)).isoformat(),
+                    model,
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
         assert belief.fresh is False
         assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
         assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
         assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
-        validation = belief.freshness_validation()
-        assert "latest_raw_cycle_time=" in validation
-        assert "raw_cycle_lag_h=6.00" in validation
-        assert validation.endswith(";stale")
+
+    def test_partial_non_anchor_raw_model_cycle_does_not_stale_posterior(self, forecasts_db):
+        """Partial non-anchor cycle rows cannot make held-position belief stale."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        for model in ("dmi_harmonie_europe", "icon_eu", "icon_global"):
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Karachi",
+                    "2026-06-12",
+                    "high",
+                    (NOW - timedelta(hours=6)).isoformat(),
+                    "single_runs",
+                    "COVERED",
+                    (NOW - timedelta(hours=5, minutes=30)).isoformat(),
+                    (NOW - timedelta(hours=5, minutes=45)).isoformat(),
+                    model,
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.latest_raw_cycle_time is None
+        assert belief.raw_cycle_lag_hours is None
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot
@@ -485,6 +572,7 @@ class TestMonitorPrimaryAuthority:
 
     def test_day0_yes_bin_probability_converts_to_held_side_for_buy_no(self):
         import src.engine.monitor_refresh as mr
+        from src.contracts import Direction
 
         assert mr._held_side_probability_from_yes_bin_probability(
             0.23,
@@ -494,6 +582,16 @@ class TestMonitorPrimaryAuthority:
             0.23,
             "buy_no",
         ) == pytest.approx(0.77)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            Direction.NO,
+        ) == pytest.approx(0.77)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "Direction.NO",
+        ) == pytest.approx(0.77)
+        with pytest.raises(ValueError, match="unsupported monitor direction"):
+            mr._held_side_probability_from_yes_bin_probability(0.23, "")
 
     def test_fresh_belief_attests_without_legacy_chain(self, monkeypatch):
         import src.engine.monitor_refresh as mr
@@ -761,7 +859,10 @@ class TestMonitorPrimaryAuthority:
                 temp_current REAL,
                 running_max REAL,
                 running_min REAL,
-                authority TEXT NOT NULL
+                authority TEXT NOT NULL,
+                causality_status TEXT NOT NULL,
+                source_role TEXT NOT NULL,
+                training_allowed INTEGER NOT NULL
             )
             """
         )
@@ -769,24 +870,25 @@ class TestMonitorPrimaryAuthority:
             """
             INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, utc_timestamp,
-                temp_current, running_max, running_min, authority
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                temp_current, running_max, running_min, authority,
+                causality_status, source_role, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T00:00:00+00:00",
-                    None, 16.0, 14.0, "VERIFIED",
+                    None, 16.0, 14.0, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T01:00:00+00:00",
-                    None, 18.0, 13.0, "VERIFIED",
+                    None, 18.0, 13.0, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T02:00:00+00:00",
-                    None, 17.0, 13.5, "VERIFIED",
+                    None, 17.0, 13.5, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
             ],
         )
@@ -805,6 +907,14 @@ class TestMonitorPrimaryAuthority:
                 "settlement_source_type": "noaa",
             },
         )()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = datetime(2026, 6, 25, 2, 10, tzinfo=timezone.utc)
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
 
         obs = mr._fetch_day0_observation(city, date(2026, 6, 25))
 
@@ -1072,6 +1182,50 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         assert "legacy_belief_substitution_suppressed" not in pos.applied_validations
         assert "BELIEF_AUTHORITY_FAULT" not in pos.applied_validations
         assert "day0_observation_unavailable:replacement_belief_reseed" in pos.applied_validations
+        assert reseeds == [
+            {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
+        ]
+
+    def test_day0_observation_unavailable_readthrough_is_not_fresh_exit_authority(
+        self, monkeypatch
+    ):
+        """Day0 observation absence cannot be papered over by replacement belief.
+
+        Replacement read-through can be recorded and reseeded, but same-day exit
+        authority stays stale until Day0 observation/hard-fact truth is available.
+        """
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+        from src.contracts.exceptions import ObservationUnavailableError
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+        monkeypatch.setattr(
+            mr,
+            "_refresh_day0_observation",
+            lambda **kw: (_ for _ in ()).throw(ObservationUnavailableError("no day0 obs")),
+        )
+        monkeypatch.setattr(mr, "_attempt_held_belief_readthrough", lambda *a, **k: 0.42)
+        reseeds = []
+        monkeypatch.setattr(
+            mr,
+            "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw),
+        )
+
+        pos = self._edli_pos(trade_id="day0-readthrough-1")
+        pos.entry_method = "day0_observation"
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None
+        )
+
+        assert is_fresh is False
+        assert prob == pytest.approx(pos.p_posterior)
+        assert refresh_pos.selected_method != SELECTED_METHOD_REPLACEMENT_POSTERIOR
+        assert (
+            "day0_observation_unavailable:replacement_belief_readthrough_available_not_exit_authority"
+            in refresh_pos.applied_validations
+        )
+        assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
         assert reseeds == [
             {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
         ]

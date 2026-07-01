@@ -1,4 +1,4 @@
-# REPLAY IS APPROXIMATE AUDIT ONLY. See docs/authority/zeus_live_backtest_shadow_boundary.md
+# REPLAY IS APPROXIMATE AUDIT ONLY. See live/backtest boundary authority docs.
 """Decision Replay Engine: replay historical facts without promoting them to truth.
 
 Backtest has two separate proof chains:
@@ -9,7 +9,7 @@ Backtest has two separate proof chains:
    trade history. No market price linkage means hypothetical PnL is unavailable.
 
 Legacy audit/counterfactual/walk_forward remain compatibility surfaces. The
-derived lanes write to zeus_backtest.db with diagnostic_non_promotion authority.
+derived lanes write to zeus_backtest.db with offline_no_promotion authority.
 """
 
 import json
@@ -37,14 +37,11 @@ from src.types import Bin
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
-BACKTEST_AUTHORITY_SCOPE = "diagnostic_non_promotion"
+BACKTEST_AUTHORITY_SCOPE = "offline_no_promotion"
 WU_SWEEP_LANE = "wu_settlement_sweep"
 TRADE_HISTORY_LANE = "trade_history_audit"
 PROBABILITY_EPS = 1e-12
-LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
-LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
-    LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
     "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
@@ -373,7 +370,6 @@ class ReplayContext:
                 "forecasts",
                 "calibration_pairs",
                 "market_events",
-                LEGACY_SHADOW_SIGNAL_TABLE,
             )
         ):
             self._sp = "world."
@@ -802,66 +798,6 @@ class ReplayContext:
                         break
             if best is not None:
                 break
-
-        if best is None and self.allow_snapshot_only_reference:
-            try:
-                shadow = self.conn.execute(
-                    f"""
-                    SELECT timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json
-                    FROM {self._sp}{LEGACY_SHADOW_SIGNAL_TABLE}
-                    WHERE city = ? AND target_date = ?
-                    ORDER BY datetime(timestamp) ASC
-                    LIMIT 1
-                    """,
-                    (city_name, target_date),
-                ).fetchone()
-            except Exception:
-                shadow = None
-            if shadow is not None and shadow["decision_snapshot_id"]:
-                try:
-                    edges_payload = json.loads(shadow["edges_json"]) if shadow["edges_json"] else []
-                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
-                    logger.warning(
-                        "REPLAY_SHADOW_EDGES_JSON_CORRUPT: timestamp=%s error=%s",
-                        shadow["timestamp"],
-                        exc,
-                    )
-                    edges_payload = []
-                bin_labels = [edge.get("bin_label", "") for edge in edges_payload if edge.get("bin_label")]
-                # B094 [critic amendment]: protect the two previously-
-                # unwrapped json.loads calls below. Include UnicodeDecodeError
-                # and RecursionError since persisted data is untrusted.
-                try:
-                    p_raw_vector = json.loads(shadow["p_raw_json"]) if shadow["p_raw_json"] else []
-                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
-                    logger.warning(
-                        "REPLAY_SHADOW_P_RAW_JSON_CORRUPT: timestamp=%s error=%s",
-                        shadow["timestamp"],
-                        exc,
-                    )
-                    p_raw_vector = []
-                try:
-                    p_cal_vector = json.loads(shadow["p_cal_json"]) if shadow["p_cal_json"] else []
-                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
-                    logger.warning(
-                        "REPLAY_SHADOW_P_CAL_JSON_CORRUPT: timestamp=%s error=%s",
-                        shadow["timestamp"],
-                        exc,
-                    )
-                    p_cal_vector = []
-                best = {
-                    "trade_id": "",
-                    "decision_time": shadow["timestamp"],
-                    "snapshot_id": int(shadow["decision_snapshot_id"]) if str(shadow["decision_snapshot_id"]).isdigit() else shadow["decision_snapshot_id"],
-                    "source": LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-                    "decision_reference_source": LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-                    "storage_source": LEGACY_SHADOW_SIGNAL_TABLE,
-                    "authority_scope": BACKTEST_AUTHORITY_SCOPE,
-                    "bin_labels": bin_labels,
-                    "p_raw_vector": p_raw_vector,
-                    "p_cal_vector": p_cal_vector,
-                    "p_market_vector": [],
-                }
 
         if best is None and self.allow_snapshot_only_reference:
             row = self._snapshot_reference_row(
@@ -1733,7 +1669,7 @@ def _replay_one_settlement(
             posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
             # K1: replay/backtest measures the FULL tested family (the denominator the
             # live gate is calibrated against), so it stays exempt — the live sharpness
-            # gate is a SHADOW live-q behavior, not an offline-measurement filter.
+            # gate is live-q admission behavior, not an offline-measurement filter.
             forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
         )
         _n_bootstrap = edge_n_bootstrap()

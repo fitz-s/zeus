@@ -148,6 +148,31 @@ def test_empty_no_ask_with_yes_bid_prices_maker_quote():
     ep.assert_kelly_safe()
 
 
+def test_empty_yes_ask_with_no_bid_prices_maker_quote():
+    """A direction-law-admitted buy_yes whose YES ask is empty but NO bid is live is
+    priced as a maker quote, symmetric with the buy_no empty-ask lane."""
+    row = _row(yes_asks=(), no_bids=(("0.62", "100"),))
+    ep, p_fill, c95 = era._execution_price_from_snapshot(
+        row, selected_token_id="yes-1", direction="buy_yes"
+    )
+    assert isinstance(ep, ExecutionPrice)
+    assert ep.value <= 0.37 + 1e-9  # 1 - no_best_bid - tick
+    assert ep.value > 0.0
+    assert p_fill > 0.0
+    assert c95 == pytest.approx(ep.value)
+    ep.assert_kelly_safe()
+
+
+def test_empty_yes_ask_and_no_no_bid_still_native_ask_missing():
+    """Fail-closed: empty YES ask without complementary NO bid gives no maker
+    placement authority."""
+    row = _row(yes_asks=(), no_bids=(), yes_bids=(), no_asks=())
+    with pytest.raises(ValueError):
+        era._execution_price_from_snapshot(
+            row, selected_token_id="yes-1", direction="buy_yes"
+        )
+
+
 def test_empty_no_ask_proof_is_maker_intent_taker_forbidden():
     """C: the generated proof carries execution_mode_intent=MAKER and
     taker_forbidden_reason=NO_ASK_EMPTY (taker is structurally impossible)."""

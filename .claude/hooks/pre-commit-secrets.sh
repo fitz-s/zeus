@@ -1,1 +1,0 @@
-legacy/pre-commit-secrets.sh

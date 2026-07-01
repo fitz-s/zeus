@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 4: No _v<N>, _old, _new, _legacy siblings of canonical tables.
 xfail(strict=False): ensemble_snapshots_v2, calibration_pairs_v2, settlements_v2, etc.

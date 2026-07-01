@@ -300,6 +300,12 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # decided is first-class decision provenance, recoverable from the blob forever.
     if payload.get("submit_lane") is None:
         payload.pop("submit_lane", None)
+    if payload.get("min_entry_price") is None:
+        payload.pop("min_entry_price", None)
+    if payload.get("min_expected_profit_usd") is None:
+        payload.pop("min_expected_profit_usd", None)
+    if payload.get("min_submit_edge_density") is None:
+        payload.pop("min_submit_edge_density", None)
     # C2 selection-shrinkage telemetry fields (task #60): ALWAYS excluded from
     # receipt_json — never hashed. Their canonical home is the queryable COLUMNS
     # (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority).

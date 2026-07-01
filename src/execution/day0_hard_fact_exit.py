@@ -30,7 +30,7 @@ Verdicts (both directions, both metrics):
 
 Settlement-grade extreme sources (provenance-ordered):
   1. WU live obs (THE settlement reference) — throttled per (city, date); margin 0.
-  2. METAR fast-lane memo (same physical station, ~3-9 min fresh) — admitted only
+  2. Same-station fast-tail memo (same physical station, ~3-9 min fresh) — admitted only
      for settlement-faithful cities (config/wu_metar_divergence.json), with a
      divergence margin derived from the SAME calibration artifact:
        empirical threshold <= 1.0 (feeds measured byte-identical post-rounding)
@@ -52,16 +52,19 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
 #: Throttle for the WU live-obs source (per city+date) — WU's own cadence is
-#: 30-60 min; the METAR memo carries the fast path.
+#: 30-60 min; the same-station memo carries the fast path.
 _WU_FETCH_INTERVAL_S = 600.0
+SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
+COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
 _WU_MEMO: dict[tuple[str, str], tuple[float, Optional[float], Optional[float]]] = {}
 _WU_MEMO_LOCK = threading.Lock()
 
@@ -72,7 +75,7 @@ class HardFactVerdict:
     reason: str
     metric: str
     rounded_extreme: float
-    source: str  # "wu_api" | "metar_fast_lane" | "wu_api+metar_fast_lane"
+    source: str  # "wu_api" | "same_station_fast_tail" | "wu_api+same_station_fast_tail"
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,16 @@ class HardFactMonitorBelief:
     yes_prob: float
     yes_verdict: str  # "YES_WON" | "YES_DEAD"
     held_verdict: str  # "STRUCTURAL_WIN" | "STRUCTURAL_LOSS"
+
+
+@dataclass(frozen=True)
+class DurableObservationExtremes:
+    high: Optional[float]
+    low: Optional[float]
+    source: str
+    row_count: int
+    max_local_hour: Optional[int]
+    max_local_timestamp: str
 
 
 def _normalize_direction(direction: Any) -> str:
@@ -148,6 +161,57 @@ def hard_fact_bin_verdict(
             f"shoulder [{bin_low},{bin_high}] — YES structurally won",
         )
     return None
+
+
+def final_observed_bin_verdict(
+    *,
+    metric: str,
+    direction: str,
+    bin_low: Optional[float],
+    bin_high: Optional[float],
+    final_extreme: float,
+) -> Optional[HardFactVerdict]:
+    """Pure final-day settlement-grid verdict once the local day is complete.
+
+    Intraday, a finite bin merely containing the running extreme is not
+    absorbing: a max can still leave upward and a min can still leave downward.
+    After the local target day is complete and durable WU rows cover the end of
+    that day, the final extreme is settlement-grade enough to decide whether
+    YES won the bin. This is the missing complement to ``hard_fact_bin_verdict``.
+    """
+
+    metric = str(getattr(metric, "value", metric) or "").strip().lower()
+    direction = _normalize_direction(direction)
+    if metric not in {"high", "low"} or direction not in {"buy_yes", "buy_no"}:
+        return None
+    if bin_low is None and bin_high is None:
+        return None
+
+    yes_won = True
+    if bin_low is not None and final_extreme < float(bin_low):
+        yes_won = False
+    if bin_high is not None and final_extreme > float(bin_high):
+        yes_won = False
+
+    if yes_won:
+        reason = (
+            f"final {metric} extreme {final_extreme} resolved inside bin "
+            f"[{bin_low},{bin_high}] — YES won"
+        )
+        action = "HOLD_STRUCTURAL_WIN" if direction == "buy_yes" else "EXIT_DEAD_BIN"
+    else:
+        reason = (
+            f"final {metric} extreme {final_extreme} resolved outside bin "
+            f"[{bin_low},{bin_high}] — YES dead"
+        )
+        action = "EXIT_DEAD_BIN" if direction == "buy_yes" else "HOLD_STRUCTURAL_WIN"
+    return HardFactVerdict(
+        action=action,
+        reason=reason,
+        metric=metric,
+        rounded_extreme=float(final_extreme),
+        source="",
+    )
 
 
 def hard_fact_monitor_belief(
@@ -266,13 +330,13 @@ def _metar_rounded_extreme(
         return None
 
 
-def _durable_observation_instants_extremes(
+def _durable_observation_instants_summary(
     *,
     city: Any,
     target_date: str,
     now: datetime,
     world_conn: Any = None,
-) -> tuple[Optional[float], Optional[float], str]:
+) -> DurableObservationExtremes | None:
     """Verified durable WU-hourly extrema for the local target date.
 
     This is the restart-safe side of the hard-fact lane. WU live API and METAR
@@ -282,10 +346,10 @@ def _durable_observation_instants_extremes(
     """
 
     if world_conn is None:
-        return None, None, ""
+        return None
     city_name = str(getattr(city, "name", "") or "")
     if not city_name or not target_date:
-        return None, None, ""
+        return None
 
     metric_filter = ("", "high", "low")
     now_iso = now.astimezone(UTC).isoformat()
@@ -301,7 +365,9 @@ def _durable_observation_instants_extremes(
                 SELECT
                     MAX(CASE WHEN running_max IS NOT NULL THEN CAST(running_max AS REAL) END) AS high,
                     MIN(CASE WHEN running_min IS NOT NULL THEN CAST(running_min AS REAL) END) AS low,
-                    COUNT(*) AS n_rows
+                    COUNT(*) AS n_rows,
+                    MAX(CAST(substr(local_timestamp, 12, 2) AS INTEGER)) AS max_local_hour,
+                    MAX(local_timestamp) AS max_local_timestamp
                 FROM {table_ref}
                 WHERE city = ?
                   AND target_date = ?
@@ -322,14 +388,128 @@ def _durable_observation_instants_extremes(
             n_rows = int(row["n_rows"] if hasattr(row, "keys") else row[2] or 0)
             high_raw = row["high"] if hasattr(row, "keys") else row[0]
             low_raw = row["low"] if hasattr(row, "keys") else row[1]
+            max_local_hour_raw = row["max_local_hour"] if hasattr(row, "keys") else row[3]
+            max_local_timestamp = str(
+                (row["max_local_timestamp"] if hasattr(row, "keys") else row[4]) or ""
+            )
         except (TypeError, KeyError, IndexError, ValueError):
             continue
         if n_rows <= 0 or (high_raw is None and low_raw is None):
             continue
         high = float(high_raw) if high_raw is not None else None
         low = float(low_raw) if low_raw is not None else None
-        return high, low, "durable_observation_instants"
-    return None, None, ""
+        try:
+            max_local_hour = (
+                int(max_local_hour_raw) if max_local_hour_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            max_local_hour = None
+        return DurableObservationExtremes(
+            high=high,
+            low=low,
+            source="durable_observation_instants",
+            row_count=n_rows,
+            max_local_hour=max_local_hour,
+            max_local_timestamp=max_local_timestamp,
+        )
+    return None
+
+
+def _durable_observation_instants_extremes(
+    *,
+    city: Any,
+    target_date: str,
+    now: datetime,
+    world_conn: Any = None,
+) -> tuple[Optional[float], Optional[float], str]:
+    summary = _durable_observation_instants_summary(
+        city=city,
+        target_date=target_date,
+        now=now,
+        world_conn=world_conn,
+    )
+    if summary is None:
+        return None, None, ""
+    return summary.high, summary.low, summary.source
+
+
+def _parse_target_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _city_zoneinfo(city: Any) -> ZoneInfo | None:
+    timezone_name = str(getattr(city, "timezone", "") or "").strip()
+    if not timezone_name:
+        return None
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return None
+
+
+def _target_local_day_complete(*, city: Any, target_date: str, now: datetime) -> bool:
+    target = _parse_target_date(target_date)
+    tz = _city_zoneinfo(city)
+    if target is None or tz is None:
+        return False
+    moment = now
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    local_now = moment.astimezone(tz)
+    return local_now.date() > target
+
+
+def _durable_summary_reaches_local_day_end(summary: DurableObservationExtremes) -> bool:
+    if summary.max_local_hour is not None:
+        return summary.max_local_hour >= 23
+    if not summary.max_local_timestamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(summary.max_local_timestamp)
+    except (TypeError, ValueError):
+        return False
+    return parsed.hour >= 23
+
+
+def _final_day_durable_verdict(
+    *,
+    metric: str,
+    direction: str,
+    bin_low: Optional[float],
+    bin_high: Optional[float],
+    durable_summary: DurableObservationExtremes | None,
+    city: Any,
+    target_date: str,
+    now: datetime,
+) -> Optional[HardFactVerdict]:
+    if durable_summary is None:
+        return None
+    if not _target_local_day_complete(city=city, target_date=target_date, now=now):
+        return None
+    if not _durable_summary_reaches_local_day_end(durable_summary):
+        return None
+    final_extreme = durable_summary.high if metric == "high" else durable_summary.low
+    if final_extreme is None:
+        return None
+    verdict = final_observed_bin_verdict(
+        metric=metric,
+        direction=direction,
+        bin_low=bin_low,
+        bin_high=bin_high,
+        final_extreme=float(final_extreme),
+    )
+    if verdict is None:
+        return None
+    return HardFactVerdict(
+        action=verdict.action,
+        reason=verdict.reason,
+        metric=verdict.metric,
+        rounded_extreme=verdict.rounded_extreme,
+        source=durable_summary.source,
+    )
 
 
 def settlement_grade_effective_extreme(
@@ -391,10 +571,10 @@ def settlement_grade_effective_extreme(
     if metar_value is None:
         return float(wu_value), wu_source
     if wu_value is None:
-        return float(metar_value), "metar_fast_lane"
+        return float(metar_value), SAME_STATION_FAST_TAIL_SOURCE
     if metric == "high":
-        return float(max(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
-    return float(min(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
+        return float(max(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
+    return float(min(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
 
 
 def evaluate_hard_fact_exit(
@@ -439,12 +619,42 @@ def evaluate_hard_fact_exit(
         if bin_low is None and bin_high is None:
             return None
 
-        durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
+        durable_summary = _durable_observation_instants_summary(
             city=city,
             target_date=target_date,
             now=moment,
             world_conn=world_conn,
         )
+        final_verdict = _final_day_durable_verdict(
+            metric=metric,
+            direction=direction,
+            bin_low=bin_low,
+            bin_high=bin_high,
+            durable_summary=durable_summary,
+            city=city,
+            target_date=target_date,
+            now=moment,
+        )
+        if final_verdict is not None:
+            log = logger.warning if final_verdict.action == "EXIT_DEAD_BIN" else logger.info
+            log(
+                "DAY0_HARD_FACT_%s trade=%s city=%s date=%s dir=%s bin=[%s,%s] "
+                "final_extreme=%s source=%s: %s",
+                final_verdict.action,
+                getattr(position, "trade_id", "?"),
+                city_name,
+                target_date,
+                direction,
+                bin_low,
+                bin_high,
+                final_verdict.rounded_extreme,
+                final_verdict.source,
+                final_verdict.reason,
+            )
+            return final_verdict
+        durable_high = durable_summary.high if durable_summary is not None else None
+        durable_low = durable_summary.low if durable_summary is not None else None
+        durable_source = durable_summary.source if durable_summary is not None else ""
         durable_effective = durable_high if metric == "high" else durable_low
         if durable_effective is not None:
             durable_verdict = hard_fact_bin_verdict(

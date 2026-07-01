@@ -40,10 +40,13 @@ from src.riskguard.metrics import (
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.runtime import bankroll_provider
+from src.runtime.bankroll_provider import BankrollOfRecord
 from src.state.db import (
+    CANONICAL_STRATEGY_KEYS,
     RISK_DB_PATH,
     get_connection,
     get_trade_connection_with_world_required,
+    _zeus_trade_db_path,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
@@ -58,6 +61,9 @@ from src.state.portfolio import (
     Position,
     load_portfolio,
 )
+
+RISKGUARD_SETTLEMENT_LIMIT = 50
+RISKGUARD_BRIER_SCAN_LIMIT = 200
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
@@ -74,6 +80,10 @@ TRAILING_LOSS_STATUSES = {
     "inconsistent_history",
     "no_reference_row",
 }
+_BANKROLL_TRUTH_SOURCES_OF_RECORD = frozenset({
+    "polymarket_wallet",
+    "collateral_ledger_snapshot",
+})
 
 
 def _finite_float_or_none(value):
@@ -93,6 +103,61 @@ def _get_runtime_trade_connection() -> sqlite3.Connection:
     if get_connection.__module__ != "src.state.db":
         return get_connection()
     return get_trade_connection_with_world_required(write_class="live")
+
+
+def _install_riskguard_collateral_ledger() -> bool:
+    """Install the P4-produced collateral ledger reader in this process.
+
+    RiskGuard runs in its own launchd process, so it cannot rely on
+    ``src.main`` having installed the process-local global ledger singleton.
+    The ledger is path-backed and opens short-lived DB connections only; it
+    consumes post-trade-capital's durable CHAIN snapshots and performs no venue
+    I/O.
+    """
+
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger, get_global_ledger
+
+    if get_global_ledger() is not None:
+        return True
+    try:
+        configure_global_ledger(CollateralLedger(db_path=_zeus_trade_db_path()))
+        logger.info(
+            "RiskGuard CollateralLedger reader installed (db=%s)",
+            _zeus_trade_db_path(),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - tick fail-closed handles missing truth.
+        logger.warning("RiskGuard CollateralLedger reader install failed: %s", exc)
+        return False
+
+
+def _bankroll_of_record_for_riskguard() -> BankrollOfRecord | None:
+    """Return current live bankroll truth for RiskGuard.
+
+    Source order is deliberate:
+    1. Fresh durable collateral snapshot from the post-trade-capital sidecar.
+       This is live CHAIN collateral truth already used by submit preflight and
+       avoids duplicating a fragile wallet/positions API read in RiskGuard.
+    2. Direct bankroll provider current() for compatibility when the sidecar
+       snapshot is unavailable.
+
+    If neither live truth source is available, callers fail closed at
+    DATA_DEGRADED.
+    """
+
+    try:
+        snapshot_record = bankroll_provider.warm_from_collateral_snapshot()
+    except Exception as exc:  # noqa: BLE001 - direct wallet path still has a chance.
+        snapshot_record = None
+        logger.warning("RiskGuard collateral snapshot bankroll read failed: %s", exc)
+    if snapshot_record is not None:
+        return snapshot_record
+
+    try:
+        return bankroll_provider.current()
+    except Exception as exc:  # noqa: BLE001 - caller writes the fail-closed row.
+        logger.warning("RiskGuard direct bankroll read failed: %s", exc)
+        return None
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
@@ -216,10 +281,11 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             len(positions), len(quarantined), len(metadata_positions)
         )
 
-    # Bankroll truth comes from on-chain wallet via src.runtime.bankroll_provider.
+    # Bankroll truth comes from the live bankroll path upstream. This metadata
+    # value is intentionally not promoted back into bankroll authority.
     # If metadata_state has no bankroll (or 0/falsy), do NOT fall back to a config
     # literal — return 0.0 so downstream sizing fails-CLOSED and RiskGuard.tick()
-    # surfaces DATA_DEGRADED via the bankroll_provider.current() check upstream.
+    # surfaces DATA_DEGRADED via the live bankroll check upstream.
     # Removed 2026-05-04: previously fell back to retired config-literal capital;
     # see docs/operations/task_2026-05-01_bankroll_truth_chain/.
     bankroll = float(getattr(metadata_state, "bankroll", 0.0) or 0.0)
@@ -437,9 +503,9 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
     # `effective_bankroll`. After cutover, `effective_bankroll` is the real
     # on-chain wallet. Without this guard, trailing-loss math could compare
     # different economic objects and trigger false RED → force_exit_review.
-    # Only rows tagged `bankroll_truth_source="polymarket_wallet"` are eligible
+    # Only rows tagged with a live bankroll truth source are eligible
     # references. Old rows (no field, or any other value) are filtered out.
-    if str(details.get("bankroll_truth_source") or "") != "polymarket_wallet":
+    if str(details.get("bankroll_truth_source") or "") not in _BANKROLL_TRUTH_SOURCES_OF_RECORD:
         return None
 
     initial_bankroll = _coerce_finite_float(details.get("initial_bankroll"))
@@ -501,7 +567,10 @@ def _trailing_loss_reference(
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
-          AND json_extract(details_json, '$.bankroll_truth_source') = 'polymarket_wallet'
+          AND json_extract(details_json, '$.bankroll_truth_source') IN (
+              'polymarket_wallet',
+              'collateral_ledger_snapshot'
+          )
         ORDER BY checked_at DESC, id DESC
         LIMIT 100
         """,
@@ -903,9 +972,9 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
 
     K1 invariant (bug #1/#2): this aggregation MUST be deduped by
     trade_id. Settlement rows can come from multiple upstream sources
-    (canonical position_events, legacy position_events_legacy, legacy
-    decision_log artifacts) and the same underlying trade may appear in
-    more than one source or in multiple batches of the same source. Prior
+    (canonical position_events and historical decision_log artifacts), and
+    the same underlying trade may appear in more than one source or in
+    multiple batches of the same source. Prior
     to dedup, opening_inertia would show 19 settlements on
     2026-04-11 while the canonical truth was 6 unique positions, because
     two decision_log settlement batches (19:43 and 20:43) each recorded
@@ -1009,6 +1078,76 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
     for bucket in by_strategy.values():
         _finalize(bucket)
     return {"overall": overall, "by_strategy": by_strategy}
+
+
+def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SETTLEMENT_LIMIT) -> list[dict]:
+    """Return learning-ready settlement rows for probability quality metrics.
+
+    Settlement truth quality and probability learning lineage are different
+    surfaces. A SETTLED event with complete canonical settlement payload is
+    valid settlement truth, but if it lacks the decision snapshot it must not
+    displace a learning-ready row in the Brier sample. Settlement backfills can
+    be newest by occurred_at while carrying no decision snapshot; using them as
+    the latest Brier rows turns a data repair into a false reduce-only halt.
+    """
+
+    metric_rows: list[dict] = []
+    for row in rows:
+        if not row.get("learning_snapshot_ready", False):
+            continue
+        if not row.get("metric_ready", True):
+            continue
+        if row.get("p_posterior") is None or row.get("outcome") is None:
+            continue
+        metric_rows.append(row)
+        if len(metric_rows) >= limit:
+            break
+    return metric_rows
+
+
+def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
+    """Per-strategy probability-quality attribution for localized protection.
+
+    Portfolio-level Brier still protects the system. When the breach is only
+    YELLOW and every learning-ready row carries a canonical strategy key, the
+    bad strategy can be halted through durable ``risk_actions`` instead of
+    freezing every other strategy. Unknown/unclassified rows keep the global
+    YELLOW because there is no safe strategy-local enforcement target.
+    """
+
+    buckets: dict[str, dict[str, object]] = {}
+    unclassified_count = 0
+    for row in rows:
+        strategy = str(row.get("strategy") or "unclassified")
+        if strategy not in CANONICAL_STRATEGY_KEYS:
+            unclassified_count += 1
+            continue
+        bucket = buckets.setdefault(strategy, {"p": [], "o": []})
+        bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
+        bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+
+    by_strategy: dict[str, dict[str, object]] = {}
+    degraded: dict[str, dict[str, object]] = {}
+    for strategy, bucket in sorted(buckets.items()):
+        p_values = list(bucket["p"])  # type: ignore[index]
+        outcomes = list(bucket["o"])  # type: ignore[index]
+        score = brier_score(p_values, outcomes)
+        level = evaluate_brier(score, thresholds)
+        payload = {
+            "sample_size": len(p_values),
+            "brier": round(float(score), 6),
+            "level": level.value,
+        }
+        by_strategy[strategy] = payload
+        if level != RiskLevel.GREEN:
+            degraded[strategy] = payload
+
+    return {
+        "by_strategy": by_strategy,
+        "degraded_strategies": degraded,
+        "unclassified_count": unclassified_count,
+        "classified_count": sum(int(row["sample_size"]) for row in by_strategy.values()),
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -1411,6 +1550,54 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     return level
 
 
+def _persist_tick_in_progress_attestation() -> None:
+    """Keep the entry gate continuous while a full RiskGuard tick is running.
+
+    RiskGuard's full metric pass can occasionally exceed the 5-minute reader
+    freshness window under DB I/O pressure. If the previous full row is still
+    fresh at tick start, persist a short-lived attestation carrying that proven
+    level so live trading does not fail RED in the middle of a still-running
+    tick. Rows written here are not full metrics and are never accepted by
+    _latest_fresh_full_risk_row; they expire through the normal freshness floor.
+    """
+    now = datetime.now(timezone.utc)
+    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
+    try:
+        init_risk_db(risk_conn)
+        previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
+        if previous_full is None:
+            return
+        details = {
+            "status": "metrics_in_progress_previous_risk_level_preserved",
+            "riskguard_degraded_reason": "metrics_refresh_in_progress",
+            "full_metrics_status": "in_progress_previous_fresh_level_preserved",
+            "previous_full_risk_level": previous_full["level"],
+            "previous_full_risk_checked_at": previous_full["checked_at"],
+        }
+        risk_conn.execute(
+            """
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+            VALUES (?, NULL, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                previous_full["level"],
+                json.dumps(details),
+                now.isoformat(),
+                int(previous_full["force_exit_review"] or 0),
+            ),
+        )
+        risk_conn.commit()
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_database_locked(exc):
+            raise
+        logger.warning(
+            "RiskGuard tick-start attestation skipped because risk_state.db is locked: %s",
+            exc,
+        )
+    finally:
+        _close_conn(risk_conn)
+
+
 def _tick_once() -> RiskLevel:
     """Run one RiskGuard evaluation attempt. Spec §7: 60-second cycle.
 
@@ -1434,27 +1621,22 @@ def _tick_once() -> RiskLevel:
     risk_conn: sqlite3.Connection | None = None
 
     # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
-    # use the on-chain wallet, NOT the config constant routed through
+    # use live chain/collateral truth, NOT the config constant routed through
     # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
-    # back to retired config-literal capital.
+    # collateral snapshot/cache exists, fail-closed at DATA_DEGRADED rather
+    # than silently falling back to retired config-literal capital.
     #
     # CONN-ACROSS-IO INVARIANT (T0-1, dimension-#4): this fetch is hoisted ABOVE
-    # the zeus_conn/risk_conn opens. `bankroll_provider.current()` is 30s-cached,
-    # but on a STALE cache it performs a Polymarket wallet NETWORK fetch; with the
-    # ~60s tick that network IO previously fired roughly every other tick WHILE
-    # both write-class conns were held (the conn-across-IO lock-contention class —
-    # the report's unconfirmed "2113 RISK_GUARD_BLOCKED/17h"). Fetching before any
-    # conn opens guarantees NO network IO ever happens while a write-class conn is
-    # held. The 30s cache, the fail-closed-to-DATA_DEGRADED contract (the
-    # `bankroll_of_record is None` branch below, which still runs after risk_conn
-    # opens so the DATA_DEGRADED attestation row can be written), the short
-    # busy_timeout, and the WAL-leak fix are all preserved; ONLY the fetch POINT
-    # moves earlier. The captured value is identical to what the old in-conn call
-    # returned and flows to the same downstream consumers (current_bankroll_usd,
-    # the details_json bankroll_truth block, the component log).
+    # the zeus_conn/risk_conn opens. The primary path consumes the post-trade
+    # sidecar's durable collateral snapshot (no venue I/O); compatibility direct
+    # wallet reads may still perform network I/O. Fetching before any conn opens
+    # guarantees NO network I/O ever happens while a write-class conn is held.
+    # The fail-closed-to-DATA_DEGRADED contract (the `bankroll_of_record is None`
+    # branch below, which still runs after risk_conn opens so the DATA_DEGRADED
+    # attestation row can be written), the short busy_timeout, and the WAL-leak
+    # fix are all preserved.
     # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
-    bankroll_of_record = bankroll_provider.current()
+    bankroll_of_record = _bankroll_of_record_for_riskguard()
 
     try:
         zeus_conn = _get_runtime_trade_connection()
@@ -1477,9 +1659,9 @@ def _tick_once() -> RiskLevel:
         portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
 
         # Bankroll truth was fetched BEFORE the conns opened (see the hoisted
-        # `bankroll_provider.current()` above — conn-across-IO invariant T0-1).
+        # `_bankroll_of_record_for_riskguard()` above — conn-across-IO invariant T0-1).
         # The fail-closed write below needs risk_conn, so the None-handling stays
-        # here; the network fetch itself no longer runs under a held conn.
+        # here; direct venue I/O itself never runs under a held conn.
         if bankroll_of_record is None:
             now_ts = datetime.now(timezone.utc).isoformat()
             risk_conn.execute(
@@ -1497,7 +1679,7 @@ def _tick_once() -> RiskLevel:
                             "fetched_at": None,
                             "staleness_seconds": None,
                             "cached": False,
-                            "reason": "wallet query failed and no fresh cache",
+                            "reason": "collateral snapshot and direct wallet query both unavailable",
                         },
                     }),
                     now_ts,
@@ -1505,12 +1687,17 @@ def _tick_once() -> RiskLevel:
             )
             risk_conn.commit()
             logger.error(
-                "RiskGuard tick fail-closed: bankroll_provider unavailable (no fresh cache)",
+                "RiskGuard tick fail-closed: bankroll truth unavailable "
+                "(no fresh collateral snapshot and no direct wallet value)",
             )
             return RiskLevel.DATA_DEGRADED
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
-        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=RISKGUARD_SETTLEMENT_LIMIT)
+        brier_candidate_rows = query_authoritative_settlement_rows(
+            zeus_conn,
+            limit=RISKGUARD_BRIER_SCAN_LIMIT,
+        )
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
         settlement_storage_source = (
             settlement_row_storage_sources[0]
@@ -1521,7 +1708,7 @@ def _tick_once() -> RiskLevel:
         degraded_rows = 0
         learning_snapshot_ready_count = 0
         canonical_payload_complete_count = 0
-        metric_ready_rows = []
+        settlement_metric_ready_rows = []
         for row in settlement_rows:
             authority_level = str(row.get("authority_level", "unknown"))
             settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
@@ -1542,7 +1729,7 @@ def _tick_once() -> RiskLevel:
             if row.get("canonical_payload_complete", False):
                 canonical_payload_complete_count += 1
             if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
-                metric_ready_rows.append(row)
+                settlement_metric_ready_rows.append(row)
 
         realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
             zeus_conn,
@@ -1550,9 +1737,10 @@ def _tick_once() -> RiskLevel:
         )
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
-        p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
-        outcomes = [int(r["outcome"]) for r in metric_ready_rows]
-        strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
+        brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
+        p_forecasts = [float(r["p_posterior"]) for r in brier_metric_rows]
+        outcomes = [int(r["outcome"]) for r in brier_metric_rows]
+        strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
         entry_execution_summary = _entry_execution_summary(zeus_conn)
         try:
             tracker = load_tracker()
@@ -1570,10 +1758,24 @@ def _tick_once() -> RiskLevel:
         b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
-        # Evaluate levels
-        brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        # Evaluate levels. Portfolio Brier is the headline quality metric, but
+        # a YELLOW breach that is fully attributable to canonical strategies can
+        # be enforced through durable strategy gates. Stronger ORANGE/RED
+        # breaches remain global fail-closed.
+        portfolio_brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        brier_level = portfolio_brier_level
+        brier_strategy_breakdown = _strategy_brier_breakdown(brier_metric_rows, thresholds) if p_forecasts else {
+            "by_strategy": {},
+            "degraded_strategies": {},
+            "unclassified_count": 0,
+            "classified_count": 0,
+        }
+        brier_strategy_localization: dict[str, object] = {
+            "status": "not_applicable",
+            "reason": "portfolio_brier_green",
+        }
         settlement_quality_level = RiskLevel.GREEN
-        if settlement_rows and not metric_ready_rows:
+        if settlement_rows and not settlement_metric_ready_rows:
             settlement_quality_level = RiskLevel.RED
         elif degraded_rows > 0:
             settlement_quality_level = RiskLevel.YELLOW
@@ -1582,6 +1784,43 @@ def _tick_once() -> RiskLevel:
         execution_observed = execution_overall["filled"] + execution_overall["rejected"]
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
+        if (
+            portfolio_brier_level == RiskLevel.YELLOW
+            and isinstance(degraded_brier_strategies, dict)
+            and degraded_brier_strategies
+            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+        ):
+            brier_strategy_localization = {
+                "status": "pending_durable_strategy_gate",
+                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+            }
+            for strategy, payload in sorted(degraded_brier_strategies.items()):
+                if not isinstance(payload, dict):
+                    continue
+                _append_reason(
+                    recommended_strategy_gate_reasons,
+                    str(strategy),
+                    (
+                        "brier_degraded("
+                        f"level={payload.get('level')},"
+                        f"brier={payload.get('brier')},"
+                        f"sample={payload.get('sample_size')}"
+                        ")"
+                    ),
+                )
+        elif portfolio_brier_level != RiskLevel.GREEN:
+            brier_strategy_localization = {
+                "status": "not_localized",
+                "reason": "portfolio_brier_requires_global_level",
+                "portfolio_brier_level": portfolio_brier_level.value,
+                "unclassified_count": int(brier_strategy_breakdown.get("unclassified_count", 0) or 0),
+                "degraded_strategy_count": (
+                    len(degraded_brier_strategies)
+                    if isinstance(degraded_brier_strategies, dict)
+                    else 0
+                ),
+            }
         if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
             execution_quality_level = RiskLevel.YELLOW
             _append_reason(
@@ -1634,6 +1873,21 @@ def _tick_once() -> RiskLevel:
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
             now=now,
         )
+        if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
+            if durable_action_status.get("status") == "emitted":
+                brier_level = RiskLevel.GREEN
+                brier_strategy_localization = {
+                    **brier_strategy_localization,
+                    "status": "localized_to_durable_strategy_gates",
+                    "durable_risk_action_status": durable_action_status.get("status"),
+                }
+            else:
+                brier_level = portfolio_brier_level
+                brier_strategy_localization = {
+                    **brier_strategy_localization,
+                    "status": "durable_strategy_gate_unavailable_global_yellow",
+                    "durable_risk_action_status": durable_action_status.get("status"),
+                }
 
         total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
         total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
@@ -1716,6 +1970,9 @@ def _tick_once() -> RiskLevel:
             level.value, b_score, d_accuracy, None,
             json.dumps({
                 "brier_level": brier_level.value,
+                "portfolio_brier_level": portfolio_brier_level.value,
+                "brier_strategy_breakdown": brier_strategy_breakdown,
+                "brier_strategy_localization": brier_strategy_localization,
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
@@ -1734,9 +1991,9 @@ def _tick_once() -> RiskLevel:
                 # this provenance marker tells `_trailing_loss_reference` to skip
                 # pre-cutover rows whose `effective_bankroll` came from retired
                 # config-literal capital.
-                # New rows after this code lands carry "polymarket_wallet"; old rows
-                # have no `bankroll_truth_source` field at all → filtered out.
-                "bankroll_truth_source": "polymarket_wallet",
+                # New rows carry the concrete live truth source; old rows have
+                # no `bankroll_truth_source` field at all → filtered out.
+                "bankroll_truth_source": bankroll_of_record.source,
                 "bankroll_truth": {
                     "value_usd": round(current_bankroll_usd, 2),
                     "source": bankroll_of_record.source,
@@ -1779,13 +2036,16 @@ def _tick_once() -> RiskLevel:
                 "realized_truth_source": realized_truth_source,
                 "realized_degraded": realized_degraded,
                 "settlement_sample_size": len(p_forecasts),
+                "settlement_brier_scan_limit": RISKGUARD_BRIER_SCAN_LIMIT,
+                "settlement_brier_candidate_count": len(brier_candidate_rows),
                 "settlement_storage_source": settlement_storage_source,
                 "settlement_row_storage_sources": settlement_row_storage_sources,
                 "settlement_authority_levels": settlement_authority_levels,
                 "settlement_degraded_row_count": degraded_rows,
                 "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
                 "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
-                "settlement_metric_ready_count": len(metric_ready_rows),
+                "settlement_metric_ready_count": len(settlement_metric_ready_rows),
+                "settlement_brier_learning_ready_count": len(brier_metric_rows),
                 # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
                 # hit rate computed from brier forecasts (did p>0.5 match the
                 # outcome?). It is NOT the same as trade profitability rate, which
@@ -1921,7 +2181,8 @@ def _tick_once() -> RiskLevel:
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
             "settlement_quality": (
-                f"metric_ready={len(metric_ready_rows)}/{len(settlement_rows)} "
+                f"metric_ready={len(settlement_metric_ready_rows)}/{len(settlement_rows)} "
+                f"brier_learning_ready={len(brier_metric_rows)}/{len(brier_candidate_rows)} "
                 f"degraded={degraded_rows} storage={settlement_storage_source}"
             ),
             "execution_quality": (
@@ -2010,6 +2271,7 @@ def tick() -> RiskLevel:
     safety boundary is weakened. ``tick()`` is the public daemon entry; its API
     is unchanged.
     """
+    _persist_tick_in_progress_attestation()
     retries = _riskguard_dependency_lock_retries()
     last_exc: sqlite3.OperationalError | None = None
     for attempt in range(retries + 1):
@@ -2061,9 +2323,9 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
         # tick_with_portfolio is the graceful-degradation entry used by callers
         # that have already loaded a portfolio. Trailing-loss math here was
         # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
-        # rewire as tick(): on-chain wallet for both equity AND threshold base,
-        # no PnL math added. Fail-closed at DATA_DEGRADED if wallet unreachable.
-        bankroll_of_record = bankroll_provider.current()
+        # rewire as tick(): live bankroll truth for both equity AND threshold base,
+        # no PnL math added. Fail-closed at DATA_DEGRADED if bankroll truth is unreachable.
+        bankroll_of_record = _bankroll_of_record_for_riskguard()
         if bankroll_of_record is None:
             logger.error(
                 "RiskGuard tick_with_portfolio fail-closed: bankroll_provider unavailable",
@@ -2169,14 +2431,17 @@ def get_current_level() -> RiskLevel:
         except (json.JSONDecodeError, TypeError):
             details = {}
         if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
-            # A dependency_db_locked attestation already carries the CORRECT level:
-            # _persist_dependency_db_locked_attestation preserves a FRESH (<5 min)
-            # full level verbatim and stamps DATA_DEGRADED only when no fresh full row
-            # exists. Re-flooring it here would re-block the GREEN-only entry gate on
-            # every transient lock (the 2026-06-08 regression). Trust the attestation's
-            # level for the transient-lock reason; keep the conservative split-brain
-            # floor for ALL OTHER degraded reasons (genuine metric/truth degradation).
-            if details.get("riskguard_degraded_reason") == "dependency_db_locked":
+            # Transient attestations already carry the CORRECT bounded level:
+            # dependency_db_locked preserves a FRESH (<5 min) full level, while
+            # metrics_refresh_in_progress is stamped only at tick start when the
+            # previous full row is still fresh. Re-flooring either here would
+            # re-block the GREEN-only entry gate during a still-running risk pass.
+            # Keep the conservative split-brain floor for ALL OTHER degraded
+            # reasons (genuine metric/truth degradation).
+            if details.get("riskguard_degraded_reason") in {
+                "dependency_db_locked",
+                "metrics_refresh_in_progress",
+            }:
                 return stored_level
             floored = overall_level(stored_level, RiskLevel.DATA_DEGRADED)
             if floored != stored_level:
@@ -2256,6 +2521,7 @@ if __name__ == "__main__":
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
+    _install_riskguard_collateral_ledger()
 
     while True:
         try:

@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-14
 # Authority basis (2026-06-14): pr408 review C1+C2 #3 HIGH — emos_mu_offset enforces the
 #   one-signed contract: an activated cell with offset_c>=0 is refused (None / EmosMuOffsetError),
-#   so a wrong-sign offset can never COOL the center. Prior basis: EMOS shadow-ledger task; PIECE 1 spec.
+#   so a wrong-sign offset can never COOL the center.
 #   Model: mu=a+b*xbar; sigma2=exp(c+d*log(S2)+e*lead_days).
 #   Table: state/emos_calibration.json, schema _meta + cells{"City|SEASON": {params,n,served}}.
 #   served=="raw" or missing cell → return None (caller falls back to raw ensemble).
@@ -411,7 +411,7 @@ def emos_season(target_date) -> str:
     EMOS cells are keyed by NH month-season (fit_emos_calibration.season()). A
     hemisphere-aware season (season_from_date(lat)) SH-flips and would serve the
     OPPOSITE-season cell for Southern-Hemisphere cities — the season-crossing twin of
-    the metric-crossing defect. EVERY EMOS caller (seam, shadow ledger, EMOS-CI override,
+    the metric-crossing defect. EVERY EMOS caller (serving path, audit ledger, EMOS-CI override,
     boot guard, offline scorers) MUST use THIS function so the lookup season always
     matches the fit's keying. Do not reintroduce season_from_date(lat) on an EMOS path.
     """

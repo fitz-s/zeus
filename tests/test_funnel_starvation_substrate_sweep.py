@@ -46,13 +46,13 @@ def test_topology_deadline_gives_positive_budget_at_live_settings():
     the warmer to 1-2 families/cycle."""
     import time
 
-    import src.main as M
+    import src.data.substrate_observer as observer
 
     budget_s = 17.0
     reserve_s = 12.0
     start = time.monotonic()
     deadline = start + budget_s
-    topo_deadline = M._topology_lookup_deadline_for_snapshot_refresh(
+    topo_deadline = observer._topology_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=deadline,
         refresh_budget_s=budget_s,
         snapshot_reserve_s=reserve_s,
@@ -76,7 +76,7 @@ def test_topology_deadline_positive_across_budget_reserve_grid():
     budget/reserve envelope, not just one point."""
     import time
 
-    import src.main as M
+    import src.data.substrate_observer as observer
 
     for budget_s in (10.0, 15.0, 17.0, 20.0, 25.0):
         for reserve_s in (6.0, 9.0, 12.0):
@@ -84,7 +84,7 @@ def test_topology_deadline_positive_across_budget_reserve_grid():
                 continue
             start = time.monotonic()
             deadline = start + budget_s
-            topo_deadline = M._topology_lookup_deadline_for_snapshot_refresh(
+            topo_deadline = observer._topology_lookup_deadline_for_snapshot_refresh(
                 refresh_deadline=deadline,
                 refresh_budget_s=budget_s,
                 snapshot_reserve_s=reserve_s,
@@ -145,13 +145,25 @@ def test_rotating_cursor_no_permanent_starvation_small_slice():
 def test_substrate_refresh_cursor_module_global_exists():
     """The rotating cursor must be a real module-global the warmer mutates, not a
     per-call local (which would reset to the same front slice every cycle)."""
-    import src.main as M
+    import src.data.substrate_observer as S
 
-    assert hasattr(M, "_SUBSTRATE_REFRESH_CURSOR"), (
+    assert hasattr(S, "_SUBSTRATE_REFRESH_CURSOR"), (
         "the rotating cursor _SUBSTRATE_REFRESH_CURSOR is missing — without a "
         "persistent cursor every cycle restarts at the newest families and the "
         "tail starves"
     )
+
+
+def test_substrate_gamma_refresh_cursor_module_global_exists():
+    """Gamma slug lookup needs its own cursor.
+
+    A family sweep can process every pending family while the bounded Gamma slice
+    only submits the first few slugs. Without a persistent Gamma cursor, every
+    cycle probes the same prefix and tail families never get topology/bin identity.
+    """
+    import src.data.substrate_observer as S
+
+    assert hasattr(S, "_SUBSTRATE_GAMMA_REFRESH_CURSOR")
 
 
 # ---------------------------------------------------------------------------

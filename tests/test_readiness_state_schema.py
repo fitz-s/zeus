@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from src.state.db import init_schema
+from src.state.db import _migrate_readiness_state_status_checks, init_schema
 from src.state.readiness_repo import get_entry_readiness, get_readiness_state, write_readiness_state
 
 
@@ -18,6 +18,21 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    return conn
+
+
+def _conn_with_legacy_readiness_status_check() -> sqlite3.Connection:
+    template = _conn()
+    create_sql = template.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='readiness_state'"
+    ).fetchone()[0]
+    legacy_sql = create_sql.replace(
+        "'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'",
+        "'READY','LIVE_ELIGIBLE','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(legacy_sql)
     return conn
 
 
@@ -211,7 +226,7 @@ def test_entry_readiness_filters_full_source_metric_identity() -> None:
     green_kwargs["source_id"] = "openmeteo_previous_runs"
     green_kwargs["track"] = "best_match"
     green_kwargs["data_version"] = "previous_runs_v1"
-    green_kwargs["reason_codes_json"] = ["SHADOW_READY"]
+    green_kwargs["reason_codes_json"] = ["ALL_DEPENDENCIES_READY"]
     write_readiness_state(conn, **green_kwargs)
 
     row = get_entry_readiness(
@@ -257,3 +272,44 @@ def test_readiness_repo_rejects_unknown_status() -> None:
 
     with pytest.raises(ValueError, match="invalid readiness status"):
         write_readiness_state(conn, **kwargs)
+
+
+def test_readiness_state_schema_rejects_log_only_status() -> None:
+    conn = _conn()
+    write_readiness_state(conn, **_ready_kwargs())
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE readiness_state SET status = 'DEGRADED_LOG_ONLY' WHERE readiness_id = ?",
+            ("ready-1",),
+        )
+
+
+def test_readiness_state_status_migration_removes_log_only_admission() -> None:
+    conn = _conn_with_legacy_readiness_status_check()
+    write_readiness_state(conn, **_ready_kwargs())
+
+    _migrate_readiness_state_status_checks(conn)
+
+    create_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='readiness_state'"
+    ).fetchone()[0]
+    assert "DEGRADED_LOG_ONLY" not in create_sql
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 1
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE readiness_state SET status = 'DEGRADED_LOG_ONLY' WHERE readiness_id = ?",
+            ("ready-1",),
+        )
+
+
+def test_readiness_state_status_migration_fails_on_obsolete_rows() -> None:
+    conn = _conn_with_legacy_readiness_status_check()
+    write_readiness_state(conn, **_ready_kwargs())
+    conn.execute(
+        "UPDATE readiness_state SET status = 'DEGRADED_LOG_ONLY' WHERE readiness_id = ?",
+        ("ready-1",),
+    )
+
+    with pytest.raises(RuntimeError, match="obsolete non-live status"):
+        _migrate_readiness_state_status_checks(conn)

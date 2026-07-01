@@ -311,10 +311,17 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         )
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
+            bayes_precision_fusion_quota_cooldown_seconds,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+        cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        if cooldown_seconds > 0:
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+                "cooldown_seconds": cooldown_seconds,
+            }
         # RUN-SELECTION AUTHORITY (2026-06-19): the capture cycle is the newest cycle
         # provably fetchable by the BPF extras transport itself. The anchor lane can
         # advance through meta/bucket before the single-runs API serves the same run;
@@ -358,15 +365,153 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
             ))
         if not targets:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
-        return download_bayes_precision_fusion_extra_raw_inputs(
+        result = download_bayes_precision_fusion_extra_raw_inputs(
             forecast_db=Path(str(forecast_db)),
             cycle=cycle,
             targets=targets,
             release_lag_hours=release_lag_hours,
         )
+        return result
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
+
+
+def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+    cfg: dict[str, object],
+    *,
+    source_clock_report: object,
+    max_wall_clock_seconds: float | None = None,
+) -> dict[str, object] | None:
+    """Fast source-clock current capture for only updated sources and affected cities.
+
+    This is the latency path.  It writes the live current ``single_runs`` rows
+    needed by the source-clock q kernel, but leaves the slower full-history
+    healing pass to the normal BPF downloader.
+    """
+    try:
+        if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
+            return None
+    except Exception:
+        return None
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from datetime import date  # noqa: PLC0415
+
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BayesPrecisionFusionDownloadTarget,
+            bayes_precision_fusion_quota_cooldown_seconds,
+            download_bayes_precision_fusion_extra_raw_inputs,
+        )
+        from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+        from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at  # noqa: PLC0415
+
+        payload = source_clock_report.as_dict()
+        updated_sources = tuple(
+            str(source).strip()
+            for source in (payload.get("updated_sources") or getattr(source_clock_report, "updated_sources", ()) or ())
+            if str(source).strip()
+        )
+        affected_cities = tuple(
+            str(city).strip()
+            for city in (payload.get("affected_cities") or getattr(source_clock_report, "affected_cities", ()) or ())
+            if str(city).strip()
+        )
+        if not updated_sources:
+            return {"status": "SOURCE_CLOCK_BPF_SCOPED_NO_UPDATED_SOURCES"}
+        if not affected_cities:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_NO_AFFECTED_CITIES",
+                "updated_sources": updated_sources,
+            }
+
+        cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        if cooldown_seconds > 0:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+                "cooldown_seconds": cooldown_seconds,
+            }
+
+        now = datetime.now(timezone.utc)
+        run_candidates: list[datetime] = []
+        try:
+            updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
+            for update in read_model_updates_jsonl(updates_path):
+                if str(update.model) not in updated_sources:
+                    continue
+                run_clock = update.to_source_run_clock()
+                if now >= source_publicly_usable_at(run_clock):
+                    run_candidates.append(update.last_run_initialisation_time.astimezone(timezone.utc))
+        except Exception:
+            run_candidates = []
+        cycle = max(run_candidates) if run_candidates else _probe_resolved_bayes_precision_fusion_extras_cycle()
+        if cycle is None:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_SKIP",
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+            }
+
+        affected = set(affected_cities)
+        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        targets: list[BayesPrecisionFusionDownloadTarget] = []
+        for row in plan.rows:
+            if row.city not in affected:
+                continue
+            city_cfg = cities_by_name.get(row.city)
+            if city_cfg is None:
+                continue
+            try:
+                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
+            except Exception:
+                lead_days = 0
+            targets.append(BayesPrecisionFusionDownloadTarget(
+                city=row.city,
+                metric=row.temperature_metric,
+                target_date=row.target_date,
+                lead_days=lead_days,
+                latitude=float(city_cfg.lat),
+                longitude=float(city_cfg.lon),
+                timezone_name=str(city_cfg.timezone),
+            ))
+        if not targets:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
+                "cycle": cycle.isoformat(),
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+            }
+
+        report = download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=Path(str(forecast_db)),
+            cycle=cycle,
+            targets=targets,
+            models=updated_sources,
+            include_previous_runs=False,
+            prune_after=False,
+            allow_single_runs_fallback=False,
+            release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+            max_wall_clock_seconds=max_wall_clock_seconds,
+        )
+        report["status"] = f"SOURCE_CLOCK_SCOPED_{report.get('status')}"
+        report["updated_sources"] = updated_sources
+        report["affected_cities"] = affected_cities
+        return report
+    except Exception as exc:  # noqa: BLE001 - source-clock fast capture must fail soft
+        logger.warning("source-clock scoped BPF capture skipped (fail-soft): %s", exc)
+        return {
+            "status": "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED",
+            "error": str(exc),
+        }
 
 
 _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
@@ -539,15 +684,48 @@ def _record_bayes_precision_fusion_capture_health(
     """Write component health for the BPF capture sub-lane.
 
     The parent replacement download job can succeed while the BPF capture lane
-    did not actually obtain current-cycle raw-model rows. That is not an OK
-    money-path state: materialization cannot produce a fresh fused posterior
-    without those rows. Keep this separate component fail-closed for preflight.
+    did not obtain extra current-cycle raw-model rows. Durable production health
+    distinguishes hard capture failures from quota/transport degradation:
+    ``FAILED`` is restart-blocking, while transport-degraded ``SKIPPED`` is
+    explicit degraded evidence as long as canonical live posterior freshness and
+    the materializer remain healthy.
     """
 
     from src.observability.scheduler_health import _write_scheduler_health  # noqa: PLC0415
 
     status = str(report.get("status") or "")
     if status == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS":
+        return
+    raw_transport_errors = report.get("transport_errors") or ()
+    if isinstance(raw_transport_errors, str):
+        transport_errors = (raw_transport_errors,)
+    else:
+        transport_errors = tuple(str(err) for err in raw_transport_errors)
+    quota_degraded = (
+        status == "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED"
+        or (
+            status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+            and any(
+                "open-meteo quota exhausted" in err.lower()
+                or "too many requests" in err.lower()
+                or "429" in err.lower()
+                or "rate limit" in err.lower()
+                for err in transport_errors
+            )
+        )
+    )
+    if quota_degraded:
+        _write_scheduler_health(
+            _EXTRAS_FIXPOINT_HEALTH_JOB,
+            failed=False,
+            skipped=True,
+            skip_reason=status,
+            extra={
+                "transport_degraded": True,
+                "transport_degradation_reason": status,
+                "quota_cooldown_seconds": int(report.get("cooldown_seconds") or 0),
+            },
+        )
         return
     if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
         cycle_raw = report.get("cycle")
@@ -695,7 +873,11 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
         return None
 
 
-def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+def _replacement_cycle_availability_poll_if_needed(
+    cfg: dict[str, object],
+    *,
+    source_clock_report: object | None = None,
+) -> dict[str, object] | None:
     """PROBE-RESOLVED raw-input fetch (operator directive 2026-06-11: automatic, ahead of
     need, no guessed numbers — K4.0b(a) availability-poll organ).
 
@@ -748,6 +930,21 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
         "legs_fetched": [],
     }
+    try:
+        if source_clock_report is None:
+            from src.data.source_clock_update_probe import (  # noqa: PLC0415
+                probe_openmeteo_source_clock_updates,
+            )
+
+            source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
+        source_clock_payload = source_clock_report.as_dict()
+        report["source_clock_status"] = source_clock_payload.get("status")
+        report["source_clock_updated_sources"] = source_clock_payload.get("updated_sources", [])
+        report["source_clock_affected_cities"] = source_clock_payload.get("affected_cities", [])
+        report["source_clock_error"] = source_clock_payload.get("error")
+    except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
+        report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
+        report["source_clock_error"] = str(exc)[:200]
     if fetch_anchor_cycle is None:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
@@ -970,6 +1167,39 @@ def _replacement_cycle_availability_poll() -> None:
         logger.info("cycle availability poll report: %s", report)
 
 
+def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | None:
+    """Config-driven station-forecast (CWA/HKO) live ingest into raw_model_forecasts.
+
+    Runs on the download lane (publish-time cron + boot catch-up), so station data refreshes at
+    the same ~2x/day cadence as the gridded raw inputs the lane already fetches. Uses an AUTOCOMMIT
+    connection: each tiny per-row write self-commits, so no write lock is held across a provider
+    network fetch (avoids the forecast-DB "database is locked" contention the heavy capture guards
+    against with BEGIN IMMEDIATE). Fail-soft end to end: returns None on any setup error, and the
+    dispatcher swallows per-source provider errors, so station ingest can never kill the cycle.
+    Returns ``{source_id: rows_written}`` or None.
+    """
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from src.data.station_forecast_adapter import (  # noqa: PLC0415
+            ingest_enabled_station_sources_live,
+        )
+        from src.state.db import _connect  # noqa: PLC0415
+
+        conn = _connect(Path(str(forecast_db)), write_class="live")
+        # Autocommit: tiny per-row INSERT self-commits; the network fetch inside each ingest
+        # function holds no write transaction. _persist_rows is autocommit-safe by contract.
+        conn.isolation_level = None
+        try:
+            return ingest_enabled_station_sources_live(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - station ingest must never break the download cycle
+        logger.warning("station-forecast live ingest skipped (fail-soft): %s", exc)
+        return None
+
+
 @_scheduler_job("replacement_forecast_download")
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the BAYES_PRECISION_FUSION/replacement soft-anchor forecast.
@@ -988,6 +1218,15 @@ def _replacement_forecast_download_cycle() -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
     cfg = _replacement_forecast_live_materialization_queue_config()
+    try:
+        from src.data.source_clock_update_probe import (  # noqa: PLC0415
+            probe_openmeteo_source_clock_updates,
+        )
+
+        source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
+        logger.info("source-clock model update probe report: %s", source_clock_report.as_dict())
+    except Exception as exc:  # noqa: BLE001 - source-clock metadata cannot kill raw downloads
+        logger.warning("source-clock model update probe skipped (fail-soft): %s", exc)
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
     if download_report is not None:
         _dl_status = download_report.get("status")
@@ -1024,6 +1263,16 @@ def _replacement_forecast_download_cycle() -> None:
     # actual fusion-capture state.
     if bayes_precision_fusion_capture_report is not None:
         _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
+    # STATION-CALIBRATED forecast ingest (operator "加数据"): the national met agency's OWN
+    # published daily-max forecast for the settlement district — CWA township (Taipei/RCSS),
+    # HKO nine-day (Hong Kong) — lands in raw_model_forecasts here on the SAME download lane as
+    # the gridded raw inputs (publish-time cron + boot catch-up). It is DATA PRECISION, not a
+    # de-bias: each source contributes to its city's served center ONLY via the per-city
+    # source-clock scheme weight downstream. Config-driven + fail-soft; a provider outage never
+    # touches the gridded capture above.
+    station_report = _ingest_station_forecasts_live(cfg)
+    if station_report:
+        logger.info("station-forecast live ingest wrote rows: %s", station_report)
 
 
 @_scheduler_job("replacement_forecast_live_materialize")

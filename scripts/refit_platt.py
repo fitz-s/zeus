@@ -554,88 +554,6 @@ def _fetch_pairs_for_bucket(
     """, tuple(params)).fetchall()
 
 
-def _active_verified_model_exists(
-    conn: sqlite3.Connection,
-    *,
-    metric_identity: MetricIdentity,
-    cluster: str,
-    season: str,
-    data_version: str,
-    cycle: str,
-    source_id: str,
-    horizon_profile: str,
-    input_space: str,
-) -> bool:
-    row = conn.execute(
-        """
-        SELECT 1
-        FROM platt_models
-        WHERE temperature_metric = ?
-          AND cluster = ?
-          AND season = ?
-          AND data_version = ?
-          AND input_space = ?
-          AND cycle = ?
-          AND source_id = ?
-          AND horizon_profile = ?
-          AND is_active = 1
-          AND authority = 'VERIFIED'
-        LIMIT 1
-        """,
-        (
-            metric_identity.temperature_metric,
-            cluster,
-            season,
-            data_version,
-            input_space,
-            cycle,
-            source_id,
-            horizon_profile,
-        ),
-    ).fetchone()
-    return row is not None
-
-
-def _delete_active_shadow_model(
-    conn: sqlite3.Connection,
-    *,
-    metric_identity: MetricIdentity,
-    cluster: str,
-    season: str,
-    data_version: str,
-    cycle: str,
-    source_id: str,
-    horizon_profile: str,
-    input_space: str,
-) -> int:
-    result = conn.execute(
-        """
-        DELETE FROM platt_models
-        WHERE temperature_metric = ?
-          AND cluster = ?
-          AND season = ?
-          AND data_version = ?
-          AND input_space = ?
-          AND cycle = ?
-          AND source_id = ?
-          AND horizon_profile = ?
-          AND is_active = 1
-          AND authority != 'VERIFIED'
-        """,
-        (
-            metric_identity.temperature_metric,
-            cluster,
-            season,
-            data_version,
-            input_space,
-            cycle,
-            source_id,
-            horizon_profile,
-        ),
-    )
-    return result.rowcount
-
-
 def _assert_platt_refit_preflight_ready(db_path: Path) -> None:
     report = build_platt_refit_preflight_report(db_path)
     if not report["ready"]:
@@ -790,62 +708,36 @@ def _fit_bucket(
         stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
         return
 
-    authority = "VERIFIED"
-    label = "OK  "
     if (
         metric_identity.temperature_metric == "low"
         and n_eff < LOW_LIVE_MIN_DECISION_GROUPS
     ):
-        authority = "UNVERIFIED"
-        label = "SHADOW"
+        print(
+            f"SKIP_LOW_MATURITY {bucket_key:50s} {summary} "
+            f"n_eff={n_eff} required={LOW_LIVE_MIN_DECISION_GROUPS}; no model saved"
+        )
+        stats.buckets_skipped_maturity += 1
+        stats.per_bucket[bucket_key] = (
+            f"SKIP_LOW_MATURITY {summary} n_eff={n_eff} "
+            f"required={LOW_LIVE_MIN_DECISION_GROUPS}; no model saved"
+        )
+        return
 
-    if authority == "VERIFIED":
-        deactivated = deactivate_model(
-            conn,
-            metric_identity=metric_identity,
-            cluster=cluster,
-            season=season,
-            data_version=data_version,
-            cycle=cycle,
-            source_id=source_id,
-            horizon_profile=horizon_profile,
-            input_space=cal.input_space,
-            error_model_family=error_model_family,
-        )
-        stats.deactivated_rows += deactivated
-    else:
-        if _active_verified_model_exists(
-            conn,
-            metric_identity=metric_identity,
-            cluster=cluster,
-            season=season,
-            data_version=data_version,
-            cycle=cycle,
-            source_id=source_id,
-            horizon_profile=horizon_profile,
-            input_space=cal.input_space,
-        ):
-            print(
-                f"SHADOW-SKIP {bucket_key:50s} {summary} authority=UNVERIFIED "
-                "(existing VERIFIED row preserved)"
-            )
-            stats.buckets_fit += 1
-            stats.per_bucket[bucket_key] = (
-                f"SHADOW-SKIP {summary} authority=UNVERIFIED "
-                "(existing VERIFIED row preserved)"
-            )
-            return
-        stats.deactivated_rows += _delete_active_shadow_model(
-            conn,
-            metric_identity=metric_identity,
-            cluster=cluster,
-            season=season,
-            data_version=data_version,
-            cycle=cycle,
-            source_id=source_id,
-            horizon_profile=horizon_profile,
-            input_space=cal.input_space,
-        )
+    authority = "VERIFIED"
+    label = "OK  "
+    deactivated = deactivate_model(
+        conn,
+        metric_identity=metric_identity,
+        cluster=cluster,
+        season=season,
+        data_version=data_version,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
+        input_space=cal.input_space,
+        error_model_family=error_model_family,
+    )
+    stats.deactivated_rows += deactivated
 
     save_platt_model(
         conn,

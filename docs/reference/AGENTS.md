@@ -29,8 +29,8 @@ machine manifests, tests, and executable source.
   `Mismatch ↔ DDD ↔ Platt-regime-absorption` relationship; encodes the
   three-stage refinement (track-aware coverage → Platt regime absorption
   verified empirically → hardened-baseline + σ-band + small-sample multiplier);
-  any change to `oracle_penalty.py`, DDD, or `bridge_oracle_to_calibration.py`
-  MUST cite §6 of that doc as authority basis
+  any change to `oracle_penalty.py` or DDD MUST cite §6 of that doc as
+  authority basis
 - `zeus_vendor_change_response_registry.md` when touching anything that may
   invalidate on a PM source switch (T1), WU silent change (T2), Lagos-class
   discovery (T3), Shenzhen-class onboarding (T4), or vendor outage (T5).

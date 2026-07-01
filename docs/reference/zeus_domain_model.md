@@ -15,12 +15,12 @@ q_lcb floor → Edge → BH FDR → Fractional Kelly → Position size
 
 Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof`; q built in `replacement_forecast_materializer._insert_posterior`.
 
-**Legacy baseline (independent LCB cap only, joined as a floor `effective_q_lcb = min(replacement, baseline)`):**
+**Diagnostic baseline (comparison/provenance only; not joined to live q):**
 
 ```
 51 ENS → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC retired) →
 Extended Platt → P_cal → market_fusion.compute_posterior (model_only_v1, NO market blend) →
-bootstrap q_lcb
+bootstrap q_lcb comparison/provenance
 ```
 
 **The integer-settlement insight (true for both chains):** Polymarket weather markets settle on WU's whole-degree daily high, so probability mass concentrates at bin boundaries — both chains integrate over the settlement preimage (`emos.bin_probability_settlement` does this via a WMO round-half-up preimage of N(μ*, σ)). The baseline's Monte-Carlo path simulated `atmosphere → member → ASOS noise (σ≈0.2–0.5°F) → METAR round → WU integer`; the live chain replaces member-counting + Platt with multimodel Bayesian fusion but keeps the same settlement-preimage integration.

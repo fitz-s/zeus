@@ -4,7 +4,7 @@
 #   σ-scale correction factor must be FITTED, never operator-picked. The materializer reads the FITTED
 #   artifact state/sigma_scale_fit.json (k AND uniform-mixture w), written only by scripts/fit_sigma_scale.py.
 #   Supersedes the old settings-key design (replacement_sigma_scale_k_c, deleted). Data basis:
-#   docs/operations/c3_sigma_calibration_surface_2026-06-12.md (C posterior ~2.5x too peaked).
+#   docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md (C posterior ~2.5x too peaked).
 """Artifact-read antibodies for the FITTED σ_pred scale (k) + uniform-mixture (w), C3 surface.
 
 Category killed: a HAND-SET correction factor. The materializer must take k and w ONLY from the fitted

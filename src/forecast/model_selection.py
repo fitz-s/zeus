@@ -2,7 +2,8 @@
 # Last reused or audited: 2026-06-17
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities), §4 algorithm steps
 #   (1) eligible / (2) provider reps, §7 antibodies ("regional-outside-domain (polygon)"); F4.
-#   BAYES_PRECISION_FUSION_PROOF_RESULT.md: regional SHADOW-ONLY/DEFER, polygon tightened (open question #3).
+#   BAYES_PRECISION_FUSION_PROOF_RESULT.md: regional providers require in-domain
+#   polygon eligibility; polygon tightened (open question #3).
 #   2026-06-17: icon_seamless REMOVED from candidate set — it was the alias-dedup probe (bit-
 #   identical to icon_d2 inside the EU nest). The probe is no longer needed because icon_seamless
 #   is simply never fetched or fused; dropped_aliases will always be empty.
@@ -149,6 +150,17 @@ _REGIONAL_DOMAIN_KEY = {
     # 3km nest; gem_hrdps_continental is the CMC 2.5km nest.
     GFS_HRRR_MODEL: GFS_HRRR_MODEL,
     GEM_HRDPS_MODEL: GEM_HRDPS_MODEL,
+    # Source-clock vNext one-scheme regional download gates (2026-06-25). These keys make
+    # config/model_domain_polygons.yaml authoritative for where the downloader may request the
+    # model; the legacy F4 selector still admits only REGIONAL_MODELS/GLOBAL_LIKELIHOOD_MODELS.
+    "dmi_harmonie_europe": "dmi_harmonie_europe",
+    "knmi_harmonie_netherlands": "knmi_harmonie_netherlands",
+    "kma_gdps": "kma_gdps",
+    "kma_ldps": "kma_ldps",
+    "met_nordic": "met_nordic",
+    "italiameteo_icon_2i": "italiameteo_icon_2i",
+    "jma_msm": "jma_msm",
+    "nam_conus": "nam_conus",
 }
 
 

@@ -135,6 +135,43 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeInvalidSafeSignatureTwoStepClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+        )
+
+
+class FakeInvalidSafeSignatureOneStepClient(FakeOneStepClient):
+    def __init__(self):
+        super().__init__(response={"orderID": "ord-recovered", "status": "LIVE"})
+        self._refreshed = False
+        self.derived_creds = FakeApiCreds(
+            "derived-submit-key",
+            "derived-submit-secret",
+            "derived-submit-passphrase",
+        )
+
+    def derive_api_key(self):
+        self.calls.append(("derive_api_key",))
+        return self.derived_creds
+
+    def set_api_creds(self, creds):
+        self.calls.append(("set_api_creds", creds))
+        self._refreshed = True
+
+    def create_and_post_order(self, order_args, options=None, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("create_and_post_order", order_args, options, order_type, post_only, defer_exec))
+        if not self._refreshed:
+            raise RuntimeError(
+                "PolyApiException[status_code=400, "
+                "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+            )
+        return self.response
+
+
 class FakeBalanceAllowanceClient:
     def __init__(self, response=None):
         self.response = response or {"balance": "100000000", "allowance": "50000000"}
@@ -588,6 +625,98 @@ def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     ]
 
 
+def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class FakeClientWithTargetCtf(FakeBalanceAllowanceClient):
+        def get_positions(self):
+            raise AssertionError("target exit CTF proof must not enumerate every position")
+
+        def get_balance_allowance(self, params):
+            self.calls.append(("get_balance_allowance", params))
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                assert getattr(params, "token_id") == "exit-token"
+                return {"balance": "21427700"}
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    fake = FakeClientWithTargetCtf()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=["exit-token"])
+
+    assert payload["ctf_token_scope"] == "targeted"
+    assert payload["ctf_token_balances_units"] == {"exit-token": 21427700}
+    assert payload["ctf_token_allowances_units"] == {"exit-token": 21427700}
+    call_asset_types = [
+        str(getattr(call[1], "asset_type", "")).upper()
+        for call in fake.calls
+        if call[0] == "get_balance_allowance"
+    ]
+    assert any("COLLATERAL" in asset for asset in call_asset_types)
+    assert any("CONDITIONAL" in asset for asset in call_asset_types)
+
+
+def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(refresh_allowance=False)
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == "50000000"
+    assert [call[0] for call in fake.calls] == ["get_balance_allowance"]
+
+
+def test_pusd_collateral_payload_skips_chain_allowance_fallback_for_heartbeat(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        raise AssertionError("pUSD heartbeat must not call chain allowance fallback")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(refresh_allowance=False)
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 0
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "missing"
+    assert rpc_calls == []
+
+
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
@@ -864,11 +993,27 @@ def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(mo
         lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
     )
     monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
+    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: False)
 
     adapter = pm.PolymarketClient()._ensure_v2_adapter()
 
     assert adapter.signature_type == 2
     assert adapter.polygon_rpc_url
+
+
+def test_polymarket_client_requires_explicit_signature_type_when_submit_armed(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
+    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: True)
+
+    with pytest.raises(RuntimeError, match="POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required"):
+        pm.PolymarketClient()._ensure_v2_adapter()
 
 
 def test_default_q1_egress_evidence_uses_current_live_control_surface():
@@ -1187,6 +1332,44 @@ def test_post_order_exception_still_bubbles_as_possible_unknown_side_effect(tmp_
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
+def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(tmp_path):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    fake = FakeInvalidSafeSignatureOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_and_post_order"]
+    assert adapter_mod._cached_derived_api_creds(
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        signer_key="test-key",
+        signature_type=2,
+        funder_address="0xfunder",
+    ) is None
+
+
+def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path):
+    signed = b"signed-safe-order"
+    fake = FakeInvalidSafeSignatureTwoStepClient(signed_order=signed)
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert result.envelope.signed_order == signed
+    assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+
+
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
@@ -1377,6 +1560,34 @@ def test_neg_risk_passthrough_v2_preserves_snapshot_value(tmp_path):
     assert envelope.neg_risk is True
     assert getattr(options, "neg_risk") is True
     assert result.envelope.neg_risk is True
+
+
+def test_submit_rejects_unbound_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    pre_submit_placeholder = envelope.with_updates(funder_address="UNRESOLVED_PRE_SUBMIT_FUNDER")
+
+    result = adapter.submit(pre_submit_placeholder)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "missing pre-bound funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
+
+
+def test_submit_rejects_mismatched_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    mismatched = envelope.with_updates(funder_address="0xotherfunder")
+
+    result = adapter.submit(mismatched)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "does not match adapter funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
 
 
 def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):

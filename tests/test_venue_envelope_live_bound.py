@@ -31,6 +31,7 @@ def _make_envelope(
     no_token_id: str = "0xbbb",
     selected_outcome_token_id: str = "0xaaa",
     outcome_label: str = "YES",
+    funder_address: str = "0xfunder",
 ) -> VenueSubmissionEnvelope:
     """Build a minimal VenueSubmissionEnvelope with controlled identity fields."""
     payload = json.dumps(
@@ -49,7 +50,7 @@ def _make_envelope(
         sdk_version="0.0.0",
         host="https://clob.polymarket.com",
         chain_id=137,
-        funder_address="0xfunder",
+        funder_address=funder_address,
         condition_id=condition_id,
         question_id=question_id,
         yes_token_id=yes_token_id,
@@ -171,4 +172,17 @@ def test_collapsed_yes_no_token_identity_is_placeholder():
     )
     assert envelope.is_compatibility_placeholder is True
     with pytest.raises(ValueError, match="compatibility submission envelope"):
+        envelope.assert_live_submit_bound()
+
+
+@pytest.mark.parametrize("funder_address", ["", "UNRESOLVED_PRE_SUBMIT_FUNDER"])
+def test_unresolved_funder_identity_cannot_authorize_live_submit(funder_address):
+    """Live submit requires the runtime venue funder, not a pre-submit placeholder."""
+    envelope = _make_envelope(
+        condition_id="0xrealcondition",
+        question_id="real-question",
+        funder_address=funder_address,
+    )
+
+    with pytest.raises(ValueError, match="funder_address"):
         envelope.assert_live_submit_bound()

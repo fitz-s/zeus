@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-06-28
 # Authority basis: silent-trade-kill antibody — submit_lane stamp + persist-boundary
 #   invariant. Root cause /tmp/allpass_nosubmit_rootcause.md (32 full-pass candidates
 #   consumed on the no-submit adapter during a live-arm crash-loop, receipts byte-
@@ -30,7 +30,6 @@ from src.events.reactor import (
 from src.engine.event_reactor_adapter import (
     SUBMIT_LANE_LIVE,
     SUBMIT_LANE_NO_SUBMIT_ADAPTER,
-    SUBMIT_LANE_SHADOW,
     SUBMIT_LANE_SUBMIT_DISABLED,
     _stamp_live_adapter_lane,
     _stamp_no_submit_adapter_lane,
@@ -157,25 +156,24 @@ def _no_submit_rows(conn, event_id):
 # ---------------------------------------------------------------------------
 
 
-def test_no_submit_adapter_lane_full_pass_default_reason_named_degrade():
+def test_no_submit_adapter_lane_full_pass_default_reason_names_live_block():
     """Incident shape at the ADAPTER: a full-pass receipt carrying the DEFAULT
-    no-submit reason on the no-submit (degrade) lane is stamped NO_SUBMIT_ADAPTER and
-    its reason is rewritten to name the degrade cause."""
+    no-submit reason on the control-blocked no-submit lane is stamped
+    NO_SUBMIT_ADAPTER and its reason is rewritten to name the live block cause."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
         submit_lane=None,
         reason="event_bound_final_intent_no_submit",
     )
-    stamped = _stamp_no_submit_adapter_lane(raw, degrade_cause="operator_arm_none")
+    stamped = _stamp_no_submit_adapter_lane(raw, live_block_cause="operator_arm_none")
     assert stamped.submit_lane == SUBMIT_LANE_NO_SUBMIT_ADAPTER
     assert stamped.reason == "NO_SUBMIT_ADAPTER_LANE:operator_arm_none"
     assert stamped.proof_accepted is True
 
 
 def test_no_submit_adapter_lane_honest_reject_keeps_reason():
-    """An honest gate-reject (FDR_REJECTED etc.) on the degrade lane keeps its specific
-    reason — it is a real no-edge decline, not a lane degrade — and is only stamped."""
+    """An honest gate-reject on the no-submit lane keeps its specific reason."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
@@ -183,13 +181,13 @@ def test_no_submit_adapter_lane_honest_reject_keeps_reason():
         reason="FDR_REJECTED",
         proof_accepted=False,
     )
-    stamped = _stamp_no_submit_adapter_lane(raw, degrade_cause="operator_arm_none")
+    stamped = _stamp_no_submit_adapter_lane(raw, live_block_cause="operator_arm_none")
     assert stamped.submit_lane == SUBMIT_LANE_NO_SUBMIT_ADAPTER
     assert stamped.reason == "FDR_REJECTED"
 
 
 def test_no_submit_adapter_lane_unconstructable_without_cause():
-    """Unconstructable: a NO_SUBMIT_ADAPTER-lane stamp without a degrade cause raises."""
+    """Unconstructable: a NO_SUBMIT_ADAPTER-lane stamp without a live block cause raises."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
@@ -197,10 +195,10 @@ def test_no_submit_adapter_lane_unconstructable_without_cause():
         reason="event_bound_final_intent_no_submit",
     )
     with pytest.raises(ValueError):
-        _stamp_no_submit_adapter_lane(raw, degrade_cause="")
+        _stamp_no_submit_adapter_lane(raw, live_block_cause="")
 
 
-def test_live_adapter_lane_stamps_live_submit_disabled_and_shadow():
+def test_live_adapter_lane_stamps_live_and_submit_disabled():
     event = _forecast_event()
     base = _full_pass_receipt(event, submit_lane=None, reason="SUBMITTED")
     assert (
@@ -211,11 +209,6 @@ def test_live_adapter_lane_stamps_live_submit_disabled_and_shadow():
         _stamp_live_adapter_lane(base, real_order_submit_enabled=False).submit_lane
         == SUBMIT_LANE_SUBMIT_DISABLED
     )
-    shadow = replace(base, reason="DAY0_SCOPE_SHADOW_ONLY", proof_accepted=False)
-    assert (
-        _stamp_live_adapter_lane(shadow, real_order_submit_enabled=True).submit_lane
-        == SUBMIT_LANE_SHADOW
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +217,9 @@ def test_live_adapter_lane_stamps_live_submit_disabled_and_shadow():
 
 
 def test_armed_live_daemon_full_pass_degrade_requeues_not_consumed():
-    """Incident shape end-to-end: an armed live daemon + the no-submit (degrade) adapter
+    """Incident shape end-to-end: an armed live daemon + the control-blocked no-submit adapter
     selected for a FULL-PASS candidate → the receipt carries NO_SUBMIT_ADAPTER + a named
-    degrade cause, and the reactor REQUEUES it (transient) rather than terminally
+    live block cause, and the reactor REQUEUES it (transient) rather than terminally
     consuming a tradeable entry as an 'accepted' no-submit.
 
     This is the strongest form of the antibody: a full-pass entry is NEVER silently
@@ -296,6 +289,78 @@ def test_persist_boundary_raises_on_live_stamped_full_pass_no_submit():
         reactor._assert_no_submit_lane_invariant(receipt)
 
 
+def test_persist_boundary_rejects_live_typed_abort_when_marked_proof_accepted():
+    """A typed pre-venue abort is not a proof-accepted live no-submit.
+
+    If an adapter emits the old shape (proof_accepted=True + NO_SUBMIT + LIVE
+    stamp), the persist boundary must still treat it as the silent-kill
+    signature. Valid typed abort receipts use proof_accepted=False and route
+    through rejection/retry classification before this boundary.
+    """
+    conn, store = _store()
+    event = _forecast_event()
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor"
+        ),
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    with pytest.raises(LiveLaneDarkInvariantError):
+        reactor._assert_no_submit_lane_invariant(receipt)
+
+
+def test_armed_live_daemon_rejects_profit_floor_abort_as_visible_decline():
+    """Profit-floor recapture aborts have no venue side effect and no accepted intent."""
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor"
+        ),
+        proof_accepted=False,
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    result = reactor.process_pending(decision_time=_DECISION_TIME)
+
+    assert result.retried == 0
+    assert result.dead_lettered == 0
+    assert result.rejected == 1
+    assert result.proof_accepted == 0
+    assert _no_submit_rows(conn, event.event_id) == []
+    row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "EXECUTOR_EXPRESSIBILITY"
+    assert row[1].startswith("SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:")
+
+
 def test_armed_live_daemon_never_silently_books_live_stamped_full_pass_no_submit():
     """Invariant end-to-end: a proof_accepted NO_SUBMIT receipt stamped LIVE on an armed
     live daemon is the silent-kill signature. The persist boundary raises; the reactor's
@@ -330,6 +395,48 @@ def test_armed_live_daemon_never_silently_books_live_stamped_full_pass_no_submit
     ).fetchone()
     assert dl is not None
     assert "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT" in dl[1]
+
+
+def test_live_active_duplicate_deferral_rejects_not_dark_full_pass():
+    """An active live order owns this candidate. That is a visible rejection for this
+    event, not a proof-accepted no-submit state. If it is incorrectly marked
+    proof_accepted=True, the armed-live invariant treats it as a silently consumed
+    tradeable entry and dead-letters it."""
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+            "condition_id=condition-1:token_id=yes-1:direction=buy_yes"
+        ),
+        proof_accepted=False,
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    result = reactor.process_pending(decision_time=_DECISION_TIME)
+
+    assert result.rejected == 1
+    assert result.dead_lettered == 0
+    assert result.proof_accepted == 0
+    assert _no_submit_rows(conn, event.event_id) == []
+    row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "EXECUTOR_EXPRESSIBILITY"
+    assert row[1].startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:")
 
 
 def test_unarmed_daemon_does_not_trip_invariant_on_live_stamp():

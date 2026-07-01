@@ -3,7 +3,7 @@
 ```
 Created: 2026-06-13
 Authority basis: ChatGPT Pro consult REQ-20260613-225646-71a908 on
-  docs/operations/system_investigation_workflow_2026-06-13.md (gisted).
+  docs/archive/2026-Q2/operations_historical/system_investigation_workflow_2026-06-13.md (gisted).
 Status: ADVISORY. Claude Code verifies locally; ChatGPT never decides correctness.
 Full verbatim answer: in session transcript (operator-pasted).
 ```

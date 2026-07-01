@@ -1,6 +1,6 @@
 """SKILL purpose orchestrator.
 
-Wraps the existing diagnostic_non_promotion forecast-skill replay lane
+Wraps the existing offline_no_promotion forecast-skill replay lane
 (src.engine.replay.run_wu_settlement_sweep) with the typed
 PurposeContract from src.backtest.purpose so callers must declare
 purpose=SKILL explicitly and cannot silently mix in ECONOMICS-shaped
@@ -30,7 +30,7 @@ def run_skill(
 ):
     """Run a forecast-skill backtest.
 
-    Output is `diagnostic_non_promotion` per BACKTEST_AUTHORITY_SCOPE.
+    Output is `offline_no_promotion` per BACKTEST_AUTHORITY_SCOPE.
     Returns a ReplaySummary whose `limitations` block must not contain
     any ECONOMICS-shaped fields (Brier/log-loss/accuracy only).
     """

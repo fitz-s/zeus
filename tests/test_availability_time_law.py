@@ -98,10 +98,6 @@ READER_SITE_ALLOWLIST: frozenset[str] = frozenset(
         "contracts/decision_provenance.py:393",
         # decision_group_id.py — hardcoded test fixture constant
         "contracts/decision_group_id.py:23",
-        # backtest — reading existing value for lookahead check
-        "backtest/shadow_replay_harness.py:199",
-        "backtest/shadow_replay_harness.py:202",
-        "backtest/shadow_replay_harness.py:207",
         # day0 event triggers — reading from observation row (not a forecast stamp)
         "events/triggers/day0_extreme_updated.py:51",
         "events/triggers/day0_extreme_updated.py:64",

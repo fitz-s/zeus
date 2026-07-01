@@ -230,7 +230,7 @@ _102 base tables_
 - **no_trade_events**  (rows≈2952, cols=13)
     market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
     decision_seq:INTEGER, reason:TEXT, reason_detail:TEXT, strategy_key:TEXT, event_source:TEXT,
-    shadow_runtime:INTEGER, observed_at:TEXT, schema_version:INTEGER, schema_compatibility:TEXT
+    observed_at:TEXT, schema_version:INTEGER, schema_compatibility:TEXT
 - **no_trade_regret_events**  (rows≈259657, cols=36)
     regret_event_id:TEXT, event_id:TEXT, rejection_stage:TEXT, rejection_reason:TEXT,
     regret_bucket:TEXT, market_slug:TEXT, condition_id:TEXT, token_id:TEXT, outcome_label:TEXT,
@@ -390,12 +390,6 @@ _102 base tables_
     settlement_source:TEXT, settled_at:TEXT, authority:TEXT, pm_bin_lo:REAL, pm_bin_hi:REAL, unit:TEXT,
     settlement_source_type:TEXT, temperature_metric:TEXT, physical_quantity:TEXT,
     observation_field:TEXT, data_version:TEXT, provenance_json:TEXT
-- **shadow_experiments**  (rows≈0, cols=7)
-    experiment_id:TEXT, strategy_id:TEXT, config_hash:TEXT, started_at:TEXT, closed_at:TEXT,
-    cohort_tag:TEXT, immutable:INTEGER
-- **shadow_signals**  (rows≈4123, cols=9)
-    id:INTEGER, city:TEXT, target_date:TEXT, timestamp:TEXT, decision_snapshot_id:TEXT, p_raw_json:TEXT,
-    p_cal_json:TEXT, edges_json:TEXT, lead_hours:REAL
 - **shoulder_exposure_ledger**  (rows≈0, cols=11)
     id:INTEGER, shoulder_side:TEXT, weather_system_cluster:TEXT, city:TEXT, target_date:TEXT,
     source:TEXT, regime:TEXT, notional_usd:REAL, decision_event_id:TEXT, observed_at:TEXT,
@@ -431,10 +425,6 @@ _102 base tables_
     strategy_key:TEXT, as_of:TEXT, open_exposure_usd:REAL, settled_trades_30d:INTEGER,
     realized_pnl_30d:REAL, unrealized_pnl:REAL, win_rate_30d:REAL, brier_30d:REAL, fill_rate_14d:REAL,
     edge_trend_30d:REAL, risk_level:TEXT, execution_decay_flag:INTEGER, edge_compression_flag:INTEGER
-- **tail_stress_scenarios**  (rows≈0, cols=9)
-    market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
-    decision_seq:INTEGER, scenarios:TEXT, max_loss_pct:REAL, tail_probability_stressed:REAL,
-    schema_version:INTEGER
 - **temp_persistence**  (rows≈0, cols=6)
     city:TEXT, season:TEXT, delta_bucket:TEXT, frequency:REAL, avg_next_day_reversion:REAL,
     n_samples:INTEGER
@@ -752,9 +742,6 @@ _75 base tables_
     settlement_source:TEXT, settled_at:TEXT, authority:TEXT, pm_bin_lo:REAL, pm_bin_hi:REAL, unit:TEXT,
     settlement_source_type:TEXT, temperature_metric:TEXT, physical_quantity:TEXT,
     observation_field:TEXT, data_version:TEXT, provenance_json:TEXT
-- **shadow_signals**  (rows≈27090, cols=9)
-    id:INTEGER, city:TEXT, target_date:TEXT, timestamp:TEXT, decision_snapshot_id:TEXT, p_raw_json:TEXT,
-    p_cal_json:TEXT, edges_json:TEXT, lead_hours:REAL
 - **solar_daily**  (rows≈0, cols=11)
     city:TEXT, target_date:TEXT, timezone:TEXT, lat:REAL, lon:REAL, sunrise_local:TEXT,
     sunset_local:TEXT, sunrise_utc:TEXT, sunset_utc:TEXT, utc_offset_minutes:INTEGER, dst_active:INTEGER
@@ -1135,7 +1122,7 @@ _116 base tables_
 - **no_trade_events**  (rows≈0, cols=13)
     market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
     decision_seq:INTEGER, reason:TEXT, reason_detail:TEXT, strategy_key:TEXT, event_source:TEXT,
-    shadow_runtime:INTEGER, observed_at:TEXT, schema_version:INTEGER, schema_compatibility:TEXT
+    observed_at:TEXT, schema_version:INTEGER, schema_compatibility:TEXT
 - **no_trade_regret_events**  (rows≈0, cols=35)
     regret_event_id:TEXT, event_id:TEXT, rejection_stage:TEXT, rejection_reason:TEXT,
     regret_bucket:TEXT, market_slug:TEXT, condition_id:TEXT, token_id:TEXT, outcome_label:TEXT,
@@ -1274,20 +1261,6 @@ _116 base tables_
     id:INTEGER, experiment_id:TEXT, decision_event_id:TEXT, forecast_error_usd:REAL,
     observation_error_usd:REAL, quote_error_usd:REAL, non_fill_error_usd:REAL, fee_error_usd:REAL,
     timing_error_usd:REAL, settlement_ambiguity_error_usd:REAL, total_regret_usd:REAL, computed_at:TEXT
-- **replacement_shadow_decisions**  (rows≈0, cols=22)
-    decision_id:INTEGER, posterior_id:INTEGER, baseline_source_run_id:TEXT, market_snapshot_id:TEXT,
-    condition_id:TEXT, token_id:TEXT, decision_time:TEXT, baseline_direction:TEXT,
-    candidate_direction:TEXT, allowed_direction:TEXT, baseline_q_lcb:REAL, candidate_q_lcb:REAL,
-    allowed_q_lcb:REAL, baseline_kelly_fraction:REAL, candidate_kelly_fraction:REAL,
-    allowed_kelly_fraction:REAL, veto:INTEGER, veto_reason:TEXT, dependency_source_run_ids_json:TEXT,
-    provenance_json:TEXT, trade_authority_status:TEXT, recorded_at:TEXT
-- **replacement_shadow_decisions_legacy_coarse_unique_20260607T131448Z**  (rows≈1, cols=22)
-    decision_id:INTEGER, posterior_id:INTEGER, baseline_source_run_id:TEXT, market_snapshot_id:TEXT,
-    condition_id:TEXT, token_id:TEXT, decision_time:TEXT, baseline_direction:TEXT,
-    candidate_direction:TEXT, allowed_direction:TEXT, baseline_q_lcb:REAL, candidate_q_lcb:REAL,
-    allowed_q_lcb:REAL, baseline_kelly_fraction:REAL, candidate_kelly_fraction:REAL,
-    allowed_kelly_fraction:REAL, veto:INTEGER, veto_reason:TEXT, dependency_source_run_ids_json:TEXT,
-    provenance_json:TEXT, trade_authority_status:TEXT, recorded_at:TEXT
 - **rescue_events**  (rows≈0, cols=12)
     rescue_event_id:INTEGER, trade_id:TEXT, position_id:TEXT, decision_snapshot_id:TEXT,
     temperature_metric:TEXT, causality_status:TEXT, authority:TEXT, authority_source:TEXT,
@@ -1327,12 +1300,6 @@ _116 base tables_
     settlement_source:TEXT, settled_at:TEXT, authority:TEXT, pm_bin_lo:REAL, pm_bin_hi:REAL, unit:TEXT,
     settlement_source_type:TEXT, temperature_metric:TEXT, physical_quantity:TEXT,
     observation_field:TEXT, data_version:TEXT, provenance_json:TEXT
-- **shadow_experiments**  (rows≈0, cols=7)
-    experiment_id:TEXT, strategy_id:TEXT, config_hash:TEXT, started_at:TEXT, closed_at:TEXT,
-    cohort_tag:TEXT, immutable:INTEGER
-- **shadow_signals**  (rows≈0, cols=9)
-    id:INTEGER, city:TEXT, target_date:TEXT, timestamp:TEXT, decision_snapshot_id:TEXT, p_raw_json:TEXT,
-    p_cal_json:TEXT, edges_json:TEXT, lead_hours:REAL
 - **shoulder_exposure_ledger**  (rows≈0, cols=11)
     id:INTEGER, shoulder_side:TEXT, weather_system_cluster:TEXT, city:TEXT, target_date:TEXT,
     source:TEXT, regime:TEXT, notional_usd:REAL, decision_event_id:TEXT, observed_at:TEXT,
@@ -1371,10 +1338,6 @@ _116 base tables_
     strategy_key:TEXT, as_of:TEXT, open_exposure_usd:REAL, settled_trades_30d:INTEGER,
     realized_pnl_30d:REAL, unrealized_pnl:REAL, win_rate_30d:REAL, brier_30d:REAL, fill_rate_14d:REAL,
     edge_trend_30d:REAL, risk_level:TEXT, execution_decay_flag:INTEGER, edge_compression_flag:INTEGER
-- **tail_stress_scenarios**  (rows≈0, cols=9)
-    market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
-    decision_seq:INTEGER, scenarios:TEXT, max_loss_pct:REAL, tail_probability_stressed:REAL,
-    schema_version:INTEGER
 - **temp_persistence**  (rows≈0, cols=6)
     city:TEXT, season:TEXT, delta_bucket:TEXT, frequency:REAL, avg_next_day_reversion:REAL,
     n_samples:INTEGER
@@ -1442,4 +1405,3 @@ _116 base tables_
     id:INTEGER, command_id:TEXT, event_type:TEXT, payload_json:TEXT, recorded_at:TEXT
 - **zeus_meta**  (rows≈10, cols=3)
     key:TEXT, value:TEXT, updated_at:TEXT
-

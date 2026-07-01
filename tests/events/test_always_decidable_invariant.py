@@ -462,6 +462,55 @@ def test_posterior_readiness_missing_also_enqueues_cycle_advance():
     assert enqueues == [("Chicago", "2026-05-24", "high")]
 
 
+def test_live_input_lag_enqueues_single_family_cycle_advance():
+    """A served posterior that lags a newer raw live input is a posterior-substrate block.
+
+    The adapter wraps this as a live-inference missing reason chain; the reactor must still
+    identify the nested live-input-lag segment, enqueue the same single-family cycle advance,
+    and requeue the still-open event instead of terminally burning it under the wrapper reason.
+    """
+    event = _forecast_event(target_date="2026-05-25")
+    payload = json.loads(event.payload_json)
+    enqueues: list[tuple] = []
+
+    def _submit(event, _dt):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "LIVE_INFERENCE_INPUTS_MISSING:"
+                "REPLACEMENT_0_1_LIVE_INPUT_LAG:"
+                "raw_cycle_after_served_posterior"
+            ),
+        )
+
+    def _enqueuer(*, city, target_date, metric):
+        enqueues.append((city, target_date, metric))
+        return True
+
+    conn, store = _store()
+    store.insert_or_ignore(event)
+    reactor = _reactor(
+        store,
+        snapshot_present={"v": True},
+        cycle_advance_enqueuer=_enqueuer,
+        submit=_submit,
+    )
+    r = reactor.process_pending(decision_time=_DT)
+    assert enqueues == [("Chicago", "2026-05-25", "high")]
+    assert r.cycle_advance_enqueues == 1
+    assert r.retried == 1
+    assert r.rejected == 0
+    assert _status(conn, event.event_id) == "pending"
+
+
 def test_pre_cutover_posterior_staleness_reason_alias_enqueues_cycle_advance():
     payload = json.loads(_forecast_event().payload_json)
     enqueues: list[tuple] = []

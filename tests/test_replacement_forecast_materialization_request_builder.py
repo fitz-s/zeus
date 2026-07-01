@@ -1,7 +1,7 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
+# Last reused/audited: 2026-07-01
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
-# Purpose: Protect validated request generation for replacement shadow materialization.
+# Purpose: Protect validated request generation for replacement live materialization.
 # Reuse: Run before changing queue input contract or live simple-switch request production.
 # Authority basis: Simple switch must not depend on hand-built unvalidated materialization JSON.
 """Replacement forecast materialization request builder tests."""
@@ -21,6 +21,17 @@ from src.data.replacement_forecast_materialization_request_builder import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _openmeteo_payload(*, hours: range = range(24)) -> dict[str, object]:
+    hour_values = list(hours)
+    return {
+        "hourly_units": {"temperature_2m": "C"},
+        "hourly": {
+            "time": [f"2026-06-07T{hour:02d}:00" for hour in hour_values],
+            "temperature_2m": [19.0 + (hour % 9) for hour in hour_values],
+        },
+    }
+
+
 def _write_inputs(tmp_path: Path) -> dict[str, object]:
     (tmp_path / "aifs_samples.json").write_text(
         json.dumps(
@@ -35,15 +46,7 @@ def _write_inputs(tmp_path: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     (tmp_path / "openmeteo_payload.json").write_text(
-        json.dumps(
-            {
-                "hourly_units": {"temperature_2m": "C"},
-                "hourly": {
-                    "time": ["2026-06-07T00:00", "2026-06-07T06:00", "2026-06-07T12:00"],
-                    "temperature_2m": [19.0, 27.0, 24.0],
-                },
-            }
-        ),
+        json.dumps(_openmeteo_payload()),
         encoding="utf-8",
     )
     (tmp_path / "precision_metadata.json").write_text(
@@ -114,11 +117,50 @@ def test_request_builder_outputs_materializer_ready_json(tmp_path) -> None:
     request = result.request
     assert request is not None
     assert request["city_timezone"] == "Asia/Shanghai"
-    assert request["aifs_samples_json"] == str(tmp_path / "aifs_samples.json")
+    assert "aifs_samples_json" not in request
     assert request["openmeteo_payload_json"] == str(tmp_path / "openmeteo_payload.json")
     assert request["precision_metadata_json"] == str(tmp_path / "precision_metadata.json")
     assert request["anchor_weight"] == 0.80
     assert request["anchor_sigma_c"] == 3.00
+
+
+def test_request_builder_blocks_incomplete_om9_localday_coverage(tmp_path) -> None:
+    seed = _write_inputs(tmp_path)
+    (tmp_path / "openmeteo_payload.json").write_text(
+        json.dumps(_openmeteo_payload(hours=range(23))),
+        encoding="utf-8",
+    )
+
+    result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    assert result.ok is False
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE",)
+    assert result.request is None
+
+
+def test_request_builder_allows_post_localday_day0_observation_to_cover_elapsed_hours(tmp_path) -> None:
+    seed = _write_inputs(tmp_path)
+    seed.update(
+        {
+            "computed_at": "2026-06-07T17:00:00+00:00",
+            "expires_at": "2026-06-08T00:00:00+00:00",
+            "day0_observed_extreme_c": 32.0,
+            "day0_observed_extreme_source": "durable_observation_instants",
+            "day0_observed_extreme_observation_time": "2026-06-07T15:00:00+00:00",
+            "day0_observed_extreme_sample_count": 24,
+            "day0_observed_extreme_unit": "C",
+        }
+    )
+    (tmp_path / "openmeteo_payload.json").write_text(
+        json.dumps(_openmeteo_payload(hours=range(14, 24))),
+        encoding="utf-8",
+    )
+
+    result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    assert result.ok is True
+    assert result.request is not None
+    assert result.request["day0_observed_extreme_c"] == 32.0
 
 
 def test_request_builder_preserves_display_settlement_units_and_rounding_rule(tmp_path) -> None:
@@ -168,7 +210,7 @@ def test_request_builder_preserves_display_settlement_units_and_rounding_rule(tm
 def test_request_builder_blocks_future_dependency_and_bad_precision(tmp_path) -> None:
     seed = _write_inputs(tmp_path)
     future = dict(seed)
-    future["aifs_source_available_at"] = "2026-06-06T05:00:00+00:00"
+    future["openmeteo_source_available_at"] = "2026-06-06T05:00:00+00:00"
 
     future_result = build_replacement_forecast_materialization_request(future, base_dir=tmp_path)
 
@@ -181,22 +223,20 @@ def test_request_builder_blocks_future_dependency_and_bad_precision(tmp_path) ->
     precision_result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
 
     assert precision_result.ok is False
-    assert "OM9_PRECISION_GUARD_BLOCKED_REQUEST_BUILD" in precision_result.reason_codes
+    assert "OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD" in precision_result.reason_codes
 
 
-def test_request_builder_rejects_incomplete_market_bin_family(tmp_path) -> None:
+def test_request_builder_leaves_market_bin_completeness_to_family_semantics(tmp_path) -> None:
     seed = _write_inputs(tmp_path)
     seed["bins"] = [
         {"bin_id": "cool", "lower_c": None, "upper_c": 20.0, "center_c": 19.0},
         {"bin_id": "hot", "lower_c": 25.0, "upper_c": None, "center_c": 32.0},
     ]
 
-    try:
-        build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
-    except ValueError as exc:
-        assert "gap" in str(exc)
-    else:
-        raise AssertionError("incomplete bin family must raise")
+    result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    assert result.ok is True
+    assert result.request is not None
 
 
 def test_request_builder_cli_writes_queue_request(tmp_path) -> None:

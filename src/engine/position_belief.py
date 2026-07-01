@@ -1,10 +1,20 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-28
 # Authority basis: settlement-losses incident 2026-06-12 (719/719 stale monitor
 #   refreshes on the Karachi position; entry authority = forecast_posteriors,
 #   exit authority = dead legacy day0/ens chain) + external consult
 #   REQ-20260612-052802 K1 (single belief authority) + replacement chain
 #   authority docs/authority/replacement_final_form_2026_06_09.md.
+#   2026-06-28 (midstream belief-freeze incident): the served daily-HIGH belief froze the
+#   day BEFORE the target day and ignored the day's own observations (Beijing served 28.6C
+#   while observed running-high was 33.0C; ~83% of served mass on bins the realized high made
+#   impossible). Added the OBSERVED-FLOOR: load_replacement_belief pushes the daily-max
+#   forecast posterior forward under the settlement transport Y=max(X,O) (HIGH) / min(X,O)
+#   (LOW) against today's realized running extreme (world.observation_instants, same
+#   authority/source filter as the day0 hard-fact lane), so the served belief can never sit
+#   below the observed running extreme regardless of whether the upstream day0 live-obs lane
+#   fired. Operator transport (NOT Bayesian conditioning) verified against
+#   day0_conditioner.probability_high_day0_bin + external consult REQ-20260628-025620.
 """Replacement-chain belief authority for HELD positions (K1 single authority).
 
 THE DISEASE THIS KILLS: the position-exit monitor's probability came from a
@@ -38,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -134,7 +145,7 @@ def _latest_raw_single_runs_cycle(
     """Latest captured raw live-input cycle for the same family, if present."""
 
     columns = _table_columns(conn, "raw_model_forecasts")
-    required = {"city", "target_date", "metric", "source_cycle_time"}
+    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
     predicates = ["city = ?", "target_date = ?", "metric = ?"]
@@ -151,6 +162,12 @@ def _latest_raw_single_runs_cycle(
             "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
         )
         params.append(now.isoformat())
+    anchor_terms = ["model = 'ecmwf_ifs'"]
+    if "source_id" in columns:
+        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
+    if "product_id" in columns:
+        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
+    anchor_expr = " OR ".join(anchor_terms)
     try:
         row = conn.execute(
             f"""
@@ -159,6 +176,8 @@ def _latest_raw_single_runs_cycle(
             WHERE {' AND '.join(predicates)}
               AND datetime(source_cycle_time) <= datetime(?)
             GROUP BY source_cycle_time
+            HAVING COUNT(DISTINCT model) >= 3
+               AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
             ORDER BY datetime(source_cycle_time) DESC
             LIMIT 1
             """,
@@ -242,7 +261,7 @@ def _latest_live_input_cycle(
     temperature_metric: str,
     now: datetime,
 ) -> tuple[datetime | None, str | None]:
-    raw_model_cycle = _latest_raw_single_runs_cycle(
+    raw_single_runs_cycle = _latest_raw_single_runs_cycle(
         conn,
         city=city,
         target_date=target_date,
@@ -256,13 +275,14 @@ def _latest_live_input_cycle(
         temperature_metric=temperature_metric,
         now=now,
     )
-    if raw_model_cycle is None:
-        if raw_artifact_cycle is None:
-            return None, None
-        return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
-    if raw_artifact_cycle is None or raw_model_cycle >= raw_artifact_cycle:
-        return raw_model_cycle, "source_cycle_time_raw_model_forecasts_lag"
-    return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
+    candidates = [
+        (raw_single_runs_cycle, "source_cycle_time_raw_model_forecasts_lag"),
+        (raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"),
+    ]
+    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
+    if not candidates:
+        return None, None
+    return max(candidates, key=lambda item: item[0])
 
 
 def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | None:
@@ -284,6 +304,261 @@ def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | N
     return None
 
 
+# ---------------------------------------------------------------------------
+# Observed-floor on the served belief (midstream belief-freeze fix 2026-06-28)
+#
+# A daily MAX can only be >= the observed-so-far max (and a daily MIN only <= the
+# observed-so-far min). The forecast posterior q_json is the model's distribution over the
+# daily max X, computed BEFORE the target day; the realized settlement value is the
+# deterministic transport Y = max(X, O) (HIGH) / Y = min(X, O) (LOW), where O is the
+# observed running extreme so far today. The served belief must be the push-forward of the
+# forecast posterior under that transport — NOT Bayesian conditioning X | X>=O.
+#
+# The two differ and only the transport is correct: every forecast trajectory with X < O
+# settles at exactly O (it lands in the bin CONTAINING O — the lowest still-possible bin),
+# and every trajectory with X >= O settles at X (UNCHANGED). So the discrete operator is:
+# move the entire mass of every impossible bin (HIGH: preimage hi <= O) onto the lowest
+# surviving bin; leave the surviving bins' mass exactly as the forecast had it; do NOT
+# renormalize. Renormalizing (conditioning) would wrongly inflate the upper-tail bins —
+# those trajectories are already >= O and must keep their forecast mass verbatim.
+#
+# This is the SAME transport the live continuous day0 law performs
+# (day0_conditioner.probability_high_day0_bin: hi<=obs -> 0; lo<=obs<hi -> cdf(hi) i.e. all
+# below-hi mass collapses into the observed bin; else the ordinary interval). Identical
+# logic in both layers makes the floor idempotent — T(T(q)) == T(q), so applying it here AND
+# in the day0 lane can never double-shift mass. It is a pure MEASURED-FACT transport, never
+# a fitted de-bias / MOS (operator law: no fitted offset anywhere).
+# ---------------------------------------------------------------------------
+
+_LABEL_BIN_BELOW_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:below|lower)", re.I)
+_LABEL_BIN_ABOVE_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:higher|above|more)", re.I)
+_LABEL_BIN_POINT_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\b")
+
+
+def _belief_rounding_rule(city: str) -> str:
+    """Settlement rounding rule for the observed-floor preimage (matches SettlementSemantics).
+
+    Hong Kong settles by decimal truncation (``oracle_truncate`` — preimage [t, t+1));
+    every other current Zeus city uses the symmetric WMO half-up rule
+    (``wmo_half_up`` — preimage [t-0.5, t+0.5)). Keyed by city NAME because the single belief
+    authority receives ``city`` as a bare string, not a City object. See
+    src/contracts/settlement_semantics.py::SettlementSemantics.for_city (the same fork).
+    """
+    if str(city or "").strip() == "Hong Kong":
+        return "oracle_truncate"
+    return "wmo_half_up"
+
+
+def _bin_label_native_bounds(label: str) -> tuple[float | None, float | None] | None:
+    """Parse a venue settlement-bin label into its integer label bounds (native unit).
+
+    Returns ``(bin_low, bin_high)`` where ``None`` denotes an open shoulder:
+      * ``"X°C or below"`` -> ``(None, X)``    (settles to a value rounding to <= X)
+      * ``"X°C or higher"`` -> ``(X, None)``   (settles to a value rounding to >= X)
+      * ``"X°C"`` (point bin) -> ``(X, X)``
+    Returns ``None`` when the label matches none of the canonical shapes (fail-closed:
+    an unparseable bin is left untouched by the floor). The shoulder forms are tested
+    BEFORE the point form so "X or below/higher" never mis-parses as a point bin.
+    """
+    text = str(label or "")
+    m = _LABEL_BIN_BELOW_RE.search(text)
+    if m:
+        return (None, float(m.group(1)))
+    m = _LABEL_BIN_ABOVE_RE.search(text)
+    if m:
+        return (float(m.group(1)), None)
+    m = _LABEL_BIN_POINT_RE.search(text)
+    if m:
+        value = float(m.group(1))
+        return (value, value)
+    return None
+
+
+def apply_observed_floor_to_q_vector(
+    q: Mapping[str, float],
+    *,
+    observed_extreme_native: float,
+    metric: str,
+    rounding_rule: str,
+    half_step: float = 0.5,
+) -> dict[str, float]:
+    """Push the daily-max forecast posterior forward under Y = max(X, O) (HIGH) / min (LOW).
+
+    ``q`` maps venue settlement-bin labels to forecast q_yes (P(daily extreme X in bin)).
+    ``observed_extreme_native`` is the realized running high (``metric == "high"``) or low
+    (``metric == "low"``) so far today, in the SAME native unit as the bin labels.
+
+    The settlement value is the deterministic transport ``Y = max(X, O)`` (HIGH). For a HIGH
+    market a bin whose preimage ``[lo, hi)`` has ``hi <= O`` is impossible (the daily max is
+    already >= O >= hi): its entire mass transports onto the bin CONTAINING ``O`` (the lowest
+    surviving bin — the one where ``X < O`` trajectories settle at exactly ``O``). Surviving
+    bins keep their forecast mass EXACTLY (trajectories with ``X >= O`` settle at ``X``,
+    unchanged); the vector is NOT renormalized. LOW is symmetric (``Y = min(X, O)``: bins with
+    ``lo >= O`` are impossible and transport onto the highest surviving bin).
+
+    This is measure-preserving transport, not Bayesian conditioning (``X | X >= O`` would
+    renormalize and wrongly inflate the upper tail). It is the SAME operator the continuous
+    day0 law uses (``day0_conditioner.probability_high_day0_bin``), so the floor is idempotent
+    — ``T(T(q)) == T(q)`` — and applying it here and in the day0 lane can never double-shift.
+
+    Fail-closed: returns the INPUT mapping unchanged when nothing is excluded (no-op floor),
+    when a bin label cannot be parsed (left in place at its forecast mass and treated as a
+    survivor so family mass is never silently dropped), or when there is no surviving target
+    bin to receive the impossible mass (degenerate — every parsed bin excluded; the floor
+    never fabricates a distribution and the caller's freshness/quality gates own that
+    contradiction).
+    """
+    from src.forecast.day0_conditioner import day0_bin_preimage_native
+
+    metric_l = str(metric or "").strip().lower()
+    if metric_l not in {"high", "low"}:
+        return dict(q)
+    try:
+        obs = float(observed_extreme_native)
+    except (TypeError, ValueError):
+        return dict(q)
+    if not math.isfinite(obs):
+        return dict(q)
+
+    # First pass: classify each bin as impossible / surviving, and record the surviving
+    # bin's preimage lower bound (HIGH) / upper bound (LOW) so we can pick the transport
+    # target = the lowest surviving bin (HIGH) / highest surviving bin (LOW).
+    out: dict[str, float] = {}
+    impossible_mass = 0.0
+    excluded_any = False
+    target_label: str | None = None
+    target_key: float | None = None  # lo (HIGH) or hi (LOW) of the current best target bin
+    for label, raw_val in q.items():
+        try:
+            val = float(raw_val)
+        except (TypeError, ValueError):
+            return dict(q)
+        out[label] = val
+        bounds = _bin_label_native_bounds(label)
+        if bounds is None:
+            # Unparseable bin: keep its mass as a survivor (never silently drop family mass).
+            continue
+        bin_low, bin_high = bounds
+        lo, hi = day0_bin_preimage_native(
+            bin_low, bin_high, rounding_rule=rounding_rule, half_step=half_step
+        )
+        if metric_l == "high":
+            impossible = hi <= obs
+        else:  # low
+            impossible = lo >= obs
+        if impossible:
+            impossible_mass += val
+            out[label] = 0.0
+            excluded_any = True
+            continue
+        # Surviving bin: track the transport target.
+        if metric_l == "high":
+            # Lowest surviving bin = smallest preimage lower bound (the O-containing bin).
+            if target_key is None or lo < target_key:
+                target_key, target_label = lo, label
+        else:  # low
+            # Highest surviving bin = largest preimage upper bound (the O-containing bin).
+            if target_key is None or hi > target_key:
+                target_key, target_label = hi, label
+
+    if not excluded_any:
+        # No bin excluded by the observed extreme -> the floor is a pure no-op.
+        return dict(q)
+    if target_label is None:
+        # Degenerate: every parsed bin is impossible -> no target to receive the mass. Do not
+        # fabricate a distribution; return the input unchanged and let the caller's gates
+        # handle the contradiction.
+        return dict(q)
+    out[target_label] = out[target_label] + impossible_mass
+    return out
+
+
+def _observed_running_extreme_native(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    now: datetime,
+    world_db_path: str | None = None,
+) -> float | None:
+    """Cheap O(1) read of the canonical observed running extreme from world.observation_instants.
+
+    Returns the running high (``metric == "high"``) / running low (``metric == "low"``) in
+    the city's NATIVE settlement unit, or ``None`` when no VERIFIED settlement-grade row is
+    available up to ``now``. This is the SAME canonical surface + source filter the day0
+    hard-fact lane and the absorbing-floor reseed already treat as authoritative
+    (monitor_refresh._day0_observed_extreme_from_canonical_surface), lifted to the single
+    belief authority so the served belief is floored REGARDLESS of whether the upstream
+    day0 live-obs fetch fired. Best-effort: any read failure returns None (the belief is
+    then served unfloored — the floor only ever ADDS the measured fact, never blocks serving).
+    """
+    metric_l = str(metric or "").strip().lower()
+    if metric_l not in {"high", "low"}:
+        return None
+    if world_db_path is None:
+        from src.state.db import ZEUS_WORLD_DB_PATH
+
+        world_db_path = str(ZEUS_WORLD_DB_PATH)
+    extreme_col = "running_min" if metric_l == "low" else "running_max"
+    agg = "MIN" if metric_l == "low" else "MAX"
+    now_iso = now.astimezone(timezone.utc).isoformat()
+    try:
+        conn = sqlite3.connect(f"file:{world_db_path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        for table_ref in ("world.observation_instants", "observation_instants"):
+            try:
+                row = conn.execute(
+                    f"""
+                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
+                           COUNT(*) AS n_rows
+                    FROM {table_ref}
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND substr(local_timestamp, 1, 10) = target_date
+                      AND utc_timestamp <= ?
+                      AND COALESCE(causality_status, 'OK') = 'OK'
+                      AND (
+                            (
+                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                                AND COALESCE(source_role, '') = 'historical_hourly'
+                                AND COALESCE(training_allowed, 0) = 1
+                                AND (
+                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
+                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                                )
+                            )
+                            OR (
+                                city = 'Hong Kong'
+                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                                AND COALESCE(source_role, '') = 'runtime_monitoring'
+                                AND COALESCE(training_allowed, 0) = 0
+                            )
+                      )
+                      AND {extreme_col} IS NOT NULL
+                    """,
+                    (city, target_date, now_iso),
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+            if row is None:
+                continue
+            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
+            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[1]) or 0)
+            if extreme is None or n_rows <= 0:
+                continue
+            return float(extreme)
+        return None
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
 def load_replacement_belief(
     *,
     city: str,
@@ -294,6 +569,7 @@ def load_replacement_belief(
     now: datetime | None = None,
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
     db_path: str | None = None,
+    world_db_path: str | None = None,
 ) -> ReplacementBelief | None:
     """Freshest replacement-chain belief for a held bin, or None (fail-closed).
 
@@ -302,6 +578,13 @@ def load_replacement_belief(
     matched, q is non-finite/out of [0, 1], or computed_at is unparseable.
     A row that matches but is older than ``max_age_hours`` is RETURNED with
     ``fresh=False`` — staleness is information, absence is not.
+
+    The served bin posterior is FLOORED by today's realized running extreme
+    (``observation_instants``) before bin extraction: a daily MAX cannot fall below the
+    observed-so-far max (nor a daily MIN rise above the observed-so-far min), so a bin the
+    measured extreme has already excluded carries q=0 and the survivors keep the forecast's
+    relative odds. ``world_db_path`` overrides the canonical-surface path (tests); production
+    reads ``ZEUS_WORLD_DB_PATH``.
     """
     # Direction arrives as the coerced Direction enum on live Position objects;
     # str(Direction.NO) is "Direction.NO" (not a str-mixin), which silently
@@ -383,6 +666,33 @@ def load_replacement_belief(
         return None
     if not isinstance(q, dict):
         return None
+    # OBSERVED-FLOOR (midstream belief-freeze fix 2026-06-28): condition the full-day-max
+    # forecast posterior on today's realized running extreme BEFORE extracting the held bin,
+    # so the served belief can NEVER place mass on a settlement bin the measured extreme has
+    # already excluded — regardless of whether the upstream day0 live-obs lane fired (it
+    # routinely fails on the settlement day, dropping back to THIS frozen posterior). O(1)
+    # canonical read; best-effort (any failure serves the belief unfloored — the floor only
+    # ever ADDS the measured fact). Pure measured-fact conditioning, not a fitted de-bias.
+    try:
+        observed_extreme = _observed_running_extreme_native(
+            city=city,
+            target_date=target_date,
+            metric=temperature_metric,
+            now=now_dt,
+            world_db_path=world_db_path,
+        )
+        if observed_extreme is not None:
+            q = apply_observed_floor_to_q_vector(
+                q,
+                observed_extreme_native=observed_extreme,
+                metric=temperature_metric,
+                rounding_rule=_belief_rounding_rule(city),
+            )
+    except Exception as exc:  # noqa: BLE001 — the floor must never kill belief serving
+        logger.warning(
+            "position_belief: observed-floor skipped for %s/%s/%s: %s",
+            city, target_date, temperature_metric, exc,
+        )
     matched = _match_bin(q, bin_label)
     if matched is None:
         return None

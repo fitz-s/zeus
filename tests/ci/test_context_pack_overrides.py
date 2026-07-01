@@ -157,9 +157,9 @@ def test_override_reviewer_approval_missing(tmp_path: Path):
 
 
 def test_override_attempts_no_override_rule(tmp_path: Path):
-    ov = _valid_override(rule_id="stdlib_shadowing_gate")
+    ov = _valid_override(rule_id="stdlib_name_collision_gate")
     repo = _build_repo(
-        tmp_path, [ov], enforcement_no_override=["stdlib_shadowing_gate"]
+        tmp_path, [ov], enforcement_no_override=["stdlib_name_collision_gate"]
     )
     r = _run(repo, today="2026-05-26")
     assert r.returncode == 1

@@ -105,7 +105,7 @@ def test_observation_context_live_hook_marks_wu_station_match_live_authority():
     assert observation["observation_available_at"] == "2026-05-24T18:07:00+00:00"
 
 
-def test_observation_context_live_hook_blocks_diagnostic_fallback():
+def test_observation_context_live_hook_blocks_non_settlement_source():
     city = SimpleNamespace(
         name="Chicago",
         timezone="America/Chicago",
@@ -122,7 +122,7 @@ def test_observation_context_live_hook_blocks_diagnostic_fallback():
         low_so_far=61.0,
         current_temp=73.0,
         unit="F",
-        coverage_status="DIAGNOSTIC_FALLBACK",
+        coverage_status="NON_SETTLEMENT_SOURCE",
     )
 
     observation = observation_context_to_live_observation(
@@ -179,6 +179,32 @@ def test_trigger_emit_idempotent():
     )
     assert first.inserted is True
     assert second.duplicate is True
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
+def test_trigger_family_admission_blocks_non_executable_day0_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        family_admission=lambda observation: observation["city"] == "Paris",
+    )
+
+    blocked = trigger.emit_from_observation(
+        observation=_observation(city="Chicago"),
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:08:00+00:00",
+    )
+    admitted = trigger.emit_from_observation(
+        observation=_observation(city="Paris"),
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:08:00+00:00",
+    )
+
+    assert blocked is None
+    assert admitted is not None and admitted.inserted is True
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
 
 
@@ -516,6 +542,65 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"event_type":"DAY0_EXTREME_UPDATED"' not in payload for payload in payloads)
     assert all('"live_authority_status":"live"' in payload for payload in payloads)
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
+
+
+def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-06-26",
+            "hko_hourly_accumulator",
+            "Asia/Hong_Kong",
+            7.0,
+            "2026-06-26T07:00:00+08:00",
+            "2026-06-25T23:00:00+00:00",
+            480,
+            0,
+            0,
+            0,
+            "hourly_accumulator",
+            27.0,
+            27.0,
+            27.0,
+            "C",
+            "HKO",
+            1,
+            "2026-06-25T23:05:00+00:00",
+            "ICAO_STATION_NATIVE",
+            "v1.wu-native",
+            '{"source_file":"hko_hourly_accumulator","station_id":"HKO","payload_hash":"sha256:test","parser_version":"test"}',
+            0,
+            "OK",
+            "runtime_monitoring",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(27),
+        decision_time=datetime(2026, 6, 25, 23, 10, tzinfo=timezone.utc),
+        received_at="2026-06-25T23:10:00+00:00",
+    )
+
+    assert len(results) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    ]
+    assert {payload["metric"] for payload in payloads} == {"high", "low"}
+    assert all(payload["live_authority_status"] == "live" for payload in payloads)
+    assert all(payload["source_authorized_status"] == "AUTHORIZED" for payload in payloads)
 
 
 def test_scan_observation_instants_keeps_west_of_utc_target_day_after_midnight_z():
@@ -954,7 +1039,7 @@ def test_day0_write_suppresses_recent_same_payload_no_value_refutation():
     assert result is None
 
 
-def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
+def test_scan_observation_instants_rows_skips_coverage_fill_evidence_rows():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     conn.execute(
@@ -992,7 +1077,7 @@ def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
             '{"source_url":"redacted","station_id":"HKO"}',
             0,
             "REQUIRES_SOURCE_REAUDIT",
-            "fallback_evidence",
+            "coverage_fill_evidence",
         ),
     )
 

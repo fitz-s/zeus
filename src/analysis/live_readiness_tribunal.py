@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from src.contracts.evidence_tier import EvidenceTier
+from src.contracts.evidence_tier import EvidenceTier, next_evidence_tier, previous_evidence_tier
 from src.analysis.evidence_report import EvidenceReport
 
 
@@ -187,7 +187,7 @@ def adjudicate(
             )
             return verdict
 
-        tier_target = EvidenceTier(max(0, tier_current.value - 1))
+        tier_target = previous_evidence_tier(tier_current)
         verdict_reason = (
             f"DEMOTE: ci_lower={ci_lower:.4f} < breakeven={breakeven:.4f} "
             f"(cost_of_capital={cost_of_capital:.4f}); "
@@ -214,7 +214,7 @@ def adjudicate(
     if promotion_predicate(
         tier_current, tier_required_for_live, ci_lower, breakeven, cost_of_capital
     ):
-        tier_target = EvidenceTier(min(7, tier_current.value + 1))
+        tier_target = next_evidence_tier(tier_current)
         verdict_reason = (
             f"PROMOTE: ci_lower={ci_lower:.4f} > breakeven={breakeven:.4f} + "
             f"cost_of_capital={cost_of_capital:.4f}; "

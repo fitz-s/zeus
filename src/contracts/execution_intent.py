@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping
 
 from src.contracts.semantic_types import Direction
 
@@ -840,6 +840,21 @@ class DecisionSourceContext:
     # PR 6 — clock drift (field map row 16)
     clock_skew_estimate_ms: Optional[int] = None  # host clock - venue Date: header (ms); None = probe failed
 
+    _DAY0_SOURCE_ROLES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "day0_live_observation",
+            "day0_observed_probability",
+            "day0_base_distribution",
+        }
+    )
+    _DAY0_AUTHORITY_TIERS: ClassVar[frozenset[str]] = frozenset({"OBSERVATION", "DAY0_OBSERVATION"})
+
+    def is_day0_observation_context(self) -> bool:
+        return (
+            str(self.forecast_source_role or "").strip() in self._DAY0_SOURCE_ROLES
+            or str(self.authority_tier or "").strip().upper() in self._DAY0_AUTHORITY_TIERS
+        )
+
     @classmethod
     def from_forecast_context(cls, context: Mapping[str, object] | None) -> "DecisionSourceContext | None":
         if not isinstance(context, Mapping):
@@ -881,10 +896,6 @@ class DecisionSourceContext:
         required_fields = {
             "source_id": self.source_id,
             "model_family": self.model_family,
-            "forecast_issue_time": self.forecast_issue_time,
-            "forecast_valid_time": self.forecast_valid_time,
-            "forecast_fetch_time": self.forecast_fetch_time,
-            "forecast_available_at": self.forecast_available_at,
             "raw_payload_hash": self.raw_payload_hash,
             "degradation_level": self.degradation_level,
             "forecast_source_role": self.forecast_source_role,
@@ -892,6 +903,24 @@ class DecisionSourceContext:
             "decision_time": self.decision_time,
             "decision_time_status": self.decision_time_status,
         }
+        is_day0_context = self.is_day0_observation_context()
+        if not is_day0_context:
+            required_fields.update(
+                {
+                    "forecast_issue_time": self.forecast_issue_time,
+                    "forecast_valid_time": self.forecast_valid_time,
+                    "forecast_fetch_time": self.forecast_fetch_time,
+                    "forecast_available_at": self.forecast_available_at,
+                }
+            )
+        else:
+            for field, value in (
+                ("forecast_issue_time", self.forecast_issue_time),
+                ("forecast_fetch_time", self.forecast_fetch_time),
+                ("forecast_available_at", self.forecast_available_at),
+            ):
+                if not value:
+                    errors.append(f"missing_{field}")
         for field, value in required_fields.items():
             if not value:
                 errors.append(f"missing_{field}")
@@ -928,11 +957,17 @@ class DecisionSourceContext:
         if available_at is not None and fetch_time is not None and available_at > fetch_time:
             errors.append("forecast_available_after_fetch_time")
 
-        if self.forecast_source_role and self.forecast_source_role != "entry_primary":
+        if is_day0_context:
+            if self.forecast_source_role and self.forecast_source_role not in self._DAY0_SOURCE_ROLES:
+                errors.append(f"day0_role_not_live_observation:{self.forecast_source_role}")
+        elif self.forecast_source_role and self.forecast_source_role != "entry_primary":
             errors.append(f"forecast_role_not_entry_primary:{self.forecast_source_role}")
         if self.degradation_level and self.degradation_level != "OK":
             errors.append(f"forecast_degraded:{self.degradation_level}")
-        if self.authority_tier and self.authority_tier != "FORECAST":
+        if is_day0_context:
+            if self.authority_tier and self.authority_tier not in self._DAY0_AUTHORITY_TIERS:
+                errors.append(f"authority_not_observation:{self.authority_tier}")
+        elif self.authority_tier and self.authority_tier != "FORECAST":
             errors.append(f"authority_not_forecast:{self.authority_tier}")
         if self.decision_time_status and self.decision_time_status != "OK":
             errors.append(f"decision_time_status_not_ok:{self.decision_time_status}")
@@ -949,11 +984,16 @@ class DecisionSourceContext:
                 "observation_time": self.observation_time,
                 "observation_available_at": self.observation_available_at,
                 "polymarket_end_anchor_source": self.polymarket_end_anchor_source,
-                "first_member_observed_time": self.first_member_observed_time,
-                "run_complete_time": self.run_complete_time,
                 "zeus_submit_intent_time": self.zeus_submit_intent_time,
                 "venue_ack_time": self.venue_ack_time,
             }
+            if not is_day0_context:
+                pr3_required.update(
+                    {
+                        "first_member_observed_time": self.first_member_observed_time,
+                        "run_complete_time": self.run_complete_time,
+                    }
+                )
             for field, value in pr3_required.items():
                 if not value:
                     errors.append(f"missing_{field}")
@@ -1043,6 +1083,11 @@ class ExecutionIntent:
     # before persistence/submission. Do not populate this from forecast
     # decision_snapshot_id; it is market/execution truth, not model truth.
     executable_snapshot_id: str = ""
+    # Snapshot id authorized by the ActionableTradeCertificate. A live submit may
+    # recapture a fresher CLOB snapshot just before the venue call; that current
+    # snapshot stays in executable_snapshot_id while this field preserves the
+    # certificate-bound snapshot identity for the pre-submit authority guard.
+    actionable_executable_snapshot_id: str = ""
     executable_snapshot_hash: str = ""
     executable_cost_basis_id: str = ""
     executable_cost_basis_hash: str = ""
@@ -1060,6 +1105,15 @@ class ExecutionIntent:
     submit_order_type: OrderType | None = None
     post_only: bool = False
     taker_quality_proof: Mapping[str, Any] | None = None
+    q_live: float | None = None
+    q_lcb_5pct: float | None = None
+    expected_edge: float | None = None
+    min_entry_price: float | None = None
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
+    selection_authority_applied: str | None = None
+    qkernel_execution_economics: Mapping[str, Any] | None = None
+    actionable_certificate_hash: str | None = None
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -1083,6 +1137,13 @@ class ExecutionIntent:
         object.__setattr__(self, "event_id", normalized_event)
         object.__setattr__(self, "resolution_window", normalized_window)
         object.__setattr__(self, "correlation_key", normalized_correlation)
+        actionable_snapshot = str(self.actionable_executable_snapshot_id or "").strip()
+        if not actionable_snapshot:
+            object.__setattr__(
+                self,
+                "actionable_executable_snapshot_id",
+                str(self.executable_snapshot_id or "").strip(),
+            )
         if self.submit_order_type is not None and self.submit_order_type not in {
             "GTC",
             "GTD",
@@ -1760,6 +1821,15 @@ class FinalExecutionIntent:
     decision_source_context: DecisionSourceContext | None = None
     passive_maker_context: PassiveMakerExecutionContext | None = None
     taker_quality_proof: Mapping[str, Any] | None = None
+    q_live: float | None = None
+    q_lcb_5pct: float | None = None
+    expected_edge: float | None = None
+    min_entry_price: float | None = None
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
+    selection_authority_applied: str | None = None
+    qkernel_execution_economics: Mapping[str, Any] | None = None
+    actionable_certificate_hash: str | None = None
     pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1780,6 +1850,15 @@ class FinalExecutionIntent:
         decision_source_context: DecisionSourceContext | None = None,
         passive_maker_context: PassiveMakerExecutionContext | None = None,
         taker_quality_proof: Mapping[str, Any] | None = None,
+        q_live: float | None = None,
+        q_lcb_5pct: float | None = None,
+        expected_edge: float | None = None,
+        min_entry_price: float | None = None,
+        min_expected_profit_usd: float | None = None,
+        min_submit_edge_density: float | None = None,
+        selection_authority_applied: str | None = None,
+        qkernel_execution_economics: Mapping[str, Any] | None = None,
+        actionable_certificate_hash: str | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
         cost_basis.assert_submit_safe()
@@ -1821,6 +1900,15 @@ class FinalExecutionIntent:
             decision_source_context=decision_source_context,
             passive_maker_context=passive_maker_context,
             taker_quality_proof=taker_quality_proof,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb_5pct,
+            expected_edge=expected_edge,
+            min_entry_price=min_entry_price,
+            min_expected_profit_usd=min_expected_profit_usd,
+            min_submit_edge_density=min_submit_edge_density,
+            selection_authority_applied=selection_authority_applied,
+            qkernel_execution_economics=qkernel_execution_economics,
+            actionable_certificate_hash=actionable_certificate_hash,
         )
 
     def __post_init__(self) -> None:

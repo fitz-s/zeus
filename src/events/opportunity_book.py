@@ -8,8 +8,7 @@
 #   S7 (2026-06-08): the off-able selector gate is GONE. to_receipt_dict no longer
 #   reads a ``selector_enabled`` cache flag to decide whether to surface the
 #   recorded selection — it records the ΔU decision unconditionally. There is no
-#   runtime toggle that can silently null the live selection (operator directive:
-#   no flag, no shadow, no default-off switch).
+#   runtime toggle that can silently null the live selection.
 """In-memory opportunity book receipt evidence."""
 
 from __future__ import annotations
@@ -51,14 +50,28 @@ class OpportunityBook:
         candidate_receipts = [
             evaluation.to_receipt_dict() for evaluation in self.evaluations
         ]
+        live_selected_candidate_id = actual_selected_candidate_id or self.selected_candidate_id
+        for candidate in candidate_receipts:
+            legacy_admitted = bool(candidate.get("admitted"))
+            live_selected = bool(
+                live_selected_candidate_id
+                and str(candidate.get("candidate_id") or "") == str(live_selected_candidate_id)
+            )
+            # ``CandidateEvaluation.admitted`` is the retired scalar/admission
+            # view. The receipt is a live-money surface: once a downstream live
+            # selection authority chooses a candidate, the selected candidate is
+            # live-admitted by that authority or the submit path must fail closed.
+            # Keep the old value only as explicit legacy provenance.
+            live_admitted = legacy_admitted or live_selected
+            candidate["legacy_admitted"] = legacy_admitted
+            candidate["admitted"] = live_admitted
+            if live_selected and not legacy_admitted:
+                candidate["admission_authority"] = selection_authority or "live_selection"
+            candidate["live_decision_selected"] = live_selected
         if actual_selected_candidate_id:
             for candidate in candidate_receipts:
                 if str(candidate.get("candidate_id") or "") != str(actual_selected_candidate_id):
                     continue
-                legacy_admitted = bool(candidate.get("admitted"))
-                candidate["legacy_admitted"] = legacy_admitted
-                candidate["admitted"] = True
-                candidate["live_decision_selected"] = True
                 if selection_authority is not None:
                     candidate["live_selection_authority"] = selection_authority
                 if selected_qkernel_execution_economics is not None:

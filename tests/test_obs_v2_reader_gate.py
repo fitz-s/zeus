@@ -46,7 +46,7 @@ UNSAFE_READER_GATE_CASES = [
         id="training_allowed",
     ),
     pytest.param(
-        {"source_role": "fallback_evidence"},
+        {"source_role": "coverage_fill_evidence"},
         id="source_role",
     ),
     pytest.param(

@@ -75,7 +75,6 @@ from src.calibration.emos import emos_predictive
 from src.forecast.bayes_precision_fusion import (
     KAPPA,
     LOWN_INFLATE,
-    MIN_TRAIN,
     SIGMA_FLOOR,
 )
 from src.forecast.debias_authority import DebiasAuthority
@@ -105,22 +104,23 @@ HUBER_TOL: float = 1e-9
 EMOS_OOS_STRENGTH_DEFAULT: float = 0.0
 
 # ---------------------------------------------------------------------------
-# COLD-START GUARD (2026-06-22, Finding 1) — universal minimum settled-n gate.
+# LOW-N PRIOR WEIGHTING (2026-06-28) — no hard model ban on thin history.
 #
-# A forecast model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled
-# observations (n_train < MIN_SETTLED_N) contributes weight=0 to the fused center.
-# Driven purely by n_train — no model-name allow/deny list.
+# A forecast model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled observations
+# is treated as thin evidence, not as absent evidence. Its raw second moment is EB-shrunk
+# toward the equal-precision prior before weighting; it gets a non-zero initial weight but
+# cannot dominate purely because a tiny sample reported a small raw_m2.
 #
-# Root cause: gfs_hrrr added to live fusion 2026-06-19 with n=8 obs,
+# Root cause of the prior hard gate: gfs_hrrr added to live fusion 2026-06-19 with n=8 obs,
 # causing +3.54°C Denver / +1.52°C Houston warm contamination of the fused center
-# (2026-06-22 centerDx Finding 1).
+# (2026-06-22 centerDx Finding 1). The hard-zero fix solved contamination but created a
+# different live bug: new sources could never affect the center until they crossed a fixed
+# sample threshold. The live rule is now continuous: add the source at prior precision, then
+# let settled evidence sharpen or weaken it.
 #
-# All-immature fallback: when every model is below MIN_SETTLED_N, the guard is
-# lifted and equal 1/n weights apply (same no-signal posture as before — no center
-# refused). Mature-model path (n_train >= MIN_SETTLED_N) is byte-identical.
-#
-# Distinct from MIN_TRAIN=25 (which controls EB-shrink-to-equal; this guard zeros
-# the weight entirely).
+# MIN_SETTLED_N remains exported for provenance and tests: n < MIN_SETTLED_N means
+# "low_n_prior_weighted", not excluded. It is also the live center's low-n EB shrink
+# threshold so the provenance category and math boundary cannot diverge.
 # ---------------------------------------------------------------------------
 MIN_SETTLED_N: int = 30  # exported: imported by materializer for provenance stamping
 
@@ -155,10 +155,10 @@ class CenterEstimate:
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward model weights — RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow
-# execution flow §2). Basis = inverse RAW SECOND MOMENT 1/max(Ê[(x−Y)²], floor²),
+# Walk-forward model weights — RAW DIAGONAL PRECISION (2026-06-18 single-serving-rule
+# flow §2). Basis = inverse RAW SECOND MOMENT 1/max(Ê[(x−Y)²], floor²),
 # NOT the inverse demeaned variance. Reads RawModelMember.walk_forward_raw_m2_native.
-# Reuses ONLY the SIGMA_FLOOR / KAPPA / MIN_TRAIN / LOWN_INFLATE scalars from
+# Reuses ONLY the SIGMA_FLOOR / KAPPA / LOWN_INFLATE scalars from
 # bayes_precision_fusion — never shrink_cov / diag_cov / np.var / np.std (those
 # discard bias² and are the WRONG basis under the RAW no-de-bias law).
 # ---------------------------------------------------------------------------
@@ -169,7 +169,7 @@ def walk_forward_model_weights(
 ) -> np.ndarray:
     """Non-negative model weights that sum to 1 — RAW diagonal precision basis.
 
-    RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow execution flow §2; consult
+    RAW DIAGONAL PRECISION (2026-06-18 single-serving-rule flow §2; consult
     resolution ledger BLOCKER 3). Under the no-de-bias RAW law the optimal diagonal
     weighting is the inverse RAW SECOND MOMENT, NOT the inverse demeaned variance:
 
@@ -186,7 +186,7 @@ def walk_forward_model_weights(
     ``np.var`` / ``np.std`` / any demeaning — those estimate Σ (demeaned) and are
     the WRONG basis under RAW.
 
-    SHRINK-TO-EQUAL AT LOW n: a member whose ``walk_forward_n < MIN_TRAIN`` cannot
+    SHRINK-TO-EQUAL AT LOW n: a member whose ``walk_forward_n < MIN_SETTLED_N`` cannot
     be trusted to dominate on a thin raw second moment, so its precision is shrunk
     toward the equal-weight precision (the pooled-equal floor) by the EB low-n rule
     ``lam = n/(n+KAPPA)``: ``m2_eff = lam·raw_m2 + (1−lam)·(SIGMA_FLOOR·LOWN_INFLATE)²``.
@@ -218,14 +218,14 @@ def walk_forward_model_weights(
     for i, member in enumerate(members):
         raw_m2 = getattr(member, "walk_forward_raw_m2_native", None)
         n_train = int(getattr(member, "walk_forward_n", 0) or 0)
-        # COLD-START GUARD (2026-06-22, Finding 1): exclude immature models entirely.
-        # A model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled observations
-        # cannot contribute a reliable second-moment estimate — its history is too short to
-        # trust.  Zero its precision weight so it does not contaminate the center.
-        # The all-immature fallback (equal 1/n) fires below via have_any_signal=False path.
-        if n_train < MIN_SETTLED_N:
-            precisions[i] = 0.0
-            continue
+        # NO-DATA-IS-ADD-DATA-NOT-BAN-DATA (operator directive 2026-06-28). A source with
+        # fewer than MIN_SETTLED_N settled observations is NOT banned (the prior 2026-06-22
+        # cold-start guard zeroed its precision — that is "banning data"). It is ADDED at its
+        # INITIAL mathematical weight: the equal-precision floor below (+ any grid-
+        # representativeness/geometry precision, which needs no settlement history), and it
+        # accrues a sharper raw second moment as it settles. "No data" means add the source at
+        # its initial precision and let it sharpen — never exclude it. The EB low-n shrink
+        # (lam = n/(n+KAPPA)) below already prevents a thin history from dominating a deep one.
         # Option C: grid-representativeness variance in the member's native unit²
         # (already serving-unit-scaled by the producer). 0.0 / non-finite ⇒ no penalty.
         try:
@@ -248,7 +248,7 @@ def walk_forward_model_weights(
                 have_any_signal = True
         else:
             have_any_signal = True
-            if n_train < MIN_TRAIN:
+            if n_train < MIN_SETTLED_N:
                 # EB shrink toward the equal-precision floor by lam = n/(n+KAPPA):
                 # a thin raw second moment cannot dominate a deep one.
                 lam = n_train / (n_train + KAPPA)
@@ -358,14 +358,6 @@ def raw_second_moment_weights(
     have_any_signal = False
     for model in models:
         raw_m2, n_train = raw_m2_and_n[model]
-        # COLD-START GUARD (2026-06-22, Finding 1): exclude immature models entirely.
-        # A model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled observations
-        # cannot contribute a reliable second-moment estimate — its history is too short to
-        # trust.  Zero its precision weight so it does not contaminate the center.
-        # The all-immature fallback (equal 1/n) fires below via have_any_signal=False path.
-        if int(n_train or 0) < MIN_SETTLED_N:
-            precisions[model] = 0.0
-            continue
         repr_native = _repr_native(model)
         try:
             raw_m2_f = float(raw_m2) if raw_m2 is not None else None
@@ -380,7 +372,7 @@ def raw_second_moment_weights(
                 have_any_signal = True
         else:
             have_any_signal = True
-            if n_train < MIN_TRAIN:
+            if n_train < MIN_SETTLED_N:
                 lam = n_train / (n_train + KAPPA)
                 m2_eff = lam * raw_m2_f + (1.0 - lam) * equal_m2
             else:

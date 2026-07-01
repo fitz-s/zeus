@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 from pathlib import Path
 
@@ -148,6 +149,25 @@ def test_substrate_observer_heartbeat_has_dedicated_executor():
     assert 'id="substrate_observer_heartbeat"' in src
     assert 'executor="heartbeat"' in src
     assert "misfire_grace_time=30" in src
+
+
+def test_substrate_observer_money_path_priority_has_dedicated_executor():
+    """Money-path substrate recapture must not wait behind broad warm/discovery jobs."""
+    src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
+    assert '"priority": _APSchedulerThreadPoolExecutor(max_workers=1)' in src
+    assert 'id="money_path_substrate_priority"' in src
+    assert 'executor="priority"' in src
+    assert "_priority_refresh_interval_seconds()" in src
+    assert "next_run_time=datetime.now(timezone.utc)" in src
+
+
+def test_substrate_observer_preflight_converges_forecast_runtime_indexes():
+    """Existing live forecasts DBs must receive hot indexes without manual SQL."""
+    src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
+    assert "ensure_forecast_runtime_indexes" in src
+    assert 'get_forecasts_connection(write_class="live")' in src
+    assert "ensure_forecast_runtime_indexes(_forecast_conn)" in src
+    assert "_forecast_conn.commit()" in src
 
 
 def test_no_regression_reactor_reader_in_order_runtime_is_untouched():
@@ -410,7 +430,7 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         # A non-empty universe — there IS substrate to capture.
         return [{"condition_id": "c1", "outcomes": []}]
 
-    def _fake_refresh(conn, *, markets, clob, captured_at, scan_authority):
+    def _fake_refresh(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         captured["refresh_called"] = True
         captured["events_seen"] = markets
         return {"attempted": 1, "inserted": 1}
@@ -440,6 +460,16 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
     ms.refresh_executable_market_substrate_snapshots = _fake_refresh
     pc.PolymarketClient = lambda *a, **k: _FakeClob()
     dbmod.get_trade_connection = lambda *a, **k: _FakeConn()
+    monkeypatch_priority_active = getattr(obs, "money_path_substrate_priority_active")
+    monkeypatch_priority_families = getattr(obs, "money_path_substrate_priority_families")
+    monkeypatch_priority_conditions = getattr(obs, "money_path_substrate_priority_condition_ids")
+    obs.money_path_substrate_priority_active = lambda: False
+    obs.money_path_substrate_priority_families = lambda: []
+    obs.money_path_substrate_priority_condition_ids = lambda: []
+    import src.data.dual_run_lock as dual_run_lock
+
+    orig_lock = dual_run_lock.acquire_lock
+    dual_run_lock.acquire_lock = lambda _name: contextlib.nullcontext(True)
     # Make the staleness clock report STALE so the producer is due to fire.
     obs._market_discovery_last_completed_monotonic = None
     try:
@@ -451,6 +481,10 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         ms.refresh_executable_market_substrate_snapshots = orig["refresh"]
         pc.PolymarketClient = orig["client"]
         dbmod.get_trade_connection = orig["trade_conn"]
+        obs.money_path_substrate_priority_active = monkeypatch_priority_active
+        obs.money_path_substrate_priority_families = monkeypatch_priority_families
+        obs.money_path_substrate_priority_condition_ids = monkeypatch_priority_conditions
+        dual_run_lock.acquire_lock = orig_lock
 
     assert captured["refresh_called"], (
         "the substrate producer must reach the snapshot-capture write path on staleness "

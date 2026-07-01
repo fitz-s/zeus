@@ -35,7 +35,7 @@ LIVE PRICING OBJECT (S1, operator directive 2026-06-08):
   As of S1 this curve IS the single live pricing object on the candidate-proof
   path (src/engine/event_reactor_adapter.py _execution_price_from_snapshot):
   avg_cost_for_shares(min_order_size) emits the typed cost-of-entry that replaces
-  the scalar VWMP kernel. There is no flag and no shadow branch — one path, one
+  the scalar VWMP kernel. There is no alternate branch — one path, one
   pricing object. (The USD-stake avg_cost / marginal_cost / max_fillable remain
   for the future §5.3 USD-parameterized ELG optimizer.)
 

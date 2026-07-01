@@ -19,10 +19,8 @@ enumerate(): scans authority_docs dirs (architecture/, docs/operations/task_*/,
     - Escalation: drift_score >= escalate_threshold → DRIFT_ESCALATE verdict
 
   Outputs are surface-only (no edits to authority docs).
-  schedule: weekly (schedule_day: monday) — run_tick currently hardcodes
-  schedule="daily" (engine.py); weekly dispatch is deferred to WAVE 7.
-  This handler will NOT be called on normal daily ticks; it is wired but
-  remains dormant until the weekly dispatch is implemented.
+  schedule: weekly (schedule_day: monday). The maintenance worker engine
+  supports weekly dispatch; this handler is not part of normal daily ticks.
 
 apply(): always dry_run_only=True (live_default: false in catalog).
   Returns mock diff showing what would be written to output_only_dir.
@@ -34,9 +32,8 @@ Verdict strings:
   SKIP_NO_CODE_SIBLING      — authority doc has no identifiable code sibling
   SKIP_TOO_FRESH            — both doc and code modified recently (< stale_days)
 
-Deviation: schedule=weekly is not dispatched in the current engine
-  (engine.py:216 hardcodes schedule="daily"). This handler is dormant
-  until WAVE 7 implements weekly tick dispatch. TODO added at engine.py:216.
+Dispatch note: this task is intentionally weekly-only. Daily ticks should skip it;
+weekly ticks may enumerate candidates and still apply only dry-run reports.
 """
 from __future__ import annotations
 
@@ -85,8 +82,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     Scans DEFAULT_AUTHORITY_DIRS for .md files and estimates drift score
     based on mtime gap between doc and code siblings.
 
-    schedule: weekly — this handler is currently dormant because engine.py
-    run_tick hardcodes schedule="daily". WAVE 7 will add weekly dispatch.
+    schedule: weekly — daily ticks skip this handler.
     """
     raw: dict = entry.raw
     config: dict = raw.get("config", {})

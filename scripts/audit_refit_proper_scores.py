@@ -13,7 +13,7 @@
 #   python scripts/audit_refit_proper_scores.py --db /tmp/ens_refit/full.db --metric high --smoke
 #
 # --smoke: reconcile Brier/LogLoss/ECE against validate_ens_refit_oos.py on same data.
-# Output: markdown tables written to docs/operations/ENS_REFIT_VALIDATION_2026-05-25_results.md
+# Output: markdown tables written to docs/archive/2026-Q2/operations_historical/ENS_REFIT_VALIDATION_2026-05-25_results.md
 #         PIT histograms (ASCII) inlined in the same file.
 """Post-refit proper-score audit harness — §4.1 p_raw + §4.2 p_cal."""
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-23; last_reused=never
 # Purpose: PR-E cleanup CLI — tag all fact-table rows backed by non-contributing
 #          forecasts (dry-run default). Wires all 6 quarantine functions with

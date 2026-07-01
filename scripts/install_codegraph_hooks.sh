@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Created: 2026-06-12
-# Authority basis: docs/superpowers/specs/2026-06-12-codegraph-topology-overhaul-design.md (Component 1)
+# Authority basis: docs/archive/2026-Q2/tooling_historical/superpowers/specs/2026-06-12-codegraph-topology-overhaul-design.md (Component 1)
 # Purpose: install an idempotent post-commit hook that runs `codegraph sync`
 #          only for explicitly registered roots with an existing index.
 set -euo pipefail

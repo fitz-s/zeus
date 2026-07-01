@@ -2,7 +2,7 @@
 
 Authority: investigation of existing shadow-comparison practice
 (`docs/evidence/shadow_comparisons/2026-06-10 … 06-14`), shadow harness
-(`src/analysis/shadow_comparator.py`), replay scripts
+(`src/analysis/retired_comparison_tool.py`), replay scripts
 (`scripts/replay_exit_path_comparison.py`), and the three changed source
 files (`src/execution/harvester.py`, `src/engine/monitor_refresh.py`,
 `src/data/bayes_precision_fusion_capture.py`).
@@ -11,7 +11,7 @@ files (`src/execution/harvester.py`, `src/engine/monitor_refresh.py`,
 
 ## Background: existing settlement-graded shadow practice
 
-The standing shadow harness (`shadow_comparator.py`) works as follows:
+The standing shadow harness (`retired_comparison_tool.py`) works as follows:
 
 - It reads `edli_no_submit_receipts` (world DB) plus
   `forecasts.settlement_outcomes` (forecasts DB ATTACHed to the world conn).
@@ -20,8 +20,8 @@ The standing shadow harness (`shadow_comparator.py`) works as follows:
 - Cells without a VERIFIED settlement are dropped as `no_settlement`.
 - Scoring: paired log-loss difference + bootstrap CI + sign test.
   Verdict: `PROMOTE_SUPPORTED` / `INSUFFICIENT_N` / `PROMOTE_NOT_SUPPORTED`.
-- CLI: `python3 -m src.analysis.shadow_comparator [--since ISO] [--no-write]`
-- Standing daily run: cron calls `run_shadow_comparator_job()`; output in
+- CLI: `python3 -m src.analysis.retired_comparison_tool [--since ISO] [--no-write]`
+- Standing daily run: cron calls `run_retired_comparison_tool_job()`; output in
   `docs/evidence/shadow_comparisons/YYYY-MM-DD_shadow_comparison.md`.
 - Current state (through 06-14): ALL days show `INSUFFICIENT_N: 0 paired cells`
   for the only registered candidate (`day0_remaining_day_q`) because the dual-persist
@@ -56,7 +56,7 @@ not change `q` at all — it changes only the `settled_at` timestamp written to
    than writing a VERIFIED settlement with a fabricated timestamp.
 
 Neither of these effects produces a `(shadow_q, live_q)` pair. M1 changes *gradeability
-of rows*, not the q values — so the shadow_comparator harness cannot score it.
+of rows*, not the q values — so the retired_comparison_tool harness cannot score it.
 
 Additionally, historical `settlement_outcomes` rows were written under the old clock,
 and those timestamps cannot be retroactively compared against what the observation
@@ -301,12 +301,12 @@ decisions. To confirm this at scale with settlement grading:
 # Step 1: Add dual-persist field to bayes_precision_fusion receipts:
 #   In the decision receipt, write q_fusion_with_guard (new) alongside q_live (old)
 #   when the guard would have excluded at least one model.
-# Step 2: Register a ShadowCandidate in shadow_comparator.py:
+# Step 2: Register a ShadowCandidate in retired_comparison_tool.py:
 #   ShadowCandidate(name="fusion_arrival_guard",
 #                   adapter=generic_two_provenance_field_adapter(shadow_field="q_fusion_with_guard"),
 #                   description="fusion arrival guard: exclude future-avail models pre-T2")
 # Step 3: Run for ≥14 days of settled markets, then:
-python3 -m src.analysis.shadow_comparator --since 2026-06-16
+python3 -m src.analysis.retired_comparison_tool --since 2026-06-16
 # Check docs/evidence/shadow_comparisons/<date>_shadow_comparison.md for
 # verdict on fusion_arrival_guard candidate.
 ```
@@ -315,7 +315,7 @@ This accumulation is NOT needed before go-live because (a) the guard is fail-ope
 (missing availability = admit), (b) the expected exclusion rate is ~0 today, and (c)
 the unit-level test above confirms the exclusion logic is correct. The settlement-graded
 comparison would only matter if the guard began excluding models at significant rate —
-which would be detected in daily shadow_comparator output once dual-persist is added.
+which would be detected in daily retired_comparison_tool output once dual-persist is added.
 
 ---
 

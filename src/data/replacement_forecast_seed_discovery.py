@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
+from src.config import cities_by_name
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
@@ -19,7 +20,7 @@ from src.data.replacement_forecast_materialization_seed_builder import (
     write_seed,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
-from src.state.db import _connect, _zeus_trade_db_path
+from src.state.db import _connect, _zeus_trade_db_path, get_world_connection_read_only
 
 
 UTC = timezone.utc
@@ -85,6 +86,114 @@ def _dt(value: datetime | str | None, *, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _temperature_native_to_c(value: float, *, unit: str) -> float:
+    normalized = str(unit or "").strip().upper()
+    if normalized == "C":
+        return float(value)
+    if normalized == "F":
+        return (float(value) - 32.0) * 5.0 / 9.0
+    raise ValueError(f"unsupported Day0 observed-extreme unit: {unit!r}")
+
+
+def _day0_observed_extreme_seed_payload(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: datetime,
+) -> dict[str, object] | None:
+    """Canonical Day0 observed-extreme payload for materialization seeds.
+
+    Seed discovery is the producer for replacement materialization requests. Once
+    a city local target day has started, the materializer correctly requires the
+    observed running high/low so q is conditioned on the settlement-day hard
+    fact. The discovery lane must therefore read the same canonical
+    ``observation_instants`` surface instead of permanently excluding all Day0
+    targets from seeding.
+    """
+
+    city_obj = cities_by_name.get(str(city))
+    if city_obj is None:
+        return None
+    metric_norm = str(metric or "").strip().lower()
+    if metric_norm not in {"high", "low"}:
+        return None
+    metric_is_low = metric_norm == "low"
+    extreme_col = "running_min" if metric_is_low else "running_max"
+    agg = "MIN" if metric_is_low else "MAX"
+    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    if not unit:
+        return None
+    try:
+        world_conn = get_world_connection_read_only()
+    except Exception:  # noqa: BLE001 - discovery remains fail-soft
+        return None
+    try:
+        world_conn.row_factory = sqlite3.Row
+        now_iso = computed_at.astimezone(UTC).isoformat()
+        for table_ref in ("world.observation_instants", "observation_instants"):
+            try:
+                row = world_conn.execute(
+                    f"""
+                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
+                           MAX(utc_timestamp) AS obs_time,
+                           COUNT(*) AS n_rows
+                    FROM {table_ref}
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND substr(local_timestamp, 1, 10) = target_date
+                      AND utc_timestamp <= ?
+                      AND COALESCE(causality_status, 'OK') = 'OK'
+                      AND (
+                            (
+                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                                AND COALESCE(source_role, '') = 'historical_hourly'
+                                AND COALESCE(training_allowed, 0) = 1
+                                AND (
+                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
+                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                                )
+                            )
+                            OR (
+                                city = 'Hong Kong'
+                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                                AND COALESCE(source_role, '') = 'runtime_monitoring'
+                                AND COALESCE(training_allowed, 0) = 0
+                            )
+                      )
+                      AND {extreme_col} IS NOT NULL
+                    """,
+                    (city, target_date, now_iso),
+                ).fetchone()
+            except Exception:  # noqa: BLE001 - missing attachment/table; try next ref
+                continue
+            if row is None:
+                continue
+            extreme = row["extreme"]
+            obs_time = row["obs_time"]
+            sample_count = int(row["n_rows"] or 0)
+            if extreme is None or not obs_time or sample_count <= 0:
+                continue
+            try:
+                observed_c = _temperature_native_to_c(float(extreme), unit=unit)
+            except Exception:
+                return None
+            return {
+                "day0_observed_extreme_c": float(observed_c),
+                "day0_observed_extreme_source": "durable_observation_instants",
+                "day0_observed_extreme_observation_time": str(obs_time),
+                "day0_observed_extreme_sample_count": sample_count,
+                "day0_observed_extreme_unit": unit,
+            }
+        return None
+    finally:
+        try:
+            world_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _manifest_path_value(manifest: RawForecastArtifactManifest, key: str) -> str | None:
@@ -373,19 +482,22 @@ def _manifest_cycle_has_fusion_current_values(
 
     if not _fusion_current_values_schema_ready(conn):
         return None
-    from src.data.replacement_current_value_serving import read_current_instrument_values  # noqa: PLC0415
+    from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+        read_current_instrument_values,
+    )
 
     try:
+        manifest_cycle = manifest.source_cycle_time.astimezone(UTC).isoformat()
         served = read_current_instrument_values(
             conn,
             city=city,
             metric=metric,
             target_date=target_date,
-            source_cycle_time_iso=manifest.source_cycle_time.astimezone(UTC).isoformat(),
+            source_cycle_time_iso=manifest_cycle,
         )
     except Exception:
         return False
-    return bool(served)
+    return any(str(value.served_cycle) == manifest_cycle for value in served.values())
 
 
 def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
@@ -470,7 +582,7 @@ def discover_replacement_forecast_materialization_seeds(
     computed_at: datetime | str | None = None,
     limit: int = 10,
 ) -> ReplacementForecastSeedDiscoveryReport:
-    """Write seed JSON for DB targets that have all shadow raw inputs available."""
+    """Write seed JSON for DB targets with all required raw inputs available."""
 
     if limit <= 0:
         raise ValueError("limit must be positive")
@@ -522,10 +634,12 @@ def discover_replacement_forecast_materialization_seeds(
                 "target_date": row.target_date,
                 "temperature_metric": row.temperature_metric,
                 "baseline_source_run_id": row.baseline_source_run_id,
+                "baseline_source_cycle_time": row.baseline_source_cycle_time,
+                "day0_observed_extreme_required": row.day0_observed_extreme_required,
             }
             # SEED-BUDGET STARVATION KILL (2026-06-11): two coupled defects froze the
             # tradeable scopes behind permanently-failing far-date targets.
-            #   1. Far-date-first: the plan's order put day-2 shadow scopes (06-13) ahead
+            #   1. Far-date-first: the plan's order put day-2 non-tradeable scopes ahead
             #      of the tradeable day0/day1 scopes. Nearest target date = the money —
             #      sort target_date ASC.
             #   2. Head-of-line budget burn: [:limit] sliced BEFORE the per-target
@@ -538,7 +652,15 @@ def discover_replacement_forecast_materialization_seeds(
             #      manifest-missing targets are recorded as failures for observability
             #      but consume no budget.
             for row in sorted(
-                (row for row in target_plan.rows if row.can_seed),
+                (
+                    row for row in target_plan.rows
+                    if row.can_seed
+                    or (
+                        not row.covered
+                        and row.day0_observed_extreme_required
+                        and row.openmeteo_manifest_count > 0
+                    )
+                ),
                 key=lambda row: (
                     held_family_priority.get(
                         (str(row.city), str(row.target_date), str(row.temperature_metric)),
@@ -567,7 +689,20 @@ def discover_replacement_forecast_materialization_seeds(
             city = str(target["city"])
             target_date = str(target["target_date"])
             metric = str(target["temperature_metric"])
+            baseline_source_cycle_time = str(target.get("baseline_source_cycle_time") or "").strip()
             target_key = f"{city}|{target_date}|{metric}"
+            day0_seed_payload: dict[str, object] = {}
+            if bool(target.get("day0_observed_extreme_required")):
+                payload = _day0_observed_extreme_seed_payload(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    computed_at=computed,
+                )
+                if payload is None:
+                    reasons.append("REPLACEMENT_SEED_DISCOVERY_DAY0_OBSERVED_EXTREME_MISSING")
+                    continue
+                day0_seed_payload = payload
             expected = expected_replacement_dependency_identity_by_role(metric)
             # City timezone for payload-coverage selection (eastward-blackout fix): resolved
             # from the SAME canonical city registry the seed builder uses, so the selector and
@@ -584,6 +719,11 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 city_timezone=_city_tz,
+                cycle_admissible=(
+                    (lambda manifest, cycle=baseline_source_cycle_time: manifest.source_cycle_time.astimezone(UTC).isoformat() == cycle)
+                    if baseline_source_cycle_time
+                    else None
+                ),
             )
             if openmeteo is None:
                 failed.append(target_key)
@@ -635,6 +775,7 @@ def discover_replacement_forecast_materialization_seeds(
                 precision_metadata_json=_resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
                 computed_at=computed,
                 base_dir=seed_path,
+                **day0_seed_payload,
             )
             if not seed_result.ok or seed_result.seed is None:
                 failed.append(target_key)

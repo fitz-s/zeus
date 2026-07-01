@@ -138,27 +138,6 @@ def test_source_contract_watch_script_routes_to_script_profile():
     assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
 
 
-def test_b0_oracle_evidence_bridge_routes_to_dedicated_profile():
-    digest = build_digest(
-        "B0 Oracle evidence wiring bridge canonical settlements observations "
-        "daily_observation_revisions high low no penalty sufficient evidence "
-        "source_type normalize",
-        [
-            "scripts/bridge_oracle_to_calibration.py",
-            "src/strategy/oracle_penalty.py",
-            "tests/test_bridge_oracle_to_calibration.py",
-        ],
-        intent="modify_existing",
-        write_intent="edit",
-    )
-
-    assert digest["profile"] == "oracle evidence bridge implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "scripts/bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/oracle_penalty.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
-
-
 def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
     digest = build_digest(
         "B2 Weather family exposure gate WeatherFamilyKey mutually exclusive "
@@ -767,7 +746,6 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
         "pricing semantics authority cutover F-10 report replay cohort hard gate "
         "after F-09 durable fill fields",
         [
-            "scripts/profit_validation_replay.py",
             "scripts/equity_curve.py",
             "src/execution/harvester.py",
             "src/state/db.py",
@@ -780,7 +758,6 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
     assert digest["profile"] == "pricing semantics authority cutover"
     assert digest["admission"]["status"] == "admitted"
     admitted = set(digest["admission"]["admitted_files"])
-    assert "scripts/profit_validation_replay.py" in admitted
     assert "scripts/equity_curve.py" in admitted
     assert "src/state/db.py" in admitted
     assert "tests/test_run_replay_cli.py" in admitted
@@ -1498,7 +1475,6 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
         [
             "src/strategy/benchmark_suite.py",
             "src/strategy/data_lake.py",
-            "src/strategy/candidates/__init__.py",
             "tests/test_strategy_benchmark.py",
             "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml",
         ],
@@ -1508,7 +1484,6 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/data_lake.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/candidates/__init__.py" in digest["admission"]["admitted_files"]
     assert "tests/test_strategy_benchmark.py" in digest["admission"]["admitted_files"]
 
 
@@ -1558,54 +1533,6 @@ def test_dsa12_zeus_mode_selector_cleanup_routes_to_phase0b_profile():
     assert "docs/operations/task_2026-04-29_design_simplification_audit/findings.md" in (
         digest["admission"]["admitted_files"]
     )
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
-
-
-def test_dsa09_stale_execution_price_shadow_flag_routes_to_phase0c_profile():
-    digest = build_digest(
-        "DSA-09 remove stale EXECUTION_PRICE_SHADOW config flag after "
-        "execution price shadow-off path removal; no production DB mutation; "
-        "no live venue side effects; no Paris config edit",
-        [
-            "config/settings.json",
-            "tests/test_execution_price.py",
-            "docs/operations/known_gaps.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "phase 0c stale execution price shadow flag cleanup"
-    assert digest["admission"]["status"] == "admitted"
-    assert "config/settings.json" in digest["admission"]["admitted_files"]
-    assert "tests/test_execution_price.py" in digest["admission"]["admitted_files"]
-    assert "docs/operations/known_gaps.md" in digest["admission"]["admitted_files"]
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
-
-
-def test_dsa10_dsa18_snapshot_only_fallback_routes_to_phase1j_profile():
-    digest = build_digest(
-        "Phase 1J DSA-10 DSA-18 replay snapshot-only fallback explicit opt-in; "
-        "remove implicit snapshot-only fallback for non-audit replay modes; "
-        "tests/docs only; no DB mutation; no live venue; no Paris source routing",
-        [
-            "src/engine/replay.py",
-            "tests/test_run_replay_cli.py",
-            "tests/test_replay_time_provenance.py",
-            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "phase 1j replay snapshot-only fallback explicit opt-in"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/engine/replay.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_run_replay_cli.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_replay_time_provenance.py" in digest["admission"]["admitted_files"]
     assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
 
 

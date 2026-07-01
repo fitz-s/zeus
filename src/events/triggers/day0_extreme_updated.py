@@ -6,7 +6,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from src.config import runtime_cities_by_name
@@ -16,6 +16,8 @@ from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
 
 UTC = timezone.utc
+
+Day0FamilyAdmission = Callable[[dict[str, Any]], bool]
 
 
 @dataclass(frozen=True)
@@ -101,12 +103,14 @@ class Day0ExtremeUpdatedTrigger:
         *,
         day0_is_tradeable: bool = True,
         suppress_recent_no_value_refutations: bool = False,
+        family_admission: Day0FamilyAdmission | None = None,
     ) -> None:
         self._writer = writer
         # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
         # Production live uses the default True; False is for tests/replay.
         self._day0_is_tradeable = day0_is_tradeable
         self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
+        self._family_admission = family_admission
 
     def emit_from_observation(
         self,
@@ -115,15 +119,13 @@ class Day0ExtremeUpdatedTrigger:
         settlement_semantics: Any,
         decision_time: datetime,
         received_at: str,
-    ) -> EventWriteResult:
-        event = build_day0_extreme_updated_event(
+    ) -> EventWriteResult | None:
+        return self._write_observation_if_admitted(
             observation=observation,
             settlement_semantics=settlement_semantics,
             decision_time=decision_time,
             received_at=received_at,
-            day0_is_tradeable=self._day0_is_tradeable,
         )
-        return self._writer.write(event)
 
     def _write_observation_if_admitted(
         self,
@@ -133,6 +135,8 @@ class Day0ExtremeUpdatedTrigger:
         decision_time: datetime,
         received_at: str,
     ) -> EventWriteResult | None:
+        if self._family_admission is not None and not self._family_admission(observation):
+            return None
         event = build_day0_extreme_updated_event(
             observation=observation,
             settlement_semantics=settlement_semantics,
@@ -283,9 +287,17 @@ class Day0ExtremeUpdatedTrigger:
                   AND substr(local_timestamp, 1, 10) = target_date
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
                   AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
-                  AND COALESCE(training_allowed, 0) = 1
                   AND COALESCE(causality_status, '') = 'OK'
-                  AND COALESCE(source_role, '') = 'historical_hourly'
+                  AND (
+                        (
+                            COALESCE(source_role, '') = 'historical_hourly'
+                            AND COALESCE(training_allowed, 0) = 1
+                        )
+                        OR (
+                            COALESCE(source_role, '') = 'runtime_monitoring'
+                            AND COALESCE(training_allowed, 0) = 0
+                        )
+                  )
                   AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
                   AND COALESCE(station_id, '') != ''
                   AND COALESCE(source, '') != ''
@@ -482,8 +494,10 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         "AUTHORIZED"
         if (
             (verified or trusted_native)
-            and source_role == "historical_hourly"
-            and training_allowed
+            and (
+                (source_role == "historical_hourly" and training_allowed)
+                or (source_role == "runtime_monitoring" and not training_allowed)
+            )
             and causality_ok
             and source_match == "MATCH"
             and station_match == "MATCH"
@@ -642,7 +656,11 @@ def _source_matches_config(source: str, settlement_source_type: str) -> bool:
     if source_type == "noaa":
         return src.startswith("ogimet_metar_")
     if source_type == "hko":
-        return src == "hko_daily_api" or src.startswith("hko_daily_api_")
+        return (
+            src == "hko_hourly_accumulator"
+            or src == "hko_daily_api"
+            or src.startswith("hko_daily_api_")
+        )
     return False
 
 

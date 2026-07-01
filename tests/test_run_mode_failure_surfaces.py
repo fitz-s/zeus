@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,6 +55,103 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload))
 
 
+def _write_forecast_event_bridge_dbs(
+    sd: Path,
+    *,
+    posterior_computed_at: str,
+    fsr_created_at: str | None,
+) -> None:
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        forecast_conn.execute(
+            "CREATE TABLE forecast_posteriors (computed_at TEXT, runtime_layer TEXT)"
+        )
+        forecast_conn.execute(
+            "INSERT INTO forecast_posteriors (computed_at, runtime_layer) VALUES (?, 'live')",
+            (posterior_computed_at,),
+        )
+        forecast_conn.commit()
+    finally:
+        forecast_conn.close()
+
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events (event_id TEXT, event_type TEXT, entity_key TEXT, created_at TEXT)"
+        )
+        if fsr_created_at is not None:
+            world_conn.execute(
+                "INSERT INTO opportunity_events (event_id, event_type, entity_key, created_at) "
+                "VALUES ('fsr-1', 'FORECAST_SNAPSHOT_READY', 'city|date|high', ?)",
+                (fsr_created_at,),
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+
+def _write_day0_trace_dbs(sd: Path, *, with_regret: bool) -> None:
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events (event_id TEXT, event_type TEXT, entity_key TEXT, created_at TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing (consumer_name TEXT, event_id TEXT, "
+            "processing_status TEXT, processed_at TEXT, last_error TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_compile_failures (event_id TEXT, stage TEXT, reason_code TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE no_trade_regret_events (event_id TEXT, rejection_stage TEXT, rejection_reason TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE edli_no_submit_receipts (event_id TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        world_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_events VALUES "
+            "('day0-1', 'DAY0_EXTREME_UPDATED', 'Madrid|2026-07-01|high|LEMD', ?)",
+            (_now_iso(-60),),
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1', 'day0-1', 'processed', ?, NULL)",
+            (_now_iso(-30),),
+        )
+        if with_regret:
+            world_conn.execute(
+                "INSERT INTO no_trade_regret_events VALUES "
+                "('day0-1', 'TRADE_SCORE', 'EVENT_BOUND_ALL_CANDIDATES_REJECTED')"
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE venue_commands (decision_id TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
 def _healthy_execution_capability() -> dict:
     return {
         "entry": {
@@ -63,7 +161,7 @@ def _healthy_execution_capability() -> dict:
                 {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
                 {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
             ],
-            "blocked_components": [],
+            "unavailable_components": [],
         },
         "exit": {
             "status": "allowed",
@@ -72,7 +170,7 @@ def _healthy_execution_capability() -> dict:
                 {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
                 {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
             ],
-            "blocked_components": [],
+            "unavailable_components": [],
         },
     }
 
@@ -80,6 +178,9 @@ def _healthy_execution_capability() -> dict:
 def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
     """Write all composite surfaces in a healthy / fresh state."""
     cycle_time = _now_iso(offset_seconds)
+    current_head = live_health._current_git_head()
+    assert current_head, "test requires a git checkout with HEAD available"
+    _write(sd / "loaded_sha.json", {"loaded_sha": current_head, "generated_at": cycle_time})
     _write(
         sd / "daemon-heartbeat.json",
         {"alive": True, "timestamp": cycle_time, "mode": "live"},
@@ -106,11 +207,13 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
                 "started_at": cycle_time,
                 "completed_at": cycle_time,
                 "candidates": 1,
-                "entry_orders_submitted": 0,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "venue_acks": 1,
                 "trades": 0,
                 "exits": 0,
-                "no_trades": 1,
-                "top_no_trade_reasons": {"EDGE_INSUFFICIENT": 1},
+                "no_trades": 0,
+                "top_no_trade_reasons": {},
                 "command_recovery": {"scanned": 0, "advanced": 0},
                 "chain_sync": {"synced": 0},
             },
@@ -235,6 +338,121 @@ def test_legacy_run_mode_failure_ignored_in_edli_live(
     assert "run_mode" not in result["failing_surfaces"]
 
 
+def test_forecast_event_bridge_not_evaluated_without_attested_main_daemon(
+    tmp_path: Path,
+) -> None:
+    """A stopped main daemon should not turn posterior-vs-FSR lag into a false blocker."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(minutes=20)).isoformat(),
+        fsr_created_at=(now - timedelta(hours=2)).isoformat(),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is True
+    assert bridge["issue"] == "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED"
+    assert "forecast_event_bridge" not in result["failing_surfaces"]
+
+
+def test_forecast_event_bridge_degrades_when_live_posterior_does_not_emit_fsr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When src.main is attested, fresh posterior production must reach FSR emission."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(minutes=20)).isoformat(),
+        fsr_created_at=(now - timedelta(hours=2)).isoformat(),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is False
+    assert "FORECAST_TO_EVENT_BRIDGE_STALLED" in bridge["issue"]
+    assert "forecast_event_bridge" in result["failing_surfaces"]
+
+
+def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write_day0_trace_dbs(sd, with_regret=False)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    trace = result["surfaces"]["day0_decision_trace"]
+    assert trace["ok"] is False
+    assert "DAY0_PROCESSED_WITHOUT_DECISION_TRACE" in trace["issue"]
+    assert trace["missing_trace_count"] == 1
+    assert "day0_decision_trace" in result["failing_surfaces"]
+
+
+def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write_day0_trace_dbs(sd, with_regret=True)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    trace = result["surfaces"]["day0_decision_trace"]
+    assert trace["ok"] is True
+    assert trace["processed_event_count"] == 1
+    assert trace["traced_processed_event_count"] == 1
+    assert "day0_decision_trace" not in result["failing_surfaces"]
+
+
 def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
     sd = tmp_path
     _setup_healthy_state(sd)
@@ -311,6 +529,8 @@ def test_all_healthy_surfaces_yield_healthy(tmp_path: Path) -> None:
     assert result["failing_surfaces"] == []
     for surface in (
         "heartbeat",
+        "runtime_code",
+        "main_daemon",
         "venue_heartbeat",
         "run_mode",
         "status_summary",
@@ -469,6 +689,84 @@ def test_business_plane_candidates_without_final_intent_need_no_trade_reasons(tm
     )
 
 
+def test_business_plane_all_no_trade_reasons_still_degrades_without_capital_flow(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "edli_event_reactor",
+                "completed_at": _now_iso(-30),
+                "candidates": 12,
+                "final_intents_built": 0,
+                "submit_attempts": 0,
+                "no_trades": 12,
+                "top_no_trade_reasons": {"QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE": 12},
+            },
+            "execution_capability": _healthy_execution_capability(),
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW"
+    )
+    assert result["surfaces"]["business_plane"]["progress"]["no_trade_reason_proof"] is True
+
+
+def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    capability = _healthy_execution_capability()
+    capability["entry"] = {
+        "status": "unavailable",
+        "global_allow_submit": False,
+        "components": [
+            {
+                "component": "risk_allocator_global",
+                "allowed": False,
+                "reason": "reduce_only_mode_active",
+            }
+        ],
+        "unavailable_components": ["risk_allocator_global"],
+    }
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "control": {
+                "entries_paused": True,
+                "entries_pause_reason": "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
+            },
+            "cycle": {
+                "mode": "edli_event_reactor",
+                "completed_at": _now_iso(-30),
+                "candidates": 310,
+                "final_intents_built": 0,
+                "no_trades": 310,
+                "top_no_trade_reasons": {},
+            },
+            "execution_capability": capability,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    business = result["surfaces"]["business_plane"]
+    assert business["ok"] is True
+    assert business["progress"]["entry_unavailable_proof"] is True
+    assert business["progress"]["entry_unavailable_reason"] == (
+        "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix"
+    )
+    assert result["surfaces"]["execution_capability"]["ok"] is False
+
+
 def test_business_plane_final_intents_without_submit_attempts_yields_degraded(tmp_path: Path) -> None:
     sd = tmp_path / "state"
     sd.mkdir()
@@ -611,7 +909,7 @@ def test_business_plane_does_not_infer_venue_ack_from_submit_count(tmp_path: Pat
     assert progress["venue_ack_observed"] is False
 
 
-def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
+def test_execution_capability_unavailable_yields_degraded(tmp_path: Path) -> None:
     """Fresh daemon/cycle signals cannot override the live order gate."""
     sd = tmp_path / "state"
     sd.mkdir()
@@ -619,7 +917,7 @@ def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
     cycle_time = _now_iso(-30)
     capability = _healthy_execution_capability()
     capability["entry"] = {
-        "status": "blocked",
+        "status": "unavailable",
         "global_allow_submit": False,
         "components": [
             {
@@ -633,7 +931,7 @@ def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
                 "reason": "heartbeat_lost",
             },
         ],
-        "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+        "unavailable_components": ["heartbeat_supervisor", "risk_allocator_global"],
     }
     _write(
         sd / "status_summary.json",
@@ -686,6 +984,66 @@ def test_venue_heartbeat_lost_yields_degraded_even_when_daemon_heartbeat_is_fres
     assert result["surfaces"]["heartbeat"]["ok"] is True
     assert "venue_heartbeat" in result["failing_surfaces"]
     assert result["surfaces"]["venue_heartbeat"]["issue"] == "VENUE_HEARTBEAT_LOST"
+
+
+def test_loaded_sha_mismatch_yields_degraded_even_when_heartbeat_is_fresh(tmp_path: Path) -> None:
+    """A fresh heartbeat from an old checkout is not current live authority."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "loaded_sha.json",
+        {"loaded_sha": "0" * 40, "generated_at": _now_iso(-10)},
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "runtime_code" in result["failing_surfaces"]
+    assert result["surfaces"]["runtime_code"]["ok"] is False
+    assert result["surfaces"]["runtime_code"]["issue"].startswith("LOADED_SHA_MISMATCH")
+
+
+def test_loaded_sha_invalid_shape_yields_degraded(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "loaded_sha.json",
+        {"loaded_sha": "abc123", "generated_at": _now_iso(-10)},
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["runtime_code"]["issue"] == "LOADED_SHA_INVALID:loaded=abc123"
+
+
+def test_status_summary_dead_main_pid_yields_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale status_summary PID cannot certify the live daemon is still running."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    status_path = sd / "status_summary.json"
+    status = json.loads(status_path.read_text())
+    status["process"] = {
+        "pid": 999999,
+        "mode": "live",
+        "version": "zeus_v2",
+        "pulse_only": False,
+    }
+    _write(status_path, status)
+    monkeypatch.setattr(live_health, "_process_command_line", lambda pid: None)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "main_daemon" in result["failing_surfaces"]
+    assert result["surfaces"]["main_daemon"]["issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
 
 
 def test_command_recovery_mutation_summary_requires_allocator_refresh() -> None:
@@ -755,8 +1113,9 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     assert ("edli_command_recovery", False, None) in health_calls
 
 
-def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
-    """Frequent recovery sweeps must not contend with the live management lane."""
+def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypatch) -> None:
+    """Confirmed fill projection is part of the live management lane and must
+    not starve behind continuous redecision activity."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
 
@@ -774,9 +1133,318 @@ def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda **kwargs: calls.append("reconcile") or {"scanned": 1, "advanced": 1},
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))) or {"scanned": 1, "advanced": 0},
     )
 
     main_module._edli_command_recovery_cycle()
 
-    assert calls == []
+    assert calls == ["live_tick"]
+
+
+def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:
+    """Boot must clear restart-relevant EDLI order locks before first reactor tick."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_conn = FakeConn()
+    calls: list[str] = []
+    refresh_calls: list[FakeConn] = []
+
+    monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))) or {"advanced": 1},
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda write_class=None: fake_conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator_for_live_bridge",
+        lambda conn: refresh_calls.append(conn) or {"configured": True},
+    )
+
+    main_module._edli_boot_command_recovery_once()
+
+    assert calls == ["boot_fast"]
+    assert refresh_calls == [fake_conn]
+    assert fake_conn.closed is True
+
+
+def test_main_orders_boot_command_recovery_before_reactor_registration() -> None:
+    """Boot-recoverable restart drift must be consumed before any entry reactor can submit."""
+    import inspect
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+
+    boot_idx = source.index("_edli_boot_command_recovery_once()")
+    reactor_idx = source.index("id=\"edli_event_reactor\"")
+    start_idx = source.index("scheduler.start()")
+    assert boot_idx < reactor_idx < start_idx
+
+
+def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) -> None:
+    """A no-fill terminal order recovery must continue the redecision chain."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    trade_refresh_conn = FakeConn()
+    trade_ro = FakeConn()
+    forecasts_ro = FakeConn()
+    summary = {
+        "scanned": 1,
+        "advanced": 1,
+        "terminal_no_fill_continuations": [
+            {"condition_id": "cond-1", "token_id": "tok-1", "command_id": "cmd-1"}
+        ],
+    }
+    families = {("Singapore", "2026-06-27", "high")}
+    emitted_calls: list[tuple[set[tuple[str, str, str]], str]] = []
+    clear_calls: list[set[tuple[str, str, str]]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: summary,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda write_class=None: trade_refresh_conn,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda: trade_ro,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        lambda: forecasts_ro,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator_for_live_bridge",
+        lambda conn: {"configured": True},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_terminal_no_fill_continuation_families",
+        lambda observed_summary, trade_conn, forecasts_conn: families,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_clear_redecision_acted_state_for_families",
+        lambda observed_families: clear_calls.append(set(observed_families)) or 2,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_emit_terminal_no_fill_redecision_continuations",
+        lambda observed_families, decision_time, received_at: (
+            emitted_calls.append((set(observed_families), str(received_at))) or 1
+        ),
+    )
+
+    main_module._edli_command_recovery_cycle()
+
+    assert trade_refresh_conn.closed is True
+    assert trade_ro.closed is True
+    assert forecasts_ro.closed is True
+    assert clear_calls == [families]
+    assert emitted_calls and emitted_calls[0][0] == families
+
+
+def test_terminal_no_fill_continuation_accepts_direct_family_identity() -> None:
+    import src.main as main_module
+
+    summary = {
+        "terminal_no_fill_continuations": [
+            {
+                "city": "Boston",
+                "target_date": "2026-06-23",
+                "metric": "tmax",
+                "condition_id": "cond-unused",
+            }
+        ]
+    }
+
+    assert main_module._terminal_no_fill_continuation_families(
+        summary,
+        trade_conn=object(),
+        forecasts_conn=object(),
+    ) == {("Boston", "2026-06-23", "high")}
+
+
+def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypatch) -> None:
+    """Boot auto-resolution must not release a family and then leave it invisible."""
+    import src.execution.command_recovery as command_recovery
+    import src.execution.edli_absence_resolver as resolver_mod
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    trade_ro = FakeConn()
+    forecasts_ro = FakeConn()
+    families = {("Hong Kong", "2026-06-19", "low")}
+    emitted_calls: list[set[tuple[str, str, str]]] = []
+    clear_calls: list[set[tuple[str, str, str]]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: {"scanned": 0, "advanced": 0},
+    )
+    monkeypatch.setattr(
+        resolver_mod,
+        "take_boot_auto_resolution_continuations",
+        lambda: [
+            {
+                "city": "Hong Kong",
+                "target_date": "2026-06-19",
+                "metric": "tmin",
+            }
+        ],
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade_ro)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts_ro)
+    monkeypatch.setattr(
+        main_module,
+        "_clear_redecision_acted_state_for_families",
+        lambda observed_families: clear_calls.append(set(observed_families)) or 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_emit_terminal_no_fill_redecision_continuations",
+        lambda observed_families, decision_time, received_at: (
+            emitted_calls.append(set(observed_families)) or 1
+        ),
+    )
+
+    main_module._edli_boot_command_recovery_once()
+
+    assert trade_ro.closed is True
+    assert forecasts_ro.closed is True
+    assert clear_calls == [families]
+    assert emitted_calls == [families]
+
+
+def test_terminal_no_fill_redecision_counts_write_many_results(monkeypatch) -> None:
+    """EventWriter.write_many returns EventWriteResult rows, not an int.
+
+    The boot/periodic no-fill continuation bridge must count inserted results
+    instead of raising TypeError("int() ... not 'list'"), otherwise cancel/no-fill
+    recovery releases a family lock but fails to requeue the family for
+    redecision.
+    """
+    from types import SimpleNamespace
+
+    import src.events.event_writer as event_writer_mod
+    import src.events.triggers.forecast_snapshot_ready as trigger_mod
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        committed = False
+        closed = False
+
+        def commit(self) -> None:
+            self.committed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeMutex:
+        acquired = False
+        released = False
+
+        def acquire(self) -> None:
+            self.acquired = True
+
+        def release(self) -> None:
+            self.released = True
+
+    world = FakeConn()
+    forecasts = FakeConn()
+    mutex = FakeMutex()
+
+    class FakeWriter:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def write_many(self, events):
+            assert len(events) == 2
+            return [
+                SimpleNamespace(inserted=True),
+                SimpleNamespace(inserted=False),
+            ]
+
+    class FakeTrigger:
+        def __init__(self, writer, *, live_eligibility_reader):
+            self.writer = writer
+            self.live_eligibility_reader = live_eligibility_reader
+
+        def build_committed_snapshot_events(self, **kwargs):
+            assert kwargs["restrict_to_families"] == {("Paris", "2026-06-20", "low")}
+            return [object(), object()]
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: world)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr(state_db, "world_write_mutex", lambda: mutex)
+    monkeypatch.setattr(
+        trigger_mod,
+        "executable_forecast_live_eligible_reader",
+        lambda conn: "reader",
+    )
+    monkeypatch.setattr(trigger_mod, "ForecastSnapshotReadyTrigger", FakeTrigger)
+    monkeypatch.setattr(event_writer_mod, "EventWriter", FakeWriter)
+    monkeypatch.setattr(main_module, "_redecision_event_with_origin", lambda event, origin: event)
+
+    emitted = main_module._emit_terminal_no_fill_redecision_continuations(
+        {("Paris", "2026-06-20", "low")},
+        decision_time=main_module.datetime.now(main_module.timezone.utc),
+        received_at=main_module.datetime.now(main_module.timezone.utc).isoformat(),
+    )
+
+    assert emitted == 1
+    assert world.committed is True
+    assert world.closed is True
+    assert forecasts.closed is True
+    assert mutex.acquired is True
+    assert mutex.released is True

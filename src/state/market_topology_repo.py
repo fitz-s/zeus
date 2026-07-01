@@ -12,9 +12,22 @@ from typing import Any, Iterator
 
 from src.state.connection_pair import WorldConnection
 
-TOPOLOGY_STATUSES = frozenset({"CURRENT", "STALE", "EMPTY_FALLBACK", "MISMATCH", "UNKNOWN"})
+TOPOLOGY_STATUSES = frozenset({
+    "CURRENT",
+    "STALE",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
+    "MISMATCH",
+    "UNKNOWN",
+})
 SOURCE_CONTRACT_STATUSES = frozenset({"MATCH", "MISMATCH", "UNKNOWN", "QUARANTINED"})
-AUTHORITY_STATUSES = frozenset({"VERIFIED", "STALE", "EMPTY_FALLBACK", "UNKNOWN"})
+AUTHORITY_STATUSES = frozenset({
+    "VERIFIED",
+    "STALE",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
+    "UNKNOWN",
+})
 
 
 def _to_iso(value: datetime | date | str | None) -> str | None:

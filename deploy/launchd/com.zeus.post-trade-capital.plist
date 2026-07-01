@@ -28,6 +28,10 @@
 		<string>/Users/leofitz/zeus</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
+		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
+		<string>2</string>
+		<key>ZEUS_CLOB_FACT_CACHE_TTL_SECONDS</key>
+		<string>0</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
 		<string>/Users/leofitz/zeus</string>
 	</dict>

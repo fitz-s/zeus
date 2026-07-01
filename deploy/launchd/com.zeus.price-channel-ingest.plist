@@ -46,6 +46,8 @@
 		<string>REPLACE_ME_POLYMARKET_API_PASSPHRASE</string>
 		<key>POLYMARKET_API_SECRET</key>
 		<string>REPLACE_ME_POLYMARKET_API_SECRET</string>
+		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
+		<string>2</string>
 		<key>PYTHONPATH</key>
 		<string>/Users/leofitz/zeus</string>
 		<key>PYTHONSAFEPATH</key>

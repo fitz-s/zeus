@@ -60,16 +60,6 @@ HEARTBEAT_REGISTRY: dict[str, dict] = {
         ],
         "note": "Forecast-live daemon alive signal.",
     },
-    "oracle_error_rates.heartbeat.json": {
-        "writer": "scripts/bridge_oracle_to_calibration.py",
-        "consumers": [
-            "scripts/deep_heartbeat.py:check_oracle_missing",
-        ],
-        "note": (
-            "Oracle artifact sidecar. Consumed by check_oracle_missing() in deep_heartbeat.py "
-            "which escalates via OpenClaw RED path on persistent MISSING (F33 fix)."
-        ),
-    },
     "venue-heartbeat-keeper.json": {
         "writer": "src/control/heartbeat_supervisor.py",
         "consumers": [

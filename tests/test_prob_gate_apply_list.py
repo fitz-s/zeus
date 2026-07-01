@@ -103,7 +103,7 @@ def test_high_opening_inertia_amsterdam_hard_rejected():
     strategy (~547 candidates in 2 days). Metrics-only enforcement means strategy_key
     is irrelevant: any HIGH phantom is hard-rejected regardless of strategy.
 
-    RED on prior branch (AND-filter): mode="shadow".
+    RED on prior branch (AND-filter): the gate does not apply hard enforcement.
     RED on origin/main: no enforcement at all, but LOW tests fail.
     GREEN on this branch: mode="hard".
     """
@@ -145,34 +145,27 @@ def test_high_center_buy_hard_rejected():
     assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
 
 
-def test_low_metric_phantom_shadow_only():
-    """LOW metric phantom → SHADOW (log-only, NOT hard block).
-
-    RED on origin/main: mode="hard" (no apply_to_metrics check).
-    GREEN on branch: mode="shadow".
-    """
+def test_low_metric_phantom_hard_reject():
+    """LOW metric phantom has no non-blocking middle path."""
     bins = _make_bins(len(_LOW_P_RAW))
     ok, reason, t = probability_edge_bin_sanity(
         selected_bin_idx=0, bins=bins, p_raw=_LOW_P_RAW, p_cal=_LOW_P_CAL, p_market=_LOW_P_MKT,
         metric="low", strategy_key="opening_hunt", config=_CONFIG_WITH_METRICS,
     )
     assert ok is False, f"LOW phantom still fires (ok=False); got ok=True"
-    assert t["probability_sanity_mode"] == "shadow", (
-        f"LOW metric must be SHADOW (unvalidated). got {t['probability_sanity_mode']!r}. "
-        f"RED: origin/main has no apply_to_metrics enforcement."
-    )
-    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW" in (reason or ""), reason
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
+    assert "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in (reason or ""), reason
 
 
-def test_low_metric_opening_hunt_low_shadow_only():
-    """LOW + opening_hunt_low → SHADOW (strategy in advisory list; metric=LOW overrides to shadow)."""
+def test_low_metric_opening_hunt_low_hard_reject():
+    """LOW + opening_hunt_low has no non-blocking middle path."""
     bins = _make_bins(len(_LOW_P_RAW))
     ok, reason, t = probability_edge_bin_sanity(
         selected_bin_idx=0, bins=bins, p_raw=_LOW_P_RAW, p_cal=_LOW_P_CAL, p_market=_LOW_P_MKT,
         metric="low", strategy_key="opening_hunt_low", config=_CONFIG_WITH_METRICS,
     )
     assert ok is False
-    assert t["probability_sanity_mode"] == "shadow", f"got {t['probability_sanity_mode']!r}"
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
 
 
 def test_no_apply_metrics_back_compat_hard_high():

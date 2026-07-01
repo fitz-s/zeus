@@ -91,7 +91,7 @@ def test_all_priced_rejected_yields_all_candidates_rejected_with_class_counts():
     # per-class counts present and correct
     assert "n=4" in reason
     assert "capital_efficiency_lcb_ev=3" in reason
-    assert "direction_law=1" in reason
+    assert "legacy_rounded_mu_direction=1" in reason
     # best_rejected leg = highest conservative EV/$ priced loser, still labelled as rejected.
     assert "best_rejected=" in reason
     assert "reason_class=capital_efficiency_lcb_ev" in reason
@@ -124,7 +124,7 @@ def test_positive_ev_vetoed_leg_is_labelled_best_rejected_with_gate_reason():
 
     assert reason is not None
     assert "best_rejected=27C buy_yes" in reason
-    assert "reason_class=direction_law" in reason
+    assert "reason_class=legacy_rounded_mu_direction" in reason
     assert "missing_reason=DIRECTION_LAW_BIN_FORECAST_MISMATCH:direction=buy_yes" in reason
     assert "rejected_ev_per_dollar=1.0619" in reason
 
@@ -186,7 +186,7 @@ def test_classifier_buckets_every_known_gate_and_falls_to_other():
         "COVERAGE_UNLICENSED_TAIL:x": "coverage_unlicensed_tail",
         "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:x": "buy_no_evidence",
         "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING": "buy_no_evidence",
-        "DIRECTION_LAW_BIN_FORECAST_MISMATCH:x": "direction_law",
+        "DIRECTION_LAW_BIN_FORECAST_MISMATCH:x": "legacy_rounded_mu_direction",
         "clob_no_ask_illiquid": "native_ask_missing",
         "missing executable snapshot row": "native_ask_missing",
         "missing token id": "native_ask_missing",

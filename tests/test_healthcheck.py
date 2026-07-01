@@ -11,6 +11,7 @@ import json
 import plistlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from scripts import healthcheck
 
@@ -18,6 +19,8 @@ _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
+_ORIGINAL_MONITOR_CADENCE_STATUS = healthcheck._monitor_cadence_status
+_ORIGINAL_EDLI_QUEUE_STATUS = healthcheck._edli_queue_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
     healthcheck._forecast_posteriors_runtime_layer_schema_status
 )
@@ -108,6 +111,29 @@ def _mock_position_current_schema_status(monkeypatch):
         healthcheck,
         "_position_current_schema_status",
         lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_monitor_cadence_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_monitor_cadence_status",
+        lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "issue": None},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_edli_queue_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_edli_queue_status",
+        lambda: {
+            "ok": True,
+            "path": "/tmp/zeus-world.db",
+            "issue": None,
+            "consumer_name": "edli_reactor_v1",
+        },
     )
 
 
@@ -879,9 +905,9 @@ def test_launchd_contracts_reject_live_trading_shadow_env(monkeypatch, tmp_path)
 
     assert result["ok"] is False
     live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
-    assert "live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW" in live_item["issues"]
+    assert "live_trading_non_submit_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW" in live_item["issues"]
     assert (
-        "loaded_live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW"
+        "loaded_live_trading_non_submit_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW"
         in live_item["issues"]
     )
 
@@ -988,11 +1014,6 @@ def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     assert "src/execution/exchange_reconcile.py" in live_paths
     assert "src/strategy/selection_family.py" in live_paths
     assert "src/strategy/family_exclusive_dedup.py" in live_paths
-    assert "src/strategy/candidates/__init__.py" in live_paths
-    assert "src/strategy/candidates/liquidity_provision_with_heartbeat.py" in live_paths
-    assert "src/strategy/candidates/resolution_window_maker.py" in live_paths
-    assert "src/strategy/candidates/stale_quote_detector.py" in live_paths
-    assert "src/strategy/candidates/weather_event_arbitrage.py" in live_paths
 
 
 def test_settlement_truth_status_rejects_stale_settled_at(tmp_path):
@@ -1182,6 +1203,327 @@ def test_position_current_schema_status_accepts_monitor_freshness_cols(
     assert result["missing_columns"] == []
 
 
+def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at
+        ) VALUES ('pos-1', 'active', 10.0, 10.0, ?)
+        """,
+        (now.isoformat(),),
+    )
+    if monitor_at is not None:
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at
+            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?)
+            """,
+            (monitor_at.isoformat(),),
+        )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at
+        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?)
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_monitor_cadence_status_rejects_chain_sync_without_fresh_monitor(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    stale_monitor = datetime.now(timezone.utc) - timedelta(minutes=20)
+    _init_monitor_cadence_db(db_path, monitor_at=stale_monitor)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["open_position_count"] == 1
+    assert result["position_current_updated_at_is_not_monitor_cadence"] is True
+
+
+def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus_trades.db"
+    fresh_monitor = datetime.now(timezone.utc) - timedelta(seconds=30)
+    _init_monitor_cadence_db(db_path, monitor_at=fresh_monitor)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["open_position_count"] == 1
+
+
+def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    fresh_monitor = datetime.now(timezone.utc) - timedelta(seconds=30)
+    _init_monitor_cadence_db(db_path, monitor_at=fresh_monitor)
+    conn = sqlite3.connect(str(db_path))
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at
+        ) VALUES ('pos-2', 'active', 3.0, 3.0, ?)
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["open_position_count"] == 2
+    assert result["fresh_position_count"] == 1
+    assert result["stale_or_missing_position_count"] == 1
+    assert result["stale_or_missing_positions"][0]["position_id"] == "pos-2"
+
+
+def test_monitor_cadence_status_reports_quarantined_chain_risk_without_blocking(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, chain_state
+        ) VALUES ('pos-q', 'quarantined', 0.0, 4.0, 'entry_authority_quarantined')
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["open_position_count"] == 0
+    assert result["non_monitor_chain_risk_position_count"] == 1
+    assert result["non_monitor_chain_risk_role"] == (
+        "chain_reconciliation_not_monitor_cadence"
+    )
+    assert result["non_monitor_chain_risk_positions"][0]["position_id"] == "pos-q"
+
+
+def test_monitor_cadence_status_excludes_quarantined_zero_chain_risk(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, chain_state
+        ) VALUES ('pos-q-zero', 'quarantined', 10.0, 0.0, 'chain_confirmed_zero')
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["open_position_count"] == 0
+    assert result["non_monitor_chain_risk_position_count"] == 0
+
+
+def test_healthcheck_is_not_healthy_when_monitor_cadence_stale(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_monitor_cadence_status",
+        lambda: {
+            "ok": False,
+            "path": "/tmp/zeus_trades.db",
+            "issue": "MONITOR_CADENCE_STALE",
+        },
+    )
+
+    result = healthcheck.check()
+
+    assert result["monitor_cadence_ok"] is False
+    assert result["monitor_cadence_issue"] == "MONITOR_CADENCE_STALE"
+    assert result["healthy"] is False
+
+
+def _init_edli_queue_status_db(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        )
+        """
+    )
+    return conn
+
+
+def test_edli_queue_status_rejects_stale_processing_claim(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc)
+    conn = _init_edli_queue_status_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-stale', 'processing', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (now - timedelta(minutes=20)).isoformat(),
+            (now - timedelta(minutes=20)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_edli_world_db_path", lambda: db_path)
+
+    result = _ORIGINAL_EDLI_QUEUE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "EDLI_QUEUE_STALE_PROCESSING"
+    assert result["stale_processing_count"] == 1
+    assert result["claimable_work_count"] == 1
+
+
+def test_edli_queue_status_accepts_future_retry_floor(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc)
+    conn = _init_edli_queue_status_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-future', 'pending', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (now + timedelta(minutes=10)).isoformat(),
+            now.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_edli_world_db_path", lambda: db_path)
+
+    result = _ORIGINAL_EDLI_QUEUE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["claimable_pending_count"] == 0
+    assert result["claimable_work_count"] == 0
+
+
+def test_healthcheck_is_not_healthy_when_edli_queue_stale(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_edli_queue_status",
+        lambda: {
+            "ok": False,
+            "path": "/tmp/zeus-world.db",
+            "issue": "EDLI_QUEUE_STALE_PROCESSING",
+            "stale_processing_count": 1,
+        },
+    )
+
+    result = healthcheck.check()
+
+    assert result["edli_queue_ok"] is False
+    assert result["edli_queue_issue"] == "EDLI_QUEUE_STALE_PROCESSING"
+    assert result["healthy"] is False
+
+
 def test_forecast_posteriors_schema_status_rejects_missing_runtime_layer(
     monkeypatch, tmp_path
 ):
@@ -1191,8 +1533,8 @@ def test_forecast_posteriors_schema_status_rejects_missing_runtime_layer(
         """
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED', 'BLOCKED'))
         )
         """
     )
@@ -1490,7 +1832,7 @@ def test_healthcheck_is_not_healthy_when_live_health_composite_is_degraded(monke
     assert healthcheck.exit_code_for(result) == 1
 
 
-def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_blocked(
+def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_unavailable(
     monkeypatch,
     tmp_path,
 ):
@@ -1503,14 +1845,14 @@ def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_bloc
     status_path.write_text(json.dumps(_status_payload(
         execution_capability={
             "entry": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
-                "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+                "unavailable_components": ["heartbeat_supervisor", "risk_allocator_global"],
             },
             "exit": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
-                "blocked_components": ["heartbeat_supervisor"],
+                "unavailable_components": ["heartbeat_supervisor"],
             },
         }
     )))
@@ -1882,14 +2224,14 @@ def test_healthcheck_is_not_healthy_when_source_health_is_stale(monkeypatch, tmp
     assert healthcheck.exit_code_for(result) == 1
 
 
-def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_blocked(monkeypatch, tmp_path):
+def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_unavailable(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"
     zeus_db_path = tmp_path / "zeus.db"
     status_path.write_text(json.dumps(_status_payload(
         execution_capability={
             "entry": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
                 "live_action_authorized": False,
                 "components": [
@@ -1915,7 +2257,7 @@ def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_blocked(m
     result = healthcheck.check()
 
     assert result["entry_execution_capability_ok"] is False
-    assert result["entry_execution_capability_issue"] == "LIVE_ENTRY_EXECUTION_BLOCKED"
+    assert result["entry_execution_capability_issue"] == "LIVE_ENTRY_EXECUTION_UNAVAILABLE"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

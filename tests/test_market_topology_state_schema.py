@@ -143,3 +143,38 @@ def test_market_topology_repo_rejects_unknown_status() -> None:
             source_contract_status="MATCH",
             authority_status="VERIFIED",
         )
+
+
+def test_market_topology_schema_drops_empty_interrupted_migration_residue() -> None:
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE market_topology_state_authority_migrated (
+            topology_id TEXT PRIMARY KEY
+        )
+        """
+    )
+
+    init_schema(conn)
+
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_topology_state_authority_migrated'"
+    ).fetchone()
+    assert row is None
+
+
+def test_market_topology_schema_refuses_nonempty_interrupted_migration_residue() -> None:
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE market_topology_state_authority_migrated (
+            topology_id TEXT PRIMARY KEY
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO market_topology_state_authority_migrated (topology_id) VALUES ('topo-interrupted')"
+    )
+
+    with pytest.raises(RuntimeError, match="interrupted market_topology_state migration residue"):
+        init_schema(conn)

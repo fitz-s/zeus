@@ -300,9 +300,7 @@ def test_liquid_bin_remains_tradeable(conn):
         pass  # tolerated: selection/label axis, not the illiquidity axis under test
 
 
-def test_synthetic_clob_substrate_identity_is_nontradeable_even_with_liquidity(conn, monkeypatch):
-    monkeypatch.setenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", "true")
-
+def test_substrate_identity_capture_uses_real_clob_metadata_for_tradeability(conn):
     _capture(conn, condition_id="condition-1", has_asks=True, tolerate=True)
 
     row = conn.execute(
@@ -311,8 +309,8 @@ def test_synthetic_clob_substrate_identity_is_nontradeable_even_with_liquidity(c
     ).fetchone()
     snap = get_snapshot(conn, row["snapshot_id"])
     assert snap.orderbook_top_ask == Decimal("0.40")
-    assert snap.tradeability_status.executable_allowed is False
-    assert snap.tradeability_status.reason == "synthetic_clob_market_info_substrate_only"
+    assert snap.tradeability_status.executable_allowed is True
+    assert snap.tradeability_status.reason == "clob_live_accepting_child"
 
 
 def test_default_substrate_fee_identity_is_nontradeable_when_explicitly_enabled(conn, monkeypatch):

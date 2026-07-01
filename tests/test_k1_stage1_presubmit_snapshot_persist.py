@@ -1,6 +1,6 @@
 # Created: 2026-06-11
 # Last reused or audited: 2026-06-11
-# Authority basis: docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4 STAGE 1, §5.2
+# Authority basis: docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4 STAGE 1, §5.2
 """K=1 STAGE 1 antibody tests — persist the fresh submit-time JIT book (R8) as a
 first-class ``executable_market_snapshots`` row tagged ``source=JIT_PRESUBMIT``,
 BEFORE it is consumed.  Pure additive persistence + provenance; the flag
@@ -224,6 +224,32 @@ def test_persist_writes_one_row_when_enabled() -> None:
     persisted = get_snapshot(conn, snapshot_id)
     assert persisted is not None
     assert persisted.orderbook_top_bid == Decimal("0.58")
+
+
+def test_persist_skips_inside_active_submit_transaction() -> None:
+    conn = _trade_conn()
+    elected = _elected_snapshot()
+    insert_snapshot(conn, elected)
+    conn.commit()
+
+    before = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+    conn.execute("SAVEPOINT live_order_build")
+    try:
+        snapshot_id = persist_presubmit_jit_snapshot(
+            conn,
+            elected,
+            witness=_witness(),
+            decision_time=_FETCH_INSTANT,
+            enabled=True,
+        )
+        during = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+    finally:
+        conn.execute("RELEASE SAVEPOINT live_order_build")
+    after = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+
+    assert snapshot_id is None
+    assert during == before
+    assert after == before
 
 
 def test_persist_off_is_byte_identical() -> None:

@@ -54,6 +54,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from src.contracts.semantic_types import EntryMethod
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,22 +114,58 @@ def edli_bridge_position_id_legacy(aggregate_id: str) -> str:
 def _edli_events_table(conn: sqlite3.Connection) -> str:
     """Resolve the schema-qualified name of the EDLI events table.
 
-    Production: the bridge runs on a trade connection with world ATTACHed, so
-    the table is ``world.edli_live_order_events``. Unit tests on a single
-    ``init_schema`` connection see it unqualified. Prefer the ATTACHed world
-    copy when present (that is the authoritative world_class table).
+    Production historically intended the world copy to be authoritative, but
+    live cutovers have also written current aggregates to trade-main while
+    leaving a stale world ghost. Pick the freshest available event table so
+    confirmed fills are bridged back into the same active aggregate stream.
     """
+    candidates: list[str] = []
+    if _table_exists(conn, "edli_live_order_events"):
+        candidates.append("edli_live_order_events")
     try:
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     except sqlite3.Error:
         attached = set()
-    if "world" in attached:
-        row = conn.execute(
-            "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name='edli_live_order_events'"
-        ).fetchone()
-        if row is not None:
-            return "world.edli_live_order_events"
-    return "edli_live_order_events"
+    if "world" in attached and _table_exists(conn, "edli_live_order_events", schema="world"):
+        candidates.append("world.edli_live_order_events")
+    if not candidates:
+        return "edli_live_order_events"
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def _latest_occurred_at(table: str) -> str:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(occurred_at) AS max_occurred_at FROM {table}"
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        try:
+            value = row["max_occurred_at"] if isinstance(row, sqlite3.Row) else row[0]
+        except (IndexError, KeyError):
+            return ""
+        return str(value or "")
+
+    return max(candidates, key=lambda table: (_latest_occurred_at(table), table))
+
+
+def _table_exists(conn: sqlite3.Connection, table: str, *, schema: str = "main") -> bool:
+    try:
+        if schema == "main":
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 def _resolved_table(conn: sqlite3.Connection, table_name: str) -> str:
@@ -229,7 +267,7 @@ def _entry_authority_from_certificates(
     conn: sqlite3.Connection,
     *,
     actionable_certificate_hash: str,
-) -> tuple[Any | None, float | None, float]:
+) -> tuple[Any | None, float | None, float, str | None]:
     """Recover entry DecisionEvidence and belief CI from persisted certificates.
 
     This never fabricates authority: if the Actionable/Belief/FDR certificate
@@ -237,13 +275,26 @@ def _entry_authority_from_certificates(
     the D4 exit gate fail-closed.
     """
     if not actionable_certificate_hash:
-        return None, None, 0.0
+        return None, None, 0.0, None
     actionable = _certificate_by_hash(conn, actionable_certificate_hash)
     if actionable is None:
-        return None, None, 0.0
+        return None, None, 0.0, None
     actionable_payload = actionable["payload"]
+    entry_method: str | None = None
     q_live = _float_or_none(actionable_payload.get("q_live"))
     q_lcb = _float_or_none(actionable_payload.get("q_lcb_5pct"))
+    qkernel_payload = actionable_payload.get("qkernel_execution_economics")
+    if isinstance(qkernel_payload, dict):
+        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
+        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+        if (
+            qkernel_point is not None
+            and qkernel_lcb is not None
+            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        ):
+            q_live = qkernel_point
+            q_lcb = qkernel_lcb
+            entry_method = EntryMethod.QKERNEL_SPINE.value
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
@@ -252,16 +303,16 @@ def _entry_authority_from_certificates(
     belief = _certificate_by_hash(conn, parents.get("belief", ""))
     fdr = _certificate_by_hash(conn, parents.get("fdr", ""))
     if belief is None or fdr is None:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
     belief_payload = belief["payload"]
     fdr_payload = fdr["payload"]
     bootstrap_n = _float_or_none(
         belief_payload.get("bootstrap_n") or fdr_payload.get("edge_bootstrap_n")
     )
     if bootstrap_n is None or bootstrap_n < 1:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
     if fdr_payload.get("passed") is not True:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
 
     from src.contracts.decision_evidence import DecisionEvidence
     from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
@@ -277,7 +328,46 @@ def _entry_authority_from_certificates(
         ),
         q_live,
         ci_width,
+        entry_method,
     )
+
+
+def _entry_authority_from_decision_audit(
+    events: list[tuple[str, dict[str, Any]]],
+) -> tuple[float | None, float, str | None]:
+    """Recover qkernel entry belief from the accepted EDLI decision audit.
+
+    The durable fill bridge normally reads the immutable ActionableTradeCertificate
+    by hash. During boot recovery, however, the caller may have the EDLI aggregate
+    event stream without a readable certificate table on the same connection. The
+    accepted decision audit is still part of that aggregate and carries the same
+    qkernel economics stamped at submit time, so use it as a local projection
+    fallback instead of writing a fake zero posterior.
+    """
+
+    payload = _latest_payload(events, "DecisionProofAccepted") or {}
+    audit = payload.get("decision_audit")
+    if not isinstance(audit, dict):
+        audit = payload
+    q_live = _float_or_none(audit.get("q_live"))
+    q_lcb = _float_or_none(audit.get("q_lcb_5pct"))
+    entry_method: str | None = None
+    qkernel_payload = audit.get("qkernel_execution_economics")
+    if isinstance(qkernel_payload, dict):
+        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
+        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+        if (
+            qkernel_point is not None
+            and qkernel_lcb is not None
+            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        ):
+            q_live = qkernel_point
+            q_lcb = qkernel_lcb
+            entry_method = EntryMethod.QKERNEL_SPINE.value
+    ci_width = 0.0
+    if q_live is not None and q_lcb is not None and q_live > q_lcb:
+        ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
+    return q_live, ci_width, entry_method
 
 
 def _latest_payload(events: list[tuple[str, dict[str, Any]]], event_type: str) -> dict[str, Any] | None:
@@ -397,7 +487,7 @@ def _resolve_strategy_key_from_pre_submit(
     if not strategy_key:
         event_type = str(pre_submit.get("event_type") or "").strip()
         if event_type == "DAY0_EXTREME_UPDATED":
-            strategy_key = "settlement_capture"
+            strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
         elif event_type == "FORECAST_SNAPSHOT_READY":
             strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
         else:
@@ -568,7 +658,7 @@ def _build_bridge_position(
         cost_basis_usd=cost_basis,
         condition_id=identity["condition_id"],
         decision_snapshot_id=identity["decision_snapshot_id"],
-        entry_method="ens_member_counting",
+        entry_method=str(identity.get("entry_method") or "ens_member_counting"),
         strategy_key=str(identity["strategy_key"]),
         order_id=identity.get("venue_order_id") or identity.get("execution_command_id") or "",
         order_status="filled",
@@ -731,6 +821,28 @@ def _absorb_same_order_duplicate_bridge_fill(
     position_id = str(existing["position_id"])
     attempted_position_id = str(projection.get("position_id") or "")
     if _same_order_chain_size_authority_must_be_preserved(existing):
+        iso_now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            UPDATE position_current
+               SET p_posterior = ?,
+                   entry_ci_width = ?,
+                   entry_method = ?,
+                   decision_snapshot_id = ?,
+                   fill_authority = COALESCE(?, fill_authority),
+                   updated_at = ?
+             WHERE position_id = ?
+            """,
+            (
+                float(projection.get("p_posterior") or 0.0),
+                float(projection.get("entry_ci_width") or 0.0),
+                str(projection.get("entry_method") or ""),
+                str(projection.get("decision_snapshot_id") or ""),
+                projection.get("fill_authority"),
+                iso_now,
+                position_id,
+            ),
+        )
         return position_id
     if (
         _same_order_absorb_already_recorded(
@@ -742,8 +854,6 @@ def _absorb_same_order_duplicate_bridge_fill(
         and _bridge_numeric_equal(existing["cost_basis_usd"], projection.get("cost_basis_usd"))
     ):
         return position_id
-    from datetime import datetime, timezone
-
     iso_now = datetime.now(timezone.utc).isoformat()
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -786,6 +896,10 @@ def _absorb_same_order_duplicate_bridge_fill(
                cost_basis_usd = ?,
                size_usd = ?,
                entry_price = ?,
+               p_posterior = ?,
+               entry_ci_width = ?,
+               entry_method = ?,
+               decision_snapshot_id = ?,
                fill_authority = COALESCE(?, fill_authority),
                updated_at = ?
          WHERE position_id = ?
@@ -795,6 +909,10 @@ def _absorb_same_order_duplicate_bridge_fill(
             float(projection.get("cost_basis_usd") or 0.0),
             float(projection.get("size_usd") or projection.get("cost_basis_usd") or 0.0),
             float(projection.get("entry_price") or 0.0),
+            float(projection.get("p_posterior") or 0.0),
+            float(projection.get("entry_ci_width") or 0.0),
+            str(projection.get("entry_method") or ""),
+            str(projection.get("decision_snapshot_id") or ""),
             projection.get("fill_authority"),
             iso_now,
             position_id,
@@ -1208,14 +1326,25 @@ def materialize_position_current_from_edli_fill(
         decision_evidence,
         certificate_q_live,
         certificate_entry_ci_width,
+        certificate_entry_method,
     ) = _entry_authority_from_certificates(
         conn,
         actionable_certificate_hash=str(identity.get("actionable_certificate_hash") or ""),
     )
+    if certificate_q_live is None or not certificate_entry_method:
+        audit_q_live, audit_entry_ci_width, audit_entry_method = _entry_authority_from_decision_audit(events)
+        if certificate_q_live is None and audit_q_live is not None:
+            certificate_q_live = audit_q_live
+        if certificate_entry_ci_width <= 0.0 and audit_entry_ci_width > 0.0:
+            certificate_entry_ci_width = audit_entry_ci_width
+        if not certificate_entry_method and audit_entry_method:
+            certificate_entry_method = audit_entry_method
     if certificate_q_live is not None:
         identity["p_posterior"] = certificate_q_live
     if certificate_entry_ci_width > 0.0:
         identity["entry_ci_width"] = certificate_entry_ci_width
+    if certificate_entry_method:
+        identity["entry_method"] = certificate_entry_method
     fill_payloads = _confirmed_fill_payloads(events)
     filled_size, avg_fill_price, fees = _aggregate_fill_economics(fill_payloads)
     if filled_size <= 0 or avg_fill_price <= 0:
@@ -1359,6 +1488,6 @@ def _bridge_env() -> str:
         mode = str(get_mode() or "").lower()
     except Exception:
         mode = ""
-    if mode in {"test", "replay", "backtest", "shadow", "live"}:
+    if mode in {"test", "replay", "backtest", "live"}:
         return mode
     return "live"

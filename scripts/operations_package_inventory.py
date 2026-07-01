@@ -10,7 +10,7 @@ CLASSIFICATION PRECEDENCE (highest wins):
      OR authority_status_registry CURRENT_LOAD_BEARING
   2. RUNTIME_GATING_EVIDENCE   — packet contains TIGGE ingest decision, live-gating evidence
   3. CURRENT_PACKAGE_INPUT     — modified in last 30 days (active window), or docs_registry active
-  4. MONITORING_SURFACE        — PLAN.md/README.md mentions observation/shadow/monitor keyword
+  4. MONITORING_SURFACE        — PLAN.md/README.md mentions observation/monitor keyword
   5. ARCHIVE_CANDIDATE         — modified 60+ days ago, no authority status, no inbound refs
   6. UNKNOWN_OPERATOR_DECISION — cannot classify without human input
 
@@ -68,7 +68,6 @@ RUNTIME_GATING_KEYWORDS = {
 # Keywords that signal MONITORING_SURFACE.
 MONITORING_KEYWORDS = {
     "observation",
-    "shadow",
     "monitor",
     "monitoring",
     "_observation/",
@@ -84,7 +83,7 @@ ARCHIVE_THRESHOLD_DAYS = 60
 
 @dataclass
 class SignalBundle:
-    slug: str                          # e.g. "task_2026-05-15_p1_topology_v_next_additive"
+    slug: str                          # e.g. "task_2026-05-15_runtime_improvement"
     last_modified_date: Optional[datetime.date]
     days_since_modified: Optional[int]
     inbound_ref_count: int             # files referencing this slug in INBOUND_REF_ROOTS
@@ -195,7 +194,7 @@ def classify(signals: SignalBundle) -> PacketRecord:
 
     # Check 4: MONITORING_SURFACE
     if signals.is_monitoring_surface:
-        reason = "PLAN.md/README.md contains observation/shadow/monitor keyword"
+        reason = "PLAN.md/README.md contains observation/monitor keyword"
         return PacketRecord(
             slug=slug,
             classification="MONITORING_SURFACE",

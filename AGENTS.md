@@ -10,7 +10,23 @@ Primary causal chain:
 
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-Every non-trivial change must say where it sits on that chain and what upstream truth it consumes. A downstream optimization that guesses contract/source/settlement truth is a money-path bug.
+Every non-trivial change must say where it sits on that chain, what upstream truth it consumes, and how it behaves on re-decision. A downstream optimization that guesses contract/source/settlement truth is a money-path bug.
+
+### Cyclic, Not One-Shot
+
+The chain above is one pass of a continuously repeating cycle, not a single decision. Zeus runs as a mesh of recurring scheduled jobs whose cadences range from seconds to daily — entry reactor, continuous-redecision screen, maker-rest escalation, held-position monitor/exit, command recovery, settlement skill-attribution, and freshness/heartbeat backstops (specific cadences are config, not root law). Every node on the chain is revisited as wall-clock time advances and as new information arrives: a fresher forecast issue, a moved book, a new observation, an elapsed deadline. No decision is final until settlement.
+
+Re-decision is a first-class lane, not an exception path:
+
+- New-entry candidates are re-emitted every reactor cycle; fair round-robin covers the full city×metric family universe over a few cycles, so a market passed over is reconsidered against fresh evidence rather than abandoned.
+- A confirmed resting maker entry stays under continuous re-decision — screened against current same-side best bid (never ask cost), pulled and re-decided when the book drifts past tolerance or belief decays, escalated rest→cross when its deadline elapses.
+- A held position is re-evaluated every monitor cycle on a fresh `ExitContext` (refreshed probability and CLOB quote) through `Position.evaluate_exit`: continuous re-evaluation before fill, during holding, through exit, and after settlement.
+
+Time-ordering is law:
+
+- Every fact carries source-issued, fetched, and written timestamps. Freshness gates drop stale forecasts, observations, and quotes and fail closed (DATA_DEGRADED, read-only); they never bridge a gap with stale-as-fresh. Selection-time executable truth is not submit-time truth (FC-03): re-fetch a fresh snapshot at submit or fail closed.
+- Learning is strictly walk-forward. De-bias and calibration consume only outcomes settled before the decision; the decision probability is frozen at decision time as an immutable certificate; settlement skill-attribution grades against that frozen certificate. No look-ahead crosses the time boundary.
+- Lifecycle is a monotonic time progression (`pending_entry -> ... -> settled`); each strategy's edge decays on its own clock (§2 alpha decay).
 
 ### Probability Authority
 
@@ -137,7 +153,7 @@ Durable trading rules:
 - Price, probability, sizing, fill, lifecycle, and settlement evidence are separate facts.
 - Current config affects present behavior but does not belong in root AGENTS unless it becomes durable law.
 
-For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route.
+For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route. Term definitions live in `docs/reference/glossary.md`; math and physics index in `docs/reference/theory_map.md`.
 
 ## 3. Routing And Gates
 
@@ -223,7 +239,7 @@ Commits use `type(scope): subject`. Add body only when why/tested scope/residual
 
 Open PRs only for milestone-level changes: complete feature, new invariant plus antibody tests, security gate, schema migration with coverage, or equivalent. Single-function fixes, partial implementations, incremental docs, and local packet iterations stay in the worktree branch. Every PR consumes paid automated review once; batch related work before opening. Template: `.github/pull_request_template.md`.
 
-Never run destructive git commands or overwrite unrelated dirty work without explicit human approval. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
+Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, force-push to main) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
 
 ## 6. Review Tasks
 

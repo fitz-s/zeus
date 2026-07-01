@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md (Finding D1)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding D1)
 """Antibody invariants: `ChainOnlyFact` carries a typed review lifecycle.
 
 Finding D1 (P1/P2, Part-2 audit 2026-05-27): PR C2/E2 in PR #347
@@ -122,14 +122,15 @@ def test_derive_unresolved_for_unparseable_first_seen() -> None:
 
 
 def test_blocks_entry_property() -> None:
-    """Only RESOLVED facts skip the entry gate; everything else blocks."""
+    """Only current unresolved/acknowledged facts block unrelated new entries."""
     base = dict(
         token_id="t", condition_id="c", size=1.0, avg_price=0.4,
         cost_basis=0.4, first_seen_at="2026-05-27T11:00:00Z",
         last_seen_at="2026-05-27T11:00:00Z",
     )
-    for s in (ChainOnlyReviewState.UNRESOLVED, ChainOnlyReviewState.EXPIRED, ChainOnlyReviewState.ACKNOWLEDGED):
+    for s in (ChainOnlyReviewState.UNRESOLVED, ChainOnlyReviewState.ACKNOWLEDGED):
         assert ChainOnlyFact(review_state=s, **base).blocks_entry is True, s
+    assert ChainOnlyFact(review_state=ChainOnlyReviewState.EXPIRED, **base).blocks_entry is False
     assert ChainOnlyFact(review_state=ChainOnlyReviewState.RESOLVED, **base).blocks_entry is False
 
 
@@ -155,8 +156,8 @@ def test_entry_gate_does_not_block_on_resolved_chain_only_fact() -> None:
     assert _has_quarantined_positions(portfolio) is False
 
 
-def test_entry_gate_blocks_on_expired_chain_only_fact() -> None:
-    """Expiry is escalation, not resolution — gate still fires."""
+def test_entry_gate_does_not_block_on_expired_chain_only_fact() -> None:
+    """Expiry is review debt, not a permanent global entry freeze."""
     fact = ChainOnlyFact(
         token_id="t", condition_id="c", size=1.0, avg_price=0.4,
         cost_basis=0.4, first_seen_at="2026-05-20T11:00:00Z",
@@ -164,4 +165,4 @@ def test_entry_gate_blocks_on_expired_chain_only_fact() -> None:
         review_state=ChainOnlyReviewState.EXPIRED,
     )
     portfolio = PortfolioState(positions=[], chain_only_facts=[fact])
-    assert _has_quarantined_positions(portfolio) is True
+    assert _has_quarantined_positions(portfolio) is False

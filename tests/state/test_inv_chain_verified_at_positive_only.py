@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 1, PR A scaffold; flipped to passing by PR C0)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 1, PR A scaffold; flipped to passing by PR C0)
 """Antibody invariants: `chain_verified_at` is a POSITIVE-observation timestamp only.
 
 Finding 1 (P1 confirmed bug): chain_reconciliation.py currently writes

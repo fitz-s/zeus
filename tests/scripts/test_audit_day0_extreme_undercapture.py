@@ -1,6 +1,6 @@
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: docs/operations/day0_multiangle_critique_2026-06-12.md §(3) +
+# Authority basis: docs/archive/2026-Q2/operations_historical/day0_multiangle_critique_2026-06-12.md §(3) +
 #   Blind spot D. Antibody for the settlement-extreme undercapture audit core.
 """Antibody tests: scripts/audit_day0_extreme_undercapture.run_undercapture_audit.
 

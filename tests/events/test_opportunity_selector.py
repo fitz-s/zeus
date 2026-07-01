@@ -4,15 +4,39 @@ from __future__ import annotations
 # Last reused/audited: 2026-06-07
 # Authority basis: Operator request — family-bin selector must choose the best sibling opportunity, not the arrival-triggered token.
 
-from dataclasses import replace
+import pytest
 
+from src.decision import selection_calibrator as sc
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.opportunity_book import build_family_opportunity_book
 from src.events.opportunity_selector import select_best_family_candidate
 
 
+@pytest.fixture(autouse=True)
+def _isolate_selection_curse_bound(monkeypatch):
+    monkeypatch.setattr("src.decision.selection_curse_bound_loader.load_bound", lambda: None)
+
+
+def _selection_artifact(*, direction: str, raw_side_prob: float, hit_rate: float = 0.99):
+    side = "NO" if str(direction).lower() == "buy_no" else "YES"
+    key = sc.cell_key(
+        side=side,
+        lead_days=1.0,
+        bin_class="nonmodal",
+        raw_side_prob=raw_side_prob,
+    )
+    return {
+        "_meta": {
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+        },
+        "cells": {key: {"n": 10000, "hit_rate": hit_rate}},
+    }
+
+
 def _evaluation(**overrides):
-    base = CandidateEvaluation(
+    base = dict(
         candidate_id="cand-expensive",
         family_id="family-1",
         condition_id="condition-expensive",
@@ -31,7 +55,15 @@ def _evaluation(**overrides):
         low_volume_usd=10.0,
         same_bin_yes_posterior=0.10,
     )
-    return replace(base, **overrides)
+    base.update(overrides)
+    base.setdefault(
+        "selection_calibrator_artifact",
+        _selection_artifact(
+            direction=str(base["direction"]),
+            raw_side_prob=float(base["q_posterior"]),
+        ),
+    )
+    return CandidateEvaluation(**base)
 
 
 def test_selector_prefers_lcb_kelly_growth_over_modal_adjacent_no():
@@ -93,7 +125,7 @@ def test_selector_keeps_large_lcb_kelly_edge_over_tiny_cheap_tail():
     assert result.selected is larger_lcb_edge
 
 
-def test_selector_allows_low_win_rate_positive_ev_when_capital_efficient():
+def test_selector_rejects_low_win_rate_positive_ev_even_when_capital_efficient():
     low_win_rate_lottery = _evaluation(
         candidate_id="cand-low-win-rate",
         condition_id="condition-low-win-rate",
@@ -119,11 +151,11 @@ def test_selector_allows_low_win_rate_positive_ev_when_capital_efficient():
 
     result = select_best_family_candidate((low_win_rate_lottery, stable_win_rate_edge))
 
-    assert result.selected in {low_win_rate_lottery, stable_win_rate_edge}
-    assert not result.loser_reasons.get("cand-low-win-rate", "").startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert result.selected is stable_win_rate_edge
+    assert result.loser_reasons["cand-low-win-rate"].startswith("ADMISSION_WIN_RATE_FLOOR:")
 
 
-def test_selector_can_choose_buy_yes_below_win_rate_floor_when_objective_best():
+def test_selector_cannot_choose_buy_yes_below_win_rate_floor_when_objective_best():
     cheap_buy_yes = _evaluation(
         candidate_id="cand-cheap-buy-yes",
         condition_id="condition-cheap-buy-yes",
@@ -151,9 +183,9 @@ def test_selector_can_choose_buy_yes_below_win_rate_floor_when_objective_best():
     result = select_best_family_candidate((expensive_buy_no, cheap_buy_yes))
 
     assert cheap_buy_yes.live_win_rate_admissible is False
-    assert cheap_buy_yes.admitted is True
-    assert result.selected is cheap_buy_yes
-    assert result.loser_reasons["cand-expensive-buy-no"].startswith("FAMILY_RANK_LOST:")
+    assert cheap_buy_yes.admitted is False
+    assert result.selected is expensive_buy_no
+    assert result.loser_reasons["cand-cheap-buy-yes"].startswith("ADMISSION_WIN_RATE_FLOOR:")
 
 
 def test_selector_ranks_low_payout_capital_inefficient_candidate_below_better_sibling():
@@ -195,8 +227,8 @@ def test_selector_uses_candidate_kelly_size_for_expected_dollars():
         direction="buy_yes",
         bin_label="tiny",
         execution_price=0.10,
-        q_posterior=0.30,
-        q_lcb_5pct=0.22,
+        q_posterior=0.58,
+        q_lcb_5pct=0.52,
         trade_score=0.10,
         kelly_size_usd=0.05,
     )

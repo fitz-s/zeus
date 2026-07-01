@@ -296,6 +296,25 @@ class FakePolymarketVenue:
             "authority_tier": "VENUE",
         }
 
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]:
+        balances = {
+            str(token_id): int(self.ledger.ctf_token_balances_units.get(str(token_id), 0))
+            for token_id in token_ids
+        }
+        allowances = {
+            str(token_id): int(self.ledger.ctf_token_allowances_units.get(str(token_id), 0))
+            for token_id in token_ids
+        }
+        return {
+            "pusd_balance_micro": self.ledger.pusd_balance_micro,
+            "pusd_allowance_micro": self.ledger.pusd_allowance_micro,
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": balances,
+            "ctf_token_allowances_units": allowances,
+            "authority_tier": "VENUE",
+            "ctf_token_scope": "targeted",
+        }
+
     def get_balance(self, conn=None) -> Any:
         if conn is None:
             return SimpleNamespace(pusd_balance_micro=self.ledger.pusd_balance_micro)

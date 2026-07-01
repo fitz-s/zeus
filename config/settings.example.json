@@ -155,13 +155,9 @@
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true
   },
-  "baseline_bias_correction_enabled": false,
   "feature_flags": {
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,
-    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
-    "NATIVE_MULTIBIN_BUY_NO_SHADOW": false,
-    "NATIVE_MULTIBIN_BUY_NO_LIVE": false,
-    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization; live gates entry submission."
+    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF."
   }
 }

@@ -3,7 +3,7 @@
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
 #   candidate-priority quote-evidence ingest (and the forever market-channel loop)
 #   must write the world event (opportunity_events) AND the trade-owned book witness
-#   (execution_feasibility_evidence) through ONE connection + a SINGLE atomic commit
+#   (execution_feasibility_evidence) through ONE attached connection + a single commit
 #   (world.db MAIN + zeus_trades.db ATTACHed as 'trades', schema-qualified feasibility
 #   write), NEVER two independent connections committed separately.
 """B5 antibody: price-channel quote-evidence ingest is a single-writer cross-DB path.
@@ -61,6 +61,24 @@ def _live_conn_vars(fn: ast.FunctionDef, opener: str) -> set[str]:
                 if isinstance(tgt, ast.Name):
                     out.add(tgt.id)
     return out
+
+
+def _world_mutex_keyword_call_names(fn: ast.FunctionDef, call_attr: str) -> list[str]:
+    names: list[str] = []
+    for sub in ast.walk(fn):
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == call_attr
+        ):
+            for kw in sub.keywords:
+                if (
+                    kw.arg == "world_mutex"
+                    and isinstance(kw.value, ast.Call)
+                    and isinstance(kw.value.func, ast.Name)
+                ):
+                    names.append(kw.value.func.id)
+    return names
 
 
 def test_no_function_opens_a_paired_world_and_trade_live_connection():
@@ -127,6 +145,18 @@ def test_refresh_feasibility_write_is_schema_qualified_trades(func_name):
     )
 
 
+@pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
+def test_refresh_seed_chunks_use_unified_world_trade_gate(func_name):
+    """The DB write chunk must enter the unified world+trade coordinator gate before
+    the legacy world mutex, not the bare world mutex by itself."""
+    node = _func_node(func_name)
+    world_mutex_calls = _world_mutex_keyword_call_names(node, "seed_rest_books_in_chunks")
+    assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"], (
+        f"{func_name} must pass _edli_price_channel_world_trade_write_gate(...) as "
+        f"seed_rest_books_in_chunks(world_mutex=...), got {world_mutex_calls!r}"
+    )
+
+
 def test_forever_ingestor_uses_single_attached_connection():
     """The long-lived market-channel ingestor must use the single-connection ATTACH
     helper (non-flocked, to avoid forever-holding cross-DB flocks), not two
@@ -141,6 +171,25 @@ def test_forever_ingestor_uses_single_attached_connection():
         "_edli_market_channel_ingestor_cycle must use the single-connection ATTACH "
         "helper get_world_connection_with_trades_required (INV-37)."
     )
+
+
+def test_forever_ingestor_passes_unified_world_trade_gate():
+    """The websocket forever loop must also use the unified world+trade gate for its
+    per-message write+commit units."""
+    node = _func_node("_edli_market_channel_ingestor_cycle")
+    world_mutex_calls: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+            if sub.func.id != "run_market_channel_service_forever":
+                continue
+            for kw in sub.keywords:
+                if (
+                    kw.arg == "world_mutex"
+                    and isinstance(kw.value, ast.Call)
+                    and isinstance(kw.value.func, ast.Name)
+                ):
+                    world_mutex_calls.append(kw.value.func.id)
+    assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"]
 
 
 def test_world_connection_with_trades_flocked_attaches_trades_world_main():

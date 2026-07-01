@@ -1,6 +1,6 @@
 """Calibration quarantine checks for replacement forecast products.
 
-Replacement forecast evidence starts shadow-only. This checker prevents B0
+This checker prevents B0
 OpenData/TIGGE/period-extrema calibration, raw_honest fallback, and sigma floors
 from being served as authority for Open-Meteo ECMWF IFS 9km plus AIFS sampled-2t
 derived posteriors.
@@ -18,14 +18,13 @@ AIFS_SOURCE_ID = "ecmwf_aifs_ens"
 AIFS_PRODUCT_ID = "ecmwf_aifs_ens_sampled_2t_6h_v1"
 OPENMETEO_ANCHOR_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 OPENMETEO_ANCHOR_PRODUCT_ID = "openmeteo_ecmwf_ifs9_deterministic_anchor_v1"
-SHADOW_ALLOWED_STATUS = "SHADOW_PRODUCT_SPECIFIC_ALLOWED"
+ALLOWED_STATUS = "ALLOWED"
 BLOCKED_STATUS = "BLOCKED"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 _REPLACEMENT_PRODUCT_IDS = {REPLACEMENT_PRODUCT_ID, AIFS_PRODUCT_ID, OPENMETEO_ANCHOR_PRODUCT_ID}
 _REPLACEMENT_SOURCE_IDS = {REPLACEMENT_SOURCE_ID, AIFS_SOURCE_ID, OPENMETEO_ANCHOR_SOURCE_ID}
 _B0_LINEAGE_TOKENS = ("ecmwf_open_data", "opendata", "tigge", "ifs_ens_0p25", "mx2t3", "mn2t3", "mx2t6", "mn2t6")
 _B0_METHODS = {"platt", "extended_platt", "emos", "raw_honest", "sigma_floor", "b0_sigma_floor"}
-_ALLOWED_SHADOW_AUTHORITY = "SHADOW_PRODUCT_SPECIFIC"
 
 
 def _reject_alias(value: str, *, field_name: str) -> None:
@@ -50,7 +49,6 @@ class ReplacementForecastCalibrationRequest:
     calibration_product_id: str
     calibration_data_version: str
     calibration_method: str
-    calibration_authority: str
     training_allowed: bool = False
     metadata: Mapping[str, object] | None = None
 
@@ -63,7 +61,6 @@ class ReplacementForecastCalibrationRequest:
             "calibration_product_id",
             "calibration_data_version",
             "calibration_method",
-            "calibration_authority",
         ):
             _text(getattr(self, field_name), field_name=field_name)
         if not isinstance(self.training_allowed, bool):
@@ -83,7 +80,7 @@ class ReplacementForecastCalibrationDecision:
 
     @property
     def allowed(self) -> bool:
-        return self.status == SHADOW_ALLOWED_STATUS
+        return self.status == ALLOWED_STATUS
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -129,14 +126,12 @@ def evaluate_replacement_forecast_calibration_quarantine(
         reasons.append("REPLACEMENT_CALIBRATION_BASELINE_LINEAGE_FORBIDDEN")
     if request.calibration_source_id != request.target_source_id or request.calibration_product_id != request.target_product_id:
         reasons.append("REPLACEMENT_CALIBRATION_PRODUCT_IDENTITY_MISMATCH")
-    if request.calibration_authority != _ALLOWED_SHADOW_AUTHORITY:
-        reasons.append("REPLACEMENT_CALIBRATION_AUTHORITY_NOT_SHADOW_PRODUCT_SPECIFIC")
     if "sampled_2t" in request.target_data_version and any(token in request.calibration_data_version.lower() for token in ("mx2t", "mn2t", "period_extrema")):
         reasons.append("REPLACEMENT_CALIBRATION_SAMPLED_2T_CANNOT_USE_PERIOD_EXTREMA")
-    status = BLOCKED_STATUS if reasons else SHADOW_ALLOWED_STATUS
+    status = BLOCKED_STATUS if reasons else ALLOWED_STATUS
     return ReplacementForecastCalibrationDecision(
         status=status,
-        reason_codes=tuple(reasons or ("REPLACEMENT_CALIBRATION_SHADOW_PRODUCT_SPECIFIC",)),
+        reason_codes=tuple(reasons or ("REPLACEMENT_CALIBRATION_PRODUCT_SPECIFIC",)),
         target_source_id=request.target_source_id,
         target_product_id=request.target_product_id,
         calibration_source_id=request.calibration_source_id,

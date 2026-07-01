@@ -150,6 +150,7 @@ def test_no_regression_p4_daemon_and_plist_artifacts_exist():
     plist = _P4_PLIST.read_text(encoding="utf-8")
     assert "com.zeus.post-trade-capital" in plist
     assert "src.ingest.post_trade_capital_daemon" in plist
+    assert "POLYMARKET_CLOB_V2_SIGNATURE_TYPE" in plist
 
 
 def test_no_regression_settlement_commands_enqueue_is_idempotent():

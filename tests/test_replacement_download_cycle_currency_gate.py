@@ -81,6 +81,55 @@ def _make_db(tmp_path: Path, cycles_by_source: dict[str, str]) -> Path:
     return db
 
 
+def test_anchor_ladder_skips_single_runs_when_source_clock_says_not_public(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    request = build_anchor_request(
+        latitude=33.63,
+        longitude=-84.44,
+        run="2026-06-25T12:00:00+00:00",
+        timezone_name="UTC",
+    )
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: False)
+
+    def _single_runs_should_not_be_called(*_args, **_kwargs):
+        raise AssertionError("single-runs fetch should be skipped before publication")
+
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        _single_runs_should_not_be_called,
+    )
+
+    def _meta_refuses(*_args, **_kwargs):
+        raise ValueError("provider declares an older run")
+
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        _meta_refuses,
+    )
+    monkeypatch.setattr(
+        dl,
+        "_try_bucket_rung_three",
+        lambda **_kwargs: (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"run_authority": "bucket_partial_run_test"},
+        ),
+    )
+
+    payload, provenance = dl._resolve_anchor_payload(
+        request=request,
+        city="Atlanta",
+        target_date="2026-06-25",
+        timezone_name="UTC",
+    )
+
+    assert payload == {"hourly": {"time": [], "temperature_2m": []}}
+    assert provenance["run_authority"] == "bucket_partial_run_test"
+
+
 def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.replacement_forecast_current_target_plan as plan_mod

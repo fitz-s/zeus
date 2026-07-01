@@ -38,8 +38,8 @@ Visible historical protocol:
 
 Cold historical storage when present locally:
 
-- `docs/archives/**`
-- local archive bundles such as `docs/archives.zip`
+- `docs/archive/legacy_archives/**`
+- local archive bundles such as `docs/archive/legacy_archives.zip`
 - retired overlays, scratch packages, and archived work packets
 
 Do not assume those cold bodies are reviewer-visible.
@@ -149,12 +149,12 @@ than promoting the bodies themselves:
 
 | Archive evidence consulted | Durable load rehydrated into |
 |---|---|
-| `docs/archives/audits/legacy_audit_truth_surfaces.md` | `docs/reference/modules/state.md`, `docs/reference/modules/data.md`, `docs/reference/modules/observability.md`, `architecture/history_lore.yaml` |
-| `docs/archives/findings/exit_failure_analysis.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `docs/reference/modules/riskguard.md`, `architecture/history_lore.yaml` |
-| `docs/archives/traces/settlement_crisis_trace.md` | `docs/reference/modules/contracts.md`, `docs/reference/modules/state.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
-| `docs/archives/architecture/zeus_blueprint_v2.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
-| `docs/archives/reports/strategy_failure_analysis.md` | `docs/reference/modules/strategy.md`, `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md` |
-| `docs/archives/investigations/agent_edit_loss_investigation.md` | `docs/reference/modules/state.md`, `architecture/history_lore.yaml` |
+| `docs/archive/legacy_archives/audits/legacy_audit_truth_surfaces.md` | `docs/reference/modules/state.md`, `docs/reference/modules/data.md`, `docs/reference/modules/observability.md`, `architecture/history_lore.yaml` |
+| `docs/archive/legacy_archives/findings/exit_failure_analysis.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `docs/reference/modules/riskguard.md`, `architecture/history_lore.yaml` |
+| `docs/archive/legacy_archives/traces/settlement_crisis_trace.md` | `docs/reference/modules/contracts.md`, `docs/reference/modules/state.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
+| `docs/archive/legacy_archives/architecture/zeus_blueprint_v2.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
+| `docs/archive/legacy_archives/reports/strategy_failure_analysis.md` | `docs/reference/modules/strategy.md`, `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md` |
+| `docs/archive/legacy_archives/investigations/agent_edit_loss_investigation.md` | `docs/reference/modules/state.md`, `architecture/history_lore.yaml` |
 
 This ledger documents extraction only. The archive bodies remain historical-only
 and non-default.
@@ -197,8 +197,8 @@ of risk; do not copy those archive bodies into active docs.
 
 A Sonnet-driven audit on 2026-04-24 classified 21 of 23 packets in
 `docs/operations/` as CLOSED or CLOSED-with-lore-extracted. **All 21
-were physically archived to `docs/archives/packets/` on 2026-04-24**
-(operator chose Option A — move to `docs/archives/packets/` — as the
+were physically archived to `docs/archive/legacy_archives/packets/` on 2026-04-24**
+(operator chose Option A — move to `docs/archive/legacy_archives/packets/` — as the
 archive cold-storage path). Lore cards were extracted into
 `architecture/history_lore.yaml` (13 new cards: see IDs in the
 "Cards extracted 2026-04-24" section of that file) BEFORE archive
@@ -208,16 +208,16 @@ raw bodies consult-on-demand from the archive path.
 **Text references elsewhere in the repo (src/ comments, YAML
 manifest `why:` pointers, test docstrings) that cite the OLD
 `docs/operations/task_*` paths now point to archived locations —
-readers should substitute `docs/operations/` → `docs/archives/packets/`
+readers should substitute `docs/operations/` → `docs/archive/legacy_archives/packets/`
 for any 2026-04-13 / -14 / -16 / -19 / -20 / -21 / -22 / -23 packet
 in the list below. None of these refs are runtime-loaded (Python
 imports / file readers); they are prose/YAML `why` pointers.**
 
-**Git-tracking split (per `.gitignore:11` `docs/archives/` + AGENTS.md
+**Git-tracking split (per `.gitignore` `docs/archive/` + AGENTS.md
 §History "raw archive bodies are local historical cold storage, not
 peer authority"):**
-- Packets that were git-tracked before the move remain git-tracked
-  at the new archived path (20 of 21). `git log --follow` preserves
+- Packet bodies under `docs/archive/` are local cold storage and are
+  not git-tracked. Historical references preserve
   history. `gitignore` does not un-track files that were tracked
   before the pattern was added.
 - The forensic package (`zeus_world_data_forensic_audit_package_
@@ -226,15 +226,15 @@ peer authority"):**
   they reproduce the body manually from the lore cards.
 
 This split matches the intended archive protocol: the durable content
-rides forward via `architecture/history_lore.yaml` (in-git); the raw
-bodies that were already git-tracked continue to be consultable via
-git archaeology; bodies that were never tracked stay local-only cold
-storage.
+rides forward via `architecture/history_lore.yaml` (in-git); raw bodies
+under `docs/archive/` are local-only cold storage unless a future
+operator explicitly promotes a summary back into a tracked authority or
+registry surface.
 
 ### Batch 1 — ARCHIVE_NOW (archived 2026-04-24; lore not extracted separately)
 
 Explicit closure evidence + low durable-lore density. Bodies now at
-`docs/archives/packets/{name}/`:
+`docs/archive/legacy_archives/packets/{name}/`:
 
 - `task_2026-04-13_topology_compiler_program.md` (4K)
 - `task_2026-04-23_graph_refresh_official_integration/` (12K)
@@ -258,7 +258,7 @@ Explicit closure evidence + low durable-lore density. Bodies now at
 
 Closed packets with durable-lore density. 13 lore cards extracted into
 `architecture/history_lore.yaml` BEFORE archive. Bodies now at
-`docs/archives/packets/{name}/`:
+`docs/archive/legacy_archives/packets/{name}/`:
 
 - `task_2026-04-23_data_readiness_remediation/` (3.2M) —
   lore cards: `DB_TRIGGER_ENFORCED_AUTHORITY_MONOTONICITY`,
@@ -269,9 +269,9 @@ Closed packets with durable-lore density. 13 lore cards extracted into
   lore cards: `BUG_DISPOSITION_TAXONOMY_TERMINATES_OPEN_LISTS`,
   `PERSISTENT_CRITIC_ROTATION_PREVENTS_RUBBER_STAMPING`
 - `zeus_world_data_forensic_audit_package_2026-04-23/` (272K) —
-  **local-only** (was never git-tracked; matches `.gitignore:11`
-  `docs/archives/` pattern). Body lives on local disk at
-  `docs/archives/packets/zeus_world_data_forensic_audit_package_
+  **local-only** (was never git-tracked; matches the `.gitignore`
+  `docs/archive/` pattern). Body lives on local disk at
+  `docs/archive/legacy_archives/packets/zeus_world_data_forensic_audit_package_
   2026-04-23/`; not committed. Lore cards preserve the durable
   content: `FORENSIC_DATA_AUDIT_TEMPLATE`,
   `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE` (this
@@ -286,11 +286,11 @@ Closed packets with durable-lore density. 13 lore cards extracted into
   lore cards: `RAINSTORM_DB_MIGRATION_WIPED_171K_FORECASTS_ROWS`
 
 **Batch 2 total**: 6 packets archived, ~5.1M. Lore extraction complete;
-bodies consultable on demand from `docs/archives/packets/`.
+bodies consultable on demand from `docs/archive/legacy_archives/packets/`.
 
 ### Archive completion summary (2026-04-24)
 
-- Archive destination: `docs/archives/packets/` (operator Option A).
+- Archive destination: `docs/archive/legacy_archives/packets/` (operator Option A).
 - Total archived: 21 packets, ~5.5M freed from `docs/operations/`.
 - Remaining in `docs/operations/`: 4 directories — 3 active
   (`task_2026-04-23_midstream_remediation/`,
@@ -344,7 +344,7 @@ D5 in `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md`.
 
 **Source**: `docs/operations/_archive/` (a git-tracked intermediate staging
 dir created 2026-04-29). Entire contents physically moved to
-`docs/archives/packets/` and removed from git tracking 2026-05-01.
+`docs/archive/legacy_archives/packets/` and removed from git tracking 2026-05-01.
 
 **Packets archived (40 entries)**:
 
@@ -390,7 +390,7 @@ dir created 2026-04-29). Entire contents physically moved to
 - `runtime_artifact_inventory.md` — runtime artifact inventory snapshot (stale)
 
 **Batch 3 total**: 40 entries. `docs/operations/_archive/` directory removed
-from git tracking; contents consultable from `docs/archives/packets/`.
+from git tracking; contents consultable from `docs/archive/legacy_archives/packets/`.
 
 ---
 

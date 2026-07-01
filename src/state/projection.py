@@ -3,9 +3,10 @@ from __future__ import annotations
 import sqlite3
 
 from src.architecture.decorators import capability
+from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
 
-POSITION_EVENT_ENVS = ("live", "test", "replay", "backtest", "shadow")
+POSITION_EVENT_ENVS = ("live", "test", "replay", "backtest")
 
 
 CANONICAL_POSITION_CURRENT_COLUMNS = (
@@ -55,7 +56,7 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "fill_authority",
     "recovery_authority",
     "chain_shares",
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     # economics on position_current so balance-only rescued positions
     # survive daemon restart with the right exposure on
     # `Position.effective_exposure()`. ALTER TABLE ADD COLUMN is additive
@@ -208,6 +209,22 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+_ABSORBING_POSITION_PHASES = frozenset(
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
+)
+_REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+    }
+)
+_REDECISION_QUARANTINE_EXIT_EVENTS = frozenset(
+    {
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_FILLED",
+    }
+)
 _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
     {
         "market_id",
@@ -232,6 +249,16 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "chain_absence_at",
     }
 )
+_MONITOR_SNAPSHOT_COLUMNS = frozenset(
+    {
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_edge",
+        "last_monitor_market_price",
+        "last_monitor_market_price_is_fresh",
+    }
+)
+_CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
 
 
 def _preserve_existing_monitor_refresh_authority(
@@ -266,6 +293,49 @@ def _preserve_existing_monitor_refresh_authority(
     return merged
 
 
+def _preserve_existing_monitor_snapshot_for_chain_projection(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    """Keep fresh monitor truth across chain-only projection writes.
+
+    Chain reconciliation events update venue/chain exposure truth. They are not a
+    monitor refresh and must not erase the last fresh belief/quote snapshot just
+    because the in-memory reconciliation object did not carry monitor fields.
+    """
+
+    if projection.get("_canonical_event_type") not in _CHAIN_PROJECTION_EVENT_TYPES:
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    preserved = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_SNAPSHOT_COLUMNS and column in current_columns
+    )
+    if not preserved:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+
+    current = {column: row[index] for index, column in enumerate(preserved)}
+    merged = dict(projection)
+    if bool(current.get("last_monitor_prob_is_fresh")):
+        for column in ("last_monitor_prob", "last_monitor_prob_is_fresh", "last_monitor_edge"):
+            if column in current:
+                merged[column] = current[column]
+    if bool(current.get("last_monitor_market_price_is_fresh")):
+        for column in ("last_monitor_market_price", "last_monitor_market_price_is_fresh"):
+            if column in current:
+                merged[column] = current[column]
+    return merged
+
+
 def _has_positive_chain_observation(projection: dict) -> bool:
     try:
         chain_shares = float(projection.get("chain_shares") or 0.0)
@@ -284,9 +354,29 @@ def _has_positive_chain_observation(projection: dict) -> bool:
     return True
 
 
+def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> bool:
+    if str(projection.get("phase") or "") != "pending_exit":
+        return False
+    if str(projection.get("_canonical_event_type") or "") not in _REDECISION_QUARANTINE_EXIT_EVENTS:
+        return False
+    chain_state = projection.get("chain_state")
+    chain_state_value = str(getattr(chain_state, "value", chain_state) or "")
+    if chain_state_value not in _REDECISION_QUARANTINE_CHAIN_STATES:
+        return False
+    for field in ("chain_shares", "shares"):
+        try:
+            value = float(projection.get(field) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0.01:
+            return True
+    return False
+
+
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     projection = _preserve_existing_monitor_refresh_authority(conn, projection)
+    projection = _preserve_existing_monitor_snapshot_for_chain_projection(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is
     # tight. If a same-token open-phase row exists with a *different*
@@ -298,6 +388,21 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     candidate_phase = str(projection.get("phase") or "")
     candidate_token = projection.get("token_id") or projection.get("no_token_id")
     candidate_position_id = str(projection.get("position_id") or "")
+    if candidate_position_id and candidate_phase not in _ABSORBING_POSITION_PHASES:
+        existing_phase_row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (candidate_position_id,),
+        ).fetchone()
+        existing_phase = str(existing_phase_row[0] if existing_phase_row else "")
+        if existing_phase in _ABSORBING_POSITION_PHASES and not (
+            existing_phase == LifecyclePhase.QUARANTINED.value
+            and _projection_allows_redecision_quarantine_pending_exit(projection)
+        ):
+            raise ValueError(
+                "position_current absorbing non-open phase cannot be reopened: "
+                f"position_id={candidate_position_id!r} "
+                f"existing_phase={existing_phase!r} candidate_phase={candidate_phase!r}"
+            )
 
     # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.
     # This makes the category of "CTF operation fails because condition_id is NULL"

@@ -126,7 +126,7 @@ class TestRescueBranch:
     def test_rescue_eligible_blocks_all_d6_mutations(self, caplog):
         """eligible=True: chain values must NOT overwrite D6 fields.
 
-        F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): the balance-only
+        F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): the balance-only
         rescue branch no longer mutates D6 fields at all, regardless of
         `corrected_executable_economics_eligible` — chain economics land on
         chain_avg_price / chain_cost_basis_usd / chain_shares. The
@@ -176,7 +176,7 @@ class TestRescueBranch:
         conn.close()
 
     def test_rescue_legacy_allows_all_d6_mutations(self, caplog):
-        """eligible=False: F1 (docs/findings_2026_05_28.md §F1, 2026-05-28)
+        """eligible=False: F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28)
         balance-only rescue no longer mutates D6 fields. The chain aggregate
         flows into chain_avg_price / chain_cost_basis_usd / chain_shares;
         submitted entry economics survive. The previous "legacy path

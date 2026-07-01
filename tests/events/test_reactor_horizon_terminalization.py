@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-19
 # Authority basis: operator law 2026-06-12 ("no caps of any kind"; "重试次数不是市场
 #   事实" — a retry count is not a market fact) + Wave 1 items 1 and 13 of
-#   docs/operations/overengineering_simplification_plan_2026-06-12.md + external
+#   docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md + external
 #   consult verdict (BLOCKER: the attempt-cap is a cap disguised as a safety check).
 #
 #   The reactor used to dead-letter a transient money-path block after
@@ -43,6 +43,8 @@ from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
     _is_transient_money_path_reason,
+    _regret_bucket_for,
+    _substrate_sidecar_owns_broad_refresh,
 )
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -64,18 +66,16 @@ _SNAPSHOT_STALE_REASON = (
     "decision_time=2026-06-13T14:00:00+00:00"
 )
 
-# VENUE-CLOSE HORIZON (zero-order reactor-stall fix 2026-06-13). Manila
-# (Asia/Manila, UTC+8) target 2026-06-13. The Polymarket weather market enters
-# POST_TRADING at the F1 12:00-UTC venue close = 2026-06-13T12:00:00Z, but the
-# target LOCAL day does not end (strictly-past floor) until local-midnight of
-# 2026-06-14 = 2026-06-13T16:00:00Z. Between those two instants the venue book is
-# GONE (capture freezes at the last pre-close snapshot, ~11:28Z live) yet the
-# timeliness floor still reports the event timely — so an EXECUTABLE_SNAPSHOT_STALE
-# block requeued forever (measured live 2026-06-13 15:48Z: 679 events / 51
-# families pinned at processed=0). A decision_time in (12:00Z, 16:00Z) is the
-# stuck window: venue CLOSED but local-day NOT past.
+_SELECTION_DEADLINE_STALE_REASON = (
+    "EXECUTABLE_SNAPSHOT_STALE:selection_deadline=2026-06-26T01:10:00.180078+00:00:"
+    "decision_time=2026-06-26T14:49:42.119056+00:00"
+)
+
+# Day0/venue horizon regression (corrected 2026-06-26). Gamma endDate/F1 12:00Z
+# is resolution timing, not proof the CLOB is closed. Manila (Asia/Manila, UTC+8)
+# target 2026-06-13 remains local-day active until 2026-06-13T16:00:00Z.
 _DT_VENUE_CLOSED_NOT_LOCAL_PAST = datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)
-# Just BEFORE the venue close: SETTLEMENT_DAY, genuinely live — must NOT terminalize.
+# Before 12:00Z is also local-day active — must NOT terminalize.
 _DT_VENUE_OPEN = datetime(2026, 6, 13, 11, 0, tzinfo=timezone.utc)
 
 
@@ -259,11 +259,9 @@ def test_horizon_terminalizes_with_horizon_label():
     market horizon terminalizes with MONEY_PATH_HORIZON_EXPIRED carrying the last
     honest transient cause; never a count.
 
-    For Chicago 2026-06-05 at _DT_HORIZON_PAST (2026-06-07) BOTH horizons are past;
-    the venue-close floor (b, F1 12:00-UTC of target_date) precedes the local-day
-    floor (a) and so labels the terminal MARKET_VENUE_CLOSED. The
-    timeliness-floor-only backstop is pinned separately in
-    test_timeliness_floor_is_backstop_when_venue_phase_unresolvable."""
+    For Chicago 2026-06-05 at _DT_HORIZON_PAST (2026-06-07), the local-day
+    timeliness horizon is past. Static F1/Gamma endDate timing must not relabel
+    it as a venue close."""
     conn, store = _store()
     event = _event("snap-horizon")
     store.insert_or_ignore(event)
@@ -302,7 +300,7 @@ def test_horizon_terminalizes_with_horizon_label():
     assert failure_stage == "MONEY_PATH_HORIZON_EXPIRED", (
         f"horizon terminal must be labeled MONEY_PATH_HORIZON_EXPIRED, got {failure_stage!r}"
     )
-    assert "MARKET_VENUE_CLOSED" in (error_message or ""), error_message
+    assert "TIMELINESS_FLOOR_PAST" in (error_message or ""), error_message
     assert "SUBMIT_ABORTED_PRICE_MOVED" in (error_message or ""), (
         "the horizon dead-letter must carry the last honest transient cause"
     )
@@ -311,8 +309,120 @@ def test_horizon_terminalizes_with_horizon_label():
         "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
     assert regret is not None
-    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:MARKET_VENUE_CLOSED:")
+    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:TIMELINESS_FLOOR_PAST:")
     assert "attempt" not in regret[0].lower()
+
+
+def test_selection_deadline_in_stale_snapshot_reason_does_not_terminalize_retry():
+    """A selected executable snapshot's deadline is stale price evidence, not event life.
+
+    The cure is fresh executable substrate plus redecision. Terminalizing on this reason
+    burns otherwise-refreshable Day0/redecision work before the sidecar or decision-time
+    priority refresh can write a fresh row.
+    """
+    conn, store = _store()
+    event = _day0_event(city="New York", target_date="2026-06-26", suffix="stale-deadline")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _SELECTION_DEADLINE_STALE_REASON)
+
+    reactor._transient_requeue_reasons[event.event_id] = _SELECTION_DEADLINE_STALE_REASON
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=datetime(2026, 6, 26, 14, 49, 42, tzinfo=timezone.utc),
+        result=res,
+    )
+
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    row = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is None
+
+
+def test_fresh_substrate_sidecar_owns_broad_refresh(monkeypatch, tmp_path):
+    """When the substrate observer sidecar is alive, broad substrate warmup is
+    owned outside the reactor. The reactor keeps targeted selected-row refresh,
+    but must not duplicate the sidecar's broad writer and lock the live DB."""
+
+    heartbeat = tmp_path / "daemon-heartbeat-substrate-observer.json"
+    heartbeat.write_text(
+        '{"daemon":"substrate-observer","alive_at":"2026-06-26T15:43:34+00:00","pid":123}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH", str(heartbeat))
+    monkeypatch.delenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", raising=False)
+
+    assert _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+    )
+    assert not _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 46, 0, tzinfo=timezone.utc)
+    )
+
+    monkeypatch.setenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", "1")
+    assert not _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+    )
+
+
+def test_sidecar_broad_ownership_still_drains_targeted_blocked_family(monkeypatch, tmp_path):
+    """The sidecar owns broad universe warming, not blocked-event targeted recapture."""
+
+    heartbeat = tmp_path / "daemon-heartbeat-substrate-observer.json"
+    heartbeat.write_text(
+        '{"daemon":"substrate-observer","alive_at":"2026-06-26T15:43:34+00:00","pid":123}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH", str(heartbeat))
+    monkeypatch.delenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", raising=False)
+    monkeypatch.setattr(
+        "src.events.reactor.datetime",
+        type(
+            "FixedDateTime",
+            (datetime,),
+            {
+                "now": classmethod(
+                    lambda cls, tz=None: datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+                )
+            },
+        ),
+    )
+
+    conn, store = _store()
+    calls: list[tuple[str, str, str]] = []
+
+    def _refresher(*, city, target_date, metric, **_kw):
+        calls.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _dt: None,
+        reject=lambda *_a: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresher,
+    )
+    reactor._pending_snapshot_refreshes = [("Chicago", "2026-06-26", "high")]
+    reactor._pending_cycle_advances = []
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._drain_substrate_refreshes(result=res)
+
+    assert calls == [("Chicago", "2026-06-26", "high")]
+    assert res.snapshot_refreshes == 1
 
 
 def test_timeliness_floor_is_backstop_when_venue_phase_unresolvable(monkeypatch):
@@ -435,7 +545,29 @@ def test_known_transient_reason_classifies_without_log(caplog):
             is True
         )
         assert _is_transient_money_path_reason("SHIFT_BIN_EXIT_OLD_LEG_PENDING") is True
+        assert (
+            _is_transient_money_path_reason(
+                "venue_auth_invalid_signature_400: PolyApiException[status_code=400, "
+                "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+            )
+            is False
+        )
+        assert (
+            _is_transient_money_path_reason("idempotency_collision: prior attempt REJECTED")
+            is False
+        )
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
+
+
+def test_registered_redecision_reasons_do_not_fall_into_unknown_bucket():
+    assert _regret_bucket_for("FILL_UP_NO_SUBMIT:BELIEF_NOT_STRENGTHENED") == "DESIGNED_GATE"
+    assert (
+        _regret_bucket_for(
+            "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated entry price below strategy floor"
+        )
+        == "DESIGNED_GATE"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -531,27 +663,15 @@ def test_operator_disarm_horizon_terminalizes(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 5. Venue-close horizon: a forecast family whose venue market has entered
-#    POST_TRADING (F1 12:00-UTC close passed) but whose target LOCAL day has not
-#    ended must terminalize — NOT requeue EXECUTABLE_SNAPSHOT_STALE forever.
+# 5. Gamma endDate/F1 12:00Z is not a venue-close horizon. A forecast family
+#    whose target LOCAL day has not ended must requeue unless explicit venue
+#    evidence says closed and not accepting orders.
 # ---------------------------------------------------------------------------
 
-def test_venue_close_horizon_terminalizes_before_local_day_end():
-    """RELATIONSHIP (reactor<->market_phase): a transient EXECUTABLE_SNAPSHOT_STALE
-    block on a forecast family whose venue market has CLOSED (POST_TRADING at the
-    F1 12:00-UTC anchor) MUST terminalize with MONEY_PATH_HORIZON_EXPIRED:
-    MARKET_VENUE_CLOSED — even though the target LOCAL day has not yet ended (the
-    older TIMELINESS_FLOOR_PAST horizon has NOT fired).
-
-    This pins the invariant the fix restores: the venue-close clock (market_phase
-    POST_TRADING, 12:00 UTC of target_date) is the market-closed authority, and it
-    is EARLIER than the local-day-end timeliness floor. In the window between them
-    the venue book is gone (capture frozen pre-close → unbreakably price-stale), so
-    requeueing forever is wrong; the family must dead-letter at its venue horizon.
-
-    RED-on-revert: without the venue-close horizon, _transient_horizon_terminal
-    returns None here (the local-day floor reports the event still timely) and the
-    event requeues — exactly the 679-event processed=0 stall (live 2026-06-13)."""
+def test_gamma_enddate_does_not_terminalize_before_local_day_end():
+    """RELATIONSHIP: a transient EXECUTABLE_SNAPSHOT_STALE block after Gamma
+    endDate but before local-day end must requeue. Static timing is not closure
+    evidence."""
     conn, store = _store()
     event = _manila_event("snap-venue-closed")
     store.insert_or_ignore(event)
@@ -571,37 +691,14 @@ def test_venue_close_horizon_terminalizes_before_local_day_end():
         result=res,
     )
 
-    assert res.dead_lettered == 1, (
-        "a venue-closed (POST_TRADING) forecast family must terminalize, not requeue "
-        "forever — even before the target local day ends"
-    )
-    assert res.retried == 0
-    assert _status(conn, event.event_id) == "dead_letter"
-
-    row = conn.execute(
-        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
-        (event.event_id,),
-    ).fetchone()
-    assert row is not None
-    failure_stage, error_message = row[0], row[1]
-    assert failure_stage == "MONEY_PATH_HORIZON_EXPIRED", failure_stage
-    assert "MARKET_VENUE_CLOSED" in (error_message or ""), error_message
-    # Carries the last honest transient cause (never an attempt count).
-    assert "EXECUTABLE_SNAPSHOT_STALE" in (error_message or ""), error_message
-    assert "attempt" not in (error_message or "").lower()
-
-    regret = conn.execute(
-        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    assert regret is not None
-    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:MARKET_VENUE_CLOSED:"), regret[0]
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_venue_open_before_close_still_requeues_no_premature_terminal():
-    """RELATIONSHIP (no over-termination): the SAME Manila family at a decision_time
-    BEFORE the 12:00-UTC venue close is genuinely live (SETTLEMENT_DAY) and MUST
-    requeue, never terminalize. This pins that the venue-close horizon does not burn
-    a still-tradeable family one cycle early — only POST_TRADING/RESOLVED terminate."""
+    """RELATIONSHIP (no over-termination): the SAME Manila family before 12:00Z is
+    local-day active and MUST requeue, never terminalize."""
     conn, store = _store()
     event = _manila_event("snap-venue-open")
     store.insert_or_ignore(event)
@@ -627,14 +724,8 @@ def test_venue_open_before_close_still_requeues_no_premature_terminal():
 
 
 # ---------------------------------------------------------------------------
-# 6. DAY0 past-close clog (freshness-throughput starvation fix 2026-06-14, #92).
-#    A DAY0_EXTREME_UPDATED event is family-keyed (city+target_date) and has a real
-#    venue close, but is NOT a forecast-decision type — so EventStore._is_timely
-#    returns True for it ALWAYS (no local-day floor) and the prior venue-close
-#    horizon scoped it OUT. A past-close DAY0 event therefore requeued FOREVER on
-#    EXECUTABLE_SNAPSHOT_BLOCKED, monopolizing the working set (live 2026-06-14:
-#    4903/5180 pending were past-close DAY0). The venue-close horizon must now
-#    terminalize it; a live future-close DAY0 family must NOT terminalize.
+# 6. DAY0 local-day horizon. DAY0_EXTREME_UPDATED events must not be terminated
+#    by static Gamma endDate/F1 timing while the target local day is still active.
 # ---------------------------------------------------------------------------
 
 def _day0_payload(*, city: str, target_date: str, metric: str = "high"):
@@ -666,16 +757,9 @@ def _day0_event(*, city: str, target_date: str, metric: str = "high", suffix: st
     )
 
 
-def test_day0_past_close_family_terminalizes_at_venue_horizon():
-    """RELATIONSHIP (reactor<->market_phase): a past-close DAY0_EXTREME_UPDATED family
-    MUST terminalize at the venue-close horizon (MARKET_VENUE_CLOSED), not requeue
-    forever. Manila 2026-06-13 closes at the F1 12:00-UTC anchor; at _DT_VENUE_CLOSED_
-    NOT_LOCAL_PAST (14:00Z) and beyond the venue is POST_TRADING.
-
-    RED-on-revert: with the horizon scoped to forecast-decision types only,
-    _venue_market_closed_horizon returns None for DAY0 (event_store._is_timely also
-    returns True for it), so NO horizon fires and the event requeues — exactly the
-    4903-event past-close DAY0 clog that starved live 06-15 families (processed≈0)."""
+def test_day0_after_gamma_enddate_requeues_until_local_day_past():
+    """A DAY0_EXTREME_UPDATED family after Gamma endDate but before local-day end
+    requeues. Venue closure requires explicit venue evidence, not static timing."""
     conn, store = _store()
     event = _day0_event(city="Manila", target_date="2026-06-13")
     store.insert_or_ignore(event)
@@ -692,32 +776,65 @@ def test_day0_past_close_family_terminalizes_at_venue_horizon():
         result=res,
     )
 
-    assert res.dead_lettered == 1, (
-        "a past-close DAY0 family must terminalize at the venue-close horizon, not "
-        "requeue forever and clog the working set"
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_stale_snapshot_selection_deadline_survives_restart_persisted_last_error():
+    """Persisted stale-snapshot selection deadlines are price freshness, not event life."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="persisted-stale")
+    store.insert_or_ignore(event)
+    store.requeue_pending(event.event_id, last_error=_SELECTION_DEADLINE_STALE_REASON)
+    reactor = _reactor_with_reason(conn, store, _SELECTION_DEADLINE_STALE_REASON)
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST,
+        result=res,
     )
-    assert res.retried == 0
-    assert _status(conn, event.event_id) == "dead_letter"
-    row = conn.execute(
-        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
-        (event.event_id,),
-    ).fetchone()
-    assert row is not None
-    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED", row[0]
-    assert "MARKET_VENUE_CLOSED" in (row[1] or ""), row[1]
-    # Carries the last honest transient cause (never an attempt count).
-    assert "EXECUTABLE_SNAPSHOT_BLOCKED" in (row[1] or ""), row[1]
-    assert "attempt" not in (row[1] or "").lower()
+
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_false_stale_snapshot_selection_deadline_dead_letter_is_requeued():
+    """Old terminal rows for stale executable selection deadlines recover automatically."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="recover-stale")
+    store.insert_or_ignore(event)
+    store.mark_dead_letter(
+        event,
+        failure_stage="MONEY_PATH_HORIZON_EXPIRED",
+        error_message=(
+            "money-path transient terminalized at event horizon "
+            "(SELECTION_DEADLINE_PAST: selection_deadline=2026-06-13T11:55:00+00:00); "
+            "last reason: EXECUTABLE_SNAPSHOT_STALE:"
+            "selection_deadline=2026-06-13T11:55:00+00:00:"
+            "decision_time=2026-06-13T14:00:00+00:00"
+        ),
+        created_at="2026-06-13T14:00:00+00:00",
+    )
+
+    recovered = store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST.isoformat(),
+    )
+
+    assert recovered == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert store.processing_last_error(event.event_id) == (
+        "RECOVERED_FALSE_EXECUTABLE_SNAPSHOT_SELECTION_DEADLINE_DAY0"
+    )
 
 
 def test_day0_live_future_close_family_does_not_terminalize():
-    """RELATIONSHIP (no over-termination): a LIVE future-close DAY0 family MUST NOT
-    terminalize — the venue-close predicate is purely geometric and returns None
-    before the F1 12:00-UTC close, so the event requeues. This pins that the widened
-    horizon scope cannot burn a genuinely-live DAY0 family one cycle early.
-
-    Manila 2026-06-13 at _DT_VENUE_OPEN (11:00Z) is BEFORE the 12:00Z venue close
-    (SETTLEMENT_DAY, still tradeable)."""
+    """RELATIONSHIP (no over-termination): a local-day active DAY0 family MUST NOT
+    terminalize."""
     conn, store = _store()
     event = _day0_event(city="Manila", target_date="2026-06-13", suffix="d0-live")
     store.insert_or_ignore(event)

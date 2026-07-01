@@ -26,9 +26,8 @@
 # (catches typos before they silently mute a constraint).
 #
 #   thesis: <text>                         Why this strategy generates alpha. Doc-only.
-#   live_status: live | shadow | blocked | deprecated
+#   live_status: live | blocked | deprecated
 #       live       — boot-OK + runtime-OK (entries placed)
-#       shadow     — boot-OK + runtime-blocked (decisions logged for future promotion)
 #       blocked    — boot-rejected + runtime-blocked (cannot run at all)
 #       deprecated — synonym for blocked, with rationale; kept for grep history
 #   allowed_market_phases: [pre_settlement_day, settlement_day, ...]
@@ -55,8 +54,8 @@
 #       Bin topology gate. shoulder_sell only fires on open_shoulder; center_buy
 #       only on finite_range etc.
 #   metric_support:
-#     high: live | shadow | blocked
-#     low:  live | shadow | blocked
+#     high: live | blocked
+#     low:  live | blocked
 #       Per-temperature-metric support. LOW is currently METRIC_UNSUPPORTED at
 #       the oracle layer (PLAN.md §A3 D-3); strategies that nominally support
 #       LOW still respect the oracle gate.
@@ -69,14 +68,11 @@
 #       overrides[market_phase] first, falling back to kelly_default_multiplier.
 #       Phase keys must match src/strategy/market_phase.py::MarketPhase enum
 #       values exactly (lowercase enum value).
-#   min_shadow_decisions: 0+
-#       Promotion gate: shadow→live requires this many shadow decisions logged.
-#       Operator-enforced, not auto-applied here.
 #   min_settled_decisions: 0+
-#       Promotion gate: shadow→live requires this many SETTLED shadow decisions.
+#       Promotion gate: blocked-to-live requires this many SETTLED offline decisions.
 #   promotion_evidence_ref: null | "<doc path>"
 #       Path to the operator-blessed evidence packet that justified live status.
-#       null until the strategy is promoted out of shadow.
+#       null until the strategy is promoted out of blocked.
 #   min_entry_price: 0.0 to <1.0
 #       Strategy economic floor for entry/final limit prices. Venue tick/min
 #       order authority may be lower; that does not make a trade live-quality.
@@ -84,6 +80,10 @@
 #       Strategy economic minimum notional, separate from venue min_order_size.
 #   min_expected_profit_usd: 0.0+
 #       Minimum expected profit before a live entry is worth execution churn.
+#   min_submit_edge_density: 0.0+
+#       Minimum conservative edge per dollar of submitted limit price. This is
+#       the opportunity-cost gate that blocks thin-margin churn even when raw
+#       expected profit is positive.
 #   allow_ultra_low_tail: true | false
 #       Explicit exception for tail-arb strategies with separate calibration.
 #   partial_source_run_allowed: true | false
@@ -95,12 +95,9 @@
 #
 # Initial values
 # --------------
-# Each strategy below mirrors the pre-A4 hardcoded behavior verbatim.
+# Each strategy below mirrors the current registry behavior.
 # - settlement_capture, center_buy, opening_inertia → live (in _LIVE_ALLOWED)
-# - shoulder_sell → shadow (was in LIVE_SAFE only, blocked at runtime — exactly
-#                            the divergence Bug review §E flagged. Resolved here
-#                            by setting live_status=shadow, which derives both
-#                            gates correctly.)
+# - shoulder_sell → blocked (refuted and removed from boot/runtime entry)
 # - shoulder_buy, center_sell → blocked (not in either allowlist pre-A4)
 #
 # Kelly defaults below mirror STRATEGY_KELLY_MULTIPLIERS. A6 introduces the
@@ -132,12 +129,12 @@ settlement_capture:
     settlement_day: 1.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 day0_nowcast_entry:
@@ -148,7 +145,7 @@ day0_nowcast_entry:
     target bin (i.e., not observation-locked). Alpha is forecast-speed, decays
     as the observation window narrows. Complements settlement_capture, which
     requires observation confirmation.
-  live_status: shadow
+  live_status: blocked
   evidence_tier: REPLAY_PASS
   evidence_tier_required_for_live: LIVE_PILOT_TINY
   promotion_blockers: [P0_FORECAST_EXTREMA_AUTHORITY_REPAIR_PENDING]
@@ -158,7 +155,7 @@ day0_nowcast_entry:
   allowed_directions: [buy_yes]
   allowed_bin_topology: [point, finite_range]
   metric_support:
-    high: shadow
+    high: blocked
     low: blocked
   kelly_default_multiplier: 0.5
   kelly_phase_overrides:
@@ -167,12 +164,12 @@ day0_nowcast_entry:
     settlement_day: 0.5
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 30
   min_settled_decisions: 20
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
   partial_source_run_allowed: false
   complete_required_for_tail_orders: true
@@ -201,12 +198,12 @@ center_buy:
     settlement_day: 0.5         # observation contamination penalty
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.02
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 0.25
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 opening_inertia:
@@ -233,12 +230,12 @@ opening_inertia:
     settlement_day: 0.0          # alpha decayed by then
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_sell:
@@ -271,12 +268,12 @@ shoulder_sell:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_impossible_tail_capture:
@@ -288,15 +285,15 @@ shoulder_impossible_tail_capture:
     shoulder. Folded into settlement-bound deterministic family.
     DATA-GATED: Δ_phys⁺/Δ_phys⁻ envelope input unwired → emits
     PHYSICAL_ENVELOPE_UNWIRED until envelope feed lands.
-    SHADOW-FIRST per operator directive 2026-05-22. Logs DeterministicEdgeDecision;
-    does NOT change live routing/sizing until operator-gated promotion.
+    Operator-gated per directive 2026-05-22. Logs DeterministicEdgeDecision;
+    does NOT change live routing/sizing until promoted.
     Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §7 + zeus_strategy_spec.md §11.4.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
+  live_status: blocked
+  evidence_tier: IDEA
   evidence_tier_required_for_live: LIVE_PILOT_TINY
   promotion_blockers:
     - "DATA-GATED: Δ_phys⁺/Δ_phys⁻ physical envelope input not yet wired"
-    - "SHADOW-FIRST: operator-gated promotion required before live routing"
+    - "operator-gated promotion required before live routing"
     - "promotion class: deterministic pipeline (not Beta win-rate CI)"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
@@ -304,8 +301,8 @@ shoulder_impossible_tail_capture:
   allowed_directions: [buy_no]
   allowed_bin_topology: [open_shoulder]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -313,7 +310,6 @@ shoulder_impossible_tail_capture:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
   min_entry_price: 0.01
@@ -348,12 +344,12 @@ imminent_open_capture:
     settlement_day: 0.5
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_buy:
@@ -377,7 +373,6 @@ shoulder_buy:
     low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides: {}
-  min_shadow_decisions: 100
   min_settled_decisions: 30
   promotion_evidence_ref: null
   min_entry_price: 0.05
@@ -406,7 +401,6 @@ center_sell:
     low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides: {}
-  min_shadow_decisions: 100
   min_settled_decisions: 30
   promotion_evidence_ref: null
   min_entry_price: 0.05
@@ -414,32 +408,32 @@ center_sell:
   min_expected_profit_usd: 0.05
   allow_ultra_low_tail: false
 
-# ── Phase 4 T2/T3 shadow candidates ────────────────────────────────────────
+# ── Phase 4 T2/T3 blocked candidates ────────────────────────────────────────
 # Added: 2026-05-21
 # Authority: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
-# All Phase 4 candidates MUST remain shadow; no candidate promoted to live here.
+# All Phase 4 candidates MUST remain blocked; no candidate promoted to live here.
 # executable_alpha=True lives in CandidateMetadata ONLY — NOT in registry YAML
 # (passing it here raises RegistrySchemaError per strategy_profile.py _REQUIRED_FIELDS).
 
 stale_quote_detector:
   thesis: >
-    Shadow candidate: detects fill-infeasible stale resting quotes after
+    Blocked candidate: detects fill-infeasible stale resting quotes after
     information events. Edge source: book hash unchanged after a known info
     event signals the resting quote has not been refreshed and may be
-    fill-infeasible at the posted price. Shadow research phase only.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
+    fill-infeasible at the posted price. Requires explicit promotion evidence.
+  live_status: blocked
+  evidence_tier: IDEA
   evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
   promotion_blockers:
-    - "Phase 4 shadow candidate; insufficient settled decisions"
+    - "Phase 4 blocked candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -447,29 +441,28 @@ stale_quote_detector:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 resolution_window_maker:
   thesis: >
-    Shadow candidate: exploits source-known but venue-unresolved discount
+    Blocked candidate: exploits source-known but venue-unresolved discount
     window. When the UMA oracle has asserted a resolution result not yet
     reflected in the Polymarket price, a maker entry on the converging side
-    captures the settlement discount. Shadow research phase only.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
+    captures the settlement discount. Requires explicit promotion evidence.
+  live_status: blocked
+  evidence_tier: IDEA
   evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
   promotion_blockers:
-    - "Phase 4 shadow candidate; insufficient settled decisions"
+    - "Phase 4 blocked candidate; insufficient settled decisions"
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -477,29 +470,28 @@ resolution_window_maker:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 liquidity_provision_with_heartbeat:
   thesis: >
-    Shadow candidate: heartbeat-aware passive liquidity provision. Exploits
+    Blocked candidate: heartbeat-aware passive liquidity provision. Exploits
     market-maker quoting cadence by posting passive quotes in anticipation
     of the next batch window. Edge source: fill_probability evidence from
-    prior command history. Shadow research phase only.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
+    prior command history. Requires explicit promotion evidence.
+  live_status: blocked
+  evidence_tier: IDEA
   evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
   promotion_blockers:
-    - "Phase 4 shadow candidate; insufficient settled decisions"
+    - "Phase 4 blocked candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -507,29 +499,28 @@ liquidity_provision_with_heartbeat:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 weather_event_arbitrage:
   thesis: >
-    Shadow candidate: weather alert / extreme event lag arbitrage. When an
+    Blocked candidate: weather alert / extreme event lag arbitrage. When an
     authoritative external alert feed signals an extreme weather event, the
     corresponding Polymarket market may not have repriced yet. Edge source:
-    trusted alert feed lag vs. market price. Shadow research phase only.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
+    trusted alert feed lag vs. market price. Requires explicit promotion evidence.
+  live_status: blocked
+  evidence_tier: IDEA
   evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
   promotion_blockers:
-    - "Phase 4 shadow candidate; insufficient settled decisions"
+    - "Phase 4 blocked candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -537,25 +528,24 @@ weather_event_arbitrage:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 cross_market_correlation_hedge:
   thesis: >
-    Shadow candidate: cross-market correlation hedge using regime-conditional
+    Blocked candidate: cross-market correlation hedge using regime-conditional
     shrunk correlation matrices (Phase 5 Ledoit-Wolf shrinkage). Edge source:
     cross-city same-weather-system correlation under WeatherRegimeTag. Requires
-    Phase 3 regime_tag_for + Phase 5 RegimeCorrelationStore. Shadow research only.
-  live_status: shadow
+    Phase 3 regime_tag_for + Phase 5 RegimeCorrelationStore and promotion evidence.
+  live_status: blocked
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -563,26 +553,25 @@ cross_market_correlation_hedge:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 neg_risk_basket:
   thesis: >
-    Shadow candidate: negRisk family completeness basket arbitrage. Edge source:
+    Blocked candidate: negRisk family completeness basket arbitrage. Edge source:
     sum of YES ask prices across full negRisk token book vs theoretical 1.0 total.
     When the full per-family token book is available and the sum of YES asks is
-    below the basket arb threshold, a shadow buy_yes entry is logged. Requires
-    negRisk metadata audit (future phase). Shadow research only.
-  live_status: shadow
+    below the basket arb threshold, an offline buy_yes entry is logged. Requires
+    negRisk metadata audit and promotion evidence.
+  live_status: blocked
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
-    high: shadow
-    low:  shadow
+    high: blocked
+    low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
     pre_trading: 0.0
@@ -590,6 +579,5 @@ neg_risk_basket:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md

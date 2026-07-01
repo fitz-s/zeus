@@ -252,7 +252,7 @@ tables:
       pre-fix SILENT INSERT-OR-IGNORE drop into a loud, forensically-attributable event
       (Fitz Constraint #3 immune system: an antibody, not an alert). The production
       download writes this audit on autocommit BEFORE its rollback-on-error BEGIN so the
-      trail survives the cycle ROLLBACK. SHADOW research/forensic surface only; lives
+      trail survives the cycle ROLLBACK. Audit/forensic surface only; lives
       ONLY on zeus-forecasts.db (INV-37 single-DB); never a settlement, calibration, or
       order truth table.
 
@@ -281,18 +281,6 @@ tables:
       provenance. Runtime readers must require runtime_layer='live',
       training_allowed=0, q_lcb/q_ucb coverage, and product-specific refit
       evidence before using rows in the event reactor.
-
-  - name: replacement_shadow_decisions
-    db: forecasts
-    schema_class: forecast_class
-    schema_version_owner: SCHEMA_FORECASTS_VERSION
-    created_by: apply_canonical_schema
-    pk_col: decision_id
-    notes: >
-      Replacement forecast event-reactor decision provenance table (2026-06-07).
-      Records baseline-vs-candidate q_lcb/Kelly/direction comparisons and veto
-      decisions at the same market snapshot. It is append-only audit evidence
-      for replacement authority behavior, not a venue command or fill record.
 
   - name: market_events
     db: forecasts
@@ -651,14 +639,14 @@ tables:
 
   - name: collateral_ledger_snapshots
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: snapshot_id
 
   - name: collateral_reservations
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: reservation_id
@@ -721,7 +709,7 @@ tables:
 
   - name: decision_log
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: decision_id
@@ -754,7 +742,7 @@ tables:
 
   - name: exchange_reconcile_findings
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -795,7 +783,7 @@ tables:
 
   - name: exit_mutex_holdings
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -829,7 +817,7 @@ tables:
 
   - name: market_price_history
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -843,7 +831,7 @@ tables:
 
   - name: model_bias
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -928,7 +916,7 @@ tables:
 
   - name: opportunity_fact
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1001,6 +989,25 @@ tables:
       runtime reads them as the DB-mediated pre-submit book evidence seam. Rows
       are evidence only and cannot assert accepted/fill truth.
 
+  - name: execution_feasibility_latest
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: "[token_id, direction]"
+    required_columns:
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: false}
+      - {name: evidence_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: quote_seen_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Compact latest-state mirror for execution_feasibility_evidence keyed by
+      token_id and direction. Hot live readers use this table first so quote
+      freshness checks do not scan the high-frequency append log.
+
   - name: no_trade_regret_events
     db: world
     schema_class: world_class
@@ -1048,7 +1055,7 @@ tables:
       - {name: mainstream_source, type: TEXT, nullable: true}
       - {name: mainstream_fetched_at_utc, type: TEXT, nullable: true}
       - {name: alpha_gap, type: REAL, nullable: true}
-      # C2 selection-shrinkage shadow columns (task #60, 2026-06-13): the
+      # C2 selection-shrinkage audit columns (task #60, 2026-06-13): the
       # writer INSERTs these on every adapter receipt (no_submit_receipts.py),
       # added to CREATE_TABLE + _ensure_column so a stale live DB FATALs at boot
       # rather than silently failing writes (same R4/#175 antibody intent).
@@ -1376,7 +1383,7 @@ tables:
       idempotent per position via UNIQUE(position_id)). NO daemon_writer field:
       the job runs in the trading daemon (src.main), not src.ingest_main, so it
       is out of assert_writer_jobs_registered's ingest-only scope (same posture
-      as settlement_guard_report / shadow_comparator). Append/upsert-only audit
+      as settlement_guard_report). Append/upsert-only audit
       evidence; never a venue command, order truth, settlement truth, or
       calibration training input.
 
@@ -1528,7 +1535,7 @@ tables:
 
   - name: provenance_envelope_events
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1550,7 +1557,7 @@ tables:
 
   - name: risk_actions
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1635,13 +1642,6 @@ tables:
       observation_authority_id (FK to this table) + day0_context_json (per-edge
       day0 truth classification), via kernel SQL + idempotent ALTER backfill.
 
-  - name: shadow_signals
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-
   - name: solar_daily
     db: world
     schema_class: world_class
@@ -1658,7 +1658,7 @@ tables:
 
   - name: strategy_health
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1672,28 +1672,28 @@ tables:
 
   - name: token_price_log
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
 
   - name: token_suppression
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
 
   - name: token_suppression_history
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
 
   - name: trade_decisions
     db: trade
-    schema_class: archive
+    schema_class: trade_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1793,7 +1793,7 @@ tables:
       instrumentation table for no-trade decisions. Columns per §5.2: market_slug,
       temperature_metric, target_date, observation_time, decision_seq, reason
       (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version,
-      schema_compatibility, strategy_key, event_source, shadow_runtime.
+      schema_compatibility, strategy_key, event_source.
       PK matches decision_events natural key for FK-like joins.
       SCHEMA_VERSION 14→15 (production pass), 20 (live release proof P0-3
       compatibility marker), 22 (live release proof P1-3 settlement command
@@ -1835,6 +1835,19 @@ tables:
       check_db_table_delta gate, excluded from assert_db_matches_registry on-disk
       coherence check. Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
 
+  - name: tail_stress_scenarios
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: "legacy Phase 3 T2 analytic DDL"
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Empty legacy analytic/stress table observed on the live world DB with no
+      remaining src writer. Registered as legacy_archived so boot-time registry
+      coherence continues to fail-closed on genuinely unknown live tables while
+      tolerating this known non-money-path ghost until an audited cleanup
+      migration drops it.
+
   - name: evidence_tier_assignments_new
     db: world
     schema_class: legacy_archived
@@ -1851,21 +1864,6 @@ tables:
       assert_db_matches_registry on-disk coherence. Catalogued 2026-05-27
       (PR #352 Part-5) when the schema_version CHECK list was extended to 40
       and the gate re-scanned the touched phase6_evidence_schema.py.
-
-  - name: tail_stress_scenarios
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 16) + migrate_no_trade_events_rebuild_phase3_t2.py (operator one-shot)"
-    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
-    notes: >
-      Phase 3 T2 (04_PHASE_3_SHOULDER.md §"Schema impact", 2026-05-21):
-      per-shoulder-decision stress probe results. Columns: market_slug, temperature_metric,
-      target_date, observation_time, decision_seq, scenarios (JSON array of scenario_ids),
-      max_loss_pct REAL, tail_probability_stressed REAL, schema_version CHECK (15, 16).
-      PK matches decision_events natural key for FK-like joins.
-      SCHEMA_VERSION 15→16. DDL in src/state/schema/tail_stress_scenarios_schema.py.
-      SCAFFOLD — writer/reader wired in T2 production pass.
 
   - name: shoulder_exposure_ledger
     db: world
@@ -1900,20 +1898,6 @@ tables:
       fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
       SCHEMA_VERSION 23→24.
 
-  - name: shadow_experiments
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 26)"
-    pk_col: experiment_id
-    notes: >
-      Phase 6 T2 (2026-05-21): immutable shadow experiment registry. Columns:
-      experiment_id (TEXT PK, SHA-256 of strategy+config+started_at), strategy_id,
-      config_hash, started_at, closed_at, cohort_tag, immutable (INTEGER DEFAULT 1).
-      DDL owner: src/state/schema/phase6_evidence_schema.py.
-      Writer/reader: src/state/shadow_experiment_registry.py, INV-37 (caller-supplied conn).
-      SCHEMA_VERSION 24→25; v26 no table-shape change.
-
   - name: evidence_tier_assignments
     db: world
     schema_class: world_class
@@ -1940,7 +1924,7 @@ tables:
     pk_col: id
     notes: >
       Phase 6 T3 (2026-05-21): per-trade 7-component regret decomposition records.
-      Columns: id (AUTOINCREMENT PK), experiment_id (FK→shadow_experiments),
+      Columns: id (AUTOINCREMENT PK), experiment_id, strategy_id, cohort_tag,
       decision_event_id, forecast_error_usd, observation_error_usd, quote_error_usd,
       non_fill_error_usd, fee_error_usd, timing_error_usd,
       settlement_ambiguity_error_usd, total_regret_usd, computed_at.
@@ -2004,7 +1988,7 @@ tables:
 
   - name: hko_hourly_accumulator
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: migration_script_k1_archive
     pk_col: null
@@ -2039,7 +2023,7 @@ tables:
 
   - name: historical_forecasts
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -2051,11 +2035,13 @@ tables:
     db: world
     schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
+    created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: >
       Legacy hourly observation store. No INSERT matches in src/ as of
-      PR-S4b audit 2026-05-18. Excluded. Drop after 2026-08-09.
+      PR-S4b audit 2026-05-18; not created by init_schema. Physical legacy
+      copies may remain until audited retention cleanup. Excluded from
+      set-equality. Drop after 2026-08-09.
 
   - name: day0_residual_fact
     db: world
@@ -2195,25 +2181,74 @@ tables:
     notes: >
       K1 2026-05-11 archive snapshot of source_run.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
-    notes: Zeus metadata store (key-value, schema version anchor).
 
   # ---------------------------------------------------------------------------
-  # PR-S4b §4 (2026-05-18): 66 legacy_archived ghost entries on db: trade
+  # PR-S4b §4 (2026-05-18): known legacy_archived ghost entries on db: trade
   #
   # Root cause: pre-PR-S4b, src/main.py:1747 called init_schema(trade_conn)
   # which is the world-schema constructor. This created 66 world/misc tables
   # on zeus_trades.db that were never intended to be there.
   #
-  # Three of these tables (shadow_signals 27k rows, probability_trace_fact 33k
-  # rows, availability_fact 24k rows) accumulated rows because cycle_runtime
-  # passed the trade-rooted conn to INV-37-violating writers. Those writers are
-  # fixed in PR-S4b §3 to use get_world_connection() internally.
+  # probability_trace_fact and availability_fact accumulated rows because
+  # cycle_runtime passed the trade-rooted conn to INV-37-violating writers.
+  # Those writers are fixed in PR-S4b §3 to use get_world_connection() internally.
   #
-  # All 66 are declared legacy_archived so assert_db_matches_registry(TRADE)
+  # These are declared legacy_archived so assert_db_matches_registry(TRADE)
   # passes on the live zeus_trades.db without requiring a data migration.
   # Data migration of the 84k misplaced rows is deferred (separate PR).
   # Drop date: 2026-08-09 (aligns with K1 archive retention).
   # ---------------------------------------------------------------------------
+
+  - name: decision_certificate_supersessions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: supersession_id
+    notes: >
+      Empty ghost on zeus_trades.db from historical world-schema-on-trade
+      contamination. Canonical non-legacy owner is zeus-world.db; the live
+      trade ghost had 0 rows on 2026-07-01 and is declared only so boot-time
+      registry coherence distinguishes known residue from a new trade table.
+      Drop after an audited cleanup migration.
+
+  - name: decision_compile_failures
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: failure_id
+    notes: >
+      Empty ghost on zeus_trades.db from historical world-schema-on-trade
+      contamination. Canonical non-legacy owner is zeus-world.db, where the
+      durable compiler-failure denominator carries live rows; the trade ghost
+      had 0 rows on 2026-07-01. Drop after an audited cleanup migration.
+
+  - name: edli_live_cap_day_slots
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: "[cap_scope, cap_date, slot]"
+    notes: >
+      Empty ghost on zeus_trades.db from historical world-schema-on-trade
+      contamination. Canonical non-legacy owner is zeus-world.db; the current
+      source schema marks this deleted day-slot cap table as legacy support for
+      existing rows and recovery cleanup, not trade-class authority. Drop after
+      an audited cleanup migration.
+
+  - name: edli_live_cap_rate_window
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: "[cap_scope, window_key, slot]"
+    notes: >
+      Empty ghost on zeus_trades.db from historical world-schema-on-trade
+      contamination. Canonical non-legacy owner is zeus-world.db; the current
+      source schema marks this deleted rate-window cap table as legacy support
+      for existing rows and recovery cleanup, not trade-class authority. Drop
+      after an audited cleanup migration.
 
   - name: availability_fact
     db: trade
@@ -2226,21 +2261,18 @@ tables:
       24k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
       in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
 
-  - name: calibration_decision_group
+  - name: tail_stress_scenarios
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: calibration_pairs
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Empty ghost on zeus_trades.db from the same historical world-schema-on-trade
+      contamination family as the PR-S4b archived tables. No active source writer
+      remains; retained only so boot-time registry coherence can distinguish this
+      known non-money-path ghost from genuinely unknown trade tables. Drop after
+      an audited cleanup migration.
 
   - name: calibration_pairs_v2
     db: trade
@@ -2260,7 +2292,7 @@ tables:
 
   - name: collateral_ledger_snapshots
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2268,7 +2300,7 @@ tables:
 
   - name: collateral_reservations
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2290,33 +2322,9 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
-  - name: daily_observation_revisions
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: data_coverage
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: day0_metric_fact
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: decision_log
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2329,14 +2337,6 @@ tables:
   # their world-class entries; these trade copies are excluded from set-equality
   # until the existing PR-S4b ghost cleanup/drop window.
 
-  - name: db_chunk_boundary_events
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
   - name: decision_certificate_edges
     db: trade
     schema_class: legacy_archived
@@ -2345,55 +2345,7 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
-  - name: decision_certificate_supersessions
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
   - name: decision_certificates
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: decision_compile_failures
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: decision_events
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: edli_fill_bridge_dispositions
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: edli_live_cap_day_slots
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: edli_live_cap_rate_window
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null
@@ -2417,30 +2369,6 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
-  - name: edli_no_submit_receipts
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: event_dead_letters
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: evidence_tier_assignments
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
   - name: execution_feasibility_evidence
     db: world
     schema_class: legacy_archived
@@ -2448,30 +2376,6 @@ tables:
     created_by: init_schema_pre_trade_repoint_residual
     pk_col: null
     notes: Ghost on zeus-world.db from pre-trade-repoint schema drift. Live sidecars write zeus_trades.db and live pre-submit reads zeus_trades.db.
-
-  - name: model_bias_ens
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: no_trade_events
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: no_trade_regret_events
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
   - name: opportunity_event_processing
     db: trade
@@ -2489,81 +2393,9 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
-  - name: regime_correlation_cache
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: regret_decompositions
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: settlement_attribution
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: shadow_experiments
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: shoulder_exposure_ledger
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: tail_stress_scenarios
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: diurnal_curves
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: diurnal_peak_prob
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: ensemble_snapshots
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: exchange_reconcile_findings
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2585,6 +2417,47 @@ tables:
       are applied by init_snapshot_schema() in snapshot_repo.py on the trade
       substrate connection. P0-2 live release proof adds tradeability_status_json
       under SCHEMA_VERSION 19 for scanner/snapshot/submit tradeability alignment.
+
+  - name: executable_market_snapshot_latest
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: "[condition_id, selected_outcome_token_id]"
+    required_columns:
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: selected_outcome_token_id, type: TEXT, nullable: false}
+      - {name: snapshot_id, type: TEXT, nullable: false}
+      - {name: question_id, type: TEXT, nullable: false}
+      - {name: yes_token_id, type: TEXT, nullable: false}
+      - {name: no_token_id, type: TEXT, nullable: false}
+      - {name: captured_at, type: TEXT, nullable: false}
+      - {name: freshness_deadline, type: TEXT, nullable: false}
+    notes: >
+      Compact latest-state mirror for executable_market_snapshots. The append
+      table remains immutable evidence; hot live refresh-priority readers use
+      this bounded per-condition/token state first and fall back to the append
+      table for legacy databases without mirror rows.
+
+  - name: executable_market_snapshot_invalidations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: invalidation_id
+    required_columns:
+      - {name: invalidation_id, type: TEXT, nullable: true}
+      - {name: condition_id, type: TEXT, nullable: true}
+      - {name: token_id, type: TEXT, nullable: true}
+      - {name: reason, type: TEXT, nullable: false}
+      - {name: invalidated_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Append-only executable snapshot invalidation facts emitted from public
+      market-channel tick-size/lifecycle changes. The executable_market_snapshots
+      evidence table remains immutable for venue-command auditability; live
+      price readers and submit gates fail closed on rows captured before a
+      matching invalidation until a newer snapshot is captured.
 
   - name: book_hash_transitions
     db: trade
@@ -2613,49 +2486,17 @@ tables:
       src/state/decision_integrity_quarantine.py; CLI
       scripts/quarantine_bad_forecast_decisions.py (dry-run default). Co-located
       on trade DB; cross-DB read-join against forecasts.ensemble_snapshots.
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
 
   - name: exit_mutex_holdings
     db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: forecast_skill
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: forecasts
-    db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
   - name: hourly_observations
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: job_run
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: market_events
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null
@@ -2673,29 +2514,13 @@ tables:
 
   - name: market_price_history
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
   - name: market_topology_state
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: model_bias
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: observation_instants
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null
@@ -2719,25 +2544,9 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
-  - name: observation_revisions
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: observations
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: opportunity_fact
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2760,14 +2569,6 @@ tables:
       outcome_fact visible on trade.db side. No writer change needed.
       Formerly declared legacy_archived — corrected to trade_class to match actuals.
 
-  - name: platt_models
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: platt_models_v2
     db: trade
     schema_class: legacy_archived
@@ -2789,21 +2590,13 @@ tables:
 
   - name: provenance_envelope_events
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
   - name: readiness_state
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: refit_bucket_failures
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null
@@ -2821,7 +2614,7 @@ tables:
 
   - name: risk_actions
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2859,60 +2652,9 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
-  - name: shadow_signals
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: >
-      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
-      27k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
-      in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
-
-  - name: solar_daily
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: source_contract_audit_events
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: source_run
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: source_run_coverage
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: strategy_health
     db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: temp_persistence
-    db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2920,7 +2662,7 @@ tables:
 
   - name: token_price_log
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2928,7 +2670,7 @@ tables:
 
   - name: token_suppression
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2944,45 +2686,13 @@ tables:
 
   - name: token_suppression_history
     db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: uma_resolution
-    db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
   - name: v_evidence_hourly_observations
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: validated_calibration_transfers
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: wrap_unwrap_commands
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: wrap_unwrap_events
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null

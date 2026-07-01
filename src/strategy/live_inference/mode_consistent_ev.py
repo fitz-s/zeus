@@ -500,16 +500,17 @@ def select_rest_then_cross_mode(
        the event ends; immediate cross while taker is admissible.
     5. TAKER_FLEETING_EDGE — raw taker edge >= the fleeting threshold; resting
        would likely forfeit it.
-    6. REST_DEFAULT — everything else rests post_only GTC at the maker limit
-       with the measured escalation deadline. THIS is the default the operator
-       ordered: a fresh-book EV preference for crossing is NOT a license to
-       cross.
+    6. TAKER_EDGE_CLEARS_BOUND — a fresh taker may cross when it clears the
+       conservative q/q_exec bound and materially beats the maker leg under the
+       mode-consistent EV comparison.
+    7. REST_DEFAULT — everything else rests post_only GTC at the maker limit
+       with the measured escalation deadline.
 
     EV provenance: both EVs are still computed (with the MEASURED deadline-
     horizon fill probability, not the retired 0.10 guess) and travel on the
     receipt so the settlement loop recalibrates the hazard curve and lambda.
-    The taker spread guard and the hysteresis margin remain lawful and
-    untouched inside the EV kernel.
+    The taker spread guard, q/q_exec cap, fee law, maker adverse-selection
+    haircut, and hysteresis margin remain the live law.
     """
     mode_ev = select_mode_consistent_ev(
         q_lcb=q_lcb,
@@ -540,8 +541,7 @@ def select_rest_then_cross_mode(
     # This gate does not LOOSEN anything: it makes every taker lane STRICTER, fully
     # consistent with the conservative-entry law and the existing cert-builder cap
     # (event_reactor_adapter TAKER_BUY_TOUCH_EXCEEDS_RESERVATION). The wide-spread
-    # guard and the REST_DEFAULT doctrine (a favorable all-in alone does NOT license
-    # an immediate cross — the Karachi antibody) remain in force above this.
+    # guard and the maker-vs-taker EV comparison remain in force above this.
     _q = float(q_lcb)
     # P0-1 (2026-06-23) EXECUTION-(PRICE)-CONDITIONED TIGHTENING. q_exec_lcb is the caller's
     # settlement-evidenced corrected bound (the selection-curse realized-NO-rate at this price —
@@ -640,21 +640,16 @@ def select_rest_then_cross_mode(
     if escalated_after_rest and not taker_admissible:
         return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
 
-    # 6a'. GTC-FIRST RESTORE (operator goal 2026-06-23 "3 GTC fills, not taker"): the
-    #    2026-06-23 "cross-when-admissible" override (POLICY_TAKER_EDGE_CLEARS_BOUND) is GATED
-    #    OFF for the fresh, far-from-event admissible case. The operator now explicitly prefers
-    #    capturing the spread as a GTC maker over paying spread+fee as a taker, accepting
-    #    fewer/delayed taker fills. Fresh admissible candidates therefore fall through to the
-    #    original K4.0 REST_DEFAULT (6b): rest an aggressive maker (bid+tick, top of book) and
-    #    escalate to a taker cross only at the deadline (rule 3, TAKER_ESCALATED_AFTER_REST) —
-    #    so a maker fill captures the spread when the market trades into our top-of-book rest,
-    #    and the cross is the fallback when it does not. The immediate-cross exception lanes are
-    #    PRESERVED above: event-end-near (rule 4) and fleeting large edge < event_end_floor..6h
-    #    (rule 5) still cross, because near settlement a rest cannot complete. The ~3.5% maker
-    #    fill rate that motivated the 06-23 override was churn-bound (78/88 cancelled before
-    #    fill by BOOK_MOVED/VALUE_REFRESH); GTC viability is being re-measured on the live chain
-    #    under this restore. (Reversible: restore `if taker_admissible: return _as_taker(
-    #    POLICY_TAKER_EDGE_CLEARS_BOUND)` here to re-enable immediate cross-when-admissible.)
+    # 6a'. FRESH BOOK MATH: taker is allowed when it is both admissible
+    #    (spread guard + fee-adjusted cost <= min(q_lcb, q_exec_lcb)) and it
+    #    materially beats the maker leg under the same EV comparison/hysteresis
+    #    used by select_mode_consistent_ev. This is not a fill-forcing fallback:
+    #    it preserves the conservative q bound, fee/spread costs, and maker
+    #    adverse-selection haircut. It only removes the old far-from-event
+    #    forced-REST doctrine that could strand a clearly superior executable
+    #    edge as an unfilled maker rest.
+    if taker_admissible and mode_ev.chosen_mode == "TAKER":
+        return _as_taker(POLICY_TAKER_EDGE_CLEARS_BOUND)
 
     # 6b. FALLBACK: the cross is inadmissible (cannot clear the conservative bound at the fresh
     #    ask, or the spread is too wide) — rest post_only GTC at the maker limit with the measured

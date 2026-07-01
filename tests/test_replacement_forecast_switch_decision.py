@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-17
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-17; last_reused=2026-06-17
-# Purpose: Prove replacement forecast switch admission is live-only and cannot admit diagnostic/shadow middle states.
+# Purpose: Prove replacement forecast switch admission is live-only and cannot admit diagnostic middle states.
 # Reuse: Run before wiring replacement forecast switch decisions into daemon or event reactor.
-# Authority basis: Operator directive 2026-06-17: already-live systems cannot retain shadow/veto coupling.
+# Authority basis: Operator directive 2026-06-17: already-live systems cannot retain non-live coupling.
 """Replacement forecast runtime switch decision tests."""
 
 from __future__ import annotations
@@ -72,28 +72,6 @@ def _live_switch(policy=None, *, current: bool = True):
             data_fact_status="CURRENT_FOR_LIVE" if current else "STALE_FOR_LIVE",
         )
     )
-
-
-def test_live_switch_does_not_require_shadow_decision_table() -> None:
-    assert "replacement_shadow_decisions" not in REQUIRED_FORECAST_TABLES
-    tables_without_shadow = tuple(
-        table for table in REQUIRED_FORECAST_TABLES if table != "replacement_shadow_decisions"
-    )
-    report = build_replacement_forecast_live_switch_report(
-        ReplacementForecastLiveSwitchInput(
-            runtime_policy=_policy(),
-            available_files=tuple(REQUIRED_LIVE_READ_FILES),
-            forecast_tables=tables_without_shadow,
-            world_tables=tuple(REQUIRED_WORLD_TABLES),
-            trade_tables=tuple(REQUIRED_TRADE_TABLES),
-            enabled_evidence_gates=tuple(REQUIRED_EVIDENCE_GATES),
-            source_fact_status="CURRENT_FOR_LIVE",
-            data_fact_status="CURRENT_FOR_LIVE",
-        )
-    )
-
-    assert report.live_authority_ready is True
-    assert "REPLACEMENT_SWITCH_MISSING_READ_TABLES" not in report.reason_codes
 
 
 def _readiness(*, ready: bool = True):
@@ -213,5 +191,5 @@ def test_switch_decision_payload_is_json_ready_and_live_only() -> None:
     assert payload["status"] == "LIVE_AUTHORITY"
     assert payload["can_read_live_posterior"] is True
     assert payload["can_initiate_trade"] is True
-    assert "can_read_shadow_posterior" not in payload
+    assert "can_read_blocked_posterior" not in payload
     assert "can_apply_veto" not in payload

@@ -11,7 +11,7 @@ maps to. Sizing/selection math composes with the 2026-06-13 calibration addendum
 (q is the calibrated posterior; q_lcb width uses N_eff=3.71).
 
 ═══════════════════════════════════════════════════════════════════════════════
-## Q1 — EXIT / TAKE-PROFIT / STOP-LOSS (system currently has NO exit capability — BLOCKER)
+## Q1 — EXIT / TAKE-PROFIT / STOP-LOSS (optimal exit formulas under expected-log utility)
 ═══════════════════════════════════════════════════════════════════════════════
 
 ### E1. Cost basis is SUNK (the foundational result)
@@ -69,7 +69,7 @@ r≥1 → x*=1; else interior `x0 = ((1−q)r(1+z) − q(1−r)) / (z·r(1−r))
 from Q4b. **All-or-nothing exits are wrong** — the FOC gives a fraction.
 
 ═══════════════════════════════════════════════════════════════════════════════
-## Q2 — PORTFOLIO KELLY (system currently sizes per-candidate — overbets correlated/exclusive)
+## Q2 — PORTFOLIO KELLY (horse-race sizing across correlated/exclusive bins)
 ═══════════════════════════════════════════════════════════════════════════════
 
 ### P1. Horse-race Kelly inside a K-bin event (boxed, CLOSED FORM).

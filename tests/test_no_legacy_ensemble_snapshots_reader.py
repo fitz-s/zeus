@@ -51,7 +51,6 @@ def _find_retired_table_refs() -> list[str]:
         [
             "grep", "-rn", "--include=*.py",
             "--exclude=test_no_legacy_ensemble_snapshots_reader.py",
-            "--exclude=test_legacy_snapshot_projection_upsert.py",
             _RETIRED_TABLE_PATTERN,
             "src/",
             "tests/",

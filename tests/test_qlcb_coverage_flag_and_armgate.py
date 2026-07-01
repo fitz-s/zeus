@@ -1,19 +1,17 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-14
-# Authority basis: Phase-2 K3 SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled)
-#   + ARM-gate coverage predicate. 2026-06-14 REBUILD (qlcb_suppression.md + RULE 1):
+# Authority basis: Phase-2 K3 settlement coverage + ARM-gate coverage predicate.
+#   2026-06-14 REBUILD (qlcb_suppression.md + RULE 1):
 #   the ARM gate is now a PROVEN-OVERCONFIDENCE catch, not a default-deny. It blocks ONLY
 #   on UNLICENSED (n>=min_n AND realized materially below claimed); it does NOT block on
 #   INSUFFICIENT_DATA (thin/absent claim history) nor on coverage_ratio>1 (conservative /
 #   calibrated-above bands). The two tests that previously asserted those blocks are
 #   updated to the rebuilt semantics below (their old assertions were the suppression bug).
-"""Flag-gating + ARM-gate relationship tests for K3 settlement-coverage.
+"""Shrink + ARM-gate relationship tests for K3 settlement-coverage.
 
 Two relationships:
-  1. SHADOW SAFETY: flag OFF -> the coverage shrink is NOT applied; the q_lcb the
-     consumer reads equals the pre-coverage (legacy) q_lcb, source unchanged. This
-     is the "byte-identical to today" contract for the live decision. (Unchanged by
-     the rebuild — the flag gating is orthogonal to the verdict computation.)
+  1. SHRINK SAFETY: only an UNLICENSED verdict can lower q_lcb; LICENSED and
+     INSUFFICIENT_DATA leave it unchanged.
   2. ARM SAFETY (REBUILT): the ARM gate blocks ONLY when a traded cohort's coverage
      verdict is UNLICENSED (PROVEN overconfident). INSUFFICIENT_DATA and conservative
      (ratio>1) verdicts do NOT block — lack of per-day claim history is not proof of
@@ -25,34 +23,10 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. SHADOW SAFETY — flag OFF leaves q_lcb byte-identical (no shrink applied).
+# 1. SHRINK SAFETY — only UNLICENSED lowers q_lcb.
 # ---------------------------------------------------------------------------
-def test_apply_coverage_flag_off_is_byte_identical():
-    """apply_settlement_coverage(..., enabled=False) returns the INPUT q_lcb
-    unchanged even when the coverage verdict is UNLICENSED — the shrink is
-    computed but NOT applied. The live decision is byte-identical to legacy."""
-    from src.calibration.settlement_backward_coverage import (
-        CoverageVerdict,
-        apply_settlement_coverage,
-    )
-
-    # An UNLICENSED verdict that WOULD shrink 0.94 -> 0.65 if applied.
-    verdict = CoverageVerdict(
-        status="UNLICENSED",
-        q_lcb_in=0.94,
-        q_lcb_out=0.65,
-        n_settlement_observations=50,
-        coverage_ratio=0.70,
-        realized_win_rate=0.66,
-        calibration_source="SETTLEMENT_ISOTONIC",
-    )
-    out = apply_settlement_coverage(q_lcb=0.94, verdict=verdict, enabled=False)
-    assert out == pytest.approx(0.94)  # FLAG OFF -> unchanged, byte-identical
-
-
-def test_apply_coverage_flag_on_applies_shrink():
-    """With the flag ON, the same UNLICENSED verdict shrinks the q_lcb to the
-    verdict's q_lcb_out (0.65). Flag ON is the only way the live LCB moves."""
+def test_apply_coverage_unlicensed_applies_shrink():
+    """An UNLICENSED verdict shrinks q_lcb to the verdict's q_lcb_out."""
     from src.calibration.settlement_backward_coverage import (
         CoverageVerdict,
         apply_settlement_coverage,
@@ -67,12 +41,12 @@ def test_apply_coverage_flag_on_applies_shrink():
         realized_win_rate=0.66,
         calibration_source="SETTLEMENT_ISOTONIC",
     )
-    out = apply_settlement_coverage(q_lcb=0.94, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.94, verdict=verdict)
     assert out == pytest.approx(0.65)
 
 
-def test_apply_coverage_flag_on_licensed_is_unchanged():
-    """Flag ON + LICENSED verdict -> q_lcb unchanged (the settled record backs the
+def test_apply_coverage_licensed_is_unchanged():
+    """LICENSED verdict -> q_lcb unchanged (the settled record backs the
     claim; nothing to shrink). Only UNLICENSED moves the number."""
     from src.calibration.settlement_backward_coverage import (
         CoverageVerdict,
@@ -88,12 +62,12 @@ def test_apply_coverage_flag_on_licensed_is_unchanged():
         realized_win_rate=0.725,
         calibration_source="SETTLEMENT_ISOTONIC",
     )
-    out = apply_settlement_coverage(q_lcb=0.70, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.70, verdict=verdict)
     assert out == pytest.approx(0.70)
 
 
-def test_apply_coverage_flag_on_insufficient_is_unchanged():
-    """Flag ON + INSUFFICIENT_DATA -> unchanged. We never shrink on thin data."""
+def test_apply_coverage_insufficient_is_unchanged():
+    """INSUFFICIENT_DATA -> unchanged. We never shrink on thin data."""
     from src.calibration.settlement_backward_coverage import (
         CoverageVerdict,
         apply_settlement_coverage,
@@ -108,7 +82,7 @@ def test_apply_coverage_flag_on_insufficient_is_unchanged():
         realized_win_rate=None,
         calibration_source="SETTLEMENT_ISOTONIC",
     )
-    out = apply_settlement_coverage(q_lcb=0.94, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.94, verdict=verdict)
     assert out == pytest.approx(0.94)
 
 

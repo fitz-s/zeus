@@ -6,9 +6,7 @@
 #   hold exit algorithm 930-938, and the line-940 contract that the current single-token
 #   ExitIntent/place_sell_order path is ONE route under the engine, NOT the exit
 #   authority) reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
-#   (GREENFIELD; CONVERT_TO_BASKET_SELL stays executable=False — venue primitive ABSENT;
-#   DIRECT_SELL + HOLD_TO_REDEEM real; canonical RED test name ``..._when_more_valuable``
-#   per spec :1216).
+#   (GREENFIELD; DIRECT_SELL + HOLD_TO_REDEEM real).
 """RED-on-revert contract tests for the LiquidationValueEngine (Stage 10).
 
 Three spec-named tests, each of which FAILS if the corrected transformation is reverted
@@ -23,20 +21,10 @@ to the broken behavior the spec replaces:
     asserts the chosen route is HOLD_TO_REDEEM (direct is recorded only as an
     alternative).
 
-  * ``test_no_position_chooses_conversion_basket_when_more_valuable`` — when (and only
-    when) the conversion-basket route is EXECUTABLE and worth more than every sell route,
-    it is chosen; while the venue convert/merge/split primitive is ABSENT the basket can
-    NEVER be chosen no matter how high its notional. RED-on-revert: if route executability
-    were ignored in the argmax (the shadow route scored on its raw value instead of
-    ``-inf``), the unexecutable basket would be selected. The test asserts (a) with a
-    convert primitive supplied + basket dominant, conversion is chosen; (b) with NO
-    primitive, the SAME dominant basket value can never be chosen — the chosen route is an
-    executable one, and the basket is a non-executable alternative.
-
   * ``test_hold_to_redeem_selected_when_all_sell_routes_worse`` — when every SELL route
-    (direct now, conversion when it lands) is worth less than holding to resolution, the
-    chosen route is HOLD_TO_REDEEM. RED-on-revert: if the engine fell back to direct sell
-    (or to any sell route) whenever a sell was possible, it would liquidate at the
+    is worth less than holding to resolution, the chosen route is HOLD_TO_REDEEM.
+    RED-on-revert: if the engine fell back to direct sell whenever a sell was possible,
+    it would liquidate at the
     deep-discount bid instead of holding the winning leg. The test asserts hold is chosen
     when the direct bid sell is far below the redeem value.
 """
@@ -54,10 +42,8 @@ from src.execution.family_book import (
     build_family_book,
 )
 from src.execution.liquidation_value import (
-    CONVERSION_PRIMITIVE_ABSENT,
     LiquidationValueEngine,
     PositionVector,
-    conversion_basket_sell_value,
     direct_sell_value,
     hold_to_redeem_value,
     liquidation_decision,
@@ -271,82 +257,7 @@ def test_direct_sell_is_one_route_not_authority():
 
 
 # ---------------------------------------------------------------------------
-# SPEC RED-on-revert #2 — conversion basket chosen ONLY when executable + more valuable.
-# ---------------------------------------------------------------------------
-
-class _StubConvertPrimitive:
-    """A stand-in venue primitive exposing a convert callable (makes conversion live)."""
-
-    def convert_positions(self, *args, **kwargs):  # pragma: no cover - not invoked here
-        raise NotImplementedError
-
-
-def test_no_position_chooses_conversion_basket_when_more_valuable():
-    """Conversion basket is chosen iff it is EXECUTABLE and the most valuable route.
-
-    Two halves:
-
-    (a) When a convert/merge/split venue primitive is SUPPLIED, the conversion route is
-        executable; if it is also the max it is chosen. (We assert that, given a primitive,
-        the route is marked executable so it CAN be selected — proving executability, not a
-        fabricated value, is the gate.)
-
-    (b) While the venue primitive is ABSENT (the live state today — drift ledger
-        BLOCKER), the conversion route is executable=False, scored -inf, and can NEVER be
-        chosen no matter how high a notional basket value would be. The engine's chosen
-        route is an EXECUTABLE one (here HOLD_TO_REDEEM dominates the depressed direct
-        sell), and the basket is a non-executable alternative carrying the
-        venue-primitive-absent reason.
-
-    RED-on-revert: if route executability were ignored in selection (the shadow basket
-    scored on raw value instead of -inf), the absent-primitive basket would win in (b).
-    The test asserts the absent basket is NEVER chosen.
-    """
-    shares = Decimal("100")
-    # Direct sell is depressed (0.10) so a basket / hold beats it; joint q favors b22.
-    markets = {"b22": _market_book("b22", yes_bid="0.10", no_bid="0.90", neg_risk=True)}
-    fb = _family_book(markets)
-    jq = _joint_q({"b_low": 0.05, "b22": 0.80, "b23": 0.10, "b_high": 0.05})
-    position = PositionVector(
-        family_id="tokyo-high",
-        quantities_by_instrument={"b22": shares},
-        payoff_vector_by_instrument={"b22": _yes_payoff("b22")},
-        directions_by_instrument={"b22": "buy_yes"},
-    )
-
-    # (b) ABSENT primitive: conversion is shadow (executable=False) and unchoosable.
-    convert_absent = conversion_basket_sell_value(position, fb, venue_primitives=None)
-    assert convert_absent.route_type == "CONVERT_TO_BASKET_SELL"
-    assert convert_absent.executable is False
-    assert convert_absent.reason == CONVERSION_PRIMITIVE_ABSENT
-
-    decision_absent = liquidation_decision(position, family_book=fb, joint_q=jq)
-    # The shadow basket can NEVER be the chosen route while the primitive is absent.
-    assert decision_absent.chosen.route_type != "CONVERT_TO_BASKET_SELL"
-    assert decision_absent.chosen.executable is True
-    # The basket is recorded as a non-executable alternative for the receipt.
-    convert_alt = [
-        r for r in decision_absent.alternatives
-        if r.route_type == "CONVERT_TO_BASKET_SELL"
-    ]
-    assert len(convert_alt) == 1
-    assert convert_alt[0].executable is False
-
-    # (a) PRESENT primitive: executability is keyed on the PRIMITIVE, not on the route
-    # being silently always-shadow. With a convert callable supplied, the route no longer
-    # takes the absent-shadow path — it refuses to fabricate a value rather than emit an
-    # unpriced executable=False route. That refusal (vs the silent shadow of the absent
-    # path) proves the executability gate is the primitive's presence.
-    from src.execution.liquidation_value import LiquidationValueError
-
-    with pytest.raises(LiquidationValueError):
-        conversion_basket_sell_value(
-            position, fb, venue_primitives=_StubConvertPrimitive()
-        )
-
-
-# ---------------------------------------------------------------------------
-# SPEC RED-on-revert #3 — HOLD_TO_REDEEM selected when all sell routes are worse.
+# SPEC RED-on-revert #2 — HOLD_TO_REDEEM selected when direct sell is worse.
 # ---------------------------------------------------------------------------
 
 def test_hold_to_redeem_selected_when_all_sell_routes_worse():
@@ -355,9 +266,8 @@ def test_hold_to_redeem_selected_when_all_sell_routes_worse():
     Scenario: a family with two held legs (buy_yes on b22, buy_yes on b23). Both native
     YES bids are deep-discount (0.05 each), so the direct sell realizes only 0.05 * shares
     per leg. The joint q puts the mass on b22 (0.70) and b23 (0.20), so hold-to-redeem is
-    worth 0.70 + 0.20 = far more than the 0.05 + 0.05 sell. Conversion is shadow (no
-    primitive). So every SELL route is worse than holding, and the engine chooses
-    HOLD_TO_REDEEM.
+    worth 0.70 + 0.20 = far more than the 0.05 + 0.05 sell. Direct sell is worse than
+    holding, and the engine chooses HOLD_TO_REDEEM.
 
     RED-on-revert: if the engine fell back to the direct sell whenever a sell was possible
     (the per-token place_sell_order behavior), it would liquidate the winning legs at the
@@ -389,10 +299,9 @@ def test_hold_to_redeem_selected_when_all_sell_routes_worse():
 
     decision = liquidation_decision(position, family_book=fb, joint_q=jq)
     assert decision.chosen.route_type == "HOLD_TO_REDEEM"
-    # Both sell routes are strictly worse and recorded as alternatives.
+    # Direct sell is strictly worse and recorded as an alternative.
     alt_types = {r.route_type for r in decision.alternatives}
     assert "DIRECT_SELL" in alt_types
-    assert "CONVERT_TO_BASKET_SELL" in alt_types
 
 
 # ---------------------------------------------------------------------------

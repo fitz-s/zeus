@@ -1267,7 +1267,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=True,
-        causality_status="RUNTIME_ONLY_FALLBACK",
+        causality_status="ISSUE_TIME_MISSING",
         snapshot_id="128",
     )
 
@@ -1293,7 +1293,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
         "lead_days": 1.0,
         "forecast_source": "tigge",
         "decision_snapshot_id": 129,
-        "snapshot_causality_status": "RUNTIME_ONLY_FALLBACK",
+        "snapshot_causality_status": "ISSUE_TIME_MISSING",
     }
 
     count = harvester_mod.maybe_write_learning_pair(
@@ -1476,7 +1476,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
             "v2_model",
             HIGH_LOCALDAY_MAX.data_version,
             0,
-            "RUNTIME_ONLY_FALLBACK",
+            "ISSUE_TIME_MISSING",
             0,
             "{}",
             "UNVERIFIED",
@@ -1494,7 +1494,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert context["snapshot_learning_ready"] is False
     assert context["learning_blocked_reason"] == "snapshot_training_not_allowed"
-    assert context["snapshot_causality_status"] == "RUNTIME_ONLY_FALLBACK"
+    assert context["snapshot_causality_status"] == "ISSUE_TIME_MISSING"
     assert p_raw == [0.2, 0.5, 0.3]
 
 

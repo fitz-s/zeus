@@ -14,7 +14,7 @@
 #   the per-cell EMOS intercept on clean VERIFIED settlement, with a walk-forward do-no-harm gate.
 #
 # WHAT THIS IS NOT: NOT the broken previous_runs-vs-single_runs anchor-offset fitter
-#   (anchor_representativeness_debias / the SHADOW replacement lane). That measures the IFS single-run
+#   (anchor_representativeness_debias / the replacement audit lane). That measures the IFS single-run
 #   ANCHOR residual and feeds the fusion prior, which does NOT reach the live EMOS calibrator. THIS
 #   measures the LIVE EMOS μ* (a + b·x̄_ensemble, the center the doc proved is served) against VERIFIED
 #   settlement, and corrects ONLY the EMOS center.

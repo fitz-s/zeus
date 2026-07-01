@@ -288,7 +288,7 @@ verbatim incident family replay yields NO priced selection.
 ## 6. Verification
 
 Commits on `fix/opportunity-book-selector` (no push, no restart, daemon
-untouched in edli_shadow_no_submit):
+untouched in the retired no-submit staging mode):
 
 - `d3d2dbc5c3` incident: root-cause doc (docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md)
 - `47a173bdc7` fix A: direction law as code (+22 antibody tests, incl. verbatim

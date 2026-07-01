@@ -1,21 +1,23 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
-# Authority basis: operator review 2026-06-10 P0 mode-authority — execution_mode_intent
-#   must be the final-submit authority; recapture and final intent must not mode-flip.
+# Last reused or audited: 2026-06-30
+# Authority basis: live redecision repair — a resting MAKER proof may upgrade to TAKER
+#   only when the same fresh rest-then-cross policy clears; unsafe/stale flips still abort.
 """Relationship tests (P0 mode-authority, operator review 2026-06-10).
 
 The cross-module invariant under test spans the boundary
   recapture proof (execution_mode_intent) -> EventSubmissionReceipt
   -> actionable payload -> final command builder -> final intent certificate.
 
-The PROVEN proof maker/taker mode is the SOLE final-submit authority. The final
-command builder may NOT re-decide the mode. Properties asserted across the boundary:
+The PROVEN proof maker/taker mode is the submit authority, with one live redecision
+exception: a resting MAKER proof may upgrade to TAKER when the same fresh
+rest-then-cross policy clears and downstream taker certificates pass. Properties
+asserted across the boundary:
 
-  (a) proof execution_mode_intent=MAKER + final-stage conditions that would force
-      TAKER  ->  SUBMIT_ABORTED_MODE_FLIPPED, NO order built (and the reverse
-      TAKER->MAKER also aborts; NO inline flip in EITHER direction).
-  (b) proof mode survives unchanged  ->  the validated mode that drives the final
-      intent certificate's order_mode EQUALS the proof execution_mode_intent.
+  (a) proof execution_mode_intent=MAKER + fresh policy TAKER  ->  validated mode
+      TAKER; the final command must then prove taker quality on the fresh book.
+      Reverse TAKER->MAKER still aborts; missing/unknown proof mode fails closed.
+  (b) proof mode survives unchanged when fresh policy agrees; otherwise the only
+      allowed mismatch is MAKER->TAKER.
   (c) the receipt carries execution_mode_intent + maker_limit_price as FIRST-CLASS
       fields end-to-end (receipt field is the authority, overriding the opportunity
       -book back-channel), and they thread into the actionable payload.
@@ -76,26 +78,25 @@ class TestLifecycleStateRegistered:
 
 
 # ---------------------------------------------------------------------------
-# (a) proof MAKER + final-stage TAKER  ->  SUBMIT_ABORTED_MODE_FLIPPED, no order.
-#     Both flip directions abort. Missing/unknown proof mode fails closed.
+# (a) proof MAKER + final-stage TAKER  ->  allowed live crossing upgrade.
+#     Reverse TAKER->MAKER aborts. Missing/unknown proof mode fails closed.
 # ---------------------------------------------------------------------------
 
-class TestModeFlipAborts:
-    def test_proof_maker_fresh_taker_aborts(self):
-        from src.engine.event_reactor_adapter import (
-            _SubmitAbortedModeFlipped,
-            _validate_final_order_mode_or_abort,
+class TestModeRevalidation:
+    def test_proof_maker_fresh_taker_upgrades_to_taker(self):
+        from src.engine.event_reactor_adapter import _validate_final_order_mode_or_abort
+
+        order_mode = _validate_final_order_mode_or_abort(
+            proof_mode="MAKER",
+            fresh_mode="TAKER",
+            fresh_best_bid=0.48,
+            fresh_best_ask=0.52,
         )
-        with pytest.raises(_SubmitAbortedModeFlipped, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            _validate_final_order_mode_or_abort(
-                proof_mode="MAKER",
-                fresh_mode="TAKER",
-                fresh_best_bid=0.48,
-                fresh_best_ask=0.52,
-            )
+
+        assert order_mode == "TAKER"
 
     def test_proof_taker_fresh_maker_aborts(self):
-        """The REVERSE direction (TAKER->MAKER) must also abort — NO inline flip."""
+        """The reverse direction (TAKER->MAKER) still aborts; no silent downgrade."""
         from src.engine.event_reactor_adapter import (
             _SubmitAbortedModeFlipped,
             _validate_final_order_mode_or_abort,
@@ -288,7 +289,7 @@ class TestReceiptCarriesModeFields:
     def test_no_mode_field_and_no_book_means_fail_closed_downstream(self):
         """A receipt with neither a mode field nor a book yields no proof_execution_mode_intent
         on the actionable payload — which the final-stage validator treats as missing and
-        FAILS CLOSED (asserted in TestModeFlipAborts.test_missing_proof_mode_fails_closed)."""
+        FAILS CLOSED (asserted in TestModeRevalidation.test_missing_proof_mode_fails_closed)."""
         from src.events.reactor import EventSubmissionReceipt
         from src.engine.event_reactor_adapter import _actionable_payload_from_receipt
         r = EventSubmissionReceipt(

@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 3: Assert no SCHEMA_VERSION counter mechanism exists.
 xfail(strict=False): scripts/check_schema_version.py exists today;

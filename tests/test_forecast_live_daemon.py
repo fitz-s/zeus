@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FORECAST_LIVE_DAEMON = REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py"
 
 
-def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat(monkeypatch) -> None:
+def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() -> None:
     from src.ingest.forecast_live_daemon import (
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
         FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
@@ -34,12 +34,6 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat(monk
         FORECAST_LIVE_JOB_IDS,
         forecast_live_job_specs,
     )
-    from src.config import settings
-
-    cfg = dict(settings._data.get("replacement_forecast_live", {}))
-    cfg["disable_legacy_opendata_forecast_live_jobs"] = False
-    monkeypatch.setitem(settings._data, "replacement_forecast_live", cfg)
-
     specs = forecast_live_job_specs(
         startup_run_date=datetime(2026, 5, 14, 8, 0, tzinfo=timezone.utc)
     )
@@ -113,42 +107,6 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat(monk
             },
         )
     ]
-
-
-def test_forecast_live_replacement_cutover_registers_heartbeat_only(monkeypatch) -> None:
-    from src.ingest.forecast_live_daemon import (
-        FORECAST_LIVE_DISABLE_OPENDATA_ENV,
-        FORECAST_LIVE_HEARTBEAT_JOB_ID,
-        _write_forecast_live_heartbeat,
-        forecast_live_job_specs,
-    )
-
-    monkeypatch.setenv(FORECAST_LIVE_DISABLE_OPENDATA_ENV, "1")
-    specs = forecast_live_job_specs(
-        startup_run_date=datetime(2026, 6, 7, 10, 0, tzinfo=timezone.utc)
-    )
-
-    assert {kwargs["id"] for _, _, kwargs in specs} == {FORECAST_LIVE_HEARTBEAT_JOB_ID}
-
-
-def test_forecast_live_replacement_cutover_heartbeat_payload_names_active_jobs(monkeypatch, tmp_path) -> None:
-    from src.ingest.forecast_live_daemon import (
-        FORECAST_LIVE_DISABLE_OPENDATA_ENV,
-        FORECAST_LIVE_HEARTBEAT_JOB_ID,
-        _write_forecast_live_heartbeat,
-    )
-
-    monkeypatch.setenv(FORECAST_LIVE_DISABLE_OPENDATA_ENV, "1")
-    heartbeat_path = tmp_path / "forecast-live-heartbeat.json"
-
-    _write_forecast_live_heartbeat(
-        heartbeat_path=heartbeat_path,
-        status="replacement_only",
-        now_utc=datetime(2026, 6, 7, 10, 0, tzinfo=timezone.utc),
-    )
-
-    payload = json.loads(heartbeat_path.read_text())
-    assert payload["jobs"] == [FORECAST_LIVE_HEARTBEAT_JOB_ID]
 
 
 def test_forecast_live_heartbeat_payload_uses_registered_scheduler_jobs(monkeypatch, tmp_path) -> None:
