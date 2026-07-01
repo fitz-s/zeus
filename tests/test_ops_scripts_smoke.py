@@ -13,6 +13,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -588,11 +589,74 @@ def test_deploy_live_retries_bootstrap_after_reload_race(monkeypatch, tmp_path):
     assert sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"]) == 2
 
 
+def test_deploy_live_waits_for_loaded_sha_and_freshness_state(monkeypatch, tmp_path):
+    dl = _load("deploy_live_runtime_fresh_wait", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "a" * 40
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    (state / "loaded_sha.json").write_text(
+        json.dumps({"loaded_sha": expected, "generated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+    (state / "deployment_freshness.json").write_text(
+        json.dumps(
+            {
+                "boot_sha": expected,
+                "current_sha": expected,
+                "status": "fresh",
+                "pause_reason": None,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_live_runtime_fresh(
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "loaded_sha" in detail
+
+
+def test_deploy_live_runtime_fresh_wait_rejects_stale_loaded_sha(monkeypatch, tmp_path):
+    dl = _load("deploy_live_runtime_fresh_wait_stale", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "b" * 40
+    launched = datetime.now(timezone.utc)
+    (state / "loaded_sha.json").write_text(
+        json.dumps(
+            {
+                "loaded_sha": expected,
+                "generated_at": (launched - timedelta(minutes=5)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_live_runtime_fresh(
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "did not verify" in detail
+
+
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
 
     def _stop(label):
         calls.append(("stop", label))
@@ -610,10 +674,15 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("launch", label))
         return True, f"bootstrapped {label}"
 
+    def _verify(**kwargs):
+        calls.append(("verify", kwargs["expected_sha"][:8]))
+        return True, "live runtime freshness verified"
+
     monkeypatch.setattr(dl, "_stop_label", _stop)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
+    monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -623,6 +692,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("recovery", (dl.LIVE_TRADING_LABEL,)),
         ("preflight", (dl.LIVE_TRADING_LABEL,)),
         ("launch", dl.LIVE_TRADING_LABEL),
+        ("verify", "cccccccc"),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
 
@@ -632,6 +702,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(
         dl,
         "_stop_label",
@@ -652,6 +723,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         "_launch_or_restart_label",
         lambda label: (calls.append(("launch", label)) or (True, f"bootstrapped {label}")),
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **kwargs: (calls.append(("verify", kwargs["expected_sha"][:8])) or (True, "verified")),
+    )
 
     rc = dl.main(["restart", "all"])
 
@@ -662,6 +738,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     assert recovery_index < preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
+    assert calls.index(("verify", "dddddddd")) > live_launch_index
     non_live_launches = [
         call for call in calls[1:recovery_index]
         if call[0] == "launch"

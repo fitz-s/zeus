@@ -52,6 +52,7 @@ import plistlib
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 LIVE_TRADING_PLIST = (
@@ -118,6 +119,10 @@ LAUNCHD_BOOTSTRAP_ATTEMPTS = 6
 LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 2.0
 LAUNCHD_UNLOAD_WAIT_SECONDS = 8.0
 LAUNCHD_UNLOAD_POLL_SECONDS = 0.5
+LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS", "90")
+)
+LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
@@ -281,6 +286,104 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
         f"FAILED bootstrap {label} after {LAUNCHD_BOOTSTRAP_ATTEMPTS} attempts: "
         f"rc={last_boot.returncode} {last_boot.stderr.strip()}",
     )
+
+
+def _parse_iso_utc(raw: object) -> datetime | None:
+    try:
+        text = str(raw or "").replace("Z", "+00:00")
+        if not text:
+            return None
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _wait_for_live_runtime_fresh(
+    *,
+    expected_sha: str,
+    launched_after: datetime,
+    timeout_seconds: float = LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait until the booted live daemon proves it loaded the expected HEAD.
+
+    launchctl bootstrap returning 0 only proves launchd accepted the plist. The
+    money path needs a process-level proof: src.main writes state/loaded_sha.json
+    at boot, then deployment_freshness clears its mismatch state on the next tick.
+    Without this wait, a restart command can report success while live submit is
+    still blocked by the previous deployment_freshness_mismatch.
+    """
+
+    live_repo = Path(_require_live_repo())
+    loaded_path = live_repo / "state" / "loaded_sha.json"
+    freshness_path = live_repo / "state" / "deployment_freshness.json"
+    expected = str(expected_sha or "").strip()
+    launched_floor = launched_after.astimezone(timezone.utc)
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_detail = "not checked"
+
+    while True:
+        loaded_payload = _load_json(loaded_path)
+        loaded = str(
+            loaded_payload.get("loaded_sha")
+            or loaded_payload.get("boot_sha")
+            or loaded_payload.get("current_sha")
+            or ""
+        ).strip()
+        loaded_at = _parse_iso_utc(loaded_payload.get("generated_at"))
+        loaded_ok = bool(
+            expected
+            and loaded == expected
+            and loaded_at is not None
+            and loaded_at >= launched_floor
+        )
+
+        freshness_payload = _load_json(freshness_path)
+        if freshness_payload:
+            freshness_status = str(freshness_payload.get("status") or "").strip()
+            freshness_pause = freshness_payload.get("pause_reason")
+            freshness_boot = str(freshness_payload.get("boot_sha") or "").strip()
+            freshness_current = str(freshness_payload.get("current_sha") or "").strip()
+            freshness_at = _parse_iso_utc(freshness_payload.get("detected_at"))
+            freshness_ok = (
+                freshness_status == "fresh"
+                and freshness_pause in (None, "")
+                and freshness_boot == expected
+                and freshness_current == expected
+                and freshness_at is not None
+                and freshness_at >= launched_floor
+            )
+        else:
+            # No stale mismatch file exists; loaded_sha is the process-level proof.
+            freshness_status = "absent"
+            freshness_ok = True
+
+        if loaded_ok and freshness_ok:
+            return (
+                True,
+                "live runtime freshness verified: "
+                f"loaded_sha={loaded[:9]} deployment_freshness={freshness_status}",
+            )
+
+        last_detail = (
+            f"loaded_sha={loaded[:9] if loaded else '<missing>'} "
+            f"loaded_at={loaded_at.isoformat() if loaded_at else '<missing>'} "
+            f"expected={expected[:9]} "
+            f"deployment_freshness={freshness_status}"
+        )
+        if time.monotonic() >= deadline:
+            return False, "live runtime freshness did not verify after restart: " + last_detail
+        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
 def _stop_label(label: str) -> tuple[bool, str]:
@@ -492,9 +595,18 @@ def cmd_restart(args: argparse.Namespace) -> int:
     print(preflight_detail)
 
     if includes_live_trading:
+        expected_live_sha = head_sha(short=False)
+        launched_after = datetime.now(timezone.utc)
         ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
+            runtime_ok, runtime_detail = _wait_for_live_runtime_fresh(
+                expected_sha=expected_live_sha,
+                launched_after=launched_after,
+            )
+            print(runtime_detail)
+            if not runtime_ok:
+                rc_all = 1
         else:
             rc_all = 1
             print(detail, file=sys.stderr)
