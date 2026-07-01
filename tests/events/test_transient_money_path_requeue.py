@@ -110,6 +110,10 @@ def test_pre_submit_book_authority_gap_is_transient():
     assert _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_STALE"
     )
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:token_id=tok:book_hash=h:best_bid=0.99"
+    )
     assert not _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE"
     )
@@ -277,6 +281,54 @@ def test_would_cross_book_requeues_not_terminal():
     result = reactor.process_pending(decision_time=_DT, limit=10)
 
     assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_pre_submit_book_authority_gap_queues_family_snapshot_refresh():
+    """A submit-time book-authority race must refresh the family, not retry old price data."""
+
+    conn, store = _store()
+    event = _event("snap-presubmit-book-gap")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
+        "token_id=tok:book_hash=h:best_bid=0.99"
+    )
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            reason=reason,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
     assert _status(conn, event.event_id) == "pending"
 
 

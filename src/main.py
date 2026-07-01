@@ -9332,12 +9332,12 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, 
     observation time — the FOK crosses against exactly this book.
 
     Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
-    book, or ``None`` when the fetch fails or the executable side is empty/crossed
-    (fail-closed — the caller then falls back to a genuinely-fresh DB row or
-    raises). A BUY needs a fresh ask; a SELL needs a fresh bid. The opposite side
-    may be absent on thin weather books and must not make submit-time authority
-    disappear. ``observed_at`` is OUR actual fetch completion instant, not the
-    venue's coarse book timestamp or the cycle-start decision time.
+    book, or ``None`` only when the fetch itself fails (fail-closed fallback to a
+    genuinely-fresh DB row). If the fetch succeeds but proves the selected side is
+    no longer executable, raise a typed PRE_SUBMIT_BOOK_AUTHORITY_JIT_* reason. That
+    distinction matters in live: a successful JIT read is fresher authority than
+    the old DB row and must force a fresh family redecision, not be masked as
+    PRE_SUBMIT_BOOK_AUTHORITY_STALE.
     """
 
     if book_quote_provider is None:
@@ -9352,16 +9352,32 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, 
     book_hash = str(message.get("hash") or "")
     normalized_side = str(side or "").upper()
     if normalized_side == "BUY" and best_ask is None:
-        return None
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:best_bid={best_bid}"
+        )
     if normalized_side == "SELL" and best_bid is None:
-        return None
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SELL_BID_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:best_ask={best_ask}"
+        )
     if normalized_side not in {"BUY", "SELL"} and (best_bid is None or best_ask is None):
-        return None
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SIDE_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:"
+            f"best_bid={best_bid}:best_ask={best_ask}"
+        )
     if not book_hash:
-        return None
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_HASH_MISSING:"
+            f"token_id={token_id}:best_bid={best_bid}:best_ask={best_ask}"
+        )
     if best_bid is not None and best_ask is not None and best_bid >= best_ask:
         # Crossed/locked book is not a usable pre-submit authority.
-        return None
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+            f"token_id={token_id}:best_bid={best_bid}:best_ask={best_ask}"
+        )
     return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
 
 

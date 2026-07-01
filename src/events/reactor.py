@@ -2082,6 +2082,16 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                     )
                 self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                if (
+                    _event_deadline_horizon(
+                        event,
+                        decision_time=decision_time,
+                        transient_reason=receipt.reason,
+                    )
+                    is None
+                    and _is_executable_snapshot_refresh_reason(str(receipt.reason))
+                ):
+                    self._record_substrate_block(event, kind="snapshot")
                 return _EXECUTABLE_SNAPSHOT_RETRY
             return self._reject_or_retry_post_submit(
                 event,
@@ -3312,6 +3322,7 @@ def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
     return (
         "pre_submit_book_authority_missing" in suffix_lower
         or "pre_submit_book_authority_stale" in suffix_lower
+        or "pre_submit_book_authority_jit_" in suffix_lower
     )
 
 
