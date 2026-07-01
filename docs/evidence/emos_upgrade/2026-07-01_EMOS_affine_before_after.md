@@ -4,6 +4,22 @@ Walk-forward (leak-free) on the REAL runtime combined center. BEFORE = served ru
 affine-corrected μ'=a+b·μ (shrunk-to-identity, slope clamped [0.85,1.15]). 19 served cities, N=2069
 settled cells, σ=1.48 (pooled realized). Every served city improves on RMSE, CRPS, and bin log-loss.
 
+## CORRECTION 2026-07-01 — ground-truth completeness fix (supersedes the numbers below)
+The original fit used `settlement_outcomes` as ground truth. That was a DATA BUG (operator-flagged):
+the venue only records TRADED markets — low settlements exist for just 9 cities, AND even for high
+only ~44% of forecast days were settled (4,712 of 9,613 forecast cells). Fixed to use the COMPLETE
+OBSERVED extreme (`observations.high_temp/low_temp`, all 54 cities, both metrics, matches venue
+settlement 100% within 0.6C where a market exists; venue settlement preferred where present).
+On the complete ground truth:
+- **HIGH: 8 production / 11 canary** — Buenos Aires, Guangzhou, Hong Kong, Kuala Lumpur, Moscow,
+  Singapore, Taipei, Toronto. Served-set RMSE 1.705→1.478 (**+13.3%**), pooled OOS ΔMSE +0.723 CI
+  [+0.56,+0.90]. (The earlier "12" leaned on the incomplete traded-day subset; 8 is the robust set.)
+- **LOW: data now present + the low forecast IS biased (HK struct +2.6, Tokyo +1.1), but 0 served** —
+  Zeus materializes a live low center for only 8 venue-low cities, and the previous_runs(ifs025)↔
+  single_runs(ifs9) product gap fails the live-low transfer for all of them (honest: the correction
+  cannot be shown to help the served low center). Recorded, not served.
+The tables below are the pre-correction (settlement-only) numbers, kept for provenance.
+
 ## Pooled
 | metric | BEFORE | AFTER | improvement |
 |---|---|---|---|
