@@ -2138,6 +2138,119 @@ def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
     assert qkernel_fdr.selected_post_fdr == ()
 
 
+def test_day0_selected_route_fdr_is_not_legacy_bh_denominator():
+    """Day0 observation routes must not be rejected by sibling binary BH denominator.
+
+    A same-day observed-fact route is one family decision conditioned on the running
+    extreme. Legacy BH over every sibling YES/NO hypothesis can reject a selected
+    Day0 route even when the selected proof's own false-edge p-value clears the FDR
+    budget.
+    """
+
+    from dataclasses import replace
+
+    from src.events.money_path_adapters import evaluate_fdr_full_family
+
+    row = _row(
+        condition_id="cond-day0",
+        yes_token="yes-day0",
+        no_token="no-day0",
+        yes_ask=0.70,
+        no_ask=0.34,
+        snapshot_id="snap-day0",
+    )
+    selected = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-day0",
+        q_posterior=0.959,
+        q_lcb_5pct=0.952,
+        bin_obj=Bin(low=12.0, high=12.0, unit="C", label="12C"),
+        execution_price=0.70,
+    )
+    selected = replace(
+        selected,
+        p_value=0.02,
+        passed_prefilter=True,
+        trade_score=0.238,
+        qkernel_execution_economics=None,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    family_id = "family-day0-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+    all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
+        f"{family_id}:sibling-{idx}" for idx in range(21)
+    )
+    p_values = {hypothesis_id: 1.0 for hypothesis_id in all_hypothesis_ids}
+    p_values[selected_hypothesis_id] = 0.02
+    prefilter = {hypothesis_id: True for hypothesis_id in all_hypothesis_ids}
+
+    legacy_bh = evaluate_fdr_full_family(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_ids=(selected_hypothesis_id,),
+        hypothesis_p_values=p_values,
+        passed_prefilter=prefilter,
+    )
+    day0_fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert legacy_bh.passed is False
+    assert day0_fdr is not None
+    assert day0_fdr.passed is True
+    assert day0_fdr.selected_post_fdr == (selected_hypothesis_id,)
+
+
+def test_day0_selected_route_fdr_rejects_high_false_edge_rate():
+    """Day0 route-FDR remains fail-closed when selected evidence is weak."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-day0-weak",
+        yes_token="yes-day0-weak",
+        no_token="no-day0-weak",
+        yes_ask=0.70,
+        no_ask=0.34,
+        snapshot_id="snap-day0-weak",
+    )
+    selected = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-day0-weak",
+        q_posterior=0.80,
+        q_lcb_5pct=0.74,
+        bin_obj=Bin(low=12.0, high=12.0, unit="C", label="12C"),
+        execution_price=0.70,
+    )
+    selected = replace(
+        selected,
+        p_value=0.50,
+        passed_prefilter=True,
+        trade_score=0.04,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    family_id = "family-day0-weak"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+
+    day0_fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=(selected_hypothesis_id,),
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert day0_fdr is not None
+    assert day0_fdr.passed is False
+    assert day0_fdr.selected_post_fdr == ()
+
+
 def test_overlay_failure_returns_none_instead_of_original_proof():
     """A qkernel overlay wiring fault must become no-trade, not an unguarded proof."""
     from types import SimpleNamespace

@@ -3691,6 +3691,48 @@ def _qkernel_selected_route_fdr_proof(
     )
 
 
+def _day0_selected_route_fdr_proof(
+    *,
+    event_type: str,
+    family_id: str,
+    all_hypothesis_ids: tuple[str, ...],
+    selected_hypothesis_id: str,
+    selected_proof: "_CandidateProof",
+) -> object | None:
+    """Return a Day0 route-level FDR proof for the selected observation path.
+
+    Day0 absorption is a single settlement-family route conditioned on observed
+    same-day facts, not 22 independent sibling wagers.  Applying legacy BH across
+    every YES/NO sibling denominator can reject a selected route whose own
+    false-edge evidence clears the live FDR budget, exactly the same route-vs-
+    sibling mismatch the qkernel spine already avoids.
+    """
+
+    if str(event_type or "") not in _DAY0_LANE_EVENT_TYPES:
+        return None
+    try:
+        p_value = float(selected_proof.p_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(p_value):
+        return None
+    from src.events.money_path_adapters import FdrProof
+    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+    passed = (
+        bool(getattr(selected_proof, "passed_prefilter", False))
+        and getattr(selected_proof, "missing_reason", None) is None
+        and p_value <= float(DEFAULT_FDR_ALPHA)
+    )
+    return FdrProof(
+        fdr_family_id=family_id,
+        attempted_hypotheses=len(all_hypothesis_ids),
+        selected_hypotheses=(selected_hypothesis_id,),
+        selected_post_fdr=(selected_hypothesis_id,) if passed else tuple(),
+        passed=passed,
+    )
+
+
 def _qkernel_selection_fact_family_id(
     *,
     family_id: str,
@@ -4723,6 +4765,14 @@ def _build_event_bound_no_submit_receipt_core(
             selected_hypothesis_id=hypothesis_id,
             selected_proof=proof,
         )
+        if fdr is None:
+            fdr = _day0_selected_route_fdr_proof(
+                event_type=event.event_type,
+                family_id=family.family_id,
+                all_hypothesis_ids=all_hypothesis_ids,
+                selected_hypothesis_id=hypothesis_id,
+                selected_proof=proof,
+            )
         if fdr is None:
             fdr = evaluate_fdr_full_family(
                 family_id=family.family_id,
