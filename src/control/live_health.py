@@ -17,13 +17,16 @@ import logging
 import os
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat budget
+FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS = STATUS_FRESH_BUDGET_SECONDS
+DAY0_DECISION_TRACE_LOOKBACK_SECONDS = 3600
+DAY0_DECISION_TRACE_SAMPLE_LIMIT = 50
 FORECAST_PIPELINE_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -203,6 +206,18 @@ def _age_seconds(ts_str: str, now: datetime) -> Optional[float]:
         return delta.total_seconds()
     except (ValueError, TypeError):
         return None
+
+
+def _parse_iso_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _int_value(payload: dict, *keys: str) -> int:
@@ -612,6 +627,359 @@ def _venue_heartbeat_surface(state_dir: Path, now: datetime) -> dict:
     }
 
 
+def _sqlite_ro_scalar(path: Path, sql: str) -> tuple[object | None, str | None]:
+    if not path.exists():
+        return None, "DB_MISSING"
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        try:
+            row = conn.execute(sql).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"DB_READ_FAILED:{type(exc).__name__}:{exc}"
+    if row is None:
+        return None, None
+    return row[0], None
+
+
+def _sqlite_ro_rows(
+    path: Path,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> tuple[list[dict], str | None]:
+    if not path.exists():
+        return [], "DB_MISSING"
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return [], f"DB_READ_FAILED:{type(exc).__name__}:{exc}"
+    return [dict(row) for row in rows], None
+
+
+def _forecast_to_event_bridge_surface(
+    state_dir: Path,
+    now: datetime,
+    *,
+    main_daemon_surface: dict,
+) -> dict:
+    """Prove live posterior production is reaching the trading event queue.
+
+    Forecast-live materializes ``forecast_posteriors`` while ``src.main`` emits
+    ``FORECAST_SNAPSHOT_READY`` opportunity events. A heartbeat on either side
+    alone is not business progress. Evaluate this bridge only when the main
+    daemon is currently attested; during an intentional stopped/restart-preflight
+    state, reporting the gap is useful but must not become a false blocker.
+    """
+
+    if not bool(main_daemon_surface.get("attested")):
+        return {
+            "ok": True,
+            "issue": "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED",
+            "evaluated": False,
+        }
+
+    forecast_db = state_dir / "zeus-forecasts.db"
+    world_db = state_dir / "zeus-world.db"
+    latest_posterior, posterior_err = _sqlite_ro_scalar(
+        forecast_db,
+        """
+        SELECT MAX(computed_at)
+          FROM forecast_posteriors
+         WHERE runtime_layer = 'live'
+        """,
+    )
+    if posterior_err:
+        return {
+            "ok": False,
+            "issue": f"LIVE_POSTERIOR_READ_UNAVAILABLE:{posterior_err}",
+            "evaluated": True,
+        }
+    latest_fsr, fsr_err = _sqlite_ro_scalar(
+        world_db,
+        """
+        SELECT MAX(created_at)
+          FROM opportunity_events
+         WHERE event_type = 'FORECAST_SNAPSHOT_READY'
+        """,
+    )
+    if fsr_err:
+        return {
+            "ok": False,
+            "issue": f"FORECAST_EVENT_READ_UNAVAILABLE:{fsr_err}",
+            "evaluated": True,
+        }
+
+    posterior_at = _parse_iso_utc(latest_posterior)
+    fsr_at = _parse_iso_utc(latest_fsr)
+    if posterior_at is None:
+        return {
+            "ok": False,
+            "issue": "LIVE_POSTERIOR_MISSING_OR_UNPARSEABLE",
+            "evaluated": True,
+            "latest_posterior_computed_at": latest_posterior,
+            "latest_fsr_created_at": latest_fsr,
+        }
+
+    posterior_age = max(0.0, (now.astimezone(timezone.utc) - posterior_at).total_seconds())
+    fsr_age = (
+        max(0.0, (now.astimezone(timezone.utc) - fsr_at).total_seconds())
+        if fsr_at is not None
+        else None
+    )
+    lag_seconds = (
+        (posterior_at - fsr_at).total_seconds()
+        if fsr_at is not None
+        else float("inf")
+    )
+    detail = {
+        "evaluated": True,
+        "latest_posterior_computed_at": posterior_at.isoformat(),
+        "latest_fsr_created_at": fsr_at.isoformat() if fsr_at is not None else None,
+        "posterior_age_seconds": posterior_age,
+        "fsr_age_seconds": fsr_age,
+        "posterior_to_fsr_lag_seconds": lag_seconds,
+        "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,
+    }
+    if (
+        lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+        and posterior_age > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+    ):
+        return {
+            "ok": False,
+            "issue": (
+                "FORECAST_TO_EVENT_BRIDGE_STALLED:"
+                f"posterior_newer_by={lag_seconds:.0f}s"
+            ),
+            **detail,
+        }
+    return {"ok": True, "issue": None, **detail}
+
+
+def _day0_decision_trace_surface(
+    state_dir: Path,
+    now: datetime,
+    *,
+    main_daemon_surface: dict,
+) -> dict:
+    """Prove processed Day0 events leave a money-path trace.
+
+    A processed ``DAY0_EXTREME_UPDATED`` row is only useful operationally if the
+    operator can tell which of the mutually exclusive outcomes happened:
+    command emitted, no-submit receipt, terminal no-trade/regret, or compile
+    failure. This is observability only; it does not rank or gate trades.
+    """
+
+    if not bool(main_daemon_surface.get("attested")):
+        return {
+            "ok": True,
+            "issue": "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED",
+            "evaluated": False,
+        }
+
+    world_db = state_dir / "zeus-world.db"
+    trade_db = state_dir / "zeus_trades.db"
+    cutoff = (
+        now.astimezone(timezone.utc)
+        - timedelta(seconds=DAY0_DECISION_TRACE_LOOKBACK_SECONDS)
+    ).isoformat()
+    day0_events, event_err = _sqlite_ro_rows(
+        world_db,
+        """
+        SELECT event_id, entity_key, created_at
+          FROM opportunity_events
+         WHERE event_type = 'DAY0_EXTREME_UPDATED'
+           AND created_at >= ?
+         ORDER BY rowid DESC
+         LIMIT ?
+        """,
+        (cutoff, DAY0_DECISION_TRACE_SAMPLE_LIMIT),
+    )
+    if event_err:
+        return {
+            "ok": False,
+            "issue": f"DAY0_EVENT_READ_UNAVAILABLE:{event_err}",
+            "evaluated": True,
+        }
+    if not day0_events:
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": True,
+            "recent_event_count": 0,
+            "processed_event_count": 0,
+            "missing_trace_count": 0,
+        }
+
+    event_ids = tuple(
+        str(row.get("event_id") or "").strip()
+        for row in day0_events
+        if str(row.get("event_id") or "").strip()
+    )
+    if not event_ids:
+        return {
+            "ok": False,
+            "issue": "DAY0_EVENT_ID_MISSING",
+            "evaluated": True,
+            "recent_event_count": len(day0_events),
+        }
+    placeholders = ",".join("?" for _ in event_ids)
+    processing_rows, processing_err = _sqlite_ro_rows(
+        world_db,
+        f"""
+        SELECT event_id, processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = 'edli_reactor_v1'
+           AND event_id IN ({placeholders})
+        """,
+        event_ids,
+    )
+    if processing_err:
+        return {
+            "ok": False,
+            "issue": f"DAY0_PROCESSING_READ_UNAVAILABLE:{processing_err}",
+            "evaluated": True,
+        }
+    processing_by_event = {
+        str(row.get("event_id") or ""): row for row in processing_rows
+    }
+    processed_event_ids = tuple(
+        event_id
+        for event_id in event_ids
+        if str(processing_by_event.get(event_id, {}).get("processing_status") or "")
+        == "processed"
+    )
+    missing: list[dict[str, object]] = []
+    traced = 0
+    trace_counts = _day0_trace_counts_for_events(
+        world_db=world_db,
+        trade_db=trade_db,
+        event_ids=processed_event_ids,
+    )
+    for event in day0_events:
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id not in processed_event_ids:
+            continue
+        trace_count = trace_counts.get(event_id, 0)
+        if trace_count > 0:
+            traced += 1
+        else:
+            missing.append(
+                {
+                    "event_id": event_id,
+                    "entity_key": event.get("entity_key"),
+                    "created_at": event.get("created_at"),
+                    "processed_at": processing_by_event.get(event_id, {}).get("processed_at"),
+                }
+            )
+
+    detail = {
+        "evaluated": True,
+        "lookback_seconds": DAY0_DECISION_TRACE_LOOKBACK_SECONDS,
+        "recent_event_count": len(day0_events),
+        "processed_event_count": len(processed_event_ids),
+        "traced_processed_event_count": traced,
+        "missing_trace_count": len(missing),
+        "missing_trace_sample": missing[:5],
+    }
+    if missing:
+        return {
+            "ok": False,
+            "issue": f"DAY0_PROCESSED_WITHOUT_DECISION_TRACE:n={len(missing)}",
+            **detail,
+        }
+    return {"ok": True, "issue": None, **detail}
+
+
+def _day0_trace_counts_for_events(
+    *,
+    world_db: Path,
+    trade_db: Path,
+    event_ids: tuple[str, ...],
+) -> dict[str, int]:
+    counts = {event_id: 0 for event_id in event_ids}
+    if not event_ids:
+        return counts
+    _add_day0_trace_counts_from_db(
+        world_db,
+        counts,
+        checks=(
+            ("SELECT 1 FROM decision_compile_failures WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            ("SELECT 1 FROM no_trade_regret_events WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            ("SELECT 1 FROM edli_no_submit_receipts WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            (
+                """
+                SELECT 1
+                  FROM decision_certificates INDEXED BY idx_decision_certificates_semantic
+                 WHERE certificate_type = 'ActionableTradeCertificate'
+                   AND semantic_key >= ?
+                   AND semantic_key < ?
+                 LIMIT 1
+                """,
+                _actionable_semantic_range,
+            ),
+        ),
+    )
+    _add_day0_trace_counts_from_db(
+        trade_db,
+        counts,
+        checks=(
+            ("SELECT 1 FROM venue_commands WHERE decision_id LIKE ? LIMIT 1", lambda event_id: (f"%{event_id}%",)),
+            (
+                """
+                SELECT 1
+                  FROM decision_certificates INDEXED BY idx_decision_certificates_semantic
+                 WHERE certificate_type = 'ActionableTradeCertificate'
+                   AND semantic_key >= ?
+                   AND semantic_key < ?
+                 LIMIT 1
+                """,
+                _actionable_semantic_range,
+            ),
+        ),
+    )
+    return counts
+
+
+def _actionable_semantic_range(event_id: str) -> tuple[str, str]:
+    return (f"actionable:{event_id}:", f"actionable:{event_id};")
+
+
+def _add_day0_trace_counts_from_db(
+    path: Path,
+    counts: dict[str, int],
+    *,
+    checks: tuple[tuple[str, object], ...],
+) -> None:
+    if not path.exists():
+        return
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        for event_id in counts:
+            for sql, params_builder in checks:
+                try:
+                    params = params_builder(event_id)  # type: ignore[operator]
+                    if conn.execute(sql, params).fetchone() is not None:
+                        counts[event_id] += 1
+                except Exception:  # noqa: BLE001
+                    continue
+    finally:
+        conn.close()
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -626,8 +994,10 @@ def compute_composite_live_health(
       4. main_daemon — status/heartbeat PID still points at src.main
       5. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
       6. forecast_pipeline — current replacement/BPF scheduler health
-      7. status_summary — status_summary.json top-level timestamp freshness
-      8. execution_capability — entry/exit side-effect gate
+      7. forecast_event_bridge — live posteriors reaching FSR event emission
+      8. day0_decision_trace — processed Day0 events have decision evidence
+      9. status_summary — status_summary.json top-level timestamp freshness
+      10. execution_capability — entry/exit side-effect gate
 
     Writes state/live_health_composite.json atomically.
 
@@ -765,6 +1135,34 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "forecast_pipeline",
             forecast_surface["issue"],
+        )
+
+    forecast_event_bridge_surface = _forecast_to_event_bridge_surface(
+        sd,
+        now,
+        main_daemon_surface=main_daemon_surface,
+    )
+    surfaces["forecast_event_bridge"] = forecast_event_bridge_surface
+    if not forecast_event_bridge_surface["ok"]:
+        failing.append("forecast_event_bridge")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "forecast_event_bridge",
+            forecast_event_bridge_surface["issue"],
+        )
+
+    day0_trace_surface = _day0_decision_trace_surface(
+        sd,
+        now,
+        main_daemon_surface=main_daemon_surface,
+    )
+    surfaces["day0_decision_trace"] = day0_trace_surface
+    if not day0_trace_surface["ok"]:
+        failing.append("day0_decision_trace")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "day0_decision_trace",
+            day0_trace_surface["issue"],
         )
 
     # Surface 4: status_summary freshness                                 #

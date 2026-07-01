@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +53,103 @@ def _now_iso(offset_seconds: int = 0) -> str:
 
 def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload))
+
+
+def _write_forecast_event_bridge_dbs(
+    sd: Path,
+    *,
+    posterior_computed_at: str,
+    fsr_created_at: str | None,
+) -> None:
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        forecast_conn.execute(
+            "CREATE TABLE forecast_posteriors (computed_at TEXT, runtime_layer TEXT)"
+        )
+        forecast_conn.execute(
+            "INSERT INTO forecast_posteriors (computed_at, runtime_layer) VALUES (?, 'live')",
+            (posterior_computed_at,),
+        )
+        forecast_conn.commit()
+    finally:
+        forecast_conn.close()
+
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events (event_id TEXT, event_type TEXT, entity_key TEXT, created_at TEXT)"
+        )
+        if fsr_created_at is not None:
+            world_conn.execute(
+                "INSERT INTO opportunity_events (event_id, event_type, entity_key, created_at) "
+                "VALUES ('fsr-1', 'FORECAST_SNAPSHOT_READY', 'city|date|high', ?)",
+                (fsr_created_at,),
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+
+def _write_day0_trace_dbs(sd: Path, *, with_regret: bool) -> None:
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events (event_id TEXT, event_type TEXT, entity_key TEXT, created_at TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing (consumer_name TEXT, event_id TEXT, "
+            "processing_status TEXT, processed_at TEXT, last_error TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_compile_failures (event_id TEXT, stage TEXT, reason_code TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE no_trade_regret_events (event_id TEXT, rejection_stage TEXT, rejection_reason TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE edli_no_submit_receipts (event_id TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        world_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_events VALUES "
+            "('day0-1', 'DAY0_EXTREME_UPDATED', 'Madrid|2026-07-01|high|LEMD', ?)",
+            (_now_iso(-60),),
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1', 'day0-1', 'processed', ?, NULL)",
+            (_now_iso(-30),),
+        )
+        if with_regret:
+            world_conn.execute(
+                "INSERT INTO no_trade_regret_events VALUES "
+                "('day0-1', 'TRADE_SCORE', 'EVENT_BOUND_ALL_CANDIDATES_REJECTED')"
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE venue_commands (decision_id TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
 
 
 def _healthy_execution_capability() -> dict:
@@ -238,6 +336,121 @@ def test_legacy_run_mode_failure_ignored_in_edli_live(
 
     assert result["surfaces"]["run_mode"]["ok"] is True
     assert "run_mode" not in result["failing_surfaces"]
+
+
+def test_forecast_event_bridge_not_evaluated_without_attested_main_daemon(
+    tmp_path: Path,
+) -> None:
+    """A stopped main daemon should not turn posterior-vs-FSR lag into a false blocker."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(minutes=20)).isoformat(),
+        fsr_created_at=(now - timedelta(hours=2)).isoformat(),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is True
+    assert bridge["issue"] == "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED"
+    assert "forecast_event_bridge" not in result["failing_surfaces"]
+
+
+def test_forecast_event_bridge_degrades_when_live_posterior_does_not_emit_fsr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When src.main is attested, fresh posterior production must reach FSR emission."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(minutes=20)).isoformat(),
+        fsr_created_at=(now - timedelta(hours=2)).isoformat(),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is False
+    assert "FORECAST_TO_EVENT_BRIDGE_STALLED" in bridge["issue"]
+    assert "forecast_event_bridge" in result["failing_surfaces"]
+
+
+def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write_day0_trace_dbs(sd, with_regret=False)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    trace = result["surfaces"]["day0_decision_trace"]
+    assert trace["ok"] is False
+    assert "DAY0_PROCESSED_WITHOUT_DECISION_TRACE" in trace["issue"]
+    assert trace["missing_trace_count"] == 1
+    assert "day0_decision_trace" in result["failing_surfaces"]
+
+
+def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write_day0_trace_dbs(sd, with_regret=True)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    trace = result["surfaces"]["day0_decision_trace"]
+    assert trace["ok"] is True
+    assert trace["processed_event_count"] == 1
+    assert trace["traced_processed_event_count"] == 1
+    assert "day0_decision_trace" not in result["failing_surfaces"]
 
 
 def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
