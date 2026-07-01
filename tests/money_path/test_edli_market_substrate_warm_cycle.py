@@ -990,6 +990,35 @@ def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypa
     assert condition_ids == ["rest-1", "rest-2"]
 
 
+def test_redecision_priority_defaults_service_live_money_frontier(monkeypatch):
+    monkeypatch.delenv("ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT", raising=False)
+    monkeypatch.delenv(
+        "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
+        raising=False,
+    )
+
+    assert main_module._edli_redecision_priority_condition_limit() == 32
+    assert market_scanner._priority_direct_clob_prefetch_condition_limit() == 32
+
+
+def test_empty_held_reemit_scope_does_not_expand_to_all_held_positions(monkeypatch):
+    """Held full-family refresh is only for reactor-reemittable held families.
+
+    Passing an empty explicit set means there is no shift/fill-up redecision
+    scope this tick.  It must not fall back to every held position, because that
+    turns ordinary monitor ownership into a broad CLOB family refresh and starves
+    entry/redecision price confirmation.
+    """
+
+    monkeypatch.setattr(
+        main_module,
+        "_edli_current_held_position_condition_scope",
+        lambda: (_ for _ in ()).throw(AssertionError("empty explicit scope must not read all held")),
+    )
+
+    assert main_module._edli_current_held_position_family_condition_scope(set()) == {}
+
+
 def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_process_lock():
     """Sidecar ownership is asynchronous; main only marks priority and filters reads."""
 

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07
+# Last reused/audited: 2026-07-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-01
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -416,6 +416,21 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
     try:
         conn.execute(
             """
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-06T12:00:00+00:00',
+                source_available_at = '2026-06-06T12:30:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE source_run_coverage
+            SET computed_at = '2026-06-06T12:35:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE raw_model_forecasts (
                 raw_model_forecast_id INTEGER PRIMARY KEY,
                 model TEXT NOT NULL,
@@ -460,6 +475,63 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
         "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
         in report.reason_codes
     )
+
+
+def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_file(raw_dir / "precision_metadata.json", {"city": "NYC"})
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-06z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T06:00:00+00:00",
+        source_available_at="2026-06-06T08:30:00+00:00",
+        captured_at="2026-06-06T09:00:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-06z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-06T12:00:00+00:00',
+                source_available_at = '2026-06-06T12:30:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE source_run_coverage
+            SET computed_at = '2026-06-06T12:35:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T13:00:00+00:00",
+    )
+
+    assert report.status == "NO_ELIGIBLE_TARGETS"
+    assert report.discovered_count == 0
+    assert report.failed_count == 1
+    assert report.written_seed_files == ()
+    assert "REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING" in report.reason_codes
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:

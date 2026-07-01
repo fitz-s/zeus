@@ -2077,15 +2077,23 @@ def _pre_submit_decision_source_errors(
     """Split source blockers from audit fields unavailable before venue submit."""
 
     errors = context.integrity_errors()
+    audit_only_errors = set(_PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS)
+    if context.is_day0_observation_context():
+        audit_only_errors.difference_update(
+            {
+                "missing_observation_time",
+                "missing_observation_available_at",
+            }
+        )
     blockers = tuple(
         error
         for error in errors
-        if error not in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+        if error not in audit_only_errors
     )
     deferred = tuple(
         error
         for error in errors
-        if error in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+        if error in audit_only_errors
     )
     return blockers, deferred
 
@@ -6453,6 +6461,23 @@ def _live_order(
                             "tx_hash": fill_tx_hash,
                             **final_envelope_payload,
                         },
+                    )
+                from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+                try:
+                    ensure_live_entry_projection_for_command(
+                        conn,
+                        command_id=command_id,
+                        client=client,
+                    )
+                except Exception as projection_exc:
+                    logger.error(
+                        "_live_order: immediate matched entry projection skipped "
+                        "(command_id=%s order_id=%s fill_event_type=%s): %s",
+                        command_id,
+                        order_id,
+                        fill_event_type,
+                        projection_exc,
                     )
             if not fill_event_type:
                 from src.execution.command_recovery import ensure_live_entry_projection_for_command

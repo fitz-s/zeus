@@ -634,6 +634,7 @@ def discover_replacement_forecast_materialization_seeds(
                 "target_date": row.target_date,
                 "temperature_metric": row.temperature_metric,
                 "baseline_source_run_id": row.baseline_source_run_id,
+                "baseline_source_cycle_time": row.baseline_source_cycle_time,
                 "day0_observed_extreme_required": row.day0_observed_extreme_required,
             }
             # SEED-BUDGET STARVATION KILL (2026-06-11): two coupled defects froze the
@@ -688,6 +689,7 @@ def discover_replacement_forecast_materialization_seeds(
             city = str(target["city"])
             target_date = str(target["target_date"])
             metric = str(target["temperature_metric"])
+            baseline_source_cycle_time = str(target.get("baseline_source_cycle_time") or "").strip()
             target_key = f"{city}|{target_date}|{metric}"
             day0_seed_payload: dict[str, object] = {}
             if bool(target.get("day0_observed_extreme_required")):
@@ -717,6 +719,11 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 city_timezone=_city_tz,
+                cycle_admissible=(
+                    (lambda manifest, cycle=baseline_source_cycle_time: manifest.source_cycle_time.astimezone(UTC).isoformat() == cycle)
+                    if baseline_source_cycle_time
+                    else None
+                ),
             )
             if openmeteo is None:
                 failed.append(target_key)

@@ -527,14 +527,18 @@ def _day0_observed_extreme_c(request: ReplacementForecastMaterializeRequest) -> 
     return number
 
 
-def _is_day0_target_window(request: ReplacementForecastMaterializeRequest, *, computed_at: datetime | None = None) -> bool:
+def _target_local_day_has_started(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    computed_at: datetime | None = None,
+) -> bool:
     computed = computed_at or _to_utc(request.computed_at, field_name="computed_at")
     target_date_value = date.fromisoformat(_date_text(request.target_date))
     target_window = compute_target_local_day_window_utc(
         city_timezone=request.city_timezone,
         target_local_date=target_date_value,
     )
-    return target_window.start_utc <= computed < target_window.end_utc
+    return computed >= target_window.start_utc
 
 
 def _local_hour_slot(value: datetime, *, city_timezone: str) -> datetime:
@@ -574,7 +578,7 @@ def _om9_localday_hourly_coverage_ok(
     anchor = request.openmeteo_anchor
     if anchor.sample_count == expected_sample_count:
         return True
-    if not _is_day0_target_window(request, computed_at=computed_at):
+    if not _target_local_day_has_started(request, computed_at=computed_at):
         return False
     if _day0_observed_extreme_c(request) is None:
         return False
@@ -638,7 +642,7 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         computed_at=computed_at,
     ):
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
-    if _is_day0_target_window(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
+    if _target_local_day_has_started(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
@@ -2779,7 +2783,7 @@ def _compute_posterior_payload(
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
             _day0_obs_extreme_c = (
-                _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+                _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
             )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
@@ -3138,7 +3142,7 @@ def _compute_posterior_payload(
         "settlement_step_c": float(request.settlement_step_c),
     }
     _posterior_day0_observed_extreme_c = (
-        _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+        _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
     )
     if _posterior_day0_observed_extreme_c is not None:
         posterior_config.update(

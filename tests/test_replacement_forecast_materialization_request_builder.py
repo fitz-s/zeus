@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-01
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
 # Purpose: Protect validated request generation for replacement live materialization.
 # Reuse: Run before changing queue input contract or live simple-switch request production.
@@ -136,6 +136,31 @@ def test_request_builder_blocks_incomplete_om9_localday_coverage(tmp_path) -> No
     assert result.ok is False
     assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE",)
     assert result.request is None
+
+
+def test_request_builder_allows_post_localday_day0_observation_to_cover_elapsed_hours(tmp_path) -> None:
+    seed = _write_inputs(tmp_path)
+    seed.update(
+        {
+            "computed_at": "2026-06-07T17:00:00+00:00",
+            "expires_at": "2026-06-08T00:00:00+00:00",
+            "day0_observed_extreme_c": 32.0,
+            "day0_observed_extreme_source": "durable_observation_instants",
+            "day0_observed_extreme_observation_time": "2026-06-07T15:00:00+00:00",
+            "day0_observed_extreme_sample_count": 24,
+            "day0_observed_extreme_unit": "C",
+        }
+    )
+    (tmp_path / "openmeteo_payload.json").write_text(
+        json.dumps(_openmeteo_payload(hours=range(14, 24))),
+        encoding="utf-8",
+    )
+
+    result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    assert result.ok is True
+    assert result.request is not None
+    assert result.request["day0_observed_extreme_c"] == 32.0
 
 
 def test_request_builder_preserves_display_settlement_units_and_rounding_rule(tmp_path) -> None:

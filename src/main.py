@@ -5872,7 +5872,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
-        held_condition_scope = _edli_current_held_position_family_condition_scope(held_families)
         family_keys = _edli_entry_redecision_family_keys(
             raw_entry_family_keys,
             held_families,
@@ -5882,6 +5881,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         held_reemit_families = _edli_reemittable_held_position_family_keys(
             held_families,
             decision_time=now,
+        )
+        held_condition_scope = _edli_current_held_position_family_condition_scope(
+            held_reemit_families
         )
         all_families = set(family_keys) | rest_pull_families | held_reemit_families
         confirmed_entry_scope = set(family_keys) | entry_refresh_families
@@ -6934,7 +6936,11 @@ def _edli_current_held_position_family_condition_scope(
     so the confirmation producer must refresh the complete executable family.
     """
 
-    held_families = set(families or set()) or set(_edli_current_held_position_condition_scope())
+    held_families = (
+        set(_edli_current_held_position_condition_scope())
+        if families is None
+        else set(families)
+    )
     clean_families = {
         (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
         for city, target_date, metric in held_families
@@ -7115,12 +7121,12 @@ def _edli_refresh_continuous_money_path_families(
 def _edli_redecision_priority_condition_limit() -> int:
     raw = os.environ.get(
         "ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT",
-        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "8"),
+        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "32"),
     )
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = 8
+        value = 32
     return max(1, min(500, value))
 
 

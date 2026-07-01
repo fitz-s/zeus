@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-30
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-01
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-01
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -336,14 +336,21 @@ def _make_entry_intent(
         min_entry_price=0.10,
         min_expected_profit_usd=1.0,
         min_submit_edge_density=0.05,
+        selection_authority_applied="qkernel_spine",
         actionable_certificate_hash=actionable_certificate_hash,
         qkernel_execution_economics={
             "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:bin-test@proof",
+            "route_type": "direct",
+            "candidate_id": "YES:bin-test:DIRECT_YES:bin-test@proof",
+            "bin_id": "bin-test",
             "side": "YES",
             "payoff_q_point": 0.99,
             "payoff_q_lcb": 0.95,
             "cost": limit_price,
             "edge_lcb": 0.95 - limit_price,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
@@ -2017,7 +2024,12 @@ class TestLiveOrderCommandSplit:
             assert len(command_ids_seen) == 1
 
     def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn, monkeypatch):
-        """A matched FOK submit response is a fill boundary, not a resting ACK."""
+        """A matched FOK submit response is a fill boundary, not a resting ACK.
+
+        The fill must also become visible to position/redecision immediately;
+        the periodic recovery loop is only a crash backstop, not the first
+        consumer of a known matched submit.
+        """
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command, list_events
@@ -2051,11 +2063,22 @@ class TestLiveOrderCommandSplit:
             command_ids_seen.append(kwargs["command_id"])
             return _real_insert(*args, **kwargs)
 
+        projection_calls: list[str] = []
+
+        def _project_now(_conn, *, command_id: str, client=None):
+            projection_calls.append(command_id)
+            assert client is mock_inst
+            return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
         with patch(
             "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
         ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
+            monkeypatch.setattr(
+                "src.execution.command_recovery.ensure_live_entry_projection_for_command",
+                _project_now,
+            )
             mock_inst.v2_preflight.return_value = None
             bound = _capture_bound_submission_envelope(mock_inst)
             mock_inst.place_limit_order.side_effect = (
@@ -2093,6 +2116,7 @@ class TestLiveOrderCommandSplit:
         assert result.shares == pytest.approx(5.0)
         assert len(command_ids_seen) == 1
         command_id = command_ids_seen[0]
+        assert projection_calls == [command_id]
         cmd = get_command(mem_conn, command_id)
         assert cmd is not None
         assert cmd["state"] == "FILLED"

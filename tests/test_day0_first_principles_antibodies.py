@@ -803,6 +803,41 @@ class TestDay0TransitionMonotonicity:
         assert decision.should_exit is True
         assert decision.trigger == "CI_SEPARATED_REVERSAL"
 
+    def test_day0_zero_probability_with_sell_value_exits_even_inside_ci_noise_floor(self):
+        """Kuala Lumpur 34C regression: Day0 remaining-window q=0 plus a
+        real executable bid is an economic exit, not a panic sale. The CI noise
+        floor may protect light negative edge, but it must not hold a zero-value
+        claim when direct sell value dominates hold value."""
+        pos = _make_position(
+            direction="buy_yes",
+            entry_price=0.031,
+            p_posterior=0.121802485107885,
+            entry_ci_width=0.0,
+            shares=10.01029,
+            cost_basis_usd=0.3103,
+            size_usd=0.3103,
+        )
+        decision = pos.evaluate_exit(
+            ExitContext(
+                fresh_prob=0.0,
+                fresh_prob_is_fresh=True,
+                current_market_price=0.011,
+                current_market_price_is_fresh=True,
+                best_bid=0.011,
+                best_ask=0.03,
+                hours_to_settlement=18.0,
+                position_state="day0_window",
+                day0_active=True,
+                entry_posterior=0.121802485107885,
+                entry_ci=(0.121802485107885, 0.121802485107885),
+                current_ci=(0.0, 0.0),
+                belief_available=True,
+            )
+        )
+        assert decision.should_exit is True
+        assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+        assert "day0_zero_probability_sell_value_dominates" in decision.applied_validations
+
     def test_no_single_cycle_day0_reversal_sell_producer_in_source(self):
         """Static antibody: portfolio.py must not reconstruct the pre-2026-06-07
         single-cycle DAY0_OBSERVATION_REVERSAL sell. The bare trigger may only

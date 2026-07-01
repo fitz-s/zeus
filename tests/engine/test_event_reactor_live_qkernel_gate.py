@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-01
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -16,9 +16,13 @@ from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
     _fdr_rejection_reason,
+    _final_intent_decision_source_context_payload,
     _pre_submit_revalidation_payload_from_final_intent,
     _record_qkernel_selection_family_facts,
 )
+from src.contracts.execution_intent import DecisionSourceContext
+from src.decision_kernel import claims
+from src.decision_kernel.certificate import build_certificate
 
 
 def _qkernel_cert() -> dict:
@@ -629,3 +633,89 @@ def test_live_entry_gate_rejects_unknown_event_type_even_with_qkernel_cert():
                 "qkernel_execution_economics": _qkernel_cert(),
             }
         )
+
+
+def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
+    decision_time = datetime(2026, 7, 1, 21, tzinfo=timezone.utc)
+    forecast = build_certificate(
+        certificate_type=claims.FORECAST_AUTHORITY,
+        semantic_key="forecast:day0-base",
+        claim_type=claims.FORECAST_AUTHORITY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={
+            "source_id": "replacement_raw_second_moment",
+            "forecast_source_id": "replacement_raw_second_moment",
+            "model_family": "replacement_raw_second_moment",
+            "forecast_issue_time": "2026-07-01T06:00:00+00:00",
+            "forecast_fetch_time": "2026-07-01T06:20:00+00:00",
+            "forecast_available_at": "2026-07-01T06:20:00+00:00",
+            "raw_payload_hash": "b" * 64,
+            "degradation_level": "OK",
+            "forecast_source_role": "day0_base_distribution",
+            "authority_tier": "FORECAST",
+            "decision_time": decision_time.isoformat(),
+            "decision_time_status": "OK",
+            "polymarket_end_anchor_source": "gamma_explicit",
+            "zeus_submit_intent_time": "2026-07-01T21:00:01+00:00",
+            "venue_ack_time": "2026-07-01T21:00:02+00:00",
+        },
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+    day0 = build_certificate(
+        certificate_type=claims.DAY0_AUTHORITY,
+        semantic_key="day0:obs",
+        claim_type=claims.DAY0_AUTHORITY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={
+            "city": "Chicago",
+            "target_date": "2026-07-01",
+            "metric": "high",
+            "station_id": "KORD",
+            "observation_time": "2026-07-01T20:51:00+00:00",
+            "observation_available_at": "2026-07-01T20:55:56+00:00",
+        },
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+    absorbing = build_certificate(
+        certificate_type=claims.ABSORBING_BOUNDARY,
+        semantic_key="day0:absorbing",
+        claim_type=claims.ABSORBING_BOUNDARY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={"boundary": "day0_absorbing_hard_fact"},
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+
+    payload = _final_intent_decision_source_context_payload(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        forecast_authority=forecast,
+        day0_source_certs=(day0, absorbing),
+    )
+    ctx = DecisionSourceContext.from_forecast_context(payload)
+
+    assert payload["forecast_source_role"] == "day0_live_observation"
+    assert payload["authority_tier"] == "OBSERVATION"
+    assert payload["raw_payload_hash"] != forecast.payload["raw_payload_hash"]
+    assert payload["day0_authority_certificate_hash"] == day0.certificate_hash
+    assert ctx is not None
+    assert ctx.integrity_errors() == ()

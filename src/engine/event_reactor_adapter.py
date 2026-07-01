@@ -7595,7 +7595,11 @@ def _build_live_execution_command_certificates(
             quote_feasibility_cert=quote_feasibility,
             cost_model_cert=cost_model,
             forecast_authority_cert=forecast_authority,
-            decision_source_context=forecast_authority.payload,
+            decision_source_context=_final_intent_decision_source_context_payload(
+                event=event,
+                forecast_authority=forecast_authority,
+                day0_source_certs=day0_source_certs,
+            ),
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
@@ -9654,6 +9658,86 @@ def _day0_live_source_parent_certificates(
     return (day0_authority, absorbing_boundary)
 
 
+def _final_intent_decision_source_context_payload(
+    *,
+    event: OpportunityEvent,
+    forecast_authority: DecisionCertificate,
+    day0_source_certs: tuple[DecisionCertificate, ...],
+) -> dict[str, object]:
+    """Return the live source context the executor must verify at submit.
+
+    Forecast events use the forecast authority directly. Day0 events are not a
+    separate order type; they are the same qkernel submit path fed by a different
+    source of probability evidence: a live observation hard fact absorbing the
+    latest base forecast distribution. The executor context must therefore bind
+    both certificates instead of pretending the Day0 belief is an entry-primary
+    forecast or dropping the observation from the submit proof.
+    """
+
+    forecast_payload = dict(forecast_authority.payload)
+    if event.event_type != "DAY0_EXTREME_UPDATED":
+        return forecast_payload
+
+    day0_authority = next(
+        (cert for cert in day0_source_certs if cert.certificate_type == claims.DAY0_AUTHORITY),
+        None,
+    )
+    absorbing_boundary = next(
+        (cert for cert in day0_source_certs if cert.certificate_type == claims.ABSORBING_BOUNDARY),
+        None,
+    )
+    if day0_authority is None or absorbing_boundary is None:
+        raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_PARENTS")
+    observation_time = _nonnull(day0_authority.payload.get("observation_time"))
+    observation_available_at = _nonnull(day0_authority.payload.get("observation_available_at"))
+    if not observation_time or not observation_available_at:
+        raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK")
+
+    base_source_id = _nonnull(
+        forecast_payload.get("forecast_source_id") or forecast_payload.get("source_id")
+    )
+    base_model = _nonnull(forecast_payload.get("model_family") or forecast_payload.get("model"))
+    source_id = (
+        "day0_live_observation:"
+        f"{_nonnull(day0_authority.payload.get('city'))}:"
+        f"{_nonnull(day0_authority.payload.get('target_date'))}:"
+        f"{_nonnull(day0_authority.payload.get('metric'))}:"
+        f"{_nonnull(day0_authority.payload.get('station_id')) or 'station'}"
+    )
+    raw_payload_hash = stable_hash(
+        {
+            "source": "day0_live_observation_over_base_forecast",
+            "forecast_authority_certificate_hash": forecast_authority.certificate_hash,
+            "day0_authority_certificate_hash": day0_authority.certificate_hash,
+            "absorbing_boundary_certificate_hash": absorbing_boundary.certificate_hash,
+            "base_raw_payload_hash": forecast_payload.get("raw_payload_hash"),
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+        }
+    )
+    combined = {
+        **forecast_payload,
+        "source_id": source_id,
+        "forecast_source_id": base_source_id,
+        "model": f"day0_observed_probability:{base_model or 'base_forecast'}",
+        "model_family": f"day0_observed_probability:{base_model or 'base_forecast'}",
+        "raw_payload_hash": raw_payload_hash,
+        "degradation_level": "OK",
+        "forecast_source_role": "day0_live_observation",
+        "authority_tier": "OBSERVATION",
+        "observation_time": observation_time,
+        "observation_available_at": observation_available_at,
+        "provider_reported_time": day0_authority.payload.get("provider_reported_time"),
+        "decision_source_basis": "day0_live_observation_over_base_forecast",
+        "base_forecast_source_id": base_source_id,
+        "base_forecast_model_family": base_model,
+        "forecast_authority_certificate_hash": forecast_authority.certificate_hash,
+        "day0_authority_certificate_hash": day0_authority.certificate_hash,
+        "absorbing_boundary_certificate_hash": absorbing_boundary.certificate_hash,
+    }
+    return combined
+
+
 _NO_SUBMIT_PROOF_EVIDENCE_FIELDS: tuple[str, ...] = (
     "source_truth",
     "market_topology",
@@ -10933,9 +11017,9 @@ def _day0_forecast_authority_payload_and_clock(
         "forecast_valid_time": snapshot.get("valid_time"),
         "forecast_fetch_time": snapshot.get("fetch_time") or source_run.get("fetch_finished_at"),
         "forecast_available_at": snapshot.get("available_at") or source_run.get("source_available_at"),
-        "degradation_level": None,
+        "degradation_level": "OK",
         "forecast_source_role": "day0_base_distribution",
-        "authority_tier": snapshot.get("authority") or "VERIFIED",
+        "authority_tier": "FORECAST",
         "decision_time": decision_time.astimezone(UTC).isoformat(),
         "decision_time_status": "OK",
         "first_member_observed_time": snapshot.get("first_member_observed_time"),
@@ -10950,7 +11034,16 @@ def _day0_forecast_authority_payload_and_clock(
         "producer_readiness_id": None,
         "entry_readiness_id": None,
         "input_snapshot_ids": tuple(str(item) for item in _json_list(coverage.get("snapshot_ids_json"))),
-        "raw_payload_hash": source_run.get("raw_payload_hash"),
+        "raw_payload_hash": source_run.get("raw_payload_hash")
+        or stable_hash(
+            {
+                "source": "day0_latest_forecast_snapshot_seed",
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "source_run_id": source_run.get("source_run_id") or snapshot.get("source_run_id"),
+                "members_json_hash": _snapshot_members_json_hash(snapshot),
+                "available_at": snapshot.get("available_at") or source_run.get("source_available_at"),
+            }
+        ),
         "manifest_hash": source_run.get("manifest_hash") or snapshot.get("manifest_hash"),
         "required_steps": required_steps,
         "observed_steps": observed_steps,

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-20
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-06-20
+# Last reused/audited: 2026-07-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-07-01
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -708,6 +708,39 @@ def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
     result = materialize_replacement_forecast_live(conn, partial_request)
 
     assert result.ok is True
+    assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
+
+
+def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        computed_at=datetime(2026, 6, 7, 17, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        day0_observed_extreme_c=32.0,
+        day0_observed_extreme_source="durable_observation_instants",
+        day0_observed_extreme_observation_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC).isoformat(),
+        day0_observed_extreme_sample_count=24,
+    )
+    partial_anchor = replace(
+        _anchor_with_local_hours(hours=range(14, 24)),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+    )
+    partial_request = replace(request, openmeteo_anchor=partial_anchor)
+
+    result = materialize_replacement_forecast_live(conn, partial_request)
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 32.0
+    assert provenance["day0_conditioning"]["sample_count"] == 24
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
 
 
