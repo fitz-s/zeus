@@ -3189,6 +3189,15 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=_strategy_floor_abort,
                     proof_accepted=False,
                 )
+            _price_moved_abort = _submit_price_moved_abort_reason(exc)
+            if _price_moved_abort is not None:
+                return dataclass_replace(
+                    no_submit_receipt,
+                    submitted=False,
+                    side_effect_status="NO_SUBMIT",
+                    reason=_price_moved_abort,
+                    proof_accepted=False,
+                )
             return dataclass_replace(
                 no_submit_receipt,
                 submitted=False,
@@ -4192,7 +4201,7 @@ def _build_event_bound_no_submit_receipt_core(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
-                reason="EXECUTABLE_SNAPSHOT_BLOCKED:DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+                reason="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
                 city=family.city,
                 target_date=family.target_date,
                 metric=family.metric,
@@ -6346,6 +6355,7 @@ def _normalize_event_bound_executor_submit_result(
 # source of truth for the reason string is _SUBMIT_ABORT_RECEIPT_REASON keyed on
 # CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED.
 _MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
+_PRICE_MOVED_ABORT_PREFIX = "SUBMIT_ABORTED_PRICE_MOVED"
 
 
 class _SubmitAbortedModeFlipped(ValueError):
@@ -6362,6 +6372,30 @@ class _SubmitAbortedModeFlipped(ValueError):
     submit boundary; the caller maps it to the first-class SUBMIT_ABORTED_MODE_FLIPPED
     receipt by matching :data:`_MODE_FLIPPED_ABORT_PREFIX`.
     """
+
+
+_TAKER_TOUCH_RESERVATION_RACE_PREFIXES = (
+    "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION",
+    "TAKER_SELL_TOUCH_BELOW_RESERVATION",
+)
+
+
+def _submit_price_moved_abort_reason(exc: BaseException) -> str | None:
+    """Map final taker touch/reservation races to the first-class price-moved abort.
+
+    The fresh JIT book can make the selected taker leg no longer executable at its
+    admitted reservation before any venue POST occurs. That is the same transient
+    stale-decision-vs-fresh-book family as submit recapture PRICE_MOVED, not a
+    structural certificate-build failure.
+    """
+
+    message = str(exc)
+    if any(
+        message.startswith(prefix) or f":{prefix}" in message
+        for prefix in _TAKER_TOUCH_RESERVATION_RACE_PREFIXES
+    ):
+        return f"{_PRICE_MOVED_ABORT_PREFIX}:{message}"
+    return None
 
 
 _PRESUBMIT_STRATEGY_FLOOR_ABORT_REASONS: tuple[tuple[str, str], ...] = (

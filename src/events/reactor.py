@@ -773,6 +773,7 @@ class ReactorResult:
     # pulse (a transient-requeue cycle with snapshot_refreshes==0 would be the regression).
     snapshot_refreshes: int = 0
     cycle_advance_enqueues: int = 0
+    day0_hourly_refreshes: int = 0
     # DRAIN BUDGET (#83, 2026-06-16): how many families the end-of-cycle substrate-refresh
     # drain did NOT reach this cycle because the per-cycle drain wall-clock budget
     # (ZEUS_REACTOR_DRAIN_BUDGET_SECONDS) was spent. Visibility only — those families stay in
@@ -801,6 +802,7 @@ class OpportunityEventReactor:
         decision_provenance_hook: Any | None = None,
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
         cycle_advance_enqueuer: "Callable[..., bool] | None" = None,
+        day0_hourly_refresher: "Callable[..., bool] | None" = None,
         held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
         family_market_absence_provider: "Callable[..., bool] | None" = None,
     ) -> None:
@@ -825,6 +827,11 @@ class OpportunityEventReactor:
         # re-materialization lane scoped to ONE family) for a posterior-staleness block. Same
         # discipline: no network/heavy work in txn, debounced, fail-soft. Absent => no-op.
         self._cycle_advance_enqueuer = cycle_advance_enqueuer
+        # Day0 remaining-day q depends on persisted high-resolution hourly vectors,
+        # not executable CLOB snapshots. Missing vectors use this separate
+        # substrate refresher so weather-carrier faults do not refresh the wrong
+        # upstream surface.
+        self._day0_hourly_refresher = day0_hourly_refresher
         # ORDERING (operator correction 2026-06-12): refresh fan-out is NOT liquidity-ordered —
         # opportunity is uncorrelated with liquidity (small markets can carry denser sophisticated
         # competition; liquidity's only role stays in sizing/fill). The ONLY ordering bias is
@@ -844,6 +851,7 @@ class OpportunityEventReactor:
         # window is DERIVED from the snapshot freshness window (half of it), never a magic number.
         self._family_refresh_last_at: dict[str, float] = {}
         self._family_cycle_advance_last_at: dict[str, float] = {}
+        self._family_day0_hourly_last_at: dict[str, float] = {}
         # FAIR-CURSOR fan-out (Wave1B precedent): blocked families discovered this cycle queue here
         # in encounter order; the cursor rotates which family is refreshed FIRST across cycles so no
         # single family monopolizes the per-cycle refresh fan-out and ALL blocked families are
@@ -867,6 +875,9 @@ class OpportunityEventReactor:
         # restart the label degrades to the generic snapshot reason, never lies
         # about a cause it does not know.
         self._transient_requeue_reasons: dict[str, str] = {}
+        self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
+        self._pending_cycle_advances: list[tuple[str, str, str]] = []
+        self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
         # Per-event requeue counter — LOG HYGIENE ONLY (operator law 2026-06-12:
         # a retry count is not a market fact and MUST NOT terminalize). Used
         # solely to dedupe the requeue log line (log at attempt 1, then every
@@ -892,6 +903,7 @@ class OpportunityEventReactor:
         # un-blocks stops being refreshed.
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
+        self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
@@ -1438,15 +1450,23 @@ class OpportunityEventReactor:
         """ALWAYS-DECIDABLE invariant (2026-06-12): record that THIS event was blocked on a
         REFRESHABLE substrate this cycle so the post-unit-of-work drain refreshes that substrate.
 
-        ``kind`` is ``"snapshot"`` (executable-snapshot block -> family_snapshot_refresher) or
-        ``"posterior"`` (stale/absent replacement posterior -> single-family cycle-advance reseed).
-        De-duplicated per family per cycle (a family blocked by many bins refreshes ONCE). The
-        intents are drained AFTER the event's unit-of-work closes (no network in any open txn).
+        ``kind`` is ``"snapshot"`` (executable-snapshot block -> family_snapshot_refresher),
+        ``"posterior"`` (stale/absent replacement posterior -> single-family cycle-advance reseed),
+        or ``"day0_hourly"`` (Day0 remaining-day hourly-vector substrate). De-duplicated per family
+        per cycle (a family blocked by many bins refreshes ONCE). The intents are drained AFTER the
+        event's unit-of-work closes (no network in any open txn).
         """
         family = self._family_identity(event)
         if family is None:
             return
-        bucket = self._pending_snapshot_refreshes if kind == "snapshot" else self._pending_cycle_advances
+        if kind == "snapshot":
+            bucket = self._pending_snapshot_refreshes
+        elif kind == "posterior":
+            bucket = self._pending_cycle_advances
+        elif kind == "day0_hourly":
+            bucket = self._pending_day0_hourly_refreshes
+        else:
+            return
         if family not in bucket:
             bucket.append(family)
 
@@ -1474,7 +1494,11 @@ class OpportunityEventReactor:
         """
         sidecar_owns_broad = _substrate_sidecar_owns_broad_refresh()
         if sidecar_owns_broad:
-            blocked = len(self._pending_snapshot_refreshes) + len(self._pending_cycle_advances)
+            blocked = (
+                len(self._pending_snapshot_refreshes)
+                + len(self._pending_cycle_advances)
+                + len(self._pending_day0_hourly_refreshes)
+            )
             if blocked:
                 import logging as _logging
 
@@ -1503,6 +1527,16 @@ class OpportunityEventReactor:
             last_at=self._family_refresh_last_at,
             counter_attr="snapshot_refreshes",
             label="snapshot",
+            result=result,
+            held=held,
+            deadline=drain_deadline,
+        )
+        self._drain_one_bucket(
+            self._pending_day0_hourly_refreshes,
+            refresher=self._day0_hourly_refresher,
+            last_at=self._family_day0_hourly_last_at,
+            counter_attr="day0_hourly_refreshes",
+            label="day0-hourly",
             result=result,
             held=held,
             deadline=drain_deadline,
@@ -1721,7 +1755,7 @@ class OpportunityEventReactor:
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
                     "EXECUTABLE_SNAPSHOT_STALE",
-                }:
+                } or _is_day0_hourly_refresh_reason(last_reason):
                     try:
                         snapshot_block_attempts = self._store.attempt_count(event.event_id)
                     except Exception:
@@ -2280,9 +2314,11 @@ class OpportunityEventReactor:
                     transient_reason=reason,
                 )
                 is None
-                and _is_executable_snapshot_refresh_reason(reason)
             ):
-                self._record_substrate_block(event, kind="snapshot")
+                if _is_day0_hourly_refresh_reason(reason):
+                    self._record_substrate_block(event, kind="day0_hourly")
+                elif _is_executable_snapshot_refresh_reason(reason):
+                    self._record_substrate_block(event, kind="snapshot")
             # Transient: the forecast source was re-ingested after this cycle's
             # decision moment, or the selected executable price expired between
             # the pre-submit family identity gate and the adapter's JIT scoring.
@@ -3051,6 +3087,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Executable family snapshot not captured yet / went stale this cycle.
     "EXECUTABLE_SNAPSHOT_BLOCKED",
     "EXECUTABLE_SNAPSHOT_STALE",
+    # Day0 remaining-day q needs persisted high-resolution hourly weather
+    # vectors. Missing vectors are a refreshable weather-substrate fault, not a
+    # no-edge conclusion and not a CLOB executable-snapshot fault.
+    "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
     # Taker race: JIT recapture found all-in cost above max + bounded tolerance
     # (Miami 16:22:35Z — EV at the NEW price still strongly positive).
     "SUBMIT_ABORTED_PRICE_MOVED",
@@ -3260,6 +3300,7 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
     return (
         "would_cross_book" in suffix_lower
         or _certificate_build_failed_is_book_authority_gap(reason)
+        or _certificate_build_failed_is_taker_reservation_race(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
         or "database is busy" in suffix_lower
@@ -3274,10 +3315,27 @@ def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
     )
 
 
+def _certificate_build_failed_is_taker_reservation_race(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return (
+        "taker_buy_touch_exceeds_reservation" in suffix_lower
+        or "taker_sell_touch_below_reservation" in suffix_lower
+    )
+
+
+def _is_day0_hourly_refresh_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    return "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE" in segments
+
+
 def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
     """True when a transient money-path reason is cured by fresh book/substrate capture."""
 
     if not reason:
+        return False
+    if _is_day0_hourly_refresh_reason(reason):
         return False
     segments = [seg.strip() for seg in str(reason).split(":")]
     if any(
@@ -3298,6 +3356,7 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
         return (
             "would_cross_book" in suffix_lower
             or _certificate_build_failed_is_book_authority_gap(str(reason))
+            or _certificate_build_failed_is_taker_reservation_race(str(reason))
         )
     return False
 

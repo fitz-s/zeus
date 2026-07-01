@@ -4659,6 +4659,7 @@ def _edli_event_reactor_cycle() -> None:
         # requeue forever while broad warming rotates past them.
         _reactor_family_snapshot_refresher = _decision_family_snapshot_refresher
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
+        _reactor_day0_hourly_refresher = _edli_reactor_day0_hourly_refresher()
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
@@ -4745,6 +4746,7 @@ def _edli_event_reactor_cycle() -> None:
             # impossible for refreshable substrate classes.
             family_snapshot_refresher=_reactor_family_snapshot_refresher,
             cycle_advance_enqueuer=_reactor_cycle_advance_enqueuer,
+            day0_hourly_refresher=_reactor_day0_hourly_refresher,
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
             held_family_provider=_edli_reactor_held_family_provider(),
@@ -9072,6 +9074,66 @@ def _edli_reactor_family_snapshot_refresher():
             family[0], family[1], family[2],
         )
         return False
+
+    return _refresh
+
+
+def _edli_reactor_day0_hourly_refresher():
+    """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
+
+    def _refresh(*, city, target_date, metric, **_ignored):
+        family = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            return False
+        try:
+            from src.config import runtime_cities_by_name
+            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+            city_obj = runtime_cities_by_name().get(family[0])
+            if city_obj is None:
+                logger.warning(
+                    "reactor day0-hourly refresh skipped: city config missing for %s/%s/%s",
+                    family[0],
+                    family[1],
+                    family[2],
+                )
+                return False
+            stats = maybe_refresh_day0_hourly_vectors(
+                [city_obj],
+                decision_time=datetime.now(timezone.utc),
+                interval_s=0.0,
+                budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
+                max_cities=1,
+                timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+                persist_lock_blocking=False,
+                return_stats=True,
+            )
+            vectors_written = int(getattr(stats, "vectors_written", stats) or 0)
+            cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+            logger.info(
+                "reactor day0-hourly refresh attempted for %s/%s/%s: vectors_written=%d "
+                "cities_attempted=%d incomplete_expected_bundles=%d",
+                family[0],
+                family[1],
+                family[2],
+                vectors_written,
+                cities_attempted,
+                int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+            )
+            return vectors_written > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reactor day0-hourly refresh failed for %s/%s/%s (fail-soft): %r",
+                family[0],
+                family[1],
+                family[2],
+                exc,
+            )
+            return False
 
     return _refresh
 

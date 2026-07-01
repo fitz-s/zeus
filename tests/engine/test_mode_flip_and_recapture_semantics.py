@@ -45,6 +45,26 @@ def test_presubmit_strategy_floor_errors_map_to_submit_abort_reasons():
     ) is None
 
 
+def test_taker_reservation_races_map_to_price_moved_abort_reason():
+    from src.engine.event_reactor_adapter import _submit_price_moved_abort_reason
+
+    assert _submit_price_moved_abort_reason(
+        ValueError("TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43")
+    ) == (
+        "SUBMIT_ABORTED_PRICE_MOVED:"
+        "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43"
+    )
+    assert _submit_price_moved_abort_reason(
+        ValueError("TAKER_SELL_TOUCH_BELOW_RESERVATION:best_bid=0.51:reservation=0.55")
+    ) == (
+        "SUBMIT_ABORTED_PRICE_MOVED:"
+        "TAKER_SELL_TOUCH_BELOW_RESERVATION:best_bid=0.51:reservation=0.55"
+    )
+    assert _submit_price_moved_abort_reason(
+        ValueError("LIVE_AUTHORITY_GRAPH_REJECTED")
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # P0-A: _selected_candidate_mode_fields_from_receipt
 # ---------------------------------------------------------------------------

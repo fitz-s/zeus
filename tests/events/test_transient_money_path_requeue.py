@@ -49,6 +49,10 @@ _PRICE_MOVED_REASON = (
 _WOULD_CROSS_REASON = (
     "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PreSubmitRevalidated requires would_cross_book=false"
 )
+_TAKER_RESERVATION_CERT_REASON = (
+    "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+    "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43"
+)
 _OTHER_CERT_REASON = "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SOME_OTHER_ASSERTION_FAILED"
 
 
@@ -84,6 +88,11 @@ def test_would_cross_book_certificate_failure_is_transient():
     assert _is_transient_money_path_reason(_WOULD_CROSS_REASON)
 
 
+def test_taker_reservation_certificate_failure_is_transient():
+    assert _is_transient_money_path_reason(_TAKER_RESERVATION_CERT_REASON)
+    assert _is_executable_snapshot_refresh_reason(_TAKER_RESERVATION_CERT_REASON)
+
+
 def test_other_certificate_failures_stay_terminal():
     assert not _is_transient_money_path_reason(_OTHER_CERT_REASON)
 
@@ -108,6 +117,18 @@ def test_pre_submit_book_authority_gap_is_transient():
 
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
+
+
+def test_day0_remaining_day_members_unavailable_is_hourly_refresh_not_snapshot():
+    from src.events.reactor import _is_executable_snapshot_refresh_reason
+
+    reason = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+    old_wrapped_reason = "EXECUTABLE_SNAPSHOT_BLOCKED:DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+
+    assert _is_transient_money_path_reason(reason)
+    assert not _is_executable_snapshot_refresh_reason(reason)
+    assert _is_transient_money_path_reason(old_wrapped_reason)
+    assert not _is_executable_snapshot_refresh_reason(old_wrapped_reason)
 
 
 def test_snapshot_block_retry_floor_backs_off_without_attempt_cap(monkeypatch):
@@ -456,6 +477,56 @@ def test_mode_flipped_no_submit_queues_family_snapshot_refresh():
     assert result.retried == 1
     assert result.snapshot_refreshes == 1
     assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_remaining_day_no_submit_queues_hourly_refresh_not_snapshot():
+    conn, store = _store()
+    event = _event("snap-day0-hourly")
+    store.insert_or_ignore(event)
+    snapshot_refreshed: list[tuple[str, str, str]] = []
+    hourly_refreshed: list[tuple[str, str, str]] = []
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        )
+
+    def _snapshot_refresh(*, city, target_date, metric):
+        snapshot_refreshed.append((city, target_date, metric))
+        return True
+
+    def _hourly_refresh(*, city, target_date, metric):
+        hourly_refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_snapshot_refresh,
+        day0_hourly_refresher=_hourly_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 0
+    assert result.day0_hourly_refreshes == 1
+    assert snapshot_refreshed == []
+    assert hourly_refreshed == [("Chicago", "2026-06-05", "high")]
     assert _status(conn, event.event_id) == "pending"
 
 
