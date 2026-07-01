@@ -175,16 +175,21 @@ Each of the 7 `position_current` writers audited for removal path + difficulty (
 | # | Writer | What it writes / liveness | Removal path | Difficulty |
 |---|--------|---------------------------|--------------|------------|
 | 1 | `state/projection.py` `upsert_position_current` | **the sole sanctioned materializer** (full-row upsert + F109/condition_id guards) | — TARGET (keep) | — |
-| 2 | `state/ledger.py` | main write routes through the projector (`:622`); **only bypass** = `backfill_fill_authority` (`:546`), an F3 helper called *only by its test*. **RESOLVED 2026-06-30: NOT dead** — live `position_current` has **558 NULL `fill_authority` rows** (vs 149 `venue_confirmed_full`); F3 (findings_2026_05_28 §F3) wrote+tested the deterministic 4-way classifier but it was **never boot-wired**, so legacy rows stay NULL | **fold the 4-way derivation INTO the projector** so every materialization sets `fill_authority` from facts → the 558 NULL rows resolve AND no separate writer remains (NOT delete, NOT wire-as-a-2nd-writer) | MEDIUM (projector hot-path change; needs a `fill_authority` replay-diff gate alongside INV-PROJ-1) |
+| 2 | `state/ledger.py` | main write routes through the projector (`:622`); only bypass = `backfill_fill_authority` (`:546`), a CORRECT + tested but **unwired** F3 helper (called only by its test — no live caller, so **not a live drift source**). Its `legacy_unknown` output is **intentional, not stale** — the harvester (`harvester.py:733`) distinguishes it from NULL-`unmigrated` (`:724`) per F3's design (findings_2026_05_28 §F3). | LOW priority — unwired ⇒ no drift. A purely-lexical INV-OWNER-1 removal would route the single-column `fill_authority` patch through a projector-owned setter; not worth it now. | LOW |
 | 3 | `state/position_duplicate_consolidator.py` | F109 duplicate-open-row merge (`:186,:370`) — a row-merge, not a materialization | emit a consolidation **event** the projector folds | MEDIUM |
 | 4 | `events/edli_position_bridge.py` | 1493 lines — fill aggregation + duplicate-fill absorption + chain/size-authority preservation (2 UPDATE sites) | append the fill **fact/event**, projector materializes (the bridge docstring names this as its own long-term fix) | HIGH |
 | 5 | `execution/command_recovery.py` | **co-tenant-hot**; broadest surface (54 w / 319 r across 5 axes) | split into fact-specific reducers; emit facts/review events | HIGH + co-tenant coord |
 | 6 | `execution/exchange_reconcile.py` | **co-tenant-hot**; reconcile repairs | emit `ReconcileFinding`s, not projection patches | MEDIUM + co-tenant coord |
 | 7 | `src/main.py` | **co-tenant-hot** | route through ledger/projector | MEDIUM + co-tenant coord |
 
-**Order:** #2 (ledger — fold fill_authority into projector) → #3 (consolidation event) → #4 (bridge fill event)
-→ #5–7 last (co-tenant coordination required). No cut is byte-trivial — each is a real refactor the INV-PROJ-1
-gate de-risks; cut #2 additionally needs a `fill_authority` replay-diff (the phase gate does not cover it).
-**Separately flagged (data gap):** 558 live rows carry NULL `fill_authority` because the F3 classifier was never
-wired — a latent completeness gap in the FillAuthority provenance facet (affects training-eligibility / recovery
-authority). Repairing it is a live-DB mutation (operator-scoped), tracked out-of-band, not part of this atlas edit.
+**Order:** #3 (consolidation event) → #4 (bridge fill event) → #5–7 last (co-tenant coordination). #2 (ledger)
+is unwired ⇒ deprioritized. No cut is byte-trivial — each is a real refactor the INV-PROJ-1 gate de-risks.
+
+**558-NULL `fill_authority` — investigated 2026-06-30 and CLOSED (not a gap).** Correcting an earlier
+over-statement: all 558 rows are **terminal** (531 voided / 18 settled / 6 admin_closed / 3 economically_closed).
+A read-only dry-run of the backfill classifies them 542→`legacy_unknown` (harvester blocks, unchanged from
+NULL) + 16→`venue_confirmed_full` (all voided/admin_closed, **zero settled**) — so running it changes **zero
+training-eligibility** (no settled+filled position is unblocked; the 18 settled rows have no linked fills). The
+projector already sets `fill_authority` on live positions (the 149 `venue_confirmed_full`), so there is **no
+durable gap**. **Decision: no live-DB mutation, no projector change** — classifying dead terminal rows for
+cosmetic completeness is not warranted (no-over-engineering). The F3 helper stays correct-but-unwired.
