@@ -52,6 +52,31 @@ def _settle_c(v, u):
     return (v - 32.0) * 5.0 / 9.0 if str(u).strip().lower() in ("f", "degf", "fahrenheit") else v
 
 
+_OBS_COL = {"high": "high_temp", "low": "low_temp"}
+
+
+def _observed_ground_truth(conn, metric):
+    """(city, target_date) -> observed daily extreme in degC from `observations` (high_temp/low_temp).
+
+    THE ground truth for EMOS. `settlement_outcomes` only records VENUE-traded markets — the venue
+    has low markets for just 9 cities, so joining low against it silently drops 45 cities (that was
+    the bug). `observations` carries BOTH extremes for ALL 54 cities and matches the venue settlement
+    exactly where a market exists (obs vs settle: median |Δ|=0.000, 100% within 0.6C, both metrics).
+    Deduped preferring wu_icao_history (the wunderground source the venue settles from)."""
+    col = _OBS_COL[metric]
+    best = {}  # (city, td) -> (value_c, is_wu)
+    for r in conn.execute(
+        f"SELECT city, target_date, {col} AS v, unit, source FROM observations WHERE {col} IS NOT NULL"
+    ):
+        if r[2] is None:
+            continue
+        k = (r[0], r[1])
+        is_wu = 1 if r[4] == "wu_icao_history" else 0
+        if k not in best or is_wu > best[k][1]:
+            best[k] = (_settle_c(r[2], r[3]), is_wu)
+    return {k: val for k, (val, _) in best.items()}
+
+
 def _replay_runtime_center(conn, metric, lead):
     """city -> [(date, center_c, settle_c)] via the frozen scheme over previous_runs (parity-exact)."""
     cities = list(runtime_cities_by_name().keys())
@@ -67,12 +92,7 @@ def _replay_runtime_center(conn, metric, lead):
     vals_by = defaultdict(dict)
     for (city, td, model), (v, _) in best.items():
         vals_by[(city, td)][model] = v
-    settle = {}
-    for r in conn.execute(
-        "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
-        "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
-    ):
-        settle[(r[0], r[1])] = _settle_c(r[2], r[3])
+    settle = _observed_ground_truth(conn, metric)  # observed extreme, ALL cities + both metrics
     recs = defaultdict(list)
     for (city, td), vals in vals_by.items():
         if city not in scheme:
@@ -106,12 +126,7 @@ def _live_served_pairs(conn, metric):
             except Exception:
                 av = None
             latest[k] = (r[2], av)
-    settle = {}
-    for r in conn.execute(
-        "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
-        "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
-    ):
-        settle[(r[0], r[1])] = _settle_c(r[2], r[3])
+    settle = _observed_ground_truth(conn, metric)  # observed extreme, ALL cities + both metrics
     out = defaultdict(list)
     for (city, td), (ca, av) in latest.items():
         if av is None:

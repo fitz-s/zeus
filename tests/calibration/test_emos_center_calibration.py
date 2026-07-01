@@ -3,8 +3,11 @@
 # Authority basis: EMOS/NGR affine center calibration (consult REQ-20260701-010328).
 # Tests the pure affine estimator (shrink-to-identity + slope clamp) and the fail-soft lookup.
 import json
+import sqlite3
 
 import pytest
+
+from scripts import fit_emos_center_calibration as fit_script
 
 from src.calibration.emos_center_calibration import (
     DEFAULT_KAPPA,
@@ -126,3 +129,56 @@ def test_clamp_boundary_slope_round_trips(tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
     a, b = lookup_affine("Taipei", "high")
     assert b == pytest.approx(SLOPE_MAX) and a == pytest.approx(-3.12)
+
+
+# ---- fitter ground truth --------------------------------------------------------------------
+def test_fitter_ground_truth_uses_observations_for_both_metrics():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT, target_date TEXT, high_temp REAL, low_temp REAL, unit TEXT, source TEXT
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO observations (city, target_date, high_temp, low_temp, unit, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("Paris", "2026-06-20", 77.0, 59.0, "F", "other_source"),
+            ("Paris", "2026-06-20", 25.0, 15.0, "C", "wu_icao_history"),
+            ("Seoul", "2026-06-20", 29.0, 21.0, "C", "wu_icao_history"),
+        ],
+    )
+
+    high = fit_script._observed_ground_truth(conn, "high")
+    low = fit_script._observed_ground_truth(conn, "low")
+
+    assert high[("Paris", "2026-06-20")] == pytest.approx(25.0)
+    assert low[("Paris", "2026-06-20")] == pytest.approx(15.0)
+    assert high[("Seoul", "2026-06-20")] == pytest.approx(29.0)
+    assert low[("Seoul", "2026-06-20")] == pytest.approx(21.0)
+
+
+def test_fitter_ground_truth_does_not_require_settlement_outcomes_table():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT, target_date TEXT, high_temp REAL, low_temp REAL, unit TEXT, source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO observations (city, target_date, high_temp, low_temp, unit, source)
+        VALUES ('Tokyo', '2026-06-20', 86.0, 70.0, 'F', 'wu_icao_history')
+        """
+    )
+
+    assert fit_script._observed_ground_truth(conn, "high")[("Tokyo", "2026-06-20")] == pytest.approx(30.0)
+    assert fit_script._observed_ground_truth(conn, "low")[("Tokyo", "2026-06-20")] == pytest.approx(
+        21.1111111111
+    )
