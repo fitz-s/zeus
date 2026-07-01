@@ -17,6 +17,7 @@ from src.engine.event_reactor_adapter import (
     _assert_live_entry_submit_authority,
     _fdr_rejection_reason,
     _pre_submit_revalidation_payload_from_final_intent,
+    _record_day0_selection_family_facts,
     _record_qkernel_selection_family_facts,
 )
 
@@ -178,6 +179,14 @@ def _fake_event() -> SimpleNamespace:
     )
 
 
+def _fake_day0_event() -> SimpleNamespace:
+    return SimpleNamespace(
+        event_id="event-day0-selection",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="snapshot-day0-selection",
+    )
+
+
 def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_path):
     from src.state.db import init_schema
 
@@ -207,6 +216,107 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
     assert conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM world.selection_family_fact").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM world.selection_hypothesis_fact").fetchone()[0] == 1
+    conn.close()
+
+
+def test_day0_legacy_selection_facts_write_to_attached_world_not_trade_local(tmp_path):
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    world.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    selected = SimpleNamespace(
+        candidate_id="day0-candidate-selected",
+        condition_id="condition-1",
+        token_id="token-yes",
+        direction="buy_yes",
+        bin_label="30C",
+        execution_price=0.38,
+        q_posterior=1.0,
+        q_lcb_5pct=0.96,
+        c_cost_95pct=0.38,
+        p_fill_lcb=0.90,
+        trade_score=0.58,
+        p_value=0.04,
+        passed_prefilter=True,
+        native_quote_available=True,
+        missing_reason=None,
+        support_index=0,
+        bin_id="bin-30c",
+    )
+    rejected = SimpleNamespace(
+        candidate_id="day0-candidate-rejected",
+        condition_id="condition-2",
+        token_id="token-no",
+        direction="buy_no",
+        bin_label="31C",
+        execution_price=0.72,
+        q_posterior=0.05,
+        q_lcb_5pct=0.02,
+        c_cost_95pct=0.72,
+        p_fill_lcb=0.90,
+        trade_score=0.0,
+        p_value=1.0,
+        passed_prefilter=False,
+        native_quote_available=True,
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+        support_index=1,
+        bin_id="bin-31c",
+    )
+    book = SimpleNamespace(
+        book_id="opportunity-book-day0",
+        book_version=1,
+        evaluations=(selected, rejected),
+        selected_candidate_id=selected.candidate_id,
+        cache_summary={
+            "selection_authority": "robust_marginal_utility",
+            "actual_receipt_selected_candidate_id": selected.candidate_id,
+        },
+    )
+
+    result = _record_day0_selection_family_facts(
+        conn,
+        family=_fake_family(),
+        opportunity_book=book,
+        event=_fake_day0_event(),
+        decision_time=datetime(2026, 7, 1, 9, tzinfo=timezone.utc),
+        decision_snapshot_id="snapshot-day0-selection",
+    )
+
+    assert result["status"] == "written"
+    assert result["families"] == 1
+    assert result["hypotheses"] == 2
+    assert conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
+    family_row = conn.execute(
+        "SELECT strategy_key, discovery_mode, meta_json FROM world.selection_family_fact"
+    ).fetchone()
+    assert family_row["strategy_key"] == "settlement_capture"
+    assert family_row["discovery_mode"] == "DAY0_EXTREME_UPDATED"
+    family_meta = json.loads(family_row["meta_json"])
+    assert family_meta["source"] == "event_bound_legacy_selector"
+    assert family_meta["selected_post_fdr"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM world.selection_hypothesis_fact WHERE selected_post_fdr=1"
+    ).fetchone()[0] == 1
+    rejected_row = conn.execute(
+        """
+        SELECT rejection_stage, meta_json
+        FROM world.selection_hypothesis_fact
+        WHERE selected_post_fdr=0
+        """
+    ).fetchone()
+    assert rejected_row["rejection_stage"] == "EVENT_BOUND_GATE_REJECTED"
+    assert json.loads(rejected_row["meta_json"])["missing_reason"] == (
+        "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV"
+    )
     conn.close()
 
 
@@ -330,6 +440,58 @@ def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_authorita
             "qkernel_execution_economics": cert,
         }
     )
+
+
+def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_floor():
+    cert = _qkernel_cert()
+    cert.update(
+        route_id="DIRECT_YES:b34@proof",
+        candidate_id="YES:b34:DIRECT_YES:b34@proof",
+        bin_id="b34",
+        payoff_q_point=0.12180248510788458,
+        payoff_q_lcb=0.06052567908958011,
+        cost=0.04001526925923045,
+        edge_lcb=0.020510409830349664,
+        delta_u_at_min=0.00009152233738979263,
+        optimal_stake_usd=1.4412832709285736,
+        optimal_delta_u=0.0006333828915951036,
+        selection_guard_q_safe=0.06052567908958011,
+    )
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "center_buy",
+                "candidate_bin_id": "b34",
+                "q_live": 0.12180248510788458,
+                "q_lcb_5pct": 0.06052567908958011,
+                "min_entry_price": 0.02,
+                "qkernel_execution_economics": cert,
+            }
+        )
+
+
+def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
+    cert = _qkernel_cert()
+    cert.update(delta_u_at_min=-0.01)
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "center_buy",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.70,
+                "q_lcb_5pct": 0.60,
+                "min_entry_price": 0.10,
+                "qkernel_execution_economics": cert,
+            }
+        )
 
 
 def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():

@@ -273,6 +273,69 @@ def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
     return floor
 
 
+def roi_frontier_growth_density(
+    *,
+    cost: float,
+    edge_lcb: float,
+    payoff_q_lcb: float,
+) -> float:
+    roi = edge_lcb / cost if cost > 0.0 else float("-inf")
+    if not (
+        np.isfinite(roi)
+        and np.isfinite(cost)
+        and np.isfinite(payoff_q_lcb)
+        and 0.0 < cost < 1.0
+        and payoff_q_lcb > cost
+    ):
+        return float("-inf")
+    return float(roi * ((payoff_q_lcb - cost) / (1.0 - cost)))
+
+
+def roi_frontier_profit_lcb_usd(
+    *,
+    stake: float,
+    cost: float,
+    edge_lcb: float,
+) -> float:
+    roi = edge_lcb / cost if cost > 0.0 else float("-inf")
+    if not (np.isfinite(stake) and stake > 0.0 and np.isfinite(roi)):
+        return float("-inf")
+    return float(stake * roi)
+
+
+def roi_frontier_useful_values(
+    *,
+    side: str | None,
+    cost: float,
+    payoff_q_lcb: float,
+    edge_lcb: float,
+    stake: float,
+    delta_u_at_min: float,
+) -> bool:
+    min_payoff_q_lcb = roi_frontier_min_payoff_q_lcb(side=side, cost=cost)
+    return bool(
+        np.isfinite(stake)
+        and stake > 0.0
+        and np.isfinite(delta_u_at_min)
+        and delta_u_at_min > 0.0
+        and np.isfinite(payoff_q_lcb)
+        and payoff_q_lcb >= min_payoff_q_lcb
+        and roi_frontier_profit_lcb_usd(
+            stake=stake,
+            cost=cost,
+            edge_lcb=edge_lcb,
+        )
+        >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
+        and np.isfinite(
+            roi_frontier_growth_density(
+                cost=cost,
+                edge_lcb=edge_lcb,
+                payoff_q_lcb=payoff_q_lcb,
+            )
+        )
+    )
+
+
 class FamilyDecisionError(ValueError):
     """Raised when a decision cannot be assembled coherently (a routing/wiring fault).
 
@@ -1183,10 +1246,11 @@ class FamilyDecisionEngine:
             stake = float(d.economics.optimal_stake_usd)
         except Exception:  # noqa: BLE001
             return float("-inf")
-        roi = self._edge_roi_lcb(d)
-        if not (np.isfinite(stake) and stake > 0.0 and np.isfinite(roi)):
-            return float("-inf")
-        return stake * roi
+        return roi_frontier_profit_lcb_usd(
+            stake=stake,
+            cost=self._selection_cost(d),
+            edge_lcb=self._selection_edge_lcb(d),
+        )
 
     def _roi_frontier_useful(self, d: CandidateDecision) -> bool:
         try:
@@ -1197,21 +1261,14 @@ class FamilyDecisionEngine:
             delta_u_at_min = 0.0
         q_lcb = self._payoff_q_lcb(d)
         cost = self._selection_cost(d)
-        min_payoff_q_lcb = roi_frontier_min_payoff_q_lcb(
+        return roi_frontier_useful_values(
             side=getattr(d.route, "side", None),
             cost=cost,
+            payoff_q_lcb=q_lcb,
+            edge_lcb=self._selection_edge_lcb(d),
+            stake=stake,
+            delta_u_at_min=delta_u_at_min,
         )
-        growth_density = self._robust_kelly_growth_density(d)
-        base_useful = (
-            np.isfinite(stake)
-            and stake > 0.0
-            and np.isfinite(delta_u_at_min)
-            and delta_u_at_min > 0.0
-            and np.isfinite(q_lcb)
-            and q_lcb >= min_payoff_q_lcb
-            and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
-        )
-        return bool(base_useful and np.isfinite(growth_density))
 
     def _payoff_q_lcb(self, d: CandidateDecision) -> float:
         try:
@@ -1235,18 +1292,11 @@ class FamilyDecisionEngine:
         their belief is genuinely strong, while refusing to let tiny
         low-confidence tails beat a high-confidence lower-ROI leg.
         """
-        roi = self._edge_roi_lcb(d)
-        cost = self._selection_cost(d)
-        q_lcb = self._payoff_q_lcb(d)
-        if not (
-            np.isfinite(roi)
-            and np.isfinite(cost)
-            and np.isfinite(q_lcb)
-            and 0.0 < cost < 1.0
-            and q_lcb > cost
-        ):
-            return float("-inf")
-        return roi * ((q_lcb - cost) / (1.0 - cost))
+        return roi_frontier_growth_density(
+            cost=self._selection_cost(d),
+            edge_lcb=self._selection_edge_lcb(d),
+            payoff_q_lcb=self._payoff_q_lcb(d),
+        )
 
     def _roi_frontier_key(self, d: CandidateDecision) -> tuple[float, float, float, float, float, float]:
         return (

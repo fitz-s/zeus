@@ -2067,6 +2067,7 @@ def _valid_qkernel_execution_economics_payload(
         payoff_q_lcb = float(cert.get("payoff_q_lcb"))
         cost = float(cert.get("cost"))
         edge_lcb = float(cert.get("edge_lcb"))
+        delta_u_at_min = float(cert.get("delta_u_at_min"))
         optimal_delta_u = float(cert.get("optimal_delta_u"))
     except (TypeError, ValueError):
         return None
@@ -2092,7 +2093,12 @@ def _valid_qkernel_execution_economics_payload(
             return None
     if not (0.0 < cost < 1.0):
         return None
-    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0 or optimal_stake <= 0.0:
+    if (
+        edge_lcb <= 0.0
+        or delta_u_at_min <= 0.0
+        or optimal_delta_u <= 0.0
+        or optimal_stake <= 0.0
+    ):
         return None
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         return None
@@ -2121,6 +2127,15 @@ def _valid_qkernel_execution_economics_payload(
     except (TypeError, ValueError):
         return None
     if not (math.isfinite(selection_guard_q_safe) and selection_guard_q_safe > 0.0):
+        return None
+    if not _qkernel_roi_frontier_useful_cert(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake,
+        delta_u_at_min=delta_u_at_min,
+    ):
         return None
     return cert
 
@@ -4072,6 +4087,200 @@ def _record_qkernel_selection_family_facts(
     }
 
 
+def _legacy_selection_fact_family_id(
+    *,
+    event_id: str,
+    family_id: str,
+    book_id: str,
+) -> str:
+    return "event_bound_selection:" + stable_hash(
+        {
+            "event_id": event_id,
+            "family_id": family_id,
+            "book_id": book_id,
+        }
+    )[:32]
+
+
+def _legacy_selection_hypothesis_id(
+    *,
+    fact_family_id: str,
+    candidate_id: str,
+) -> str:
+    return "event_bound_hypothesis:" + stable_hash(
+        {
+            "fact_family_id": fact_family_id,
+            "candidate_id": candidate_id,
+        }
+    )[:32]
+
+
+def _record_day0_selection_family_facts(
+    conn: sqlite3.Connection | None,
+    *,
+    family: EventBoundCandidateFamily,
+    opportunity_book: OpportunityBook | None,
+    event: OpportunityEvent,
+    decision_time: datetime,
+    decision_snapshot_id: str | None,
+) -> dict[str, Any]:
+    """Persist Day0's observation-aware selector facts to the canonical world DB.
+
+    Day0 uses the observed-extreme masking selector rather than the forecast
+    qkernel spine. That is correct probability semantics, but it must not make
+    the live lane opaque: every processed DAY0_EXTREME_UPDATED event needs a
+    structural family/hypothesis record explaining the selected leg or no-trade
+    reason. This writer records evidence only; it does not re-rank or gate.
+    """
+
+    if conn is None:
+        return {"status": "skipped_no_connection", "families": 0, "hypotheses": 0}
+    if opportunity_book is None:
+        return {"status": "skipped_no_opportunity_book", "families": 0, "hypotheses": 0}
+    evaluations = tuple(getattr(opportunity_book, "evaluations", ()) or ())
+    if not evaluations:
+        return {"status": "skipped_no_hypotheses", "families": 0, "hypotheses": 0}
+
+    from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
+
+    selected_candidate_id = str(getattr(opportunity_book, "selected_candidate_id", "") or "")
+    fact_family_id = _legacy_selection_fact_family_id(
+        event_id=str(event.event_id or ""),
+        family_id=str(getattr(family, "family_id", "") or ""),
+        book_id=str(getattr(opportunity_book, "book_id", "") or ""),
+    )
+    recorded_at = decision_time.astimezone(UTC).isoformat()
+    selected_count = sum(1 for ev in evaluations if ev.candidate_id == selected_candidate_id)
+    passed_prefilter_count = sum(1 for ev in evaluations if bool(ev.passed_prefilter))
+    admitted_count = sum(
+        1
+        for ev in evaluations
+        if ev.execution_price is not None
+        and bool(ev.passed_prefilter)
+        and not str(ev.missing_reason or "").strip()
+    )
+    family_meta = {
+        "source": "event_bound_legacy_selector",
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "book_id": opportunity_book.book_id,
+        "book_version": opportunity_book.book_version,
+        "event_bound_family_id": str(getattr(family, "family_id", "") or ""),
+        "tested_hypotheses": len(evaluations),
+        "passed_prefilter": passed_prefilter_count,
+        "admitted_count": admitted_count,
+        "selected_post_fdr": selected_count,
+        "selected_candidate_id": selected_candidate_id,
+        "selection_authority": str(
+            opportunity_book.cache_summary.get("selection_authority")
+            or "robust_marginal_utility"
+        ),
+        "actual_receipt_selected_candidate_id": str(
+            opportunity_book.cache_summary.get("actual_receipt_selected_candidate_id") or ""
+        ),
+    }
+    family_result = log_selection_family_fact(
+        conn,
+        family_id=fact_family_id,
+        cycle_mode="event_bound_legacy_selector",
+        created_at=recorded_at,
+        meta=family_meta,
+        decision_snapshot_id=decision_snapshot_id,
+        city=family.city,
+        target_date=family.target_date,
+        strategy_key="settlement_capture",
+        discovery_mode=event.event_type,
+        decision_time_status="live",
+        require_attached_world=True,
+    )
+    if family_result.get("status") != "written":
+        return {
+            "status": str(family_result.get("status") or "family_write_failed"),
+            "families": 0,
+            "hypotheses": 0,
+        }
+
+    hypothesis_writes = 0
+    first_failure: str | None = None
+    for ev in evaluations:
+        candidate_id = str(ev.candidate_id or "")
+        selected = bool(candidate_id and candidate_id == selected_candidate_id)
+        if selected:
+            rejection_stage = None
+            rejection_detail = None
+        elif str(ev.missing_reason or "").strip():
+            rejection_stage = "EVENT_BOUND_GATE_REJECTED"
+            rejection_detail = str(ev.missing_reason or "").strip()
+        elif ev.execution_price is None:
+            rejection_stage = "NATIVE_QUOTE_MISSING"
+            rejection_detail = "execution_price_missing"
+        elif not bool(ev.passed_prefilter):
+            rejection_stage = "PREFILTER_REJECTED"
+            rejection_detail = "passed_prefilter_false"
+        else:
+            rejection_stage = "EVENT_BOUND_NOT_SELECTED"
+            rejection_detail = "not_live_rank_winner"
+        result = log_selection_hypothesis_fact(
+            conn,
+            hypothesis_id=_legacy_selection_hypothesis_id(
+                fact_family_id=fact_family_id,
+                candidate_id=candidate_id,
+            ),
+            family_id=fact_family_id,
+            city=family.city,
+            target_date=family.target_date,
+            range_label=str(ev.bin_label or ""),
+            direction=str(ev.direction or "unknown"),
+            recorded_at=recorded_at,
+            meta={
+                "source": "event_bound_legacy_selector",
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "book_id": opportunity_book.book_id,
+                "candidate_id": candidate_id,
+                "condition_id": ev.condition_id,
+                "token_id": ev.token_id,
+                "native_quote_available": bool(ev.native_quote_available),
+                "missing_reason": ev.missing_reason,
+                "rejection_detail": rejection_detail,
+                "execution_price": ev.execution_price,
+                "c_cost_95pct": ev.c_cost_95pct,
+                "p_fill_lcb": ev.p_fill_lcb,
+                "support_index": ev.support_index,
+                "bin_id": ev.bin_id,
+            },
+            decision_id=None,
+            candidate_id=candidate_id,
+            p_value=ev.p_value,
+            q_value=ev.q_posterior,
+            ci_lower=ev.q_lcb_5pct,
+            ci_upper=None,
+            edge=ev.trade_score,
+            tested=True,
+            passed_prefilter=bool(ev.passed_prefilter),
+            selected_post_fdr=selected,
+            rejection_stage=rejection_stage,
+            require_attached_world=True,
+        )
+        if result.get("status") == "written":
+            hypothesis_writes += 1
+        elif first_failure is None:
+            first_failure = str(result.get("status") or "hypothesis_write_failed")
+
+    if hypothesis_writes <= 0:
+        return {
+            "status": first_failure or "hypothesis_write_failed",
+            "families": 1,
+            "hypotheses": 0,
+        }
+    return {
+        "status": "written",
+        "families": 1,
+        "hypotheses": hypothesis_writes,
+        "family_id": fact_family_id,
+    }
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -4556,6 +4765,32 @@ def _build_event_bound_no_submit_receipt_core(
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
         selection_exposure_by_outcome=_selection_exposure,
     )
+    if _is_day0_event:
+        _day0_selection_fact_result = _record_day0_selection_family_facts(
+            trade_conn,
+            family=family,
+            opportunity_book=opportunity_book,
+            event=event,
+            decision_time=decision_time,
+            decision_snapshot_id=event.causal_snapshot_id,
+        )
+        if _day0_selection_fact_result.get("status") != "written":
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "DAY0_SELECTION_FACT_PERSISTENCE_FAILED:"
+                    f"{_day0_selection_fact_result.get('status') or 'unknown'}"
+                ),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                source_status="MATCH",
+                family_complete=True,
+                opportunity_book=_json_finite(opportunity_book.to_receipt_dict()),
+            )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
         # persist the best-scoring family's mainstream verdict on the MISSING receipt so
@@ -7824,7 +8059,10 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         direction=direction,
     )
     if cert is None:
-        raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
+        raw_cert = actionable_payload.get("qkernel_execution_economics")
+        if raw_cert in (None, ""):
+            raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
+        raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID")
     cert_bin_id = str(cert.get("bin_id") or "").strip()
     if not cert_bin_id:
         cert_candidate_id = str(cert.get("candidate_id") or "").strip()
@@ -11282,6 +11520,57 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
 )
 
 
+def _qkernel_roi_frontier_useful_cert(
+    *,
+    side: str | None,
+    cost: float,
+    payoff_q_lcb: float,
+    edge_lcb: float,
+    stake: float,
+    delta_u_at_min: float,
+) -> bool:
+    try:
+        from src.decision.family_decision_engine import roi_frontier_useful_values
+
+        return roi_frontier_useful_values(
+            side=side,
+            cost=cost,
+            payoff_q_lcb=payoff_q_lcb,
+            edge_lcb=edge_lcb,
+            stake=stake,
+            delta_u_at_min=delta_u_at_min,
+        )
+    except Exception:  # noqa: BLE001
+        min_q_lcb = 0.02
+        if (
+            str(side or "").strip().upper() == "YES"
+            and math.isfinite(cost)
+            and 0.0 < cost < 0.05
+        ):
+            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
+        profit_lcb_usd = (
+            stake * (edge_lcb / cost)
+            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
+            else float("-inf")
+        )
+        growth_density = (
+            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
+            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
+            else float("-inf")
+        )
+        return bool(
+            math.isfinite(stake)
+            and stake > 0.0
+            and math.isfinite(delta_u_at_min)
+            and delta_u_at_min > 0.0
+            and math.isfinite(payoff_q_lcb)
+            and payoff_q_lcb >= min_q_lcb
+            and math.isfinite(profit_lcb_usd)
+            and profit_lcb_usd >= 0.25
+            and math.isfinite(growth_density)
+        )
+
+
 def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
     # B3 residual (2026-06-20 re-review): the qkernel execution authority is the
     # SELECTION STAMP, not the mere presence of a syntactically-valid cert. The old
@@ -12204,6 +12493,7 @@ def _proofs_with_qkernel_candidate_economics(
             cost = float(cert.get("cost"))
             payoff_q_lcb = float(cert.get("payoff_q_lcb"))
             edge_lcb = float(cert.get("edge_lcb"))
+            delta_u_at_min = float(cert.get("delta_u_at_min"))
             optimal_delta_u = float(cert.get("optimal_delta_u"))
             optimal_stake_usd = float(cert.get("optimal_stake_usd") or 0.0)
         except (TypeError, ValueError):
@@ -12221,6 +12511,12 @@ def _proofs_with_qkernel_candidate_economics(
             return (
                 "QKERNEL_DELTA_U_NON_POSITIVE:"
                 f"optimal_delta_u={optimal_delta_u:.9f}:edge_lcb={edge_lcb:.6f}:"
+                f"stake={optimal_stake_usd:.6f}"
+            )
+        if delta_u_at_min <= 0.0:
+            return (
+                "QKERNEL_DELTA_U_AT_MIN_NON_POSITIVE:"
+                f"delta_u_at_min={delta_u_at_min:.9f}:edge_lcb={edge_lcb:.6f}:"
                 f"stake={optimal_stake_usd:.6f}"
             )
         if optimal_stake_usd <= 0.0:
@@ -12244,6 +12540,7 @@ def _proofs_with_qkernel_candidate_economics(
             math.isfinite(profit_lcb_usd)
             and profit_lcb_usd >= min_profit_lcb_usd
             and math.isfinite(growth_density)
+            and delta_u_at_min > 0.0
             and payoff_q_lcb >= min_payoff_q_lcb
         )
         if not roi_frontier_useful:
@@ -13295,6 +13592,16 @@ def _family_rest_state(
     from src.state.canonical_projections import is_open_order_fact
     terminal_unfilled_states = ("CANCEL_CONFIRMED", "EXPIRED")
     nonterminal_command_states = ("SUBMITTING", "POSTING", "POST_ACKED", "ACKED", "PARTIAL")
+    terminal_command_states = (
+        "CANCELLED",
+        "CANCELED",
+        "EXPIRED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+        "FILLED",
+        "MATCHED",
+        "TERMINAL_NOOP",
+    )
     try:
         rows = trade_conn.execute(
             f"""
@@ -13321,11 +13628,13 @@ def _family_rest_state(
     # Normalise the rows ONCE (the per-row reads are identical for both passes).
     parsed_rows = []
     for row in rows:
-        command_state = str(row["command_state"] if isinstance(row, sqlite3.Row) else row[0] or "")
+        command_state = str(row["command_state"] if isinstance(row, sqlite3.Row) else row[0] or "").upper()
         created_at = _parse_utc(row["created_at"] if isinstance(row, sqlite3.Row) else row[1])
         fact_state = row["fact_state"] if isinstance(row, sqlite3.Row) else row[2]
         observed_at = _parse_utc(row["observed_at"] if isinstance(row, sqlite3.Row) else row[3])
-        parsed_rows.append((command_state, created_at, str(fact_state or ""), fact_state, observed_at))
+        parsed_rows.append(
+            (command_state, created_at, str(fact_state or "").upper(), fact_state, observed_at)
+        )
 
     # PASS 1 — escalation arming. A family ENTRY rest cancelled/expired UNFILLED
     # after a real maker window (>= escalation_arm_floor_seconds) LICENSES the
@@ -13381,6 +13690,8 @@ def _family_rest_state(
     # safe ordering, with no double-submit window.
     unexpired_rest = False
     for command_state, created_at, fact_state_s, fact_state, _observed_at in parsed_rows:
+        if command_state in terminal_command_states:
+            continue
         is_open = is_open_order_fact(fact_state_s) or (
             fact_state is None and command_state in nonterminal_command_states
         )

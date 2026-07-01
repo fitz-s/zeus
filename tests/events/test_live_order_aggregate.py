@@ -620,6 +620,8 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
                 "payoff_q_lcb": 0.100708440505795,
                 "cost": 0.07,
                 "edge_lcb": 0.0307084405057945,
+                "delta_u_at_min": 0.00009152233738979263,
+                "optimal_stake_usd": 1.4412832709285736,
                 "optimal_delta_u": 0.000411243383550307,
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
@@ -629,6 +631,75 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
                     "selection_guard_q_safe": 0.100708440505795,
                 },
             ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_qkernel_low_price_yes_below_roi_frontier_floor():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="qkernel roi frontier not useful"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                strategy_key="center_buy",
+                q_live=0.12180248510788458,
+                q_lcb_5pct=0.06052567908958011,
+                limit_price=0.031,
+                expected_edge=0.020510409830349664,
+                size=46.49,
+                min_entry_price=0.02,
+                min_expected_profit_usd=0.05,
+                min_submit_edge_density=0.02,
+                current_best_bid=0.02,
+                current_best_ask=0.04,
+                qkernel_execution_economics={
+                    **_pre_submit_payload()["qkernel_execution_economics"],
+                    "route_id": "DIRECT_YES:b34@proof",
+                    "side": "YES",
+                    "payoff_q_point": 0.12180248510788458,
+                    "payoff_q_lcb": 0.06052567908958011,
+                    "cost": 0.04001526925923045,
+                    "edge_lcb": 0.020510409830349664,
+                    "delta_u_at_min": 0.00009152233738979263,
+                    "optimal_stake_usd": 1.4412832709285736,
+                    "optimal_delta_u": 0.0006333828915951036,
+                    "selection_guard_q_safe": 0.06052567908958011,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_nonpositive_qkernel_delta_u_at_min():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    economics = {
+        **_pre_submit_payload()["qkernel_execution_economics"],
+        "delta_u_at_min": -0.01,
+    }
+
+    with pytest.raises(LiveOrderAggregateError, match="delta_u_at_min"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(qkernel_execution_economics=economics),
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
@@ -668,6 +739,8 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
                 "payoff_q_lcb": 0.074,
                 "cost": 0.024,
                 "edge_lcb": 0.050,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 30.0,
                 "optimal_delta_u": 0.01,
                 "false_edge_rate": 0.01,
                 "direction_law_ok": True,
@@ -782,6 +855,8 @@ def test_pre_submit_rejects_jeddah_qkernel_payoff_mismatched_submit_lcb():
                     "payoff_q_lcb": 0.998678563135879,
                     "cost": 0.98,
                     "edge_lcb": 0.018678563135879,
+                    "delta_u_at_min": 0.001,
+                    "optimal_stake_usd": 200.0,
                     "optimal_delta_u": 0.001,
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
@@ -979,6 +1054,8 @@ def _pre_submit_payload(**overrides):
             "payoff_q_lcb": 0.60,
             "cost": 0.40,
             "edge_lcb": 0.20,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.02,
             "direction_law_ok": True,

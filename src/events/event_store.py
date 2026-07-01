@@ -1868,6 +1868,96 @@ class EventStore:
         row = self.conn.execute("SELECT changes()").fetchone()
         return int(row[0] or 0) if row is not None else 0
 
+    def requeue_processed_day0_entries_paused(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 500,
+    ) -> int:
+        """Reopen Day0 facts that were consumed only because entries were paused.
+
+        ``DAY0_EXTREME_UPDATED`` is an immutable observation fact. If the latest
+        decision for that fact was a runtime ``pause_entries``/``entries_paused``
+        block, the event must re-enter the money path once the pause clears;
+        otherwise unchanged observation watermarks and event idempotency make the
+        post-pause system silently skip same evidence. Requeue only when that
+        pause block is the latest no-trade verdict for the event and the city's
+        local target day is still open.
+        """
+
+        self._require_world_event_tables()
+        if not _table_exists(self.conn, "no_trade_regret_events"):
+            return 0
+        decision_time_utc = _parse_utc(decision_time)
+        limit = max(1, min(int(batch_limit or 500), 5000))
+        rows = self.conn.execute(
+            """
+            WITH latest AS (
+                SELECT n.event_id, MAX(n.created_at) AS latest_created_at
+                  FROM no_trade_regret_events n
+                  JOIN opportunity_events e
+                    ON e.event_id = n.event_id
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                 GROUP BY n.event_id
+            )
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   n.rejection_reason
+              FROM latest l
+              JOIN no_trade_regret_events n
+                ON n.event_id = l.event_id
+               AND n.created_at = l.latest_created_at
+              JOIN opportunity_event_processing p
+                ON p.event_id = l.event_id
+              JOIN opportunity_events e
+                ON e.event_id = l.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'processed'
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND (
+                    n.rejection_reason LIKE '%entries_paused%'
+                 OR n.rejection_reason LIKE '%pause_entries%'
+               )
+             ORDER BY n.created_at DESC
+             LIMIT ?
+            """,
+            (self.consumer_name, limit),
+        ).fetchall()
+
+        recover: list[str] = []
+        for event_id, city, target_date, _reason in rows:
+            if not event_id:
+                continue
+            if self._strictly_past_in_tz(
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                decision_time_utc,
+            ):
+                continue
+            recover.append(str(event_id))
+
+        if not recover:
+            return 0
+
+        now = _utc_now()
+        for event_id in recover:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'pending',
+                       claimed_at = NULL,
+                       processed_at = NULL,
+                       last_error = 'RECOVERED_DAY0_ENTRIES_PAUSED',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'processed'
+                """,
+                (now, self.consumer_name, event_id),
+            )
+        return len(recover)
+
     def requeue_false_static_venue_close_day0_dead_letters(
         self,
         *,

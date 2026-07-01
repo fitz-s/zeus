@@ -1666,6 +1666,57 @@ def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_sa
     assert "payoff_q_lcb=0.060526" in annotated.missing_reason
 
 
+def test_qkernel_receipt_annotation_rejects_nonpositive_min_order_utility():
+    row = _row(
+        condition_id="cond-qk-negative-min-du",
+        yes_token="yes-qk-negative-min-du",
+        no_token="no-qk-negative-min-du",
+        yes_ask=0.40,
+        no_ask=0.61,
+        snapshot_id="snap-qk-negative-min-du",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-negative-min-du",
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        bin_obj=Bin(low=30.0, high=30.0, unit="C", label="30C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-negative-min-du",
+        "receipt_hash": "receipt-qk-negative-min-du",
+        "candidate_id": "YES:b30:DIRECT_YES:b30@proof",
+        "route_id": "DIRECT_YES:b30@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": 0.60,
+        "edge_lcb": 0.20,
+        "point_ev": 0.30,
+        "delta_u_at_min": -0.01,
+        "optimal_stake_usd": "10",
+        "optimal_delta_u": 0.01,
+        "q_dot_payoff": 0.70,
+        "cost": 0.40,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|modal|qb6|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason.startswith("QKERNEL_DELTA_U_AT_MIN_NON_POSITIVE:")
+
+
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
     """A non-native YES cannot become live through qkernel overlay without direction law."""
 

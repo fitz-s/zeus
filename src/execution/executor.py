@@ -56,6 +56,57 @@ _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 _CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 
 
+def _qkernel_roi_frontier_useful(
+    *,
+    side: str | None,
+    cost: float,
+    payoff_q_lcb: float,
+    edge_lcb: float,
+    stake: float,
+    delta_u_at_min: float,
+) -> bool:
+    try:
+        from src.decision.family_decision_engine import roi_frontier_useful_values
+
+        return roi_frontier_useful_values(
+            side=side,
+            cost=cost,
+            payoff_q_lcb=payoff_q_lcb,
+            edge_lcb=edge_lcb,
+            stake=stake,
+            delta_u_at_min=delta_u_at_min,
+        )
+    except Exception:  # noqa: BLE001
+        min_q_lcb = 0.02
+        if (
+            str(side or "").strip().upper() == "YES"
+            and math.isfinite(cost)
+            and 0.0 < cost < 0.05
+        ):
+            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
+        profit_lcb_usd = (
+            stake * (edge_lcb / cost)
+            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
+            else float("-inf")
+        )
+        growth_density = (
+            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
+            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
+            else float("-inf")
+        )
+        return bool(
+            math.isfinite(stake)
+            and stake > 0.0
+            and math.isfinite(delta_u_at_min)
+            and delta_u_at_min > 0.0
+            and math.isfinite(payoff_q_lcb)
+            and payoff_q_lcb >= min_q_lcb
+            and math.isfinite(profit_lcb_usd)
+            and profit_lcb_usd >= 0.25
+            and math.isfinite(growth_density)
+        )
+
+
 # Mode-based fill timeout (seconds). Spec §6.4.
 MODE_TIMEOUTS = {
     "opening_hunt": 4 * 3600,
@@ -823,6 +874,8 @@ def _entry_economics_component(
     ).strip()
     econ_cost = _float_field(economics.get("cost"))
     econ_edge_lcb = _float_field(economics.get("edge_lcb"))
+    econ_delta_u_at_min = _float_field(economics.get("delta_u_at_min"))
+    econ_optimal_stake_usd = _float_field(economics.get("optimal_stake_usd"))
     econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
     econ_false_edge_rate = _float_field(economics.get("false_edge_rate"))
     payoff_q_point = _float_field(economics.get("payoff_q_point"))
@@ -860,6 +913,10 @@ def _entry_economics_component(
         reason = "qkernel_edge_lcb_exceeds_submit_edge"
     elif expected_edge > econ_edge_lcb + 1e-6:
         reason = "expected_edge_exceeds_qkernel_edge_lcb"
+    elif econ_delta_u_at_min is None or econ_delta_u_at_min <= 0.0:
+        reason = "qkernel_delta_u_at_min_non_positive"
+    elif econ_optimal_stake_usd is None or econ_optimal_stake_usd <= 0.0:
+        reason = "qkernel_optimal_stake_non_positive"
     elif econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0:
         reason = "qkernel_optimal_delta_u_non_positive"
     elif econ_false_edge_rate is None or not (0.0 < econ_false_edge_rate <= max_false_edge_rate):
@@ -876,6 +933,15 @@ def _entry_economics_component(
         reason = "qkernel_direction_law_not_ok"
     elif economics.get("coherence_allows") is not True:
         reason = "qkernel_coherence_blocks"
+    elif not _qkernel_roi_frontier_useful(
+        side=econ_side,
+        cost=econ_cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=econ_edge_lcb,
+        stake=econ_optimal_stake_usd,
+        delta_u_at_min=econ_delta_u_at_min,
+    ):
+        reason = "qkernel_roi_frontier_not_useful"
     else:
         reason = ""
     if reason:
@@ -893,6 +959,12 @@ def _entry_economics_component(
             limit_price=limit_price,
             qkernel_cost=econ_cost if econ_cost is not None else "",
             qkernel_edge_lcb=econ_edge_lcb if econ_edge_lcb is not None else "",
+            qkernel_delta_u_at_min=(
+                econ_delta_u_at_min if econ_delta_u_at_min is not None else ""
+            ),
+            qkernel_optimal_stake_usd=(
+                econ_optimal_stake_usd if econ_optimal_stake_usd is not None else ""
+            ),
             qkernel_optimal_delta_u=(
                 econ_optimal_delta_u if econ_optimal_delta_u is not None else ""
             ),
@@ -1155,6 +1227,8 @@ def _actionable_certificate_intent_mismatch_reason(
         for key in (
             "cost",
             "edge_lcb",
+            "delta_u_at_min",
+            "optimal_stake_usd",
             "optimal_delta_u",
             "false_edge_rate",
             "payoff_q_point",

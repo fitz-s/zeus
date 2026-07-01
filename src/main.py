@@ -8167,6 +8167,42 @@ def _edli_prune_pending_working_set(
         )
 
     try:
+        if _budget_exhausted("requeue_processed_day0_entries_paused"):
+            return
+        _step_started = time.monotonic()
+        try:
+            from src.control.control_plane import is_entries_paused as _entries_paused_now
+
+            _entries_paused_currently = bool(_entries_paused_now())
+        except Exception as _pause_read_exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI reactor: entries_paused state unavailable during Day0 pause "
+                "requeue sweep; skipping recovery this cycle: %r",
+                _pause_read_exc,
+            )
+            _entries_paused_currently = True
+        _day0_pause_recovered = 0
+        if not _entries_paused_currently:
+            _day0_pause_recovered = store.requeue_processed_day0_entries_paused(
+                decision_time=decision_time.isoformat(),
+                batch_limit=min(batch_limit, 1000),
+            )
+        _log_prune_step("requeue_processed_day0_entries_paused", _step_started, _day0_pause_recovered)
+        if _day0_pause_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events whose latest verdict was "
+                "entries_paused/pause_entries; same observation facts will re-decide "
+                "after the pause cleared",
+                _day0_pause_recovered,
+            )
+    except Exception as _day0_pause_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: processed Day0 entries_paused recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _day0_pause_recovery_exc,
+        )
+
+    try:
         if _budget_exhausted("requeue_false_static_venue_close_day0_dead_letters"):
             return
         _step_started = time.monotonic()

@@ -149,6 +149,26 @@ class TestFamilyRestState:
             False,
         )
 
+    def test_cancelled_command_with_stale_live_fact_does_not_hold(self):
+        """A terminal command row outranks a stale latest venue LIVE fact.
+
+        Live DB recovery can contain command_state=CANCELLED while the newest
+        venue_order_facts row is still an older LIVE/PARTIALLY_MATCHED snapshot.
+        The stale fact must not resurrect an active family rest after restart.
+        """
+        conn = _db()
+        created = NOW - timedelta(minutes=30)
+        _add(
+            conn,
+            created_at=created,
+            command_state="CANCELLED",
+            facts=[("LIVE", "0", created + timedelta(seconds=5))],
+        )
+        assert adapter._family_rest_state(conn, family=_family(), decision_time=NOW) == (
+            False,
+            False,
+        )
+
     def test_screen_pulled_unfilled_rest_between_floor_and_deadline_escalates(self):
         """RED-ON-REVERT (conversion death-line, 2026-06-20). The live break: the
         continuous-redecision SCREEN cancels most rests at 5-20 min (CONFIRMED_VALUE

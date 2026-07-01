@@ -21,6 +21,57 @@ _CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 _DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 
 
+def _qkernel_roi_frontier_useful(
+    *,
+    side: str | None,
+    cost: float,
+    payoff_q_lcb: float,
+    edge_lcb: float,
+    stake: float,
+    delta_u_at_min: float,
+) -> bool:
+    try:
+        from src.decision.family_decision_engine import roi_frontier_useful_values
+
+        return roi_frontier_useful_values(
+            side=side,
+            cost=cost,
+            payoff_q_lcb=payoff_q_lcb,
+            edge_lcb=edge_lcb,
+            stake=stake,
+            delta_u_at_min=delta_u_at_min,
+        )
+    except Exception:  # noqa: BLE001
+        min_q_lcb = 0.02
+        if (
+            str(side or "").strip().upper() == "YES"
+            and math.isfinite(cost)
+            and 0.0 < cost < 0.05
+        ):
+            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
+        profit_lcb_usd = (
+            stake * (edge_lcb / cost)
+            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
+            else float("-inf")
+        )
+        growth_density = (
+            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
+            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
+            else float("-inf")
+        )
+        return bool(
+            math.isfinite(stake)
+            and stake > 0.0
+            and math.isfinite(delta_u_at_min)
+            and delta_u_at_min > 0.0
+            and math.isfinite(payoff_q_lcb)
+            and payoff_q_lcb >= min_q_lcb
+            and math.isfinite(profit_lcb_usd)
+            and profit_lcb_usd >= 0.25
+            and math.isfinite(growth_density)
+        )
+
+
 PRE_SUBMIT_REQUIRED_FIELDS = (
     "event_id",
     "final_intent_id",
@@ -928,6 +979,14 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
     cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
+    delta_u_at_min = _positive_number(
+        economics.get("delta_u_at_min"),
+        "qkernel_execution_economics.delta_u_at_min",
+    )
+    optimal_stake_usd = _positive_number(
+        economics.get("optimal_stake_usd"),
+        "qkernel_execution_economics.optimal_stake_usd",
+    )
     optimal_delta_u = _positive_number(
         economics.get("optimal_delta_u"),
         "qkernel_execution_economics.optimal_delta_u",
@@ -949,6 +1008,15 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     if expected_edge > edge_lcb + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
+    if not _qkernel_roi_frontier_useful(
+        side=qkernel_side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake_usd,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel roi frontier not useful")
 
 
 def _live_entry_min_price_floor(payload: Mapping[str, Any]) -> float:

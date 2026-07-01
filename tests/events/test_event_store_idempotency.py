@@ -12,8 +12,10 @@ import pytest
 
 from src.events.event_store import EventStore, EventStoreSchemaError
 from src.events.opportunity_event import (
+    Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
     MarketBookEventPayload,
+    make_day0_extreme_updated_event,
     make_opportunity_event,
 )
 from src.state.db import init_schema
@@ -64,6 +66,84 @@ def _event(snapshot_id: str, priority: int, available_at: str, received_at: str)
         causal_snapshot_id=snapshot_id,
         payload=_payload(snapshot_id),
         priority=priority,
+    )
+
+
+def _day0_event(
+    *,
+    city: str = "Chicago",
+    target_date: str = "2026-05-24",
+    metric: str = "high",
+    available_at: str = "2026-05-24T04:16:00+00:00",
+):
+    payload = Day0ExtremeUpdatedPayload(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        settlement_source="aviationweather_metar",
+        station_id="KORD",
+        observation_time="2026-05-24T04:15:00+00:00",
+        observation_available_at=available_at,
+        raw_value=28.0,
+        rounded_value=28,
+        high_so_far=28.0 if metric == "high" else None,
+        low_so_far=28.0 if metric == "low" else None,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    return make_day0_extreme_updated_event(
+        entity_key=f"{city}|{target_date}|{metric}|KORD",
+        source="day0_extreme_updated_trigger",
+        observed_at=payload.observation_time,
+        received_at=available_at,
+        payload=payload,
+        causal_snapshot_id="day0-authority-1",
+        priority=100,
+    )
+
+
+def _insert_no_trade_regret(
+    conn: sqlite3.Connection,
+    event,
+    *,
+    regret_event_id: str | None = None,
+    created_at: str = "2026-05-24T04:20:00+00:00",
+    rejection_reason: str,
+) -> None:
+    payload = json.loads(event.payload_json)
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            executable_snapshot_id, created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  ?, ?, ?, ?, ?, ?, NULL, ?, 1)
+        """,
+        (
+            regret_event_id or ("regret-" + event.event_id),
+            event.event_id,
+            rejection_reason,
+            created_at,
+            str(payload.get("city") or ""),
+            str(payload.get("target_date") or ""),
+            str(payload.get("metric") or ""),
+            "|".join(
+                (
+                    str(payload.get("city") or ""),
+                    str(payload.get("target_date") or ""),
+                    str(payload.get("metric") or ""),
+                )
+            ),
+            event.causal_snapshot_id,
+            created_at,
+        ),
     )
 
 
@@ -251,6 +331,126 @@ def test_repair_missing_processing_rows_backfills_decision_events_only():
         )
     }
     assert rows == {decision.event_id: "pending"}
+
+
+def test_requeue_processed_day0_entries_paused_when_pause_cleared():
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed',
+               processed_at = ?,
+               updated_at = ?
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (
+            "2026-05-24T04:20:00+00:00",
+            "2026-05-24T04:20:00+00:00",
+            store.consumer_name,
+            event.event_id,
+        ),
+    )
+    _insert_no_trade_regret(
+        conn,
+        event,
+        created_at="2026-05-24T04:20:00+00:00",
+        rejection_reason=(
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:strategy_policy:"
+            "STRATEGY_POLICY_GATED:settlement_capture:sources=hard_safety:pause_entries"
+        ),
+    )
+
+    assert store.requeue_processed_day0_entries_paused(
+        decision_time="2026-05-24T10:00:00+00:00",
+        batch_limit=10,
+    ) == 1
+    row = conn.execute(
+        """
+        SELECT processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert row["processing_status"] == "pending"
+    assert row["processed_at"] is None
+    assert row["last_error"] == "RECOVERED_DAY0_ENTRIES_PAUSED"
+
+
+def test_requeue_processed_day0_entries_paused_requires_latest_pause_and_open_local_day():
+    conn = _world_conn()
+    store = EventStore(conn)
+    latest_non_pause_event = _day0_event(available_at="2026-05-24T04:16:00+00:00")
+    past_event = _day0_event(available_at="2026-05-24T04:17:00+00:00")
+    store.insert_or_ignore(latest_non_pause_event)
+    store.insert_or_ignore(past_event)
+    for event in (latest_non_pause_event, past_event):
+        conn.execute(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'processed',
+                   processed_at = ?,
+                   updated_at = ?
+             WHERE consumer_name = ? AND event_id = ?
+            """,
+            (
+                "2026-05-24T04:20:00+00:00",
+                "2026-05-24T04:20:00+00:00",
+                store.consumer_name,
+                event.event_id,
+            ),
+        )
+    _insert_no_trade_regret(
+        conn,
+        latest_non_pause_event,
+        created_at="2026-05-24T04:20:00+00:00",
+        rejection_reason="EVENT_BOUND_ALL_CANDIDATES_REJECTED:entries_paused:operator",
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            executable_snapshot_id, created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  ?, 'Chicago', '2026-05-24', 'high', 'Chicago|2026-05-24|high',
+                  ?, NULL, ?, 1)
+        """,
+        (
+            "regret-later-" + latest_non_pause_event.event_id,
+            latest_non_pause_event.event_id,
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:capital_efficiency_lcb_ev",
+            "2026-05-24T04:25:00+00:00",
+            latest_non_pause_event.causal_snapshot_id,
+            "2026-05-24T04:25:00+00:00",
+        ),
+    )
+    _insert_no_trade_regret(
+        conn,
+        past_event,
+        created_at="2026-05-24T04:20:00+00:00",
+        rejection_reason="EVENT_BOUND_ALL_CANDIDATES_REJECTED:entries_paused:operator",
+    )
+
+    assert store.requeue_processed_day0_entries_paused(
+        decision_time="2026-05-26T10:00:00+00:00",
+        batch_limit=10,
+    ) == 0
+    rows = conn.execute(
+        """
+        SELECT event_id, processing_status
+          FROM opportunity_event_processing
+         WHERE consumer_name = ?
+        """,
+        (store.consumer_name,),
+    ).fetchall()
+    assert {row["event_id"]: row["processing_status"] for row in rows} == {
+        latest_non_pause_event.event_id: "processed",
+        past_event.event_id: "processed",
+    }
 
 
 @pytest.mark.parametrize(
@@ -959,7 +1159,7 @@ def test_archive_recent_no_value_refuted_events_keeps_day0_separate_from_forecas
     )
 
 
-def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog():
+def test_fetch_pending_interleaves_forecast_before_day0_backlog():
     from src.events.opportunity_event import Day0ExtremeUpdatedPayload
 
     conn = _world_conn()
@@ -992,7 +1192,7 @@ def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog
 
     ordered = store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00", limit=2)
 
-    assert [event.event_type for event in ordered] == ["DAY0_EXTREME_UPDATED", "FORECAST_SNAPSHOT_READY"]
+    assert [event.event_type for event in ordered] == ["FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"]
 
 
 def test_stale_processing_claim_is_reclaimed_after_lease():
