@@ -181,7 +181,7 @@ from src.decision.family_decision_engine import (
 )
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
-from src.decision_kernel.certificate import DecisionCertificate, build_certificate
+from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
 from src.decision_kernel.certificates.action import build_actionable_trade_certificate
 from src.decision_kernel.certificates.execution import (
     build_execution_command_certificate_from_final_intent,
@@ -7221,6 +7221,12 @@ def _build_live_execution_command_certificates(
     base_certs = tuple(compile_result.certificates)
     _assert_event_bound_calibration_live_admitted(_required_cert(base_certs, claims.CALIBRATION))
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
+    day0_source_certs = _day0_live_source_parent_certificates(
+        event=event,
+        payload=_payload(event),
+        base_certs=base_certs,
+        decision_time=decision_time,
+    )
     live_cap = _build_live_cap_certificate_from_ledger(
         event=event,
         receipt=receipt,
@@ -7237,7 +7243,7 @@ def _build_live_execution_command_certificates(
         _assert_live_entry_submit_authority(actionable_payload)
         actionable = build_actionable_trade_certificate(
             payload=actionable_payload,
-            parent_certificates=base_certs + (live_cap,),
+            parent_certificates=base_certs + day0_source_certs + (live_cap,),
             decision_time=decision_time,
         )
         forecast_authority = _required_cert(base_certs, claims.FORECAST_AUTHORITY)
@@ -7829,7 +7835,14 @@ def _build_live_execution_command_certificates(
         )
     except Exception:
         raise
-    return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
+    return base_certs + day0_source_certs + (
+        live_cap,
+        actionable,
+        final_intent,
+        expressibility,
+        pre_submit,
+        command,
+    )
 
 
 def _selected_candidate_mode_fields_from_receipt(
@@ -9510,6 +9523,135 @@ def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str
         if cert.certificate_type == certificate_type:
             return cert
     raise ValueError(f"missing required certificate: {certificate_type}")
+
+
+def _parent_edge(role: str, cert: DecisionCertificate) -> ParentEdge:
+    return ParentEdge(role, cert.certificate_hash, cert.certificate_type)
+
+
+def _day0_live_source_parent_certificates(
+    *,
+    event: OpportunityEvent,
+    payload: Mapping[str, object],
+    base_certs: tuple[DecisionCertificate, ...],
+    decision_time: datetime,
+) -> tuple[DecisionCertificate, ...]:
+    """Mint Day0 source parents for live ActionableTrade verification.
+
+    Day0 uses the same qkernel/actionable submit path as forecast/redecision.
+    The only additional evidence is the observed same-day hard fact and the
+    absorbing-boundary transform it authorizes.
+    """
+
+    if event.event_type != "DAY0_EXTREME_UPDATED":
+        return ()
+
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_payload_authority,
+        normalize_day0_live_authority_status,
+    )
+
+    try:
+        assert_live_day0_payload_authority(payload)
+    except Day0AuthorityError as exc:
+        raise ValueError(f"DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED:{exc}") from None
+
+    clock = _required_cert(base_certs, claims.CLOCK_MODE)
+    causal = _required_cert(base_certs, claims.CAUSAL_EVENT)
+    source_truth = _required_cert(base_certs, claims.SOURCE_TRUTH)
+    family = _required_cert(base_certs, claims.FAMILY_CLOSURE)
+    belief = _required_cert(base_certs, claims.BELIEF)
+
+    observation_time = _nonnull(payload.get("observation_time") or event.observed_at)
+    observation_available_at = _nonnull(
+        payload.get("observation_available_at") or event.available_at
+    )
+    source_available_at = _parse_utc(observation_available_at) or _parse_utc(event.available_at) or decision_time
+    agent_received_at = _parse_utc(event.received_at) or source_available_at
+    persisted_at = _parse_utc(event.created_at) or agent_received_at
+    rounded_value = payload.get("rounded_value")
+
+    day0_authority = build_certificate(
+        certificate_type=claims.DAY0_AUTHORITY,
+        semantic_key=f"day0_authority:{event.event_id}:{observation_time}",
+        claim_type=claims.DAY0_AUTHORITY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=source_available_at,
+        agent_received_at=agent_received_at,
+        persisted_at=persisted_at,
+        payload={
+            "identity": f"day0_authority:{event.event_id}",
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+            "city": payload.get("city"),
+            "target_date": payload.get("target_date"),
+            "metric": payload.get("metric") or payload.get("temperature_metric"),
+            "station_id": payload.get("station_id"),
+            "settlement_source": payload.get("settlement_source"),
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+            "raw_value": payload.get("raw_value"),
+            "rounded_value": rounded_value,
+            "source_match_status": payload.get("source_match_status"),
+            "station_match_status": payload.get("station_match_status"),
+            "local_date_status": payload.get("local_date_status"),
+            "dst_status": payload.get("dst_status"),
+            "metric_match_status": payload.get("metric_match_status"),
+            "rounding_status": payload.get("rounding_status"),
+            "source_authorized_status": payload.get("source_authorized_status"),
+            "live_authority_status": normalize_day0_live_authority_status(
+                payload.get("live_authority_status")
+            ),
+        },
+        parent_edges=(
+            _parent_edge("clock_mode", clock),
+            _parent_edge("causal_event", causal),
+            _parent_edge("source_truth", source_truth),
+        ),
+        parent_certificates=(clock, causal, source_truth),
+        authority_id="zeus.events.day0_authority",
+        authority_version="v1",
+        algorithm_id="decision_kernel.day0_authority.event_bound_adapter",
+        algorithm_version="v1",
+    )
+    absorbing_boundary = build_certificate(
+        certificate_type=claims.ABSORBING_BOUNDARY,
+        semantic_key=f"day0_absorbing:{event.event_id}:{family.payload.get('family_id')}:{rounded_value}",
+        claim_type=claims.ABSORBING_BOUNDARY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={
+            "identity": f"day0_absorbing:{event.event_id}",
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "boundary": "day0_absorbing_hard_fact",
+            "probability_authority": "day0_absorbing_hard_fact",
+            "family_id": family.payload.get("family_id"),
+            "metric": payload.get("metric") or payload.get("temperature_metric"),
+            "rounded_value": rounded_value,
+            "observation_time": observation_time,
+            "day0_authority_certificate_hash": day0_authority.certificate_hash,
+            "belief_certificate_hash": belief.certificate_hash,
+            "mask_semantics": "zero ruled-out bins; renormalize remaining support",
+        },
+        parent_edges=(
+            _parent_edge("day0_authority", day0_authority),
+            _parent_edge("family_closure", family),
+            _parent_edge("belief", belief),
+        ),
+        parent_certificates=(day0_authority, family, belief),
+        authority_id="zeus.strategy.day0_absorbing_boundary",
+        authority_version="v1",
+        algorithm_id="decision_kernel.day0_absorbing_boundary.event_bound_adapter",
+        algorithm_version="v1",
+    )
+    return (day0_authority, absorbing_boundary)
 
 
 _NO_SUBMIT_PROOF_EVIDENCE_FIELDS: tuple[str, ...] = (

@@ -1527,6 +1527,45 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
         )
 
 
+def test_live_execution_command_day0_actionable_has_observation_source_parents():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _day0_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            accepted,
+            decision_time=decision_time,
+        ),
+    )
+
+    certificates = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+    actionable = _required_cert(certificates, claims.ACTIONABLE_TRADE)
+    parent_types = {edge.certificate_type for edge in actionable.header.parent_edges}
+
+    assert claims.DAY0_AUTHORITY in parent_types
+    assert claims.ABSORBING_BOUNDARY in parent_types
+    assert _required_cert(certificates, claims.DAY0_AUTHORITY).payload["authority"] == (
+        "DAY0_LIVE_OBSERVATION_HARD_FACT"
+    )
+    assert _required_cert(certificates, claims.ABSORBING_BOUNDARY).payload["boundary"] == (
+        "day0_absorbing_hard_fact"
+    )
+
+
 def test_raw_event_bound_receipt_hydrates_live_quality_floors():
     from src.engine import event_reactor_adapter as adapter
 
@@ -3852,6 +3891,46 @@ def _forecast_event():
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key="Chicago|2026-05-24|high|live-canary-test",
         source="forecast_live",
+        observed_at="2026-05-24T18:00:00+00:00",
+        available_at="2026-05-24T18:01:00+00:00",
+        received_at="2026-05-24T18:02:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-1",
+    )
+
+
+def _day0_event():
+    from src.events.opportunity_event import make_opportunity_event
+
+    payload = {
+        "city": "Chicago",
+        "target_date": "2026-05-24",
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "station_id": "KORD",
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "raw_value": 80.06,
+        "rounded_value": 80,
+        "high_so_far": 80.06,
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "source_id": "opendata",
+        "source_run_id": "run-1",
+        "required_fields_present": True,
+        "required_steps_present": True,
+        "completeness_status": "COMPLETE",
+    }
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Chicago|2026-05-24|high|KORD",
+        source="day0_extreme_updated_trigger",
         observed_at="2026-05-24T18:00:00+00:00",
         available_at="2026-05-24T18:01:00+00:00",
         received_at="2026-05-24T18:02:00+00:00",
