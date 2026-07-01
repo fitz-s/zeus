@@ -149,7 +149,17 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
   `FROM world.executable_market_snapshots` — the empty world shadow — instead of the 9.1M-row trades owner, so it
   always misses and falls back to the Gamma network API. Had the ghost not existed, K1 cutover would have raised
   "no such table" and forced the fix. (Sibling `_lookup_market_neg_risk_authoritative` :1252 already has the
-  trades fallback; submit_redeem was missed. Flagged for TDD fix.)
+  trades fallback; submit_redeem was missed.) **NOW FIXED** — Tier-2 trades read added (commit `0f78630e6`,
+  TDD antibody); a 24-agent violation sweep independently re-confirmed the bug + fix.
+- **Registry INVERSION (verified 2026-06-30, sweep + row-probe):** `db_table_ownership.yaml` — the INV-05
+  canonical authority — declares `opportunity_fact` + `decision_log` as `world_class`@world (canonical) +
+  `legacy_archived`@trade (ghost), but reality is INVERTED: the "legacy ghost" trade copy holds ALL the data
+  (`opportunity_fact` 38555, `decision_log` 19329 rows, written by live INV-37 code) while the "canonical"
+  world copy is EMPTY. `assert_db_matches_registry` set-equality can't catch it (checks table EXISTENCE per
+  `(name,db)`, not data LOCATION; `legacy_archived` is excluded entirely). This drift inflated a 24-agent
+  wrong-DB sweep to **24 "confirmed" of which only ONE (`settlement_commands:872`) was real** — the verify
+  agents trusted the stale registry over actual data/code. **Lesson: ownership verdicts must be DATA-grounded
+  (row-probe + live writer), never registry-grounded.** Registry reconciliation flagged as a task.
 
 ### 6A. Cross-DB wiring (接线) — VERIFIED
 - **Canonical factories in `state/db.py` are correct:** `get_world_connection_with_trades_required`,
