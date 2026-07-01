@@ -12339,12 +12339,28 @@ def _strategy_policy_selection_rejection_reason(
     except Exception as exc:  # noqa: BLE001
         return f"STRATEGY_POLICY_UNAVAILABLE:{type(exc).__name__}"
 
-    sources = ",".join(str(source) for source in policy.sources) or "none"
-    if policy.gated:
+    source_values = tuple(str(source) for source in policy.sources)
+    sources = ",".join(source_values) or "none"
+    if policy.gated and _strategy_policy_has_selection_gate(source_values):
         return f"STRATEGY_POLICY_GATED:{strategy_key}:sources={sources}"
     if policy.exit_only:
         return f"STRATEGY_POLICY_EXIT_ONLY:{strategy_key}:sources={sources}"
     return None
+
+
+def _strategy_policy_has_selection_gate(sources: tuple[str, ...]) -> bool:
+    """Return whether strategy governance, not global submit safety, gates selection.
+
+    ``pause_entries`` and deployment freshness are global submit/admission controls.
+    They must stop venue submission at the executor boundary, but they are not
+    evidence that a candidate is economically inferior inside the family optimizer.
+    Per-strategy controls still remove candidates before ranking.
+    """
+
+    for source in sources:
+        if source in {"manual_override:gate", "risk_action:gate"}:
+            return True
+    return False
 
 
 def _live_selection_rejection_reason(
@@ -12394,6 +12410,89 @@ def _live_selection_rejection_reason(
         direction=str(getattr(proof, "direction", "") or ""),
     ) is None:
         return "QKERNEL_EXECUTION_ECONOMICS_INVALID_FOR_SELECTION"
+    final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
+        proof=proof,
+        cert=cert,
+        strategy_policy_event_type=strategy_policy_event_type,
+    )
+    if final_floor_reason is not None:
+        return final_floor_reason
+    return None
+
+
+def _qkernel_final_submit_floor_rejection_reason(
+    *,
+    proof: _CandidateProof,
+    cert: Mapping[str, Any],
+    strategy_policy_event_type: str | None = None,
+) -> str | None:
+    """Reject qkernel candidates that cannot clear the final live submit floors."""
+
+    try:
+        strategy_key = _event_bound_strategy_key(
+            event_type=str(strategy_policy_event_type or ""),
+            direction=str(getattr(proof, "direction", "") or ""),
+            metric=str(
+                getattr(getattr(proof, "candidate", None), "metric", "")
+                or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
+                or ""
+            ),
+            require_metric_live=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"QKERNEL_FINAL_SUBMIT_FLOOR_UNAVAILABLE:{type(exc).__name__}"
+
+    try:
+        cost = float(cert.get("cost"))
+        edge_lcb = float(cert.get("edge_lcb"))
+        payoff_q_point = float(cert.get("payoff_q_point"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        optimal_stake_usd = float(cert.get("optimal_stake_usd"))
+    except (TypeError, ValueError):
+        return "QKERNEL_FINAL_SUBMIT_FLOOR:invalid_economics"
+    if not all(
+        math.isfinite(value)
+        for value in (cost, edge_lcb, payoff_q_point, payoff_q_lcb, optimal_stake_usd)
+    ):
+        return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
+
+    floors = _event_bound_strategy_live_quality_floors(strategy_key)
+    floor_decision = entry_price_floor_decision(
+        strategy_key=strategy_key,
+        direction=str(getattr(proof, "direction", "") or ""),
+        declared_min_entry_price=floors["min_entry_price"],
+        selection_authority_applied="qkernel_spine",
+        economics=cert,
+        q_live=payoff_q_point,
+        q_lcb=payoff_q_lcb,
+        limit_price=cost,
+    )
+    effective_min_entry_price = float(floor_decision.effective_min_entry_price)
+    min_expected_profit_usd = float(floors["min_expected_profit_usd"])
+    min_submit_edge_density = float(floors["min_submit_edge_density"])
+    if cost + 1e-12 < effective_min_entry_price:
+        return (
+            "QKERNEL_FINAL_SUBMIT_FLOOR:limit_price_below_strategy_entry_floor:"
+            f"strategy={strategy_key}:cost={cost:.6f}:floor={effective_min_entry_price:.6f}"
+        )
+    profit_lcb_usd = roi_frontier_profit_lcb_usd(
+        stake=optimal_stake_usd,
+        cost=cost,
+        edge_lcb=edge_lcb,
+    )
+    if profit_lcb_usd + 1e-9 < min_expected_profit_usd:
+        return (
+            "QKERNEL_FINAL_SUBMIT_FLOOR:expected_profit_below_strategy_floor:"
+            f"strategy={strategy_key}:profit_lcb_usd={profit_lcb_usd:.6f}:"
+            f"floor={min_expected_profit_usd:.6f}"
+        )
+    edge_density = edge_lcb / cost if cost > 0.0 else float("-inf")
+    if edge_density + 1e-9 < min_submit_edge_density:
+        return (
+            "QKERNEL_FINAL_SUBMIT_FLOOR:submit_edge_density_below_strategy_floor:"
+            f"strategy={strategy_key}:edge_density={edge_density:.6f}:"
+            f"floor={min_submit_edge_density:.6f}"
+        )
     return None
 
 
@@ -12479,6 +12578,7 @@ def _proofs_with_qkernel_candidate_economics(
     *,
     proofs: tuple[_CandidateProof, ...],
     qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None,
+    strategy_policy_event_type: str | None = None,
 ) -> tuple[_CandidateProof, ...]:
     """Attach qkernel candidate economics to receipt proofs without granting authority.
 
@@ -12491,6 +12591,7 @@ def _proofs_with_qkernel_candidate_economics(
     min_profit_lcb_usd = roi_frontier_min_profit_lcb_usd()
 
     def _qkernel_receipt_rejection_reason(
+        proof: _CandidateProof,
         cert: Mapping[str, Any],
     ) -> str | None:
         try:
@@ -12554,6 +12655,13 @@ def _proofs_with_qkernel_candidate_economics(
                 f"profit_lcb_usd={profit_lcb_usd:.6f}:growth_density={growth_density:.9f}:"
                 f"edge_roi_lcb={roi_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}"
             )
+        final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
+            proof=proof,
+            cert=cert,
+            strategy_policy_event_type=strategy_policy_event_type,
+        )
+        if final_floor_reason is not None:
+            return final_floor_reason
         return None
 
     annotated: list[_CandidateProof] = []
@@ -12568,7 +12676,7 @@ def _proofs_with_qkernel_candidate_economics(
         if cert is None:
             annotated.append(proof)
             continue
-        qkernel_reason = _qkernel_receipt_rejection_reason(cert)
+        qkernel_reason = _qkernel_receipt_rejection_reason(proof, cert)
         q_point = _optional_float(cert.get("payoff_q_point"))
         q_lcb = _optional_float(cert.get("payoff_q_lcb"))
         trade_score = _optional_float(cert.get("edge_lcb"))
@@ -12638,6 +12746,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("STRATEGY_POLICY_GATED", "strategy_policy"),
     ("STRATEGY_POLICY_EXIT_ONLY", "strategy_policy"),
     ("STRATEGY_POLICY_UNAVAILABLE", "strategy_policy"),
+    ("QKERNEL_FINAL_SUBMIT_FLOOR", "final_submit_floor"),
     (_ENTRY_HELD_FAMILY_REASON_BASE, "held_family_monitor_owned"),
     (_ENTRY_HELD_POSITION_REASON_BASE, "held_position_monitor_owned"),
     # Genuinely-no-book classes (proof had execution_price None): the maker-quote
@@ -12765,6 +12874,7 @@ def _opportunity_book_from_proofs(
     book_proofs = _proofs_with_qkernel_candidate_economics(
         proofs=proofs,
         qkernel_economics_by_bin_side=qkernel_economics_by_bin_side,
+        strategy_policy_event_type=strategy_policy_event_type,
     )
     evaluations = tuple(
         _candidate_evaluation_from_proof(

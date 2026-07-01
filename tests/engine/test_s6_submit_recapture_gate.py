@@ -773,6 +773,175 @@ def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(
     assert "strategy_policy=1" in family_reason
 
 
+def test_edli_selection_does_not_treat_global_pause_as_strategy_rejection(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    no_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        no_asks=(("0.45", "1000000"),),
+        condition_id="cond-no",
+        yes_token_id="yes-no",
+        no_token_id="no-no",
+        snapshot_id="snap-no",
+    )
+    no_proof = _proof_from_row(
+        direction="buy_no",
+        row=no_row,
+        token_id="no-no",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_X,
+    )
+    yes_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        condition_id="cond-yes",
+        yes_token_id="yes-yes",
+        no_token_id="no-yes",
+        snapshot_id="snap-yes",
+    )
+    yes_proof = _proof_from_row(
+        direction="buy_yes",
+        row=yes_row,
+        token_id="yes-yes",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_Y,
+    )
+
+    scoped = era._selection_scoped_proofs(
+        proofs=(no_proof, yes_proof),
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert scoped == (no_proof, yes_proof)
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(no_proof,),
+        selected_proof=None,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+    )
+    assert book.evaluations[0].missing_reason is None
+
+
+def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    low_floor_row = _snapshot_row(
+        yes_asks=(("0.005", "1000000"),),
+        min_order="5",
+        condition_id="cond-low",
+        yes_token_id="yes-low",
+        no_token_id="no-low",
+        snapshot_id="snap-low",
+    )
+    low_floor_proof = _proof_from_row(
+        direction="buy_yes",
+        row=low_floor_row,
+        token_id="yes-low",
+        q_posterior=0.12,
+        q_lcb_5pct=0.08,
+        bin_obj=_BIN_X,
+    )
+    live_floor_row = _snapshot_row(
+        yes_asks=(("0.20", "1000000"),),
+        condition_id="cond-live",
+        yes_token_id="yes-live",
+        no_token_id="no-live",
+        snapshot_id="snap-live",
+    )
+    live_floor_proof = _proof_from_row(
+        direction="buy_yes",
+        row=live_floor_row,
+        token_id="yes-live",
+        q_posterior=0.70,
+        q_lcb_5pct=0.50,
+        bin_obj=_BIN_Y,
+    )
+
+    def _cert(proof, *, cost: float, q_lcb: float, stake: float) -> dict:
+        bin_id = era._candidate_bin_id(proof)
+        return {
+            "source": "qkernel_spine",
+            "candidate_id": f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+            "bin_id": bin_id,
+            "route_id": f"DIRECT_YES:{bin_id}@proof",
+            "side": "YES",
+            "payoff_q_point": float(proof.q_posterior),
+            "payoff_q_lcb": q_lcb,
+            "edge_lcb": q_lcb - cost,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": stake,
+            "optimal_delta_u": 0.02,
+            "cost": cost,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
+        }
+
+    proofs = era._proofs_with_qkernel_candidate_economics(
+        proofs=(low_floor_proof, live_floor_proof),
+        qkernel_economics_by_bin_side={
+            (era._candidate_bin_id(low_floor_proof), "YES"): _cert(
+                low_floor_proof,
+                cost=0.005,
+                q_lcb=0.08,
+                stake=10.0,
+            ),
+            (era._candidate_bin_id(live_floor_proof), "YES"): _cert(
+                live_floor_proof,
+                cost=0.20,
+                q_lcb=0.50,
+                stake=10.0,
+            ),
+        },
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+    )
+
+    assert proofs[0].missing_reason is not None
+    assert proofs[0].missing_reason.startswith(
+        "QKERNEL_FINAL_SUBMIT_FLOOR:limit_price_below_strategy_entry_floor"
+    )
+    scoped = era._selection_scoped_proofs(
+        proofs=proofs,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert tuple(era._candidate_bin_id(proof) for proof in scoped) == (
+        era._candidate_bin_id(live_floor_proof),
+    )
+
+
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():
     import sqlite3
 
