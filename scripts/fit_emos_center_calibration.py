@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # Created: 2026-07-01
 # Last audited: 2026-07-01
-# Authority basis: EMOS/NGR affine center calibration. Operator "运行态组合数据 精准 emos";
-#   consult REQ-20260701-010328. READ-ONLY over state/zeus-forecasts.db; SOLE writer of
-#   state/emos_center_calibration.json.
-"""Fit the per-city affine EMOS center calibration μ'=a+b·μ from the REAL runtime combined center.
+# Authority basis: EMOS/NGR affine center calibration. Operator sentence #1 —
+#   "使用真实参与概率计算的运行态组合数据进行精准的emos设计提升". The 运行态组合数据 IS the served fused
+#   center forecast_posteriors.anchor_value_c (the value that actually feeds the live probability q) —
+#   NOT a raw model endpoint (previous_runs is ECMWF ifs025 0.25° coarse, single_runs is a raw source).
+#   READ-ONLY over state/zeus-forecasts.db; SOLE writer of state/emos_center_calibration.json.
+"""Fit the per-city affine EMOS center calibration μ'=a+b·μ on the REAL runtime served center.
 
-Replays the frozen source-clock scheme over settled previous_runs history (reproduces the served
-anchor_value_c byte-exact) → per-city shrunk-to-identity OLS (a,b), gated to SERVE only where BOTH:
-  STRUCT   — the walk-forward affine OOS ΔMSE has an individual 95% lower CI ≥ 0 (long history), AND
-  TRANSFER — the SAME (a,b) has non-negative 95% lower-CI ΔMSE on the ACTUAL live served
-             (single_runs) center over the settled overlap (guards the previous_runs↔single_runs
-             product gap). Point-positive but CI-unproven cities are emitted as canary only.
-The slope b captures the temperature-dependent representativeness bias a constant offset cannot;
-shrinkage keeps world-class cities at identity (byte-identical). The output is a config artifact only;
-live use still requires a fresh posterior materialization that stamps the applied affine in provenance.
+Basis: forecast_posteriors.anchor_value_c (the served fused center, latest cycle per city/date) vs
+the observed daily extreme (observations, the physical ground truth; venue settlement where present).
+This is the exact product that participates in the live q — no previous_runs↔single_runs product gap,
+so no transfer bridge is needed. Same-product ⇒ one honest basis.
+
+The runtime history is short (~20 served days/city today), so validation is LEAVE-ONE-OUT (walk-forward
+needs ~25 prior). A city SERVES only when its LOO OOS ΔMSE has a 95% lower CI ≥ 0 (per-unit no-harm).
+Shrink-to-identity keeps the correction TINY on this thin data (a world-class city stays at identity);
+the served (a,b) is fit on ALL runtime days and sharpens as the live history accrues.
 """
 from __future__ import annotations
 
@@ -34,56 +36,34 @@ if REPO not in sys.path:
 from src.calibration.emos_center_calibration import (  # noqa: E402
     ARTIFACT_AUTHORITY,
     DEFAULT_KAPPA,
-    DEFAULT_MIN_TRAIN,
     apply_affine,
-    current_affine,
     fit_affine,
-    walk_forward_affine,
 )
-from src.config import runtime_cities_by_name, runtime_state_path  # noqa: E402
+from src.config import runtime_state_path  # noqa: E402
 from src.state.db import get_forecasts_connection_read_only  # noqa: E402
-from src.strategy.live_inference.source_clock_city_weights import scheme_for_city  # noqa: E402
 
 OUT_DEFAULT = str(runtime_state_path("emos_center_calibration.json"))
+_OBS_COL = {"high": "high_temp", "low": "low_temp"}
 
 
-def _settle_c(v, u):
+def _to_c(v, u):
     v = float(v)
     return (v - 32.0) * 5.0 / 9.0 if str(u).strip().lower() in ("f", "degf", "fahrenheit") else v
 
 
-_OBS_COL = {"high": "high_temp", "low": "low_temp"}
-
-
-def _table_exists(conn, name):
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-            (name,),
-        ).fetchone()
-    except Exception:
-        return False
-    return row is not None
-
-
 def _observed_ground_truth(conn, metric):
     """(city, target_date) -> daily extreme in degC. VENUE settlement where it exists (authoritative
-    traded truth, keeps the validated HIGH byte-stable), else the OBSERVED extreme from `observations`.
-
-    Fixes the low-data bug: `settlement_outcomes` only records VENUE-traded markets — the venue has
-    low markets for just 9 cities, so joining low against it silently dropped 45 cities. `observations`
-    carries BOTH extremes for ALL 54 cities and matches venue settlement exactly where a market exists
-    (median |Δ|=0.000, 100% within 0.6C, both metrics). Observations deduped preferring wu_icao_history
-    (the wunderground source the venue settles from)."""
+    traded truth), else the OBSERVED extreme from `observations`. observations carries BOTH extremes
+    for all 54 cities and matches venue settlement 100% within 0.6C where a market exists; deduped
+    preferring wu_icao_history (the wunderground source the venue settles from)."""
     truth = {}
-    if _table_exists(conn, "settlement_outcomes"):
-        for r in conn.execute(
-            "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
-            "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
-        ):
-            truth[(r[0], r[1])] = _settle_c(r[2], r[3])
+    for r in conn.execute(
+        "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
+        "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
+    ):
+        truth[(r[0], r[1])] = _to_c(r[2], r[3])
     col = _OBS_COL[metric]
-    best = {}  # (city, td) -> (value_c, is_wu)
+    best = {}
     for r in conn.execute(
         f"SELECT city, target_date, {col} AS v, unit, source FROM observations WHERE {col} IS NOT NULL"
     ):
@@ -92,49 +72,15 @@ def _observed_ground_truth(conn, metric):
         k = (r[0], r[1])
         is_wu = 1 if r[4] == "wu_icao_history" else 0
         if k not in best or is_wu > best[k][1]:
-            best[k] = (_settle_c(r[2], r[3]), is_wu)
+            best[k] = (_to_c(r[2], r[3]), is_wu)
     for k, (val, _) in best.items():
-        truth.setdefault(k, val)  # fallback only where no venue settlement
+        truth.setdefault(k, val)
     return truth
 
 
-def _replay_runtime_center(conn, metric, lead):
-    """city -> [(date, center_c, settle_c)] via the frozen scheme over previous_runs (parity-exact)."""
-    cities = list(runtime_cities_by_name().keys())
-    scheme = {c: dict(s.weights) for c in cities if (s := scheme_for_city(c)) is not None}
-    best = {}
-    for r in conn.execute(
-        "SELECT city,target_date,model,forecast_value_c,source_cycle_time FROM raw_model_forecasts "
-        "WHERE endpoint='previous_runs' AND metric=? AND lead_days=?", (metric, lead)
-    ):
-        k = (r[0], r[1], r[2])
-        if k not in best or r[4] > best[k][1]:
-            best[k] = (r[3], r[4])
-    vals_by = defaultdict(dict)
-    for (city, td, model), (v, _) in best.items():
-        vals_by[(city, td)][model] = v
-    settle = _observed_ground_truth(conn, metric)  # observed extreme, ALL cities + both metrics
-    recs = defaultdict(list)
-    for (city, td), vals in vals_by.items():
-        if city not in scheme:
-            continue
-        s = settle.get((city, td))
-        if s is None:
-            continue
-        w = {m: scheme[city][m] for m in scheme[city]
-             if m in vals and vals[m] is not None and math.isfinite(vals[m])}
-        tot = math.fsum(w.values())
-        if tot <= 0:
-            continue
-        ctr = math.fsum(vals[m] * (w[m] / tot) for m in w)
-        recs[city].append((td, ctr, s))
-    for c in recs:
-        recs[c].sort()
-    return recs
-
-
-def _live_served_pairs(conn, metric):
-    """city -> [(live_center, settle)] on the ACTUAL served center (single_runs anchor_value_c)."""
+def _runtime_served_center(conn, metric):
+    """city -> [(target_date, served_center_c, observed_c)] from the RUNTIME served center
+    (forecast_posteriors.anchor_value_c, latest computed_at per city/date) — the value that feeds q."""
     latest = {}
     for r in conn.execute(
         "SELECT city,target_date,computed_at,provenance_json FROM forecast_posteriors "
@@ -147,24 +93,27 @@ def _live_served_pairs(conn, metric):
             except Exception:
                 av = None
             latest[k] = (r[2], av)
-    settle = _observed_ground_truth(conn, metric)  # observed extreme, ALL cities + both metrics
-    out = defaultdict(list)
+    truth = _observed_ground_truth(conn, metric)
+    recs = defaultdict(list)
     for (city, td), (ca, av) in latest.items():
         if av is None:
             continue
-        s = settle.get((city, td))
+        s = truth.get((city, td))
         if s is not None:
-            out[city].append((float(av), s))
-    return out
+            recs[city].append((td, float(av), s))
+    for c in recs:
+        recs[c].sort()
+    return recs
 
 
-def _wf_affine_dmse(recs, min_train, kappa):
-    """Walk-forward affine per-cell ΔMSE list (leak-free)."""
-    series = {d: (a, b) for d, a, b in walk_forward_affine(recs, min_train=min_train, kappa=kappa)}
+def _loo_dmse(pairs, kappa):
+    """Leave-one-out OOS per-cell ΔMSE for the shrunk affine (thin-data honest validation)."""
     out = []
-    for (d, c, s) in recs:
-        a, b = series.get(d, (0.0, 1.0))
-        out.append((s - c) ** 2 - (s - apply_affine(c, a, b)) ** 2)
+    for i in range(len(pairs)):
+        tr = pairs[:i] + pairs[i + 1:]
+        a, b = fit_affine(tr, kappa=kappa)
+        cc, s = pairs[i]
+        out.append((s - cc) ** 2 - (s - apply_affine(cc, a, b)) ** 2)
     return out
 
 
@@ -172,134 +121,78 @@ def _lower_ci(xs, *, alpha=0.05, nboot=1000, seed=5):
     if len(xs) < 2:
         return float("-inf")
     rng = random.Random(seed)
-    boots = sorted(statistics.mean(rng.choice(xs) for _ in xs) for _ in range(nboot))
-    return boots[int(alpha * nboot)]
+    return sorted(statistics.mean(rng.choice(xs) for _ in xs) for _ in range(nboot))[int(alpha * nboot)]
 
 
-def _pooled_block_ci(cells, *, nboot=1000, seed=7):
-    bydate = defaultdict(list)
-    for d, delta in cells:
-        bydate[d].append(delta)
-    ds = list(bydate)
-    rng = random.Random(seed)
-    boots = []
-    for _ in range(nboot):
-        tot = 0.0
-        n = 0
-        for _ in range(len(ds)):
-            dd = rng.choice(ds)
-            for v in bydate[dd]:
-                tot += v
-                n += 1
-        boots.append(tot / n if n else 0.0)
-    boots.sort()
-    return statistics.mean(boots), boots[int(0.025 * nboot)], boots[int(0.975 * nboot)]
-
-
-def _fit_one_metric(conn, metric, a):
-    """Fit + dual-gate one metric; return (cities_out, validation, report, recs_count)."""
-    recs = _replay_runtime_center(conn, metric, a.lead)
-    livep = _live_served_pairs(conn, metric)
+def _fit_metric(conn, metric, a):
+    recs = _runtime_served_center(conn, metric)
     cities_out = {}
     served_cells = []
-    report = []
     for city in sorted(recs):
         rc = recs[city]
-        ab = current_affine(rc, min_train=a.min_train, kappa=a.kappa)
-        wf = _wf_affine_dmse(rc, a.min_train, a.kappa)
-        n = len(wf)
-        oos = statistics.mean(wf) if wf else 0.0
-        struct_lcb = _lower_ci(wf) if n >= a.serve_min_n else float("-inf")
-        struct_ok = (ab is not None) and (n >= a.serve_min_n) and (struct_lcb >= 0.0)
-        # TRANSFER gate on the ACTUAL live served center
-        lp = livep.get(city, [])
-        A, B = (ab if ab is not None else (0.0, 1.0))
-        live_deltas = [(s - c) ** 2 - (s - apply_affine(c, A, B)) ** 2 for c, s in lp]
-        live_n = len(live_deltas)
-        live_dmse = statistics.mean(live_deltas) if live_deltas else 0.0
-        live_lcb = _lower_ci(live_deltas) if live_n >= a.live_min_n else float("-inf")
+        pairs = [(c, s) for _, c, s in rc]
+        n = len(pairs)
+        if n < a.min_days:
+            cities_out[city] = {"a": 0.0, "b": 1.0, "serve": False, "tier": None, "n": n,
+                                "bias_c": (round(statistics.mean(s - c for c, s in pairs), 3) if pairs else None),
+                                "loo_dmse": None, "loo_dmse_lcb95": None}
+            continue
+        A, B = fit_affine(pairs, kappa=a.kappa)          # served coefficients (all runtime days)
+        loo = _loo_dmse(pairs, a.kappa)
+        oos = statistics.mean(loo)
+        lcb = _lower_ci(loo)
         is_identity = (abs(A) < 1e-9 and abs(B - 1.0) < 1e-9)
-        # TRANSFER gate: the affine must NOT HARM the ACTUAL live served (single_runs) center over the
-        # settled overlap — guards the previous_runs(ifs025)↔single_runs(ifs9) product gap. PRODUCTION
-        # tier requires the 95% lower-CI (consult REQ-20260701-034919 [HIGH]: a point gate on ~18 live
-        # obs is too noisy for a per-unit no-harm guarantee). A city passing STRUCT + point-transfer but
-        # NOT transfer-CI is a CANARY candidate (serve=False; tier="canary") — accrues live data until
-        # its CI tightens. The nested blocked policy replay (select early / score untouched late block)
-        # + threshold-wise Brier both cleared, so the SELECTION POLICY generalizes and no decision
-        # cutpoint is harmed (consult would GO on that; the CI gate is the conservative production line).
-        transfer_ok = (not is_identity) and (live_n >= a.live_min_n) and (live_lcb >= 0.0)
-        transfer_ok_point = (not is_identity) and (live_n >= a.live_min_n) and (live_dmse >= 0.0)
-        serve = bool(struct_ok and transfer_ok)
-        tier = "production" if serve else ("canary" if (struct_ok and transfer_ok_point) else None)
+        serve = bool((not is_identity) and oos > 0.0 and lcb >= 0.0)
+        tier = "production" if serve else ("canary" if (not is_identity and oos > 0.0) else None)
         cities_out[city] = {
             "a": round(A, 5), "b": round(B, 5), "serve": serve, "tier": tier, "n": n,
-            "oos_dmse": round(oos, 4),
-            "oos_dmse_lcb95": (round(struct_lcb, 4) if math.isfinite(struct_lcb) else None),
-            "live_n": live_n, "live_transfer_dmse": round(live_dmse, 4),
-            "live_transfer_dmse_lcb95": (round(live_lcb, 4) if math.isfinite(live_lcb) else None),
-            "struct_ok": bool(struct_ok), "transfer_ok": bool(transfer_ok),
-            "transfer_ok_point": bool(transfer_ok_point),
+            "bias_c": round(statistics.mean(s - c for c, s in pairs), 3),
+            "loo_dmse": round(oos, 4), "loo_dmse_lcb95": round(lcb, 4) if math.isfinite(lcb) else None,
         }
         if serve:
-            served_cells += [(d, m) for (d, c, s), m in zip(rc, wf)]
-        report.append((oos, city, A, B, n, serve))
-
-    pooled, plo, phi = _pooled_block_ci(served_cells) if served_cells else (0.0, 0.0, 0.0)
+            served_cells += loo
+    pooled = statistics.mean(served_cells) if served_cells else 0.0
     validation = {
-        "served_pooled_oos_dmse": round(pooled, 4),
-        "served_pooled_block_ci95": [round(plo, 4), round(phi, 4)],
-        "served_pooled_lower_ci_gt0": bool(plo > 0),
+        "served_pooled_loo_dmse": round(pooled, 4),
         "n_served": sum(1 for v in cities_out.values() if v["serve"]),
         "n_cities": len(cities_out),
+        "median_days_per_city": statistics.median([len(rc) for rc in recs.values()]) if recs else 0,
     }
-    report.sort(reverse=True)
-    return cities_out, validation, report, len(recs)
+    return cities_out, validation
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Fit per-city affine EMOS center calibration (candidate-safe).")
+    ap = argparse.ArgumentParser(description="Fit affine EMOS center calibration on the runtime served center.")
     ap.add_argument("--kappa", type=float, default=DEFAULT_KAPPA)
-    ap.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN)
+    ap.add_argument("--min-days", type=int, default=12, help="min served runtime days/city to attempt a fit.")
     ap.add_argument("--metric", default="both", choices=["high", "low", "both"])
-    ap.add_argument("--lead", type=int, default=1)
-    ap.add_argument("--serve-min-n", type=int, default=40)
-    ap.add_argument("--live-min-n", type=int, default=10)
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--disabled", action="store_true", help="write the artifact with enabled=false (kill switch OFF).")
+    ap.add_argument("--disabled", action="store_true", help="write enabled=false (kill switch OFF).")
     a = ap.parse_args()
 
     conn = get_forecasts_connection_read_only()
-    try:
-        from src.strategy.live_inference.source_clock_city_weights import GRID_AWARE_ARTIFACT_NAME  # noqa: PLC0415
-        scheme_art = str(GRID_AWARE_ARTIFACT_NAME)
-    except Exception:
-        scheme_art = None
-
-    metrics_to_fit = ["high", "low"] if a.metric == "both" else [a.metric]
+    metrics = ["high", "low"] if a.metric == "both" else [a.metric]
     metrics_out, validations = {}, {}
-    for metric in metrics_to_fit:
-        cities_out, validation, report, n_recs = _fit_one_metric(conn, metric, a)
-        metrics_out[metric] = {"cities": cities_out}
-        validations[metric] = validation
-        print(f"=== EMOS affine center calibration (metric={metric} lead={a.lead} κ={a.kappa} min_train={a.min_train}) ===")
-        print(f"served {validation['n_served']}/{n_recs}  served-pooled OOS ΔMSE={validation['served_pooled_oos_dmse']:+.4f} "
-              f"CI95={validation['served_pooled_block_ci95']} lower>0={validation['served_pooled_lower_ci_gt0']}")
-        for oos, city, A, B, n, serve in report:
-            if serve:
-                print(f"  {city:16s} a={A:>+7.2f} b={B:>7.3f} oos_dmse={oos:>+9.4f} n={n}")
+    for m in metrics:
+        cities_out, validation = _fit_metric(conn, m, a)
+        metrics_out[m] = {"cities": cities_out}
+        validations[m] = validation
+        print(f"=== EMOS affine (basis=runtime served center, metric={m}, κ={a.kappa}) ===")
+        print(f"served {validation['n_served']}/{validation['n_cities']}  pooled LOO ΔMSE="
+              f"{validation['served_pooled_loo_dmse']:+.4f}  median_days/city={validation['median_days_per_city']:.0f}")
+        for city, d in sorted(cities_out.items(), key=lambda kv: -(kv[1]["loo_dmse"] or -9)):
+            if d["serve"]:
+                print(f"  {city:14s} a={d['a']:>+7.2f} b={d['b']:>7.3f} bias={d['bias_c']:>+6.2f} LOO_ΔMSE={d['loo_dmse']:>+8.4f} n={d['n']}")
 
     artifact = {
-        "authority": ARTIFACT_AUTHORITY, "fit_on_scheme_artifact": scheme_art,
-        "enabled": (not a.disabled),  # kill switch: enabled=false => lookup returns identity for all
-        "model": "affine_ngr_center: mu' = a + b*mu_runtime (per-unit, shrunk-to-identity, slope-clamped)",
-        "kappa": a.kappa, "min_train": a.min_train, "lead": a.lead,
-        "serve_rule": ("STRUCT(walk_forward_affine_oos_dmse_lower95CI>=0, n>=serve_min_n) AND "
-                       "TRANSFER(live_single_runs_affine_dmse_lower95CI>=0, live_n>=live_min_n); "
-                       "STRUCT+point-positive but CI-unproven rows are tier=canary, serve=false"),
-        "serve_min_n": a.serve_min_n, "live_min_n": a.live_min_n,
-        "metrics": metrics_out,
-        "validation": validations,
+        "authority": ARTIFACT_AUTHORITY,
+        "enabled": (not a.disabled),
+        "basis": "runtime_served_center: forecast_posteriors.anchor_value_c (the value that feeds q)",
+        "model": "affine_ngr_center: mu' = a + b*mu_served (per-unit, shrunk-to-identity, slope-clamped)",
+        "validation": "leave-one-out OOS dMSE, 95% lower-CI >= 0 (runtime history ~20 days/city)",
+        "kappa": a.kappa, "min_days": a.min_days,
+        "metrics": metrics_out, "validation_by_metric": validations,
     }
     if a.dry_run:
         print("\n[dry-run] artifact NOT written.")

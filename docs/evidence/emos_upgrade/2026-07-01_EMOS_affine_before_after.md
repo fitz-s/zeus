@@ -1,5 +1,26 @@
 # EMOS affine center calibration — before/after (2026-07-01)
 
+## FINAL BASIS (operator sentence #1): the RUNTIME served center, not any raw endpoint
+"使用真实参与概率计算的运行态组合数据". The 运行态组合数据 IS the served fused center
+`forecast_posteriors.anchor_value_c` — the value that literally feeds the live probability q.
+Earlier passes calibrated on raw model endpoints (previous_runs = ECMWF ifs025 0.25° coarse; then
+single_runs raw) — both WRONG: previous_runs is a different product (ifs025 vs live ifs9 gap sd 1.52,
+e.g. Jeddah −1.44 on ifs025 → +0.08 on ifs9 = pure coarse-grid artifact), single_runs is a raw source
+not the combination. Refit on the served center itself. No product gap ⇒ no transfer bridge.
+Runtime history is short (~19-20 served days/city today) ⇒ **leave-one-out** validation (walk-forward
+needs ~25 prior); the served (a,b) sharpens as the live history accrues.
+
+**Before/after on the runtime served center (LOO-validated, shrunk-to-identity, slope-clamped):**
+- HIGH: **20 cities served** (LOO OOS ΔMSE 95% lower-CI ≥ 0), served-set pooled LOO ΔMSE +0.51.
+  Before/after (N=375): RMSE **1.513→1.300 (+14.1%)**, CRPS **0.841→0.721 (+14.2%)**, |bias| 0.42→0.28.
+- LOW: **2 cities** (Paris, NYC) — the rest of the 8 venue-low cities are already world-class
+  (pooled low bias −0.01), correctly not corrected.
+- Corrections are TINY (heavy shrinkage on thin data): e.g. Guangzhou bias +1.68 → served affine only
+  ~+0.5 at operating temp. σ untouched. Everything below is superseded (raw-endpoint bases).
+
+---
+
+
 Walk-forward (leak-free) on the REAL runtime combined center. BEFORE = served runtime center; AFTER =
 affine-corrected μ'=a+b·μ (shrunk-to-identity, slope clamped [0.85,1.15]). 19 served cities, N=2069
 settled cells, σ=1.48 (pooled realized). Every served city improves on RMSE, CRPS, and bin log-loss.
