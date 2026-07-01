@@ -3812,6 +3812,77 @@ class TestRecoveryResolutionTable:
 
         assert "ord-late-candidate" in priming["order_ids"]
 
+    def test_live_tick_clears_terminal_cancel_fact_before_venue_snapshot(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+        from src.execution import venue_sync_contract
+        from src.state.db import init_schema
+
+        db_path = tmp_path / "live-tick-terminal-before-snapshot.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-001")
+        _seed_pending_entry_projection(seed)
+        _append_order_fact(
+            seed,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="12.44",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        def _fail_capture(*args, **kwargs):
+            raise RuntimeError("venue snapshot blocked after local cleanup")
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+        client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+        with pytest.raises(RuntimeError, match="venue snapshot blocked after local cleanup"):
+            command_recovery.reconcile_unresolved_commands(client=client, scope="live_tick")
+
+        verified = _conn_factory()
+        try:
+            command = verified.execute(
+                "SELECT state FROM venue_commands WHERE command_id = 'cmd-001'"
+            ).fetchone()
+            latest_event = verified.execute(
+                """
+                SELECT event_type
+                  FROM venue_command_events
+                 WHERE command_id = 'cmd-001'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            current = verified.execute(
+                """
+                SELECT phase, shares, cost_basis_usd, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            verified.close()
+
+        assert command["state"] == "CANCELLED"
+        assert latest_event["event_type"] == "CANCEL_ACKED"
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
     def test_acked_terminal_point_order_missing_matched_size_stays(
         self,
         conn,

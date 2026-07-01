@@ -15153,6 +15153,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         reconcile_review_required_exit_mutex_releases,
         "review_required_exit_mutex_release",
     )
+    if scope == "live_tick":
+        # These passes consume facts that are already durable in zeus_trades.
+        # Run them before the venue snapshot so one slow CLOB point-order read
+        # cannot keep zero-exposure pending entries or duplicate locks alive.
+        _db_pass(
+            "cancel_ack_terminal_no_fill_facts",
+            reconcile_cancel_ack_terminal_no_fill_facts,
+            "cancel_ack_terminal_no_fill_facts",
+        )
+        _db_pass(
+            "terminal_order_facts",
+            reconcile_terminal_order_facts,
+            "terminal_order_facts",
+            collect_continuations=True,
+        )
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
@@ -15314,15 +15329,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "edli_post_submit_unknown_absence",
             _reconcile_edli_post_submit_unknown_absence,
             "edli_post_submit_unknown_absence",
-        )
-        _db_pass("cancel_ack_terminal_no_fill_facts",
-                 reconcile_cancel_ack_terminal_no_fill_facts,
-                 "cancel_ack_terminal_no_fill_facts")
-        _db_pass(
-            "terminal_order_facts",
-            reconcile_terminal_order_facts,
-            "terminal_order_facts",
-            collect_continuations=True,
         )
         abandoned_ghosts = summary.get("abandoned_unsubmitted_ghosts")
         abandoned_continuations = (

@@ -163,7 +163,7 @@ def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
         verify_execution_command(command, parents)
 
 
-def test_execution_command_accepts_low_price_with_qkernel_authority_and_profit_floor():
+def test_execution_command_rejects_low_price_with_qkernel_authority_and_profit_floor():
     parents, command = execution_graph(
         final_payload={
             "limit_price": 0.01,
@@ -198,7 +198,8 @@ def test_execution_command_accepts_low_price_with_qkernel_authority_and_profit_f
         },
     )
 
-    verify_execution_command(command, parents)
+    with pytest.raises(CertificateVerificationError, match="below strategy entry floor"):
+        verify_execution_command(command, parents)
 
 
 def test_execution_command_has_no_max_notional_ceiling():

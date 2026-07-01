@@ -896,6 +896,7 @@ def _pre_submit_payload(**overrides):
         "q_live": 0.70,
         "q_lcb_5pct": 0.60,
         "expected_edge": 0.10,
+        "selection_authority_applied": "qkernel_spine",
         "min_entry_price": 0.10,
         "min_expected_profit_usd": 1.0,
         "min_submit_edge_density": 0.05,

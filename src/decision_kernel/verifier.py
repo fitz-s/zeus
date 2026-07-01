@@ -1430,24 +1430,9 @@ def _finite_float(value: object, field_name: str) -> float:
     return parsed
 
 
-def _uses_qkernel_spine_entry_authority(payload: dict) -> bool:
-    economics = payload.get("qkernel_execution_economics")
-    if not isinstance(economics, dict):
-        return False
-    if str(economics.get("source") or "").strip() != "qkernel_spine":
-        return False
-    return str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
-
-
 def _entry_floor_applies(payload: dict) -> bool:
     direction = str(payload.get("direction") or "").strip().lower()
-    if direction not in {"buy_yes", "buy_no"}:
-        return False
-    # Qkernel-spine entries carry their own executable economics certificate and
-    # are still checked for positive conservative edge, profit floor, edge density,
-    # selection guard, and qkernel authority. A fixed raw price floor is not a
-    # probability or alpha proof and suppresses valid low-price YES opportunities.
-    return not _uses_qkernel_spine_entry_authority(payload)
+    return direction in {"buy_yes", "buy_no"}
 
 
 def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:

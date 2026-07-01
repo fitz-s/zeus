@@ -73,7 +73,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_accepts_low_price_when_qkernel_authority_and_profit_clear():
+def test_entry_economics_blocks_low_price_even_when_qkernel_authority_and_profit_clear():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -94,8 +94,9 @@ def test_entry_economics_accepts_low_price_when_qkernel_authority_and_profit_cle
         shares=1497.78,
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["details"]["expected_profit_usd"] > 1.0
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
 def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():

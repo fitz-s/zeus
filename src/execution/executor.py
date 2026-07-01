@@ -648,15 +648,6 @@ def _bool_field(value: Any) -> bool | None:
     return None
 
 
-def _uses_qkernel_spine_entry_authority(intent: ExecutionIntent) -> bool:
-    economics = getattr(intent, "qkernel_execution_economics", None)
-    if not isinstance(economics, Mapping):
-        return False
-    if str(economics.get("source") or "").strip() != "qkernel_spine":
-        return False
-    return str(getattr(intent, "selection_authority_applied", "") or "").strip() == "qkernel_spine"
-
-
 def _entry_economics_component(
     intent: ExecutionIntent,
     *,
@@ -746,15 +737,10 @@ def _entry_economics_component(
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
-    qkernel_spine_entry = _uses_qkernel_spine_entry_authority(intent)
-    effective_min_entry_price = (
-        float("-inf")
-        if qkernel_spine_entry
-        else max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE)
-    )
+    effective_min_entry_price = max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE)
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif not qkernel_spine_entry and min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+    elif min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
         reason = "min_entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
@@ -766,7 +752,7 @@ def _entry_economics_component(
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif not qkernel_spine_entry and limit_price <= effective_min_entry_price + 1e-12:
+    elif limit_price <= effective_min_entry_price + 1e-12:
         reason = "limit_price_below_strategy_entry_floor"
     elif expected_profit + 1e-9 < effective_min_expected_profit:
         reason = "expected_profit_below_floor"

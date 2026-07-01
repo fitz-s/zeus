@@ -20,15 +20,6 @@ _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 _DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 
 
-def _uses_qkernel_spine_entry_authority(payload: dict[str, Any]) -> bool:
-    economics = payload.get("qkernel_execution_economics")
-    if not isinstance(economics, dict):
-        return False
-    if str(economics.get("source") or "").strip() != "qkernel_spine":
-        return False
-    return str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
-
-
 PRE_SUBMIT_REQUIRED_FIELDS = (
     "event_id",
     "final_intent_id",
@@ -815,12 +806,10 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
-    qkernel_spine_entry = _uses_qkernel_spine_entry_authority(payload)
-    if not qkernel_spine_entry:
-        if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
-            raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-        if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
-            raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
+    if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+        raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
+    if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
+        raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
