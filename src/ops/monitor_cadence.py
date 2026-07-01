@@ -1,0 +1,184 @@
+"""Read-only held-position monitor cadence evidence.
+
+This module is intentionally pure SELECT/in-memory classification.  It proves
+whether live-money positions have fresh per-position ``MONITOR_REFRESHED``
+events; it does not use projection timestamps and never writes runtime state.
+"""
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any
+
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
+
+MONITOR_CADENCE_EXPOSURE_EPS = 0.01
+MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
+MONITOR_CADENCE_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
+
+
+def collect_monitor_cadence_evidence(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    max_age_seconds: float | None = None,
+    min_occurred_at: datetime | None = None,
+    sample_limit: int = 25,
+) -> dict[str, Any]:
+    """Return per-position monitor cadence evidence for current money risk.
+
+    ``max_age_seconds`` is the normal health/preflight freshness window.
+    ``min_occurred_at`` is the post-start restart proof floor.  When both are
+    supplied, a position must satisfy both.  Future-dated monitor events are
+    reported separately because they are clock/data faults, not stale cadence.
+    """
+
+    position_columns = _table_columns(conn, "position_current")
+    event_columns = _table_columns(conn, "position_events")
+    monitored_rows = _monitor_cadence_position_rows(conn, position_columns)
+    now_utc = _ensure_utc(now)
+    min_occurred_utc = _ensure_utc(min_occurred_at) if min_occurred_at else None
+    stale_or_missing: list[dict[str, Any]] = []
+    future_events: list[dict[str, Any]] = []
+    fresh_count = 0
+    for position in monitored_rows:
+        occurred_at = _latest_monitor_refreshed_at(
+            conn,
+            str(position["position_id"]),
+            event_columns,
+        )
+        position_evidence = {
+            "position_id": position["position_id"],
+            "phase": position["phase"],
+            "chain_state": position["chain_state"],
+        }
+        if not occurred_at:
+            stale_or_missing.append(
+                {**position_evidence, "last_monitor_refreshed_at": None}
+            )
+            continue
+        position_evidence["last_monitor_refreshed_at"] = occurred_at
+        occurred_dt = _parse_iso_utc(occurred_at)
+        if occurred_dt is None:
+            stale_or_missing.append(
+                {**position_evidence, "issue": "timestamp_unparseable"}
+            )
+            continue
+        age_seconds = (now_utc - occurred_dt).total_seconds()
+        position_evidence["age_seconds"] = round(age_seconds, 1)
+        if age_seconds < 0.0:
+            future_events.append(position_evidence)
+        elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
+            stale_or_missing.append(position_evidence)
+        elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
+            stale_or_missing.append(position_evidence)
+        else:
+            fresh_count += 1
+    open_count = len(monitored_rows)
+    return {
+        "open_position_count": open_count,
+        "monitored_position_count": open_count,
+        "fresh_position_count": fresh_count,
+        "stale_or_missing_position_count": len(stale_or_missing),
+        "stale_or_missing_positions": stale_or_missing[:sample_limit],
+        "future_monitor_event_count": len(future_events),
+        "future_monitor_events": future_events[:sample_limit],
+    }
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
+def _monitor_cadence_position_rows(
+    conn: sqlite3.Connection,
+    position_columns: set[str],
+) -> list[dict[str, object]]:
+    if "position_id" not in position_columns:
+        return []
+    optional_selects = []
+    for column in ("phase", "shares", "chain_shares", "chain_state"):
+        optional_selects.append(column if column in position_columns else f"NULL AS {column}")
+    rows = conn.execute(
+        f"""
+        SELECT position_id, {", ".join(optional_selects)}
+          FROM position_current
+        """
+    ).fetchall()
+    monitored: list[dict[str, object]] = []
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        phase = str(row["phase"] or "").strip().lower()
+        chain_state = str(row["chain_state"] or "").strip()
+        shares = _float_or_zero(row["shares"])
+        chain_shares = _float_or_zero(row["chain_shares"])
+        exposure_positive = (
+            shares > MONITOR_CADENCE_EXPOSURE_EPS
+            or chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
+        )
+        current_chain_risk = (
+            chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
+            and chain_state in CURRENT_MONEY_RISK_CHAIN_STATES
+        )
+        if phase in MONITOR_CADENCE_CHAIN_RISK_PHASES:
+            should_monitor = current_chain_risk
+        elif phase:
+            should_monitor = phase in MONITOR_CADENCE_POSITION_PHASES and exposure_positive
+        else:
+            should_monitor = exposure_positive
+        if should_monitor:
+            monitored.append(
+                {
+                    "position_id": position_id,
+                    "phase": phase,
+                    "chain_state": chain_state,
+                }
+            )
+    return monitored
+
+
+def _latest_monitor_refreshed_at(
+    conn: sqlite3.Connection,
+    position_id: str,
+    event_columns: set[str],
+) -> str | None:
+    order_by = "datetime(occurred_at) DESC"
+    if "sequence_no" in event_columns:
+        order_by += ", sequence_no DESC"
+    row = conn.execute(
+        f"""
+        SELECT occurred_at
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY {order_by}
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    return None if row is None else str(row["occurred_at"] or "")
+
+
+def _parse_iso_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _ensure_utc(parsed)
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

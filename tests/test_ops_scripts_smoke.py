@@ -690,6 +690,228 @@ def test_deploy_live_runtime_fresh_wait_allows_boot_timestamp_boundary(monkeypat
     assert "verified" in detail
 
 
+def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path):
+    dl = _load("deploy_live_monitor_cadence_wait", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0)"
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start monitor cadence verified" in detail
+
+
+def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_stale", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0, ?)",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at
+        ) VALUES (1, 'pos-1', 'CHAIN_SIZE_CORRECTED', ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at
+        ) VALUES (2, 'pos-1', 'MONITOR_REFRESHED', ?)
+        """,
+        ((launched - timedelta(minutes=20)).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "did not verify" in detail
+    assert "last_monitor_refreshed_at" in detail
+
+
+def test_deploy_live_post_start_monitor_wait_is_per_position(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_per_position", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    conn.execute("INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0)")
+    conn.execute("INSERT INTO position_current VALUES ('pos-2', 'active', 1.0, 1.0)")
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "stale_or_missing_positions=1" in detail
+    assert "pos-2" in detail
+
+
+def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_future", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    conn.execute("INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0)")
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+        """,
+        ((datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "future_monitor_events=1" in detail
+
+
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
@@ -717,11 +939,16 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("verify", kwargs["expected_sha"][:8]))
         return True, "live runtime freshness verified"
 
+    def _monitor(**kwargs):
+        calls.append(("monitor", "post-start"))
+        return True, "post-start monitor cadence verified"
+
     monkeypatch.setattr(dl, "_stop_label", _stop)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
     monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
+    monkeypatch.setattr(dl, "_wait_for_post_start_monitor_cadence", _monitor)
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -734,6 +961,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
+        ("monitor", "post-start"),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
 
@@ -769,6 +997,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         "_wait_for_live_runtime_fresh",
         lambda **kwargs: (calls.append(("verify", kwargs["expected_sha"][:8])) or (True, "verified")),
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **kwargs: (calls.append(("monitor", "post-start")) or (True, "monitor verified")),
+    )
 
     rc = dl.main(["restart", "all"])
 
@@ -780,6 +1013,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     assert calls.index(("verify", "dddddddd")) > live_launch_index
+    assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
     non_live_launches = [
         call for call in calls[1:recovery_index]
         if call[0] == "launch"

@@ -2531,6 +2531,25 @@ files:
     - src/control/control_plane.py
     - src/engine/cycle_runner.py
     - src/main.py
+  src/ops/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks ops namespace for read-only operator/runtime proof helpers.
+  src/ops/monitor_cadence.py:
+    zone: K2_runtime
+    authority_role: monitor_cadence_proof_helper
+    why: >
+      Shared read-only per-position monitor cadence evidence for restart
+      preflight, post-start deploy verification, and operator healthcheck.
+      Uses canonical position_events.MONITOR_REFRESHED per current-money-risk
+      position; never treats position_current.updated_at as monitor/redecision
+      proof.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/check_live_restart_preflight.py
+    - scripts/deploy_live.py
+    - scripts/healthcheck.py
   src/supervisor_api/AGENTS.md:
     zone: docs
     authority_role: registry

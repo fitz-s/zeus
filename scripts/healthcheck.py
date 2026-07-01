@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import get_mode, state_path
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 from src.state.db import get_connection, get_forecasts_connection, ZEUS_FORECASTS_DB_PATH
 from src.state.decision_chain import query_no_trade_cases
 
@@ -659,64 +660,27 @@ def _monitor_cadence_status() -> dict:
         if "position_events" not in tables:
             evidence["issue"] = "MONITOR_CADENCE_POSITION_EVENTS_MISSING"
             return evidence
-        position_columns = {
-            str(row["name"])
-            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
-        }
-        exposure_terms = []
-        if "shares" in position_columns:
-            exposure_terms.append("COALESCE(shares, 0) > 0.01")
-        if "chain_shares" in position_columns:
-            exposure_terms.append("COALESCE(chain_shares, 0) > 0.01")
-        exposure_sql = " OR ".join(exposure_terms) if exposure_terms else "1=1"
-        phase_sql = (
-            "LOWER(COALESCE(phase, '')) NOT IN "
-            "('settled','voided','economically_closed','admin_closed','quarantined')"
-            if "phase" in position_columns
-            else "1=1"
+        cadence = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=MONITOR_CADENCE_STALE_SECONDS,
         )
-        open_count = int(
-            conn.execute(
-                f"""
-                SELECT COUNT(*)
-                  FROM position_current
-                 WHERE ({phase_sql})
-                   AND ({exposure_sql})
-                """
-            ).fetchone()[0]
-            or 0
-        )
-        evidence["open_position_count"] = open_count
+        evidence.update(cadence)
+        open_count = int(cadence["open_position_count"])
         if open_count == 0:
             evidence["ok"] = True
             return evidence
-        row = conn.execute(
-            """
-            SELECT occurred_at
-              FROM position_events
-             WHERE event_type = 'MONITOR_REFRESHED'
-             ORDER BY datetime(occurred_at) DESC, sequence_no DESC
-             LIMIT 1
-            """
-        ).fetchone()
-        if row is None:
-            evidence["issue"] = "MONITOR_CADENCE_NO_REFRESH_EVENT"
-            return evidence
-        occurred_at = str(row["occurred_at"] or "")
-        evidence["last_monitor_refreshed_at"] = occurred_at
-        try:
-            occurred_dt = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            evidence["issue"] = "MONITOR_CADENCE_TIMESTAMP_UNPARSEABLE"
-            return evidence
-        if occurred_dt.tzinfo is None:
-            occurred_dt = occurred_dt.replace(tzinfo=timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - occurred_dt.astimezone(timezone.utc)).total_seconds()
-        evidence["age_seconds"] = round(age_seconds, 1)
-        if age_seconds < 0.0:
+        stale_or_missing = cadence["stale_or_missing_positions"]
+        if cadence["future_monitor_event_count"]:
             evidence["issue"] = "MONITOR_CADENCE_FUTURE_TIMESTAMP"
             return evidence
-        if age_seconds > MONITOR_CADENCE_STALE_SECONDS:
+        if stale_or_missing:
+            if len(stale_or_missing) == open_count and all(
+                item.get("last_monitor_refreshed_at") is None
+                for item in stale_or_missing
+            ):
+                evidence["issue"] = "MONITOR_CADENCE_NO_REFRESH_EVENT"
+                return evidence
             evidence["issue"] = "MONITOR_CADENCE_STALE"
             return evidence
         evidence["ok"] = True

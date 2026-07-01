@@ -39,6 +39,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -4680,40 +4681,28 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
     running and the cadence is stale, fail closed.
     """
 
-    open_count = len(rows)
     evidence: dict[str, Any] = {
         "trade_db": str(TRADE_DB),
-        "open_position_count": open_count,
+        "preflight_open_position_count": len(rows),
         "max_age_seconds": MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
         "source": "position_events.MONITOR_REFRESHED",
         "position_current_updated_at_is_not_monitor_cadence": True,
     }
-    if open_count == 0:
-        return CheckResult(
-            "monitor_cadence_restart_evidence",
-            True,
-            "no open positions require monitor cadence recovery evidence",
-            evidence,
-        )
 
     try:
         with _connect_live_ro() as conn:
-            if not _table_exists(conn, "main", "position_events"):
+            if not _table_exists(conn, "main", "position_current"):
                 return CheckResult(
                     "monitor_cadence_restart_evidence",
                     False,
-                    "position_events table is missing; monitor cadence cannot be proven",
+                    "position_current table is missing; monitor cadence cannot be proven",
                     evidence,
                 )
-            row = conn.execute(
-                """
-                SELECT occurred_at
-                  FROM position_events
-                 WHERE event_type = 'MONITOR_REFRESHED'
-                 ORDER BY datetime(occurred_at) DESC, sequence_no DESC
-                 LIMIT 1
-                """
-            ).fetchone()
+            cadence = collect_monitor_cadence_evidence(
+                conn,
+                now=datetime.now(timezone.utc),
+                max_age_seconds=MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
+            )
     except Exception as exc:  # noqa: BLE001
         evidence["error"] = str(exc)
         return CheckResult(
@@ -4723,42 +4712,38 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
             evidence,
         )
 
-    if row is None:
-        return CheckResult(
-            "monitor_cadence_restart_evidence",
-            False,
-            "open positions exist but no MONITOR_REFRESHED event was found",
-            evidence,
-        )
-    occurred_at = str(row["occurred_at"] or "")
-    occurred_dt = _parse_dt(occurred_at)
-    evidence["last_monitor_refreshed_at"] = occurred_at
-    if occurred_dt is None:
-        return CheckResult(
-            "monitor_cadence_restart_evidence",
-            False,
-            "latest MONITOR_REFRESHED timestamp is invalid",
-            evidence,
-        )
-    age_seconds = (datetime.now(timezone.utc) - occurred_dt.astimezone(timezone.utc)).total_seconds()
-    evidence["age_seconds"] = age_seconds
-    main_processes = _live_main_processes()
-    evidence["live_main_processes"] = main_processes
-    if 0.0 <= age_seconds <= MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS:
+    evidence.update(cadence)
+    if not cadence["open_position_count"]:
         return CheckResult(
             "monitor_cadence_restart_evidence",
             True,
-            "held-position monitor cadence is fresh",
+            "no open positions require monitor cadence recovery evidence",
+            evidence,
+        )
+    main_processes = _live_main_processes()
+    evidence["live_main_processes"] = main_processes
+    if cadence["future_monitor_event_count"]:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "held-position monitor cadence has future-dated events",
+            evidence,
+        )
+    if not cadence["stale_or_missing_position_count"]:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "all held-position monitor cadence evidence is fresh",
             evidence,
         )
     evidence["restart_recovery_obligation"] = (
-        "post-start health must observe a fresh MONITOR_REFRESHED before live is considered recovered"
+        "post-start health must observe fresh per-position MONITOR_REFRESHED events before live is considered recovered"
     )
     if not main_processes:
         return CheckResult(
             "monitor_cadence_restart_evidence",
             True,
-            "held-position monitor cadence is stale; restart is expected to recover it and post-start health must verify",
+            "held-position monitor cadence is stale or missing per position; restart is expected to recover it and post-start health must verify",
             evidence,
         )
     return CheckResult(

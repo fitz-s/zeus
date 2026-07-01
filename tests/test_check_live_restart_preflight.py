@@ -5314,6 +5314,79 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
 
 
+def test_monitor_cadence_restart_evidence_is_per_position_not_global_latest(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'pos-2', 'active', 'Paris', '2026-07-02', 'low',
+            'Will the lowest temperature in Paris be 19°C on July 2?',
+            'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
+            0.81, 1, 0.75, 1, ?
+        )
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is False
+    assert result.evidence["fresh_position_count"] == 1
+    assert result.evidence["stale_or_missing_position_count"] == 1
+    assert result.evidence["stale_or_missing_positions"][0]["position_id"] == "pos-2"
+
+
+def test_monitor_cadence_restart_evidence_rejects_future_events_even_main_absent(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is False
+    assert result.detail == "held-position monitor cadence has future-dated events"
+    assert result.evidence["future_monitor_event_count"] == 1
+
+
 # --- B1: submit_authority_config fail-closed tests ---
 
 

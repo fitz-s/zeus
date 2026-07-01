@@ -50,11 +50,18 @@ import argparse
 import json
 import os
 import plistlib
+import sqlite3
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 
 LIVE_TRADING_PLIST = (
     Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -135,11 +142,13 @@ LAUNCHD_UNLOAD_POLL_SECONDS = 0.5
 LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS", "90")
 )
+LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS", "240")
+)
 LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
 LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
 )
-
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
 # scripts/*.py from the live checkout (external review 2026-06-12). deploy/launchd
@@ -405,6 +414,85 @@ def _wait_for_live_runtime_fresh(
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
+def _wait_for_post_start_monitor_cadence(
+    *,
+    launched_after: datetime,
+    timeout_seconds: float = LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait until held-position monitoring proves it ran after this boot.
+
+    Chain reconciliation can refresh ``position_current.updated_at`` without any
+    exit/hold decision.  The post-start recovery proof is a fresh canonical
+    ``MONITOR_REFRESHED`` event after the live-trading launch floor while open
+    positions exist.
+    """
+
+    trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
+    launched_floor = launched_after.astimezone(timezone.utc) - timedelta(
+        seconds=max(0.0, LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS)
+    )
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_detail = "not checked"
+
+    while True:
+        try:
+            conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+            conn.row_factory = sqlite3.Row
+            tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "position_current" not in tables or "position_events" not in tables:
+                conn.close()
+                last_detail = "position_current or position_events table missing"
+            else:
+                cadence = collect_monitor_cadence_evidence(
+                    conn,
+                    now=datetime.now(timezone.utc),
+                    min_occurred_at=launched_floor,
+                    sample_limit=5,
+                )
+                conn.close()
+                open_count = int(cadence["open_position_count"])
+                if open_count == 0:
+                    return True, "post-start monitor cadence skipped: no open positions"
+                if cadence["future_monitor_event_count"]:
+                    last_detail = (
+                        f"open_positions={open_count} "
+                        f"future_monitor_events={cadence['future_monitor_event_count']} "
+                        f"sample={cadence['future_monitor_events']}"
+                    )
+                else:
+                    stale_or_missing = list(cadence["stale_or_missing_positions"])
+                    if not stale_or_missing:
+                        return (
+                            True,
+                            "post-start monitor cadence verified: "
+                            f"all_positions_refreshed={open_count}",
+                        )
+                    sample = ", ".join(
+                        f"{item['position_id']} last_monitor_refreshed_at={item['last_monitor_refreshed_at']}"
+                        for item in stale_or_missing[:5]
+                    )
+                    last_detail = (
+                        f"open_positions={open_count} "
+                        f"stale_or_missing_positions={cadence['stale_or_missing_position_count']} "
+                        f"sample={sample or '<empty>'} "
+                        f"launched_floor={launched_floor.isoformat()}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            last_detail = f"monitor cadence read failed: {type(exc).__name__}: {exc}"
+
+        if time.monotonic() >= deadline:
+            return (
+                False,
+                "post-start monitor cadence did not verify after restart: " + last_detail,
+            )
+        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
 def _stop_label(label: str) -> tuple[bool, str]:
     """Stop/unload a launchd label so preflight can inspect an absent process."""
 
@@ -657,6 +745,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
             print(runtime_detail)
             if not runtime_ok:
                 rc_all = 1
+            else:
+                monitor_ok, monitor_detail = _wait_for_post_start_monitor_cadence(
+                    launched_after=launched_after,
+                )
+                print(monitor_detail)
+                if not monitor_ok:
+                    rc_all = 1
         else:
             rc_all = 1
             print(detail, file=sys.stderr)

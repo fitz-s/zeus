@@ -1270,6 +1270,126 @@ def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_p
     assert result["open_position_count"] == 1
 
 
+def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    fresh_monitor = datetime.now(timezone.utc) - timedelta(seconds=30)
+    _init_monitor_cadence_db(db_path, monitor_at=fresh_monitor)
+    conn = sqlite3.connect(str(db_path))
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at
+        ) VALUES ('pos-2', 'active', 3.0, 3.0, ?)
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["open_position_count"] == 2
+    assert result["fresh_position_count"] == 1
+    assert result["stale_or_missing_position_count"] == 1
+    assert result["stale_or_missing_positions"][0]["position_id"] == "pos-2"
+
+
+def test_monitor_cadence_status_includes_quarantined_current_chain_risk(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, chain_state
+        ) VALUES ('pos-q', 'quarantined', 0.0, 4.0, 'entry_authority_quarantined')
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_NO_REFRESH_EVENT"
+    assert result["open_position_count"] == 1
+    assert result["stale_or_missing_positions"][0]["position_id"] == "pos-q"
+
+
+def test_monitor_cadence_status_excludes_quarantined_zero_chain_risk(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, chain_state
+        ) VALUES ('pos-q-zero', 'quarantined', 10.0, 0.0, 'chain_confirmed_zero')
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["open_position_count"] == 0
+
+
 def test_healthcheck_is_not_healthy_when_monitor_cadence_stale(monkeypatch):
     monkeypatch.setattr(
         healthcheck,
