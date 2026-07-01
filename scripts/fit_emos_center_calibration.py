@@ -25,6 +25,7 @@ import json
 import math
 import os
 import random
+import sqlite3
 import statistics
 import sys
 from collections import defaultdict
@@ -57,11 +58,17 @@ def _observed_ground_truth(conn, metric):
     for all 54 cities and matches venue settlement 100% within 0.6C where a market exists; deduped
     preferring wu_icao_history (the wunderground source the venue settles from)."""
     truth = {}
-    for r in conn.execute(
-        "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
-        "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
-    ):
-        truth[(r[0], r[1])] = _to_c(r[2], r[3])
+    # Venue settlement is preferred WHERE PRESENT, but the ground truth does NOT require it: the
+    # observed extreme (observations, below) is authoritative and complete on its own. Fail-soft so a
+    # DB without settlement_outcomes (or with none for this metric) still yields the observed truth.
+    try:
+        for r in conn.execute(
+            "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
+            "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
+        ):
+            truth[(r[0], r[1])] = _to_c(r[2], r[3])
+    except sqlite3.OperationalError:
+        pass  # no settlement_outcomes table -> observations-only ground truth
     col = _OBS_COL[metric]
     best = {}
     for r in conn.execute(
