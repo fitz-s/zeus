@@ -63,6 +63,16 @@ PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS = 24.0
 SERVED_VIA_SINGLE_RUNS = "single_runs"
 SERVED_VIA_PREVIOUS_RUNS = "previous_runs"
 
+# 删了0.25 (2026-07-01): a model whose previous_runs product is a DIFFERENT (coarser) physical product
+# than its live single_runs — NOT just an older run of the same product. ECMWF's OM previous-runs feed
+# serves ecmwf_ifs025 (0.25° grid) while single_runs serves ecmwf_ifs (9km). The substitution law
+# (没有新的就用老的) is correct for same-product models (an older run of the SAME product) but WRONG here:
+# substituting ifs025 injects a coarse-grid representativeness artifact into the served center (measured
+# ifs025↔ifs9 per-city gap sd 1.52C, e.g. Jeddah +2.2C; Jeddah's whole apparent −1.44 bias was this
+# artifact — +0.08 on ifs9). So when the fresh 9km value is missing, DROP the model (the scheme
+# renormalizes over present sources) rather than serve the 0.25° coarse product.
+_PRODUCT_MISMATCHED_PREVIOUS_RUNS = frozenset({"ecmwf_ifs"})
+
 
 @dataclass(frozen=True)
 class ServedInstrumentValue:
@@ -190,6 +200,10 @@ def read_current_instrument_values(
                 continue
             age = _age_hours_or_none(captured, served_cycle)
             if endpoint == SERVED_VIA_PREVIOUS_RUNS and age is not None and age > float(max_substitution_age_hours):
+                continue
+            # 删了0.25: never substitute a product-mismatched previous_runs (ECMWF ifs025 0.25° coarse)
+            # for the live 9km center — drop it, let the scheme renormalize over the present sources.
+            if endpoint == SERVED_VIA_PREVIOUS_RUNS and model in _PRODUCT_MISMATCHED_PREVIOUS_RUNS:
                 continue
             out[model] = ServedInstrumentValue(
                 value_c=value, raw_model_forecast_id=rid, served_via=endpoint,
