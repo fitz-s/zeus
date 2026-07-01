@@ -28,6 +28,7 @@
 #                    unchanged and still enforce that submission stays gated.
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from copy import deepcopy
@@ -1045,7 +1046,8 @@ def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatc
             self.closed = True
 
     fake_conn = FakeConn()
-    monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setattr("src.data.dual_run_lock.acquire_lock", lambda _name: contextlib.nullcontext(True))
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(market_scanner, "find_weather_markets", lambda **_kwargs: [])
     monkeypatch.setattr(
@@ -1125,6 +1127,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
     monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_write_loaded_sha_state", lambda _sha: None)
     monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
     monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
     monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
@@ -1145,6 +1148,11 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     # test_boot_guard_pin_shape.py.
     monkeypatch.setattr(main, "assert_calibration_pin_shape_is_dict", lambda _cfg: None)
     monkeypatch.setattr(main, "assert_frozen_as_of_not_stale", lambda _cfg, **_kw: None)
+    monkeypatch.setattr(main, "_ensure_day0_identity_platt_fit_at_boot", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_fill_bridge_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_settlement_redeem_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_command_recovery_once", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_invalid_pending_entry_authority_cancel_once", lambda: None)
     monkeypatch.setattr(main, "_assert_cascade_liveness_contract", lambda _scheduler: None)
     monkeypatch.setattr(main, "init_schema_trade_only", lambda _conn: None)
     monkeypatch.setenv("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "0")
@@ -1430,7 +1438,14 @@ def _pre_submit_payload_for_promotion(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "size": 10.0,
         "q_live": 0.45,
+        "q_lcb_5pct": 0.44,
+        "expected_edge": 0.02,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.01,
         "expected_cost_basis": 0.421,
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,
@@ -1459,6 +1474,25 @@ def _pre_submit_payload_for_promotion(**overrides):
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
         "expected_edge_source_certificate_hash": "actionable-hash-1",
         "cost_basis_source_certificate_hash": "cost-hash-1",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.45,
+            "payoff_q_lcb": 0.44,
+            "cost": 0.42,
+            "edge_lcb": 0.02,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.44,
+        },
     }
     payload.update(overrides)
     return payload

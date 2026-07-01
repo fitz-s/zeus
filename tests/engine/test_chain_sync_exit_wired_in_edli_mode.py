@@ -56,6 +56,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
     monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_write_loaded_sha_state", lambda _sha: None)
     monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
     monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
     monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
@@ -64,8 +65,13 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
     monkeypatch.setattr(main, "_assert_edli_stage_readiness", lambda _cfg: None)
+    monkeypatch.setattr(main, "_ensure_day0_identity_platt_fit_at_boot", lambda: None)
     monkeypatch.setattr(main, "_edli_boot_fill_bridge_recovery", lambda: None)
     monkeypatch.setattr(main, "_edli_boot_settlement_redeem_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_command_recovery_once", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_invalid_pending_entry_authority_cancel_once", lambda: None)
+    monkeypatch.setattr(main, "assert_calibration_pin_shape_is_dict", lambda _cfg: None)
+    monkeypatch.setattr(main, "assert_frozen_as_of_not_stale", lambda _cfg, **_kw: None)
     # _startup_wallet_check is called as _startup_wallet_check(bankroll_record=...) at the
     # current boot site, so the stub must accept arbitrary args/kwargs (pre-existing harness
     # drift: a no-arg lambda raised TypeError before the scheduler was ever built).
