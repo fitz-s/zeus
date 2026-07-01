@@ -142,12 +142,14 @@ def _insert_no_trade_event_row(
     strategy_key: str | None = None,
     event_source: str | None = None,
 ) -> None:
+    from src.state.owner_routed_write import owner_qualified_name
+    tbl = owner_qualified_name(conn, "no_trade_events")  # owner-routed: lands in the owner (world), never a ghost
     columns = _table_columns(conn, "no_trade_events")
     if "schema_compatibility" in columns:
         if {"strategy_key", "event_source"} <= columns:
             conn.execute(
-                """
-                INSERT INTO no_trade_events (
+                f"""
+                INSERT INTO {tbl} (
                     market_slug, temperature_metric, target_date,
                     observation_time, decision_seq,
                     reason, reason_detail,
@@ -165,8 +167,8 @@ def _insert_no_trade_event_row(
             )
             return
         conn.execute(
-            """
-            INSERT INTO no_trade_events (
+            f"""
+            INSERT INTO {tbl} (
                 market_slug, temperature_metric, target_date,
                 observation_time, decision_seq,
                 reason, reason_detail,
@@ -177,8 +179,8 @@ def _insert_no_trade_event_row(
         )
     else:
         conn.execute(
-            """
-            INSERT INTO no_trade_events (
+            f"""
+            INSERT INTO {tbl} (
                 market_slug, temperature_metric, target_date,
                 observation_time, decision_seq,
                 reason, reason_detail,
