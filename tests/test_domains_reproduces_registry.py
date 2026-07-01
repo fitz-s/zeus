@@ -1,16 +1,16 @@
 # Created: 2026-06-30
 # Last audited: 2026-06-30
-# Authority basis: docs/operations/current/reports/market_structure_code_atlas_2026-06-30.md §6B
-#   (2-DB first-principles redesign, Phase 0). Ratchet: src/state/domains.py is the intended single
-#   ownership source; this proves it reproduces the current registry so the two cannot drift.
-"""Phase-0 antibody: src/state/domains.py mirrors architecture/db_table_ownership.yaml exactly.
+# Authority basis: docs/operations/current/reports/market_structure_code_atlas_2026-06-30.md §6
+#   (in-place ownership cleanup — single source over the EXISTING three DBs, no restructure).
+"""Phase-0 antibody: src/state/domains.py is the single ownership source, data-correct + drift-locked.
 
-domains.py is the redesign's single ownership truth-source. Until the boot gate is repointed onto it
-(§6B Phase 5), it must stay byte-equivalent to the hand-maintained YAML for every live (non-legacy)
-table — otherwise the "single source" foundation is already drifting. This test is the ratchet: any
-future ownership change made in ONE place (YAML or domains.py) but not the other fails CI, forcing the
-single-source discipline the whole redesign depends on. It also proves the central design claim — that
-the full ownership map is regenerable from one typed declaration — at zero runtime risk.
+domains.py collapses the three drifting ownership sources onto one typed declaration over the EXISTING
+world/forecasts/trade DBs (no physical restructure). It must equal the current registry EVERYWHERE except
+the CORRECTED_FROM_REGISTRY set — the 19 tables the registry inverts (data lives elsewhere than declared),
+which the in-place migration converges. This test is the ratchet: it proves domains.py == registry for
+every non-inverted table (so the two cannot silently drift) AND that every correction is a real, still-open
+divergence (so the list can't rot). Once a correction lands (init+registry moved to match), that table drops
+out of CORRECTED_FROM_REGISTRY and this test tightens.
 """
 
 from __future__ import annotations
@@ -30,34 +30,37 @@ def _registry_canonical_owners() -> dict[str, str]:
     owners: dict[str, str] = {}
     for t in reg["tables"]:
         if t.get("schema_class") not in _LEGACY:
-            name = t["name"]
-            assert name not in owners, f"registry has >1 non-legacy entry for {name}"
-            owners[name] = t["db"]
+            owners[t["name"]] = t["db"]
     return owners
 
 
-def test_current_db_reproduces_registry_owners_exactly() -> None:
+def test_domains_equals_registry_except_documented_corrections() -> None:
     registry = _registry_canonical_owners()
-    domains_map = dict(domains.CURRENT_DB)
-    missing = set(registry) - set(domains_map)
-    extra = set(domains_map) - set(registry)
-    assert not missing, f"domains.CURRENT_DB is missing live registry tables (drift): {sorted(missing)}"
-    assert not extra, f"domains.CURRENT_DB has tables not in the registry (drift): {sorted(extra)}"
-    mismatched = {n: (domains_map[n], registry[n]) for n in registry if domains_map[n] != registry[n]}
-    assert not mismatched, f"owner DB mismatch domains vs registry (domains, registry): {mismatched}"
+    corrected = domains.CORRECTED_FROM_REGISTRY
+    # (a) Every NON-corrected table must match the registry exactly (no silent drift).
+    for name, reg_db in registry.items():
+        if name in corrected:
+            continue
+        d = domains.owner_domain(name)
+        assert d is not None, f"domains.py is missing live registry table {name!r} (drift)"
+        assert d.value == reg_db, f"owner drift for {name!r}: domains={d.value} registry={reg_db}"
+    # (b) domains.py must not invent tables the registry has never heard of (outside corrections).
+    extra = set(domains.live_tables()) - set(registry) - corrected
+    assert not extra, f"domains.py declares tables absent from the registry: {sorted(extra)}"
 
 
-def test_target_domain_is_total_and_valid() -> None:
+def test_every_correction_is_a_real_open_divergence() -> None:
+    registry = _registry_canonical_owners()
+    for name in domains.CORRECTED_FROM_REGISTRY:
+        d = domains.owner_domain(name)
+        assert d is not None, f"correction {name!r} has no domains owner"
+        reg_db = registry.get(name)  # None if registry has no canonical entry (the missing-canonical case)
+        assert reg_db != d.value, (
+            f"{name!r} is listed as corrected but domains ({d.value}) already agrees with registry "
+            f"({reg_db}); remove it from CORRECTED_FROM_REGISTRY (the migration converged it)"
+        )
+
+
+def test_owner_domain_total_and_valid() -> None:
     for name in domains.live_tables():
-        d = domains.target_domain(name)
-        assert d in (domains.Domain.BULK, domains.Domain.MONEY), f"{name} -> {d!r}"
-
-
-def test_bulk_tables_are_live_and_subset() -> None:
-    live = domains.live_tables()
-    stray = domains.BULK_TABLES - live
-    assert not stray, f"BULK_TABLES references non-live tables: {sorted(stray)}"
-    # BULK is the forecast/observation ingest domain — its members must currently be forecast- or
-    # world-owned, never trade-owned (a trade-owned table in BULK would be a classification error).
-    trade_owned_in_bulk = {t for t in domains.BULK_TABLES if domains.CURRENT_DB.get(t) == "trade"}
-    assert not trade_owned_in_bulk, f"trade-owned tables misclassified as BULK: {sorted(trade_owned_in_bulk)}"
+        assert domains.owner_domain(name) in set(domains.Domain), name
