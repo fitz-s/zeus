@@ -6288,11 +6288,18 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
 
 
 def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    # Owner-routed (2026-07-01): market_price_history is trade-owned. This forward-substrate writer runs on a
+    # forecasts-rooted conn, so it cannot reach trade -> SKIP (never write the forecasts ghost). When called on
+    # a trade-reachable conn it lands in the owner. See site-8 decision in the atlas §6C.
+    from src.state.owner_routed_write import owner_write_target
+    _mph = owner_write_target(conn, "market_price_history")
+    if _mph is None:
+        return "skipped_wrong_db"
     existing = conn.execute(
-        """
+        f"""
         SELECT market_slug, token_id, price, recorded_at, hours_since_open,
                hours_to_resolution
-        FROM market_price_history
+        FROM {_mph}
         WHERE token_id = ? AND recorded_at = ?
         """,
         (values["token_id"], values["recorded_at"]),
@@ -6304,8 +6311,8 @@ def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str
         return "conflict"
 
     conn.execute(
-        """
-        INSERT INTO market_price_history (
+        f"""
+        INSERT INTO {_mph} (
             market_slug, token_id, price, recorded_at, hours_since_open,
             hours_to_resolution
         )
@@ -6317,12 +6324,18 @@ def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str
 
 
 def _insert_full_linkage_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    # Owner-routed (2026-07-01): market_price_history is trade-owned. This executable-snapshot-linkage writer
+    # runs on a trade-rooted conn -> owner_write_target returns the bare name (no-op); a wrong-DB conn SKIPs.
+    from src.state.owner_routed_write import owner_write_target
+    _mph = owner_write_target(conn, "market_price_history")
+    if _mph is None:
+        return "skipped_wrong_db"
     existing = conn.execute(
-        """
+        f"""
         SELECT market_slug, token_id, price, recorded_at, hours_since_open,
                hours_to_resolution, market_price_linkage, source, best_bid,
                best_ask, raw_orderbook_hash, snapshot_id, condition_id
-        FROM market_price_history
+        FROM {_mph}
         WHERE token_id = ? AND recorded_at = ?
         """,
         (values["token_id"], values["recorded_at"]),
@@ -6334,8 +6347,8 @@ def _insert_full_linkage_price_history(conn: sqlite3.Connection, values: dict) -
         return "conflict"
 
     conn.execute(
-        """
-        INSERT INTO market_price_history (
+        f"""
+        INSERT INTO {_mph} (
             market_slug, token_id, price, recorded_at, hours_since_open,
             hours_to_resolution, market_price_linkage, source, best_bid,
             best_ask, raw_orderbook_hash, snapshot_id, condition_id
