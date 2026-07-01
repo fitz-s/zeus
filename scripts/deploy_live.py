@@ -61,6 +61,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.ops.edli_queue import (
+    EDLI_REACTOR_PROCESSING_LEASE_SECONDS,
+    collect_edli_queue_evidence,
+)
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 
 LIVE_TRADING_PLIST = (
@@ -152,7 +156,6 @@ LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
 LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
 )
-EDLI_REACTOR_PROCESSING_LEASE_SECONDS = 300.0
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
 # scripts/*.py from the live checkout (external review 2026-06-12). deploy/launchd
@@ -513,7 +516,6 @@ def _wait_for_post_start_edli_queue_progress(
 
     while True:
         now = datetime.now(timezone.utc)
-        stale_cutoff = now - timedelta(seconds=EDLI_REACTOR_PROCESSING_LEASE_SECONDS)
         try:
             conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
             conn.row_factory = sqlite3.Row
@@ -527,68 +529,20 @@ def _wait_for_post_start_edli_queue_progress(
                 conn.close()
                 last_detail = "opportunity_event_processing table missing"
             else:
-                row = conn.execute(
-                    """
-                    SELECT
-                        SUM(CASE WHEN processing_status = 'pending' THEN 1 ELSE 0 END)
-                            AS pending_count,
-                        SUM(CASE WHEN processing_status = 'processing' THEN 1 ELSE 0 END)
-                            AS processing_count,
-                        SUM(
-                            CASE
-                            WHEN processing_status = 'pending'
-                             AND (claimed_at IS NULL OR claimed_at <= ?)
-                            THEN 1 ELSE 0 END
-                        ) AS claimable_pending_count,
-                        SUM(
-                            CASE
-                            WHEN processing_status = 'processing'
-                             AND claimed_at IS NOT NULL
-                             AND claimed_at <= ?
-                            THEN 1 ELSE 0 END
-                        ) AS stale_processing_count,
-                        MIN(
-                            CASE
-                            WHEN processing_status = 'processing'
-                             AND claimed_at IS NOT NULL
-                             AND claimed_at <= ?
-                            THEN claimed_at ELSE NULL END
-                        ) AS oldest_stale_claimed_at,
-                        SUM(
-                            CASE
-                            WHEN processing_status = 'processing'
-                             AND claimed_at IS NOT NULL
-                             AND claimed_at >= ?
-                            THEN 1
-                            WHEN processing_status IN ('processed','failed','dead_letter','expired')
-                             AND processed_at IS NOT NULL
-                             AND processed_at >= ?
-                            THEN 1
-                            ELSE 0 END
-                        ) AS claim_or_terminal_after_launch_count
-                      FROM opportunity_event_processing
-                     WHERE consumer_name = 'edli_reactor_v1'
-                       AND processing_status IN (
-                            'pending','processing','processed','failed',
-                            'dead_letter','expired'
-                       )
-                    """,
-                    (
-                        now.isoformat(),
-                        stale_cutoff.isoformat(),
-                        stale_cutoff.isoformat(),
-                        launched_floor.isoformat(),
-                        launched_floor.isoformat(),
-                    ),
-                ).fetchone()
+                queue = collect_edli_queue_evidence(
+                    conn,
+                    now=now,
+                    launched_floor=launched_floor,
+                    processing_lease_seconds=EDLI_REACTOR_PROCESSING_LEASE_SECONDS,
+                )
                 conn.close()
-                pending_count = int(row["pending_count"] or 0)
-                processing_count = int(row["processing_count"] or 0)
-                claimable_pending_count = int(row["claimable_pending_count"] or 0)
-                stale_processing_count = int(row["stale_processing_count"] or 0)
-                progressed_count = int(row["claim_or_terminal_after_launch_count"] or 0)
-                claimable_work_count = claimable_pending_count + stale_processing_count
-                oldest_stale_claimed_at = str(row["oldest_stale_claimed_at"] or "")
+                pending_count = int(queue["pending_count"])
+                processing_count = int(queue["processing_count"])
+                claimable_pending_count = int(queue["claimable_pending_count"])
+                stale_processing_count = int(queue["stale_processing_count"])
+                progressed_count = int(queue["claim_or_terminal_after_launch_count"])
+                claimable_work_count = int(queue["claimable_work_count"])
+                oldest_stale_claimed_at = str(queue["oldest_stale_claimed_at"] or "")
                 if claimable_work_count == 0:
                     if progressed_count > 0:
                         return (

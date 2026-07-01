@@ -2535,6 +2535,18 @@ files:
     zone: K2_runtime
     authority_role: package_marker
     why: Marks ops namespace for read-only operator/runtime proof helpers.
+  src/ops/edli_queue.py:
+    zone: K2_runtime
+    authority_role: edli_queue_proof_helper
+    why: >
+      Shared read-only EDLI reactor queue evidence for post-start deploy
+      verification and operator healthcheck. Proves stale in-flight claims and
+      post-launch queue progress without mutating canonical event rows.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/deploy_live.py
+    - scripts/healthcheck.py
   src/ops/monitor_cadence.py:
     zone: K2_runtime
     authority_role: monitor_cadence_proof_helper

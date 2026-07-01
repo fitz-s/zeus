@@ -25,8 +25,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import get_mode, state_path
+from src.ops.edli_queue import EDLI_REACTOR_CONSUMER, collect_edli_queue_evidence
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
-from src.state.db import get_connection, get_forecasts_connection, ZEUS_FORECASTS_DB_PATH
+from src.state.db import (
+    ZEUS_FORECASTS_DB_PATH,
+    ZEUS_WORLD_DB_PATH,
+    get_connection,
+    get_forecasts_connection,
+)
 from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
@@ -144,6 +150,10 @@ def _world_db_path() -> Path:
     # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
     # tests that stub this function) target the correct physical file.
     return ZEUS_FORECASTS_DB_PATH
+
+
+def _edli_world_db_path() -> Path:
+    return ZEUS_WORLD_DB_PATH
 
 
 def _forecast_db_path() -> Path:
@@ -687,6 +697,52 @@ def _monitor_cadence_status() -> dict:
         return evidence
     except Exception as exc:
         evidence["issue"] = f"MONITOR_CADENCE_UNAVAILABLE:{type(exc).__name__}"
+        evidence["error"] = str(exc)
+        return evidence
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _edli_queue_status() -> dict:
+    """Prove the EDLI reactor queue has no stale in-flight claim."""
+
+    db_path = _edli_world_db_path()
+    evidence: dict = {
+        "ok": False,
+        "path": str(db_path),
+        "issue": None,
+        "source": "opportunity_event_processing",
+        "consumer_name": EDLI_REACTOR_CONSUMER,
+    }
+    if not db_path.exists():
+        evidence["issue"] = "EDLI_QUEUE_DB_MISSING"
+        return evidence
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "opportunity_event_processing" not in tables:
+            evidence["issue"] = "EDLI_QUEUE_TABLE_MISSING"
+            return evidence
+        queue = collect_edli_queue_evidence(conn, now=datetime.now(timezone.utc))
+        evidence.update(queue)
+        if int(queue["stale_processing_count"]) > 0:
+            evidence["issue"] = "EDLI_QUEUE_STALE_PROCESSING"
+            return evidence
+        evidence["ok"] = True
+        return evidence
+    except Exception as exc:
+        evidence["issue"] = f"EDLI_QUEUE_UNAVAILABLE:{type(exc).__name__}"
         evidence["error"] = str(exc)
         return evidence
     finally:
@@ -1644,6 +1700,13 @@ def check() -> dict:
             result["monitor_cadence"].get("issue")
             or "MONITOR_CADENCE_UNHEALTHY"
         )
+    result["edli_queue"] = _edli_queue_status()
+    result["edli_queue_ok"] = bool(result["edli_queue"].get("ok", True))
+    if not result["edli_queue_ok"]:
+        result["edli_queue_issue"] = (
+            result["edli_queue"].get("issue")
+            or "EDLI_QUEUE_UNHEALTHY"
+        )
     result["forecast_posteriors_schema"] = _forecast_posteriors_runtime_layer_schema_status()
     result["forecast_posteriors_schema_ok"] = bool(
         result["forecast_posteriors_schema"].get("ok", True)
@@ -1938,6 +2001,7 @@ def check() -> dict:
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
         and bool(result.get("monitor_cadence_ok", True))
+        and bool(result.get("edli_queue_ok", True))
         and bool(result.get("forecast_posteriors_schema_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"

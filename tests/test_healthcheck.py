@@ -11,6 +11,7 @@ import json
 import plistlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from scripts import healthcheck
 
@@ -19,6 +20,7 @@ _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
 _ORIGINAL_MONITOR_CADENCE_STATUS = healthcheck._monitor_cadence_status
+_ORIGINAL_EDLI_QUEUE_STATUS = healthcheck._edli_queue_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
     healthcheck._forecast_posteriors_runtime_layer_schema_status
 )
@@ -118,6 +120,20 @@ def _mock_monitor_cadence_status(monkeypatch):
         healthcheck,
         "_monitor_cadence_status",
         lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "issue": None},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_edli_queue_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_edli_queue_status",
+        lambda: {
+            "ok": True,
+            "path": "/tmp/zeus-world.db",
+            "issue": None,
+            "consumer_name": "edli_reactor_v1",
+        },
     )
 
 
@@ -1405,6 +1421,101 @@ def test_healthcheck_is_not_healthy_when_monitor_cadence_stale(monkeypatch):
 
     assert result["monitor_cadence_ok"] is False
     assert result["monitor_cadence_issue"] == "MONITOR_CADENCE_STALE"
+    assert result["healthy"] is False
+
+
+def _init_edli_queue_status_db(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        )
+        """
+    )
+    return conn
+
+
+def test_edli_queue_status_rejects_stale_processing_claim(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc)
+    conn = _init_edli_queue_status_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-stale', 'processing', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (now - timedelta(minutes=20)).isoformat(),
+            (now - timedelta(minutes=20)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_edli_world_db_path", lambda: db_path)
+
+    result = _ORIGINAL_EDLI_QUEUE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "EDLI_QUEUE_STALE_PROCESSING"
+    assert result["stale_processing_count"] == 1
+    assert result["claimable_work_count"] == 1
+
+
+def test_edli_queue_status_accepts_future_retry_floor(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc)
+    conn = _init_edli_queue_status_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-future', 'pending', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (now + timedelta(minutes=10)).isoformat(),
+            now.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_edli_world_db_path", lambda: db_path)
+
+    result = _ORIGINAL_EDLI_QUEUE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["claimable_pending_count"] == 0
+    assert result["claimable_work_count"] == 0
+
+
+def test_healthcheck_is_not_healthy_when_edli_queue_stale(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_edli_queue_status",
+        lambda: {
+            "ok": False,
+            "path": "/tmp/zeus-world.db",
+            "issue": "EDLI_QUEUE_STALE_PROCESSING",
+            "stale_processing_count": 1,
+        },
+    )
+
+    result = healthcheck.check()
+
+    assert result["edli_queue_ok"] is False
+    assert result["edli_queue_issue"] == "EDLI_QUEUE_STALE_PROCESSING"
     assert result["healthy"] is False
 
 
