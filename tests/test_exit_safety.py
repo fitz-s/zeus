@@ -2837,7 +2837,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
-        exit_reason="MODEL_DIVERGENCE_PANIC",
+        exit_reason="FLASH_CRASH_PANIC",
         current_market_price=0.99,
         current_market_price_is_fresh=True,
         best_bid=0.99,

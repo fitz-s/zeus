@@ -229,9 +229,6 @@ NO_TRADE_NO_ROI_FRONTIER_CANDIDATE = "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 # q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
-NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING = (
-    "MODAL_YES_EMPIRICAL_AUTHORITY_MISSING_FOR_NO_SUBSTITUTE"
-)
 _OOF_LIVE_RELIABILITY_BASES = frozenset(
     {
         "OOF_WILSON_95",
@@ -1131,14 +1128,6 @@ class FamilyDecisionEngine:
                 forecast_bin=forecast_bin,
                 outcome_bin_ids=tuple(b.bin_id for b in omega.bins),
             )
-            selected_decision, no_trade_reason = (
-                self._apply_modal_yes_empirical_authority_invariant(
-                    selected_decision=selected_decision,
-                    scored=scored,
-                    forecast_bin=forecast_bin,
-                    outcome_bin_ids=tuple(b.bin_id for b in omega.bins),
-                )
-            )
         portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
         if selected_decision is not None:
             portfolio_comparisons = self._portfolio_comparisons(
@@ -1630,76 +1619,6 @@ class FamilyDecisionEngine:
         ):
             return center_yes
         return selected_decision
-
-    def _apply_modal_yes_empirical_authority_invariant(
-        self,
-        *,
-        selected_decision: CandidateDecision,
-        scored: Sequence[CandidateDecision],
-        forecast_bin: str,
-        outcome_bin_ids: Sequence[str],
-    ) -> tuple[CandidateDecision | None, str | None]:
-        """Prevent empirical guard gaps from becoming adjacent-NO authority.
-
-        A forecast-modal YES with positive point expectation can be blocked because
-        its own live empirical guard is missing, sparse, unarmed, or otherwise
-        abstained. That absence is a family-level uncertainty, not permission to
-        express the same modal payoff through a broader nonmodal NO route whose
-        payoff also wins when the modal outcome settles. Without this invariant the
-        selector systematically converts missing YES authority into apparently
-        licensed adjacent/shoulder NO entries.
-        """
-
-        if selected_decision.route.side != "NO":
-            return selected_decision, None
-        try:
-            modal_idx = list(outcome_bin_ids).index(forecast_bin)
-            selected_modal_payoff = float(selected_decision.route.payoff_vector[modal_idx])
-        except (ValueError, IndexError, TypeError):
-            return selected_decision, None
-        if selected_modal_payoff <= 0.0:
-            return selected_decision, None
-
-        modal_yes = next(
-            (
-                d
-                for d in scored
-                if d.route.side == "YES" and d.route.bin_id == forecast_bin
-            ),
-            None,
-        )
-        if modal_yes is None:
-            return selected_decision, None
-        if self._selection_point_ev(modal_yes) <= 0.0:
-            return selected_decision, None
-        if not self._modal_yes_empirical_authority_missing(modal_yes):
-            return selected_decision, None
-        return None, NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING
-
-    @staticmethod
-    def _modal_yes_empirical_authority_missing(d: CandidateDecision) -> bool:
-        if d.q_lcb_guard_abstained:
-            return True
-        if d.selection_guard_abstained:
-            return True
-        for basis in (d.q_lcb_guard_basis, d.selection_guard_basis):
-            text = str(basis or "").upper()
-            if not text:
-                continue
-            if text == "MODAL_YES_QKERNEL_OOF_GUARD":
-                continue
-            if any(
-                marker in text
-                for marker in (
-                    "MISSING",
-                    "THIN",
-                    "UNARMED",
-                    "SIDE_NOT_ARMED",
-                    "ERROR",
-                )
-            ):
-                return True
-        return False
 
     def _adjacent_no_pair_for_center(
         self,

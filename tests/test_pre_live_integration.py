@@ -10,7 +10,7 @@ from src.contracts.edge_context import EdgeContext
 from src.state.portfolio import Position, ExitContext
 
 def test_monitoring_chain_trigger():
-    """Divergence panic fires via the ONE live exit path (Position.evaluate_exit)."""
+    """Removed model-divergence panic cannot fire via the one live exit path."""
     from src.state.portfolio import divergence_hard_threshold
     pos = Position(
         trade_id="pos123", market_id="m1", city="Dallas", cluster="tx",
@@ -30,8 +30,8 @@ def test_monitoring_chain_trigger():
         divergence_score=divergence_hard_threshold() + 0.1,
     )
     decision = pos.evaluate_exit(exit_ctx)
-    assert decision.should_exit is True
-    assert decision.trigger == "MODEL_DIVERGENCE_PANIC"
+    assert decision.should_exit is False
+    assert decision.trigger != "MODEL_DIVERGENCE_PANIC"
 
 from src.engine.cycle_runner import _execute_monitoring_phase, CycleArtifact
 from src.state.portfolio import PortfolioState

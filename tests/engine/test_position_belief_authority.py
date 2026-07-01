@@ -1186,11 +1186,14 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
             {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
         ]
 
-    def test_day0_observation_unavailable_uses_replacement_readthrough_when_possible(
+    def test_day0_observation_unavailable_readthrough_is_not_fresh_exit_authority(
         self, monkeypatch
     ):
-        """If local Day0 observation has not arrived yet, monitor should still use
-        the same replacement authority when read-through can recompute it."""
+        """Day0 observation absence cannot be papered over by replacement belief.
+
+        Replacement read-through can be recorded and reseeded, but same-day exit
+        authority stays stale until Day0 observation/hard-fact truth is available.
+        """
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
         from src.contracts.exceptions import ObservationUnavailableError
@@ -1215,11 +1218,17 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
             pos, conn=None, city=object(), target_d=None
         )
 
-        assert is_fresh is True
-        assert prob == pytest.approx(0.42)
-        assert refresh_pos.selected_method == SELECTED_METHOD_REPLACEMENT_POSTERIOR
-        assert "day0_observation_unavailable:replacement_belief_readthrough" in refresh_pos.applied_validations
-        assert reseeds == []
+        assert is_fresh is False
+        assert prob == pytest.approx(pos.p_posterior)
+        assert refresh_pos.selected_method != SELECTED_METHOD_REPLACEMENT_POSTERIOR
+        assert (
+            "day0_observation_unavailable:replacement_belief_readthrough_available_not_exit_authority"
+            in refresh_pos.applied_validations
+        )
+        assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
+        assert reseeds == [
+            {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
+        ]
 
     def test_fresh_day0_window_position_does_not_reseed(self, monkeypatch):
         import src.engine.monitor_refresh as mr

@@ -64,7 +64,6 @@ from src.decision.family_decision_engine import (
     NO_TRADE_NO_MIN_ORDER_UTILITY,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_NO_POSITIVE_UTILITY,
-    NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
     CandidateDecision,
     FamilyDecision,
@@ -1277,12 +1276,13 @@ def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
     assert selected is selected_no
 
 
-def test_modal_yes_missing_empirical_authority_blocks_no_substitute():
-    """A blocked modal YES cannot be re-expressed as a broader nonmodal NO.
+def test_modal_yes_missing_empirical_authority_is_candidate_local_not_family_veto():
+    """A weak modal YES does not get re-expressed, but it also cannot veto live selection.
 
     Shanghai/Munich class failure: the modal YES has positive point value but its
-    empirical guard is missing/thin, so the selector should abstain at family
-    level instead of buying a NO leg that still pays when the modal outcome wins.
+    empirical guard is missing/thin. That candidate remains blocked by its own
+    economics/guards, while a separate executable live candidate must still flow
+    through selection rather than a family-level no-trade alias.
     """
 
     case = _case()
@@ -1314,19 +1314,16 @@ def test_modal_yes_missing_empirical_authority_blocks_no_substitute():
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
 
-    selected, reason = engine._apply_modal_yes_empirical_authority_invariant(
-        selected_decision=selected_no,
-        scored=[selected_no, modal_yes],
-        forecast_bin="b25",
-        outcome_bin_ids=tuple(b.bin_id for b in space.bins),
-    )
+    selected, reason = engine._select([selected_no, modal_yes])
 
-    assert selected is None
-    assert reason == NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING
+    assert selected is selected_no
+    assert reason is None
+    assert modal_yes.selection_guard_basis == "ACTIVE_MISSING_CELL"
+    assert modal_yes.selection_guard_abstained is True
 
 
-def test_modal_yes_authority_invariant_does_not_block_independent_no():
-    """The modal-YES invariant is not a NO ban; it only blocks missing-authority substitution."""
+def test_modal_yes_guard_receipt_does_not_block_independent_no():
+    """Modal-YES guard evidence is receipt context, not a family-level NO ban."""
 
     case = _case()
     space = _outcome_space(case)
@@ -1356,15 +1353,15 @@ def test_modal_yes_authority_invariant_does_not_block_independent_no():
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
 
-    selected, reason = engine._apply_modal_yes_empirical_authority_invariant(
-        selected_decision=selected_no,
-        scored=[selected_no, licensed_modal_yes],
-        forecast_bin="b25",
-        outcome_bin_ids=tuple(b.bin_id for b in space.bins),
-    )
+    selected, reason = engine._select([selected_no, licensed_modal_yes])
 
     assert selected is selected_no
     assert reason is None
+
+
+def test_modal_yes_family_veto_alias_is_not_live_contract():
+    assert not hasattr(fde_mod, "NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING")
+    assert not hasattr(FamilyDecisionEngine, "_apply_modal_yes_empirical_authority_invariant")
 
 
 def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():

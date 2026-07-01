@@ -731,7 +731,7 @@ def test_exit_telemetry_persists_to_recent_exits():
         trade_id="tx1",
         market_id="m1",
         direction="buy_no",
-        exit_trigger="MODEL_DIVERGENCE_PANIC",
+        exit_trigger="FLASH_CRASH_PANIC",
         exit_divergence_score=0.34,
         exit_market_velocity_1h=-0.12,
         exit_forward_edge=-0.08,
@@ -740,7 +740,7 @@ def test_exit_telemetry_persists_to_recent_exits():
 
     close_position(portfolio, "tx1", 0.12, "Model-Market divergence score 0.34 exceeds hard threshold")
     ex = portfolio.recent_exits[-1]
-    assert ex["exit_trigger"] == "MODEL_DIVERGENCE_PANIC"
+    assert ex["exit_trigger"] == "FLASH_CRASH_PANIC"
     assert ex["exit_divergence_score"] == pytest.approx(0.34)
     assert ex["exit_market_velocity_1h"] == pytest.approx(-0.12)
     assert ex["exit_forward_edge"] == pytest.approx(-0.08)

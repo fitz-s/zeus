@@ -1758,7 +1758,7 @@ def test_held_position_family_provider_includes_market_closed_hold_exposure():
                 "synced",
                 "pending_exit",
                 "backoff_exhausted",
-                "MODEL_DIVERGENCE_PANIC",
+                "FLASH_CRASH_PANIC",
             ),
         ],
     )
