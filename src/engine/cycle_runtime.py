@@ -7842,6 +7842,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             _cmd_state or "missing",
                         )
                         runtime_order_status = "pending"
+                    if _cmd_state == "PARTIAL" and runtime_order_status == "pending":
+                        if _cmd_durable:
+                            _record_entry_order_summary(
+                                summary,
+                                runtime_order_status="partial",
+                                command_state=_cmd_state,
+                            )
+                        logger.info(
+                            "run_cycle: skipping legacy pending-entry materialization for "
+                            "partial fill command trade_id=%s command_id=%s; venue_trade_facts "
+                            "drive active exposure projection",
+                            getattr(result, "trade_id", ""),
+                            getattr(result, "command_id", ""),
+                        )
+                        continue
                     if _cmd_durable:
                         _record_entry_order_summary(
                             summary,

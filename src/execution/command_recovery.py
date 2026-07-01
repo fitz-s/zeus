@@ -2637,7 +2637,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                snap.no_token_id AS snapshot_no_token_id,
                snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
                snap.outcome_label AS snapshot_outcome_label
-          FROM venue_commands cmd
+         FROM venue_commands cmd
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
           LEFT JOIN position_current pc
@@ -2651,7 +2651,15 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            AND cmd.state IN ('FILLED', 'PARTIAL')
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
-           AND pc.position_id IS NULL
+           AND (
+                pc.position_id IS NULL
+                OR (
+                    pc.phase = 'pending_entry'
+                    AND ABS(CAST(COALESCE(pc.shares, '0') AS REAL)) <= 0.000000001
+                    AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)) <= 0.000000001
+                    AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                )
+           )
            AND NOT EXISTS (
                SELECT 1
                  FROM position_current existing_pc
@@ -3525,6 +3533,14 @@ def _entry_recovery_position(
     decision_log_id: int | None,
     filled: bool,
 ) -> SimpleNamespace:
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        FILL_AUTHORITY_NONE,
+        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+
     position_id = str(candidate.get("position_id") or "").strip()
     command_id = str(candidate.get("command_id") or "").strip()
     venue_order_id = str(candidate.get("venue_order_id") or "").strip()
@@ -3580,6 +3596,8 @@ def _entry_recovery_position(
         if command_size is not None and command_price is not None
         else None
     )
+    shares_submitted_dec = command_size or Decimal("0")
+    shares_remaining_dec = max(Decimal("0"), shares_submitted_dec - shares_dec)
     size_usd = _decimal_or_none(trade_case.get("size_usd")) or command_notional or cost_basis_dec
     bin_label = str(trade_case.get("bin_label") or trade_case.get("range_label") or "").strip()
     city = str(trade_case.get("city") or "").strip()
@@ -3621,6 +3639,23 @@ def _entry_recovery_position(
         shares=float(shares_dec),
         cost_basis_usd=float(cost_basis_dec),
         entry_price=float(fill_price_dec),
+        target_notional_usd=float(command_notional or size_usd),
+        submitted_notional_usd=float(command_notional or Decimal("0")),
+        filled_cost_basis_usd=float(cost_basis_dec),
+        entry_price_submitted=float(command_price or Decimal("0")),
+        entry_price_avg_fill=float(fill_price_dec),
+        shares_submitted=float(shares_submitted_dec),
+        shares_filled=float(shares_dec),
+        shares_remaining=float(shares_remaining_dec),
+        entry_economics_authority=(
+            ENTRY_ECONOMICS_AVG_FILL_PRICE if filled else ENTRY_ECONOMICS_SUBMITTED_LIMIT
+        ),
+        fill_authority=(
+            FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+            if partial_fill
+            else (FILL_AUTHORITY_VENUE_CONFIRMED_FULL if filled else FILL_AUTHORITY_NONE)
+        ),
+        entry_fill_verified=bool(filled and not partial_fill),
         p_posterior=float(p_posterior),
         last_monitor_prob=None,
         last_monitor_edge=None,
@@ -3886,41 +3921,66 @@ def _append_filled_entry_projection_repair(
         upsert_position_current(conn, projection)
         _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
         return True
-    if _latest_position_sequence(conn, position_id) != 0:
-        raise ValueError(
-            "filled entry projection repair refuses partial position_events without ENTRY_ORDER_FILLED"
-        )
+    latest_sequence = _latest_position_sequence(conn, position_id)
     filled_at = str(candidate.get("fill_observed_at") or _now_iso())
     posted_at = str(candidate.get("created_at") or filled_at)
-    events = [
-        _entry_recovery_event(
-            position,
-            sequence_no=1,
-            event_type="POSITION_OPEN_INTENT",
-            occurred_at=posted_at,
-            phase_before=None,
-            phase_after="pending_entry",
-            order_id=None,
-        ),
-        _entry_recovery_event(
-            position,
-            sequence_no=2,
-            event_type="ENTRY_ORDER_POSTED",
-            occurred_at=posted_at,
-            phase_before="pending_entry",
-            phase_after="pending_entry",
-            order_id=position.order_id,
-        ),
-        _entry_recovery_event(
-            position,
-            sequence_no=3,
-            event_type="ENTRY_ORDER_FILLED",
-            occurred_at=filled_at,
-            phase_before="pending_entry",
-            phase_after="active",
-            order_id=position.order_id,
-        ),
-    ]
+    if latest_sequence == 0:
+        events = [
+            _entry_recovery_event(
+                position,
+                sequence_no=1,
+                event_type="POSITION_OPEN_INTENT",
+                occurred_at=posted_at,
+                phase_before=None,
+                phase_after="pending_entry",
+                order_id=None,
+            ),
+            _entry_recovery_event(
+                position,
+                sequence_no=2,
+                event_type="ENTRY_ORDER_POSTED",
+                occurred_at=posted_at,
+                phase_before="pending_entry",
+                phase_after="pending_entry",
+                order_id=position.order_id,
+            ),
+            _entry_recovery_event(
+                position,
+                sequence_no=3,
+                event_type="ENTRY_ORDER_FILLED",
+                occurred_at=filled_at,
+                phase_before="pending_entry",
+                phase_after="active",
+                order_id=position.order_id,
+            ),
+        ]
+    else:
+        existing_posted = conn.execute(
+            """
+            SELECT phase_after
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_POSTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if existing_posted is None:
+            raise ValueError(
+                "filled entry projection repair refuses partial position_events without ENTRY_ORDER_POSTED"
+            )
+        events = [
+            _entry_recovery_event(
+                position,
+                sequence_no=latest_sequence + 1,
+                event_type="ENTRY_ORDER_FILLED",
+                occurred_at=filled_at,
+                phase_before=str(existing_posted["phase_after"] or "pending_entry"),
+                phase_after="active",
+                order_id=position.order_id,
+            ),
+        ]
     append_many_and_project(conn, events, projection)
     _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
     return True
@@ -4070,12 +4130,33 @@ def ensure_live_entry_projection_for_command(
     if current is None:
         raise ValueError(f"live entry projection command not found: {command_id}")
     current_map = _dict_row(current)
+    current_state = str(current_map.get("state") or "").upper()
+    if (
+        str(current_map.get("intent_kind") or "").upper() == "ENTRY"
+        and str(current_map.get("side") or "").upper() == "BUY"
+        and current_state in {"FILLED", "PARTIAL"}
+    ):
+        candidates = [
+            candidate
+            for candidate in _latest_unprojected_filled_entry_candidates(conn)
+            if str(candidate.get("command_id") or "") == command_id
+        ]
+        summary = {"scanned": len(candidates), "advanced": 0, "stayed": 0, "errors": 0}
+        if not candidates:
+            return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
+        for candidate in candidates:
+            advanced = _append_filled_entry_projection_repair(conn, candidate=candidate, client=client)
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        return summary
     if current_map.get("projected_position_id"):
         return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
     if (
         str(current_map.get("intent_kind") or "").upper() != "ENTRY"
         or str(current_map.get("side") or "").upper() != "BUY"
-        or str(current_map.get("state") or "").upper() not in {"ACKED", "POST_ACKED"}
+        or current_state not in {"ACKED", "POST_ACKED"}
     ):
         return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
 

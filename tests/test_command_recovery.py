@@ -5728,6 +5728,165 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_partial_entry_trade_fact_projects_active_exposure_immediately(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A real partial fill is active exposure even while the remainder rests."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-entry")
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-entry",
+            state="PARTIALLY_MATCHED",
+            matched_size="2.127658",
+            remaining_size="7.172342",
+            source="WS_USER",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "source": "WS_USER",
+                "venue_order_id": "ord-partial-entry",
+                "trade_id": "trade-partial-entry",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-entry",
+            trade_id="trade-partial-entry",
+            state="MATCHED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+
+    def test_partial_entry_repair_promotes_zero_share_pending_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Existing 0-share pending projection must not hide a positive venue fill."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-entry")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-partial-entry",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-entry",
+            state="PARTIALLY_MATCHED",
+            matched_size="2.127658",
+            remaining_size="7.172342",
+            source="WS_USER",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "source": "WS_USER",
+                "venue_order_id": "ord-partial-entry",
+                "trade_id": "trade-partial-entry",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-entry",
+            trade_id="trade-partial-entry",
+            state="MATCHED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import reconcile_filled_entry_projection_repairs
+
+        summary = reconcile_filled_entry_projection_repairs(conn, mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        events = conn.execute(
+            """
+            SELECT sequence_no, event_type, phase_before, phase_after
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [dict(row) for row in events] == [
+            {
+                "sequence_no": 1,
+                "event_type": "POSITION_OPEN_INTENT",
+                "phase_before": None,
+                "phase_after": "pending_entry",
+            },
+            {
+                "sequence_no": 2,
+                "event_type": "ENTRY_ORDER_POSTED",
+                "phase_before": "pending_entry",
+                "phase_after": "pending_entry",
+            },
+            {
+                "sequence_no": 3,
+                "event_type": "ENTRY_ORDER_FILLED",
+                "phase_before": "pending_entry",
+                "phase_after": "active",
+            },
+        ]
+
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
         conn,
