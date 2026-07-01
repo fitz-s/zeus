@@ -27,7 +27,8 @@ COMMANDS
         uncommitted changes, OR when HEAD != origin/<branch> (unpushed) —
         printing exactly what is dirty / unpushed. Pass --allow-dirty to
         bypass only the git-surface gate with a loud warning. live-trading
-        restarts still require scripts/check_live_restart_preflight.py to pass.
+        restarts also reload the live prerequisite sidecars before preflight,
+        and still require scripts/check_live_restart_preflight.py to pass.
 
 SAFETY
     Read-mostly: the only state-changing action is `launchctl bootout` followed
@@ -115,6 +116,18 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+LIVE_TRADING_PREREQUISITE_LABELS = tuple(
+    DAEMONS[key]
+    for key in (
+        "data-ingest",
+        "forecast-live",
+        "substrate-observer",
+        "price-channel-ingest",
+        "post-trade-capital",
+        "riskguard-live",
+        "venue-heartbeat",
+    )
+)
 LAUNCHD_BOOTSTRAP_ATTEMPTS = 6
 LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 2.0
 LAUNCHD_UNLOAD_WAIT_SECONDS = 8.0
@@ -528,13 +541,44 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
 
 
-def cmd_restart(args: argparse.Namespace) -> int:
-    target = args.daemon
+def _dedupe_labels(labels: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        if label in seen:
+            continue
+        seen.add(label)
+        deduped.append(label)
+    return deduped
+
+
+def _restart_labels_for_target(target: str) -> list[str] | None:
+    """Expand an operator restart target into launchd labels.
+
+    A live-trading restart is not process-local anymore: restart preflight
+    requires sidecar heartbeat code identity to match the checkout that will run
+    ``src.main``.  If only live-trading is reloaded after a code change, the
+    preflight correctly blocks on stale sidecar SHAs and leaves the trading
+    daemon stopped.  Make that dependency explicit in the deployment tool by
+    refreshing live prerequisites before the read-only preflight.
+    """
+
     if target == "all":
         labels = list(DAEMONS.values())
     elif target in DAEMONS:
         labels = [DAEMONS[target]]
     else:
+        return None
+
+    if target != "all" and LIVE_TRADING_LABEL in labels:
+        labels = [*LIVE_TRADING_PREREQUISITE_LABELS, *labels]
+    return _dedupe_labels(labels)
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    target = args.daemon
+    labels = _restart_labels_for_target(target)
+    if labels is None:
         print(f"unknown daemon '{target}'. known: {', '.join(DAEMONS)}, or 'all'", file=sys.stderr)
         return 2
 

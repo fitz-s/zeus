@@ -726,10 +726,12 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     rc = dl.main(["restart", "live-trading"])
 
     assert rc == 0
+    expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         ("stop", dl.LIVE_TRADING_LABEL),
-        ("recovery", (dl.LIVE_TRADING_LABEL,)),
-        ("preflight", (dl.LIVE_TRADING_LABEL,)),
+        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("recovery", tuple(expanded_labels)),
+        ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
     ]
@@ -816,10 +818,12 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     rc = dl.main(["restart", "live-trading"])
 
     assert rc == 1
+    expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         ("stop", dl.LIVE_TRADING_LABEL),
-        ("recovery", (dl.LIVE_TRADING_LABEL,)),
-        ("preflight", (dl.LIVE_TRADING_LABEL,)),
+        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("recovery", tuple(expanded_labels)),
+        ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
     assert "live-trading left stopped" in err
