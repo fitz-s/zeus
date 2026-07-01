@@ -91,6 +91,13 @@ def test_lookup_serves_gated_city(tmp_path, monkeypatch):
     assert lookup_affine("Seoul", "low") == (0.0, 1.0)     # wrong metric -> identity
 
 
+def test_lookup_does_not_serve_canary_tier(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, {
+        "Shanghai": {"a": 0.8, "b": 1.04, "serve": False, "tier": "canary"},
+    })
+    assert lookup_affine("Shanghai", "high") == (0.0, 1.0)
+
+
 def test_lookup_failsoft_on_malformed(tmp_path, monkeypatch):
     (tmp_path / "emos_center_calibration.json").write_text("{ bad json", encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)

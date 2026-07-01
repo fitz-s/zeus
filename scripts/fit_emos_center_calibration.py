@@ -9,8 +9,9 @@
 Replays the frozen source-clock scheme over settled previous_runs history (reproduces the served
 anchor_value_c byte-exact) → per-city shrunk-to-identity OLS (a,b), gated to SERVE only where BOTH:
   STRUCT   — the walk-forward affine OOS ΔMSE has an individual 95% lower CI ≥ 0 (long history), AND
-  TRANSFER — the SAME (a,b) has non-negative point ΔMSE on the ACTUAL live served (single_runs)
-             center over the settled overlap (guards the previous_runs↔single_runs product gap).
+  TRANSFER — the SAME (a,b) has non-negative 95% lower-CI ΔMSE on the ACTUAL live served
+             (single_runs) center over the settled overlap (guards the previous_runs↔single_runs
+             product gap). Point-positive but CI-unproven cities are emitted as canary only.
 The slope b captures the temperature-dependent representativeness bias a constant offset cannot;
 shrinkage keeps world-class cities at identity (byte-identical). The output is a config artifact only;
 live use still requires a fresh posterior materialization that stamps the applied affine in provenance.
@@ -200,20 +201,26 @@ def main() -> int:
         live_dmse = statistics.mean(live_deltas) if live_deltas else 0.0
         live_lcb = _lower_ci(live_deltas) if live_n >= a.live_min_n else float("-inf")
         is_identity = (abs(A) < 1e-9 and abs(B - 1.0) < 1e-9)
-        # TRANSFER gate: the affine must NOT HARM the ACTUAL live served (single_runs) center — this
-        # guards the previous_runs↔single_runs product gap. POINT no-harm (live ΔMSE ≥ 0), not a 95%
-        # CI: the affine is robust in aggregate (pooled live +0.23, 33/49 help) so the CI on ~18 live
-        # obs is over-strict; the point gate keeps the meaningful breadth while still dropping any city
-        # the fit actively hurts on live. live_transfer_dmse_lcb95 is recorded for transparency.
-        transfer_ok = (not is_identity) and (live_n >= a.live_min_n) and (live_dmse >= 0.0)
+        # TRANSFER gate: the affine must NOT HARM the ACTUAL live served (single_runs) center over the
+        # settled overlap — guards the previous_runs(ifs025)↔single_runs(ifs9) product gap. PRODUCTION
+        # tier requires the 95% lower-CI (consult REQ-20260701-034919 [HIGH]: a point gate on ~18 live
+        # obs is too noisy for a per-unit no-harm guarantee). A city passing STRUCT + point-transfer but
+        # NOT transfer-CI is a CANARY candidate (serve=False; tier="canary") — accrues live data until
+        # its CI tightens. The nested blocked policy replay (select early / score untouched late block)
+        # + threshold-wise Brier both cleared, so the SELECTION POLICY generalizes and no decision
+        # cutpoint is harmed (consult would GO on that; the CI gate is the conservative production line).
+        transfer_ok = (not is_identity) and (live_n >= a.live_min_n) and (live_lcb >= 0.0)
+        transfer_ok_point = (not is_identity) and (live_n >= a.live_min_n) and (live_dmse >= 0.0)
         serve = bool(struct_ok and transfer_ok)
+        tier = "production" if serve else ("canary" if (struct_ok and transfer_ok_point) else None)
         cities_out[city] = {
-            "a": round(A, 5), "b": round(B, 5), "serve": serve, "n": n,
+            "a": round(A, 5), "b": round(B, 5), "serve": serve, "tier": tier, "n": n,
             "oos_dmse": round(oos, 4),
             "oos_dmse_lcb95": (round(struct_lcb, 4) if math.isfinite(struct_lcb) else None),
             "live_n": live_n, "live_transfer_dmse": round(live_dmse, 4),
             "live_transfer_dmse_lcb95": (round(live_lcb, 4) if math.isfinite(live_lcb) else None),
             "struct_ok": bool(struct_ok), "transfer_ok": bool(transfer_ok),
+            "transfer_ok_point": bool(transfer_ok_point),
         }
         if serve:
             served_cells += [(d, m) for (d, c, s), m in zip(rc, wf)]
@@ -225,7 +232,8 @@ def main() -> int:
         "model": "affine_ngr_center: mu' = a + b*mu_runtime (shrunk to identity)",
         "kappa": a.kappa, "min_train": a.min_train, "lead": a.lead,
         "serve_rule": ("STRUCT(walk_forward_affine_oos_dmse_lower95CI>=0, n>=serve_min_n) AND "
-                       "TRANSFER(live_single_runs affine_dmse_point>=0, live_n>=live_min_n)"),
+                       "TRANSFER(live_single_runs_affine_dmse_lower95CI>=0, live_n>=live_min_n); "
+                       "STRUCT+point-positive but CI-unproven rows are tier=canary, serve=false"),
         "serve_min_n": a.serve_min_n, "live_min_n": a.live_min_n,
         "metrics": {a.metric: {"cities": cities_out}},
         "validation": {
