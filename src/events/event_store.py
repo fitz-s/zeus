@@ -333,9 +333,9 @@ class EventStore:
         # plan under redecision/day0 predicates. Keep SQL to active processing rows
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
-        active_rows: list[tuple[str, int, str]] = []
+        active_rows: list[tuple[str, int, str, int]] = []
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
             for row in self.conn.execute(
                 """
                 SELECT p.event_id, p.attempt_count, p.last_error
@@ -351,7 +351,7 @@ class EventStore:
             ).fetchall()
         )
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 1)
             for row in self.conn.execute(
                 """
                 SELECT p.event_id, p.attempt_count, p.last_error
@@ -371,12 +371,14 @@ class EventStore:
             return []
         attempt_by_event: dict[str, int] = {}
         last_error_by_event: dict[str, str] = {}
+        stale_reclaim_by_event: dict[str, int] = {}
         event_ids: list[str] = []
-        for event_id, attempt_count, last_error in active_rows:
+        for event_id, attempt_count, last_error, stale_reclaim in active_rows:
             if not event_id or event_id in attempt_by_event:
                 continue
             attempt_by_event[event_id] = attempt_count
             last_error_by_event[event_id] = last_error
+            stale_reclaim_by_event[event_id] = stale_reclaim
             event_ids.append(event_id)
 
         rows: list[tuple[object, ...]] = []
@@ -445,9 +447,17 @@ class EventStore:
                 rank_rows.append(tuple(row[key] for key in _EVENT_ROW_KEYS) + (
                     _pending_row_attempt_count(row),
                     1 if recapture_edge_backoff else 0,
+                    0,
                 ))
             else:
-                rank_rows.append(tuple(row) + (1 if recapture_edge_backoff else 0,))
+                event_id = str(row[0] or "") if row else ""
+                rank_rows.append(
+                    tuple(row)
+                    + (
+                        1 if recapture_edge_backoff else 0,
+                        stale_reclaim_by_event.get(event_id, 0),
+                    )
+                )
 
         ranked = _rank_pending_rows_python(rank_rows, day0_is_tradeable=day0_is_tradeable)
         events = [event for event, _attempt_count in ranked]
@@ -2375,6 +2385,18 @@ def _pending_row_recapture_edge_backoff(row: sqlite3.Row | tuple) -> int:
     return _safe_bool_int(raw)
 
 
+def _pending_row_stale_processing_reclaim(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_stale_processing_reclaim"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        index = len(_EVENT_ROW_KEYS) + 2
+        raw = row[index] if len(row) > index else None
+    return _safe_bool_int(raw)
+
+
 def _live_redecision_retry_lane(event: OpportunityEvent, attempt_count: int) -> int:
     """Claim lane for live redecision rows already carrying retry debt.
 
@@ -2400,12 +2422,14 @@ def _rank_pending_rows_python(
         event = _event_from_row(row)
         attempt_count = _pending_row_attempt_count(row)
         recapture_edge_backoff = _pending_row_recapture_edge_backoff(row)
+        stale_processing_reclaim = _pending_row_stale_processing_reclaim(row)
         payload = _event_payload_dict(event)
         records.append(
             {
                 "event": event,
                 "attempt_count": attempt_count,
                 "recapture_edge_backoff": recapture_edge_backoff,
+                "stale_processing_reclaim": stale_processing_reclaim,
                 "payload": payload,
                 "tier": _claim_tier_for_event(
                     event,
@@ -2416,6 +2440,9 @@ def _rank_pending_rows_python(
                 "target_key": _date_desc_key(payload.get("target_date")),
                 "available_key": _datetime_desc_key(event.available_at),
                 "retry_key": 0 if attempt_count > 0 else 1,
+                "stale_processing_reclaim_lane": (
+                    0 if stale_processing_reclaim else 1
+                ),
                 "live_redecision_retry_lane": _live_redecision_retry_lane(
                     event, attempt_count
                 ),
@@ -2444,6 +2471,7 @@ def _rank_pending_rows_python(
     ranked = sorted(
         records,
         key=lambda item: (
+            item["stale_processing_reclaim_lane"],
             item["tier"],
             item["live_redecision_retry_lane"],
             item["recapture_edge_backoff"],

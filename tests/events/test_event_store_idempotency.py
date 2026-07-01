@@ -1211,6 +1211,35 @@ def test_stale_processing_claim_is_reclaimed_after_lease():
     ).fetchone()[0] == 2
 
 
+def test_stale_processing_claim_is_not_buried_behind_pending_backlog():
+    conn = _world_conn()
+    store = EventStore(conn, processing_lease_seconds=60)
+    stale = _event(
+        "snap-stale-buried",
+        5,
+        "2026-05-24T04:05:00+00:00",
+        "2026-05-24T04:06:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+    assert store.claim(stale.event_id, claimed_at="2026-05-24T04:10:00+00:00") is True
+    for i in range(250):
+        pending = _event(
+            f"snap-pending-{i}",
+            100,
+            "2026-05-24T04:11:00+00:00",
+            "2026-05-24T04:11:00+00:00",
+        )
+        store.insert_or_ignore(pending)
+
+    fetched = store.fetch_pending(
+        decision_time="2026-05-24T04:12:00+00:00",
+        limit=20,
+    )
+
+    assert fetched
+    assert fetched[0].event_id == stale.event_id
+
+
 def test_dead_letter_writes_separate_evidence_and_terminal_status():
     conn = _world_conn()
     store = EventStore(conn)
