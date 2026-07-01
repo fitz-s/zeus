@@ -1,6 +1,26 @@
 # EMOS affine center calibration — before/after (2026-07-01)
 
-## ★★ AUTHORITATIVE (2026-07-01, production-hardened after consult REQ-20260701-063727)
+## ★★★ AUTHORITATIVE (2026-07-01): PASSES the DECISION-level gate — this is the real bar
+The center-MSE nested pass is necessary but NOT sufficient (consult Q6). The live-capital gate is the
+DECISION-level test: held-out, does correcting the center improve the **TRADED bin-q's log-loss on the
+REAL settled bin**? (μ → `bin_probability_settlement(μ,σ)` on the integer bin that actually settled;
+identity μ vs corrected μ'.) Money-path verified first: the live traded q reads the materialized
+posterior center `anchor_value_c` (the `replacement_0_1` reactor lane) — the exact value this layer
+corrects — so the correction reaches the decision (not the raw-member fallback lane).
+
+**Layer enabled ONLY when the decision-nested (global-date reselection) traded-q log-loss lower-CI>0:**
+- **HIGH: PASSES → 13 cities served.** decision-nested traded-q log-loss lcb95 **+0.024** (all-cell
+  portfolio; +0.082 on the selected cells), Brier lcb95 +0.011; center-MSE nested lcb95 +0.118. On the
+  served-13 held-out cells the traded-q log-loss goes **1.897 → 1.749**. The correction genuinely
+  sharpens the probability on the outcome that actually settled — leak-free, decision-level, CI-clear.
+- **LOW: FAILS → 0 served (layer disabled).** decision log-loss lcb95 **−0.007** (only Paris clears
+  center-MSE, and it does NOT survive the decision bar). Low is world-class; nothing serves.
+
+Lead-gated (served_lead=day-ahead; other leads identity) + range-guarded (in-support only) +
+atomic-written; kill switch `enabled:false`. Tests: 21 calibration + 6 materializer pass.
+**This is the genuine pass. Everything below is prior/superseded — do not cite its numbers.**
+
+## (superseded) production-hardened after consult REQ-20260701-063727
 Supersedes everything below. The frontier consult reviewed the WHOLE surface (PR #421) and found the
 EB direction right but the layer not production-sound as shipped. All flagged defects fixed + verified:
 

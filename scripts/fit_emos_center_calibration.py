@@ -72,9 +72,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from src.calibration.emos import bin_probability_settlement  # noqa: E402
 from src.calibration.emos_center_calibration import (  # noqa: E402
     ARTIFACT_AUTHORITY,
     apply_affine,
+    apply_affine_in_support,
     fit_affine_eb,
 )
 from src.config import runtime_state_path  # noqa: E402
@@ -246,16 +248,79 @@ def _nested_portfolio(pool, min_days):
     return statistics.mean(port), _date_block_lcb(port), (statistics.median(counts) if counts else 0)
 
 
+def _served_sigma(conn, metric):
+    """(city, date) -> the served settlement-facing σ at the day-ahead lead (settlement_sigma_floor_c,
+    else anchor_sigma_c) — the σ the TRADED bin-q integrates with. Latest computed_at per cell."""
+    latest = {}
+    for r in conn.execute(
+        "SELECT city,target_date,source_cycle_time,computed_at,provenance_json "
+        "FROM forecast_posteriors WHERE temperature_metric=?", (metric,)
+    ):
+        city, td, sct, ca, prov = r[0], r[1], r[2], r[3], r[4]
+        try:
+            if (datetime.date.fromisoformat(td) - datetime.date.fromisoformat(str(sct)[:10])).days != DECISION_LEAD:
+                continue
+            p = json.loads(prov)
+            sig = p.get("settlement_sigma_floor_c") or p.get("anchor_sigma_c")
+        except Exception:
+            sig = None
+        if sig is None or float(sig) <= 0.0:
+            continue
+        k = (city, td)
+        if k not in latest or ca > latest[k][0]:
+            latest[k] = (ca, float(sig))
+    return {k: v[1] for k, v in latest.items()}
+
+
+def _decision_nested_portfolio(pool, sigma_map, min_days):
+    """THE production gate (consult Q6 / live-score-mismatch): the DECISION-level nested test. Same
+    nested global-date reselection as _nested_portfolio, but the score is the TRADED bin-q's log-loss
+    on the REAL settled bin — identity μ vs corrected μ' both integrated by bin_probability_settlement
+    at σ. ΔlogLoss>0 means the correction makes the traded probability sharper on the outcome that
+    actually settled. Equal-weight portfolio over ALL cells (unselected contribute 0). center-MSE is
+    necessary-not-sufficient; a live-capital correction must not harm this. (Served cities are non-HK
+    → wmo_half_up integer bins.) Returns (mean, lcb95)."""
+    dates = sorted({d for c in pool for d in pool[c]})
+    port = []
+    for D in dates:
+        selected = _reselect(pool, [x for x in dates if x != D], min_days)
+        num, den = 0.0, 0
+        for c in pool:
+            if D not in pool[c]:
+                continue
+            den += 1
+            if c not in selected:
+                continue
+            sig = sigma_map.get((c, D))
+            if sig is None or sig <= 0.0:
+                continue
+            mu, settle = pool[c][D]
+            centers = [m for m, _ in pool[c].values()]
+            a, b = selected[c]
+            mu2 = apply_affine_in_support(mu, a, b, min(centers), max(centers))
+            X = float(round(settle))
+            q0 = min(max(bin_probability_settlement(mu, sig, X, X), 1e-9), 1.0 - 1e-9)
+            q1 = min(max(bin_probability_settlement(mu2, sig, X, X), 1e-9), 1.0 - 1e-9)
+            num += (-math.log(q0)) - (-math.log(q1))     # >0: correction lowers traded log-loss
+        if den:
+            port.append(num / den)
+    if len(port) < 3:
+        return 0.0, float("-inf")
+    return statistics.mean(port), _date_block_lcb(port)
+
+
 def _fit_metric(conn, metric, a):
     recs = _runtime_served_center(conn, metric)          # city -> [(date, center, obs)], one/date
     pool = _pool_bydate(recs, a.min_days)                # {city: {date: (center, settle)}}
+    sigma_map = _served_sigma(conn, metric)
     eb_full = fit_affine_eb({c: list(v.values()) for c, v in pool.items()})
     per_city = _global_date_lodo(pool)                   # leak-free: leave-one-GLOBAL-date-out
 
-    # NESTED selection is the LAYER-enable gate: serve live ONLY if the fit+select+apply policy has a
-    # positive PORTFOLIO lower CI on held-out dates — not the selection-conditional served-set number.
+    # center-MSE nested is necessary; the DECISION-level nested (traded-q log-loss on the real settled
+    # bin) is the SUFFICIENT live-capital gate. The layer serves ONLY if the DECISION gate lcb>0.
     port_mean, port_lcb, med_resel = _nested_portfolio(pool, a.min_days)
-    layer_ok = port_lcb > 0.0
+    dec_mean, dec_lcb = _decision_nested_portfolio(pool, sigma_map, a.min_days)
+    layer_ok = dec_lcb > 0.0
 
     cities_out = {}
     served_cells = []
@@ -289,6 +354,9 @@ def _fit_metric(conn, metric, a):
             served_cells += cells
     validation = {
         "layer_enabled": layer_ok,
+        "gate": "decision_nested_logloss_lcb95>0 (traded-q log-loss on the real settled bin, held-out)",
+        "decision_nested_logloss_dmse": round(dec_mean, 4),
+        "decision_nested_logloss_lcb95": round(dec_lcb, 4) if math.isfinite(dec_lcb) else None,
         "nested_portfolio_dmse": round(port_mean, 4),
         "nested_portfolio_lcb95": round(port_lcb, 4) if math.isfinite(port_lcb) else None,
         "nested_median_reselected": med_resel,
@@ -319,9 +387,10 @@ def main() -> int:
         metrics_out[m] = {"cities": cities_out, "served_lead": DECISION_LEAD}
         validations[m] = validation
         print(f"=== EMOS affine EB (basis=day-ahead served center, one/date, metric={m}) ===")
-        print(f"LAYER {'ENABLED' if validation['layer_enabled'] else 'DISABLED'} by nested selection: "
-              f"portfolio ΔMSE={validation['nested_portfolio_dmse']:+.4f} lcb95={validation['nested_portfolio_lcb95']} "
-              f"(median reselected/fold={validation['nested_median_reselected']:.0f})")
+        print(f"LAYER {'ENABLED' if validation['layer_enabled'] else 'DISABLED'} by DECISION gate: "
+              f"traded-q log-loss ΔdMSE={validation['decision_nested_logloss_dmse']:+.4f} "
+              f"lcb95={validation['decision_nested_logloss_lcb95']} "
+              f"(center-MSE nested lcb95={validation['nested_portfolio_lcb95']}, median reselected={validation['nested_median_reselected']:.0f})")
         print(f"served {validation['n_served']}/{validation['n_cities']} (canary {validation['n_canary']})  "
               f"global-date served-pooled ΔMSE={validation['served_pooled_global_date_dmse']:+.4f}  "
               f"median_dates/city={validation['median_dates_per_city']:.0f}")
