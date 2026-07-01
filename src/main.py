@@ -3193,7 +3193,9 @@ def _boot_deployment_freshness_auto_resume() -> None:
     reflect durable DB state, not stale in-memory defaults.
 
     Logic:
-    - If entries are NOT paused → no-op.
+    - Always refresh state/deployment_freshness.json to fresh when boot SHA
+      matches filesystem HEAD; this is the deploy script's post-start proof.
+    - If entries are NOT paused → no DB resume action.
     - If entries are paused for a non-deployment-freshness reason → no-op;
       do not clear operator-issued or other system pauses.
     - If entries are paused with deployment-freshness reason AND the current
@@ -3212,14 +3214,6 @@ def _boot_deployment_freshness_auto_resume() -> None:
     )
 
     try:
-        if not is_entries_paused():
-            return
-        pause_reason = get_entries_pause_reason()
-        if pause_reason not in (
-            {_DEPLOYMENT_FRESHNESS_PAUSE_REASON}
-            | set(_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS)
-        ):
-            return
         boot_sha: str | None = _BOOT_STATE.get("sha")
         if not boot_sha:
             logger.warning(
@@ -3246,11 +3240,6 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 boot_sha[:8], current_sha[:8],
             )
             return
-        # SHA matches: operator restarted with current code — safe to auto-resume.
-        resume_entries(
-            "deployment_freshness_resumed_on_sha_match",
-            issued_by="control_plane",
-        )
         try:
             df_path = state_path("deployment_freshness.json")
             detected_at = datetime.now(timezone.utc)
@@ -3278,6 +3267,19 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 "deployment_freshness_auto_resume: failed to refresh deployment_freshness.json (%s)",
                 exc,
             )
+        if not is_entries_paused():
+            return
+        pause_reason = get_entries_pause_reason()
+        if pause_reason not in (
+            {_DEPLOYMENT_FRESHNESS_PAUSE_REASON}
+            | set(_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS)
+        ):
+            return
+        # SHA matches: operator restarted with current code — safe to auto-resume.
+        resume_entries(
+            "deployment_freshness_resumed_on_sha_match",
+            issued_by="control_plane",
+        )
         logger.info(
             "deployment_freshness_auto_resume: cleared deployment freshness pause "
             "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",

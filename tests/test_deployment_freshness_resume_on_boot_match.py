@@ -30,6 +30,7 @@ import logging
 import json
 import os
 import subprocess
+import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -104,11 +105,14 @@ def _run_auto_resume(
 
     with patch.object(main_module, "_BOOT_STATE", {"sha": boot_sha, "ts": datetime.now(_UTC)}):
         with patch("subprocess.check_output", side_effect=_fake_git):
-            if state_dir is None:
-                _boot_deployment_freshness_auto_resume()
-            else:
+            if state_dir is not None:
                 with patch("src.config.state_path", side_effect=lambda name: state_dir / name):
                     _boot_deployment_freshness_auto_resume()
+            else:
+                with tempfile.TemporaryDirectory() as tmp_state:
+                    tmp_dir = Path(tmp_state)
+                    with patch("src.config.state_path", side_effect=lambda name: tmp_dir / name):
+                        _boot_deployment_freshness_auto_resume()
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +267,36 @@ class TestAutoResumeNoop:
                     _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
 
         resume_mock.assert_not_called()
+
+    def test_r3_no_pause_still_refreshes_freshness_state_file(self, tmp_path):
+        """If DB pause was already cleared, boot still replaces stale freshness state."""
+        _, conn = _setup_world_db(tmp_path)
+        conn.close()
+        df_path = tmp_path / "deployment_freshness.json"
+        df_path.write_text(
+            json.dumps(
+                {
+                    "boot_sha": DIFF_SHA,
+                    "current_sha": DIFF_SHA,
+                    "status": "fresh",
+                    "pause_reason": None,
+                    "detected_at": (datetime.now(_UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
+
+        payload = json.loads(df_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "fresh"
+        assert payload["pause_reason"] is None
+        assert payload["boot_sha"] == BOOT_SHA
+        assert payload["current_sha"] == BOOT_SHA
 
     def test_r4_different_pause_reason_not_touched(self, tmp_path):
         """Entries paused for a DIFFERENT reason are not cleared by auto-resume."""
