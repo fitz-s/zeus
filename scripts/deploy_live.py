@@ -176,8 +176,9 @@ def _git(*args: str, repo: str | None = None) -> subprocess.CompletedProcess:
 
 
 def head_sha(short: bool = True) -> str:
-    res = _git("rev-parse", "--short" if short else "HEAD", "HEAD")
-    return res.stdout.strip() or "?"
+    args = ("rev-parse", "--short", "HEAD") if short else ("rev-parse", "HEAD")
+    res = _git(*args)
+    return (res.stdout.strip().splitlines() or ["?"])[0] or "?"
 
 
 def current_branch() -> str:

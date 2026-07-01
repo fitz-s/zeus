@@ -300,6 +300,30 @@ def test_zeus_status_price_holes_no_snapshot(tmp_path):
 # --------------------------------------------------------------------------
 # deploy_live
 # --------------------------------------------------------------------------
+def test_deploy_live_head_sha_reads_single_revision(monkeypatch):
+    import subprocess
+
+    dl = _load("deploy_live_head_sha_single_revision", "deploy_live.py")
+    calls: list[tuple[str, ...]] = []
+
+    def _fake_git(*args, repo=None):  # noqa: ANN001, ARG001
+        calls.append(tuple(args))
+        if args == ("rev-parse", "--short", "HEAD"):
+            return subprocess.CompletedProcess(["git"], 0, "abc1234\n", "")
+        if args == ("rev-parse", "HEAD"):
+            return subprocess.CompletedProcess(["git"], 0, "a" * 40 + "\n", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(dl, "_git", _fake_git)
+
+    assert dl.head_sha(short=True) == "abc1234"
+    assert dl.head_sha(short=False) == "a" * 40
+    assert calls == [
+        ("rev-parse", "--short", "HEAD"),
+        ("rev-parse", "HEAD"),
+    ]
+
+
 def test_deploy_live_status_runs(capsys):
     """status runs against this checkout and prints structured output.
 
