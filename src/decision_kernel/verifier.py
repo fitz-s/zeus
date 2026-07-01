@@ -17,6 +17,7 @@ from src.decision.family_decision_engine import (
     entry_price_floor_decision,
     live_entry_min_price_floor,
     native_curve_side_for_direction,
+    roi_frontier_useful_values,
 )
 from src.events.day0_authority import (
     Day0AuthorityError,
@@ -491,6 +492,12 @@ def _verify_actionable_qkernel_economics(
     optimal_delta_u = _finite_float(
         economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
     )
+    delta_u_at_min = _finite_float(
+        economics.get("delta_u_at_min"), "actionable qkernel delta_u_at_min"
+    )
+    optimal_stake_usd = _finite_float(
+        economics.get("optimal_stake_usd"), "actionable qkernel optimal_stake_usd"
+    )
     false_edge_rate = _finite_float(
         economics.get("false_edge_rate"), "actionable qkernel false_edge_rate"
     )
@@ -502,6 +509,14 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError(
             "actionable qkernel optimal_delta_u must be positive"
         )
+    if delta_u_at_min <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel delta_u_at_min must be positive"
+        )
+    if optimal_stake_usd <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel optimal_stake_usd must be positive"
+        )
     try:
         from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 
@@ -512,6 +527,17 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
+    if not roi_frontier_useful_values(
+        side=qkernel_side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake_usd,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        raise CertificateVerificationError(
+            "actionable qkernel roi frontier not useful"
+        )
     if not _qkernel_direction_admitted(economics, direction=payload.get("direction")):
         raise CertificateVerificationError("actionable qkernel direction admission missing")
     if economics.get("coherence_allows") is not True:

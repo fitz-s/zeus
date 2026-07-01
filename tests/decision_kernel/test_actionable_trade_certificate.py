@@ -151,6 +151,8 @@ def test_actionable_rejects_qkernel_payoff_probability_mismatch():
                 "cost": 0.01,
                 "edge_lcb": 0.04049776073684555,
                 "optimal_delta_u": 0.013993788651471595,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 5.0,
                 "false_edge_rate": 0.02599350162459385,
                 "direction_law_ok": False,
                 "coherence_allows": True,
@@ -176,6 +178,8 @@ def test_actionable_rejects_oof_reliability_direction_override_for_yes():
                 "cost": 0.4,
                 "edge_lcb": 0.2,
                 "optimal_delta_u": 0.01,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 5.0,
                 "false_edge_rate": 0.01,
                 "direction_law_ok": False,
                 "q_lcb_guard_basis": "OOF_WILSON_95",
@@ -213,6 +217,8 @@ def test_actionable_rejects_wrong_cost_source_for_buy_no():
                 "cost": 0.4,
                 "edge_lcb": 0.2,
                 "optimal_delta_u": 0.01,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 5.0,
                 "false_edge_rate": 0.01,
                 "direction_law_ok": True,
                 "coherence_allows": True,
@@ -244,6 +250,40 @@ def test_actionable_rejects_wrong_cost_source_for_sell_yes():
     )
 
     with pytest.raises(CertificateVerificationError, match="quote.cost_source"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_low_price_yes_below_roi_frontier_confidence_floor():
+    parents, action = actionable_graph(
+        action_payload={
+            "q_live": 0.12180248510788458,
+            "q_lcb_5pct": 0.06052567908958011,
+            "c_fee_adjusted": 0.04001526925923045,
+            "c_cost_95pct": 0.04001526925923045,
+            "p_fill_lcb": 0.95,
+            "trade_score": 0.020510409830349664,
+            "action_score": 0.020510409830349664,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.12180248510788458,
+                "payoff_q_lcb": 0.06052567908958011,
+                "cost": 0.04001526925923045,
+                "edge_lcb": 0.020510409830349664,
+                "optimal_delta_u": 0.00009152233738979263,
+                "delta_u_at_min": 0.00009152233738979263,
+                "optimal_stake_usd": "1.4412832709285736083984375",
+                "false_edge_rate": 0.05,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.06052567908958011,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="roi frontier not useful"):
         verify_actionable_trade(action, parents)
 
 
@@ -478,6 +518,8 @@ def _action_payload() -> dict:
             "cost": 0.4,
             "edge_lcb": 0.2,
             "optimal_delta_u": 0.01,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 5.0,
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
