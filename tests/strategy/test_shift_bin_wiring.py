@@ -417,7 +417,14 @@ def test_old_leg_residual_zero_when_chain_collateral_has_no_token():
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
 
 
-def test_old_leg_residual_position_chain_shares_override_empty_collateral():
+def test_old_leg_residual_chain_zero_overrides_stale_local_projection():
+    """Fresh CHAIN zero is closure truth even when local position_current is stale.
+
+    This is the live redecision bug: after a sell/zero-collateral proof, the local
+    projection can still carry chain_shares/cost. Close-before-open must not keep
+    emitting EXIT_OLD_LEG from that stale row; otherwise the selected new YES/NO leg
+    never reaches final intent.
+    """
     conn = _conn()
     _insert_held(
         conn,
@@ -428,7 +435,35 @@ def test_old_leg_residual_position_chain_shares_override_empty_collateral():
     )
     _insert_chain_collateral(conn, {})
 
-    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+
+
+def test_chain_zero_old_leg_admits_new_bin_under_shift_lease():
+    """Once chain collateral proves the old leg is zero, shift-bin admits new entry."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        position_id="p-old",
+        token_id="tok-A",
+        bin_label="60-61F",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=10.0,
+    )
+    _insert_chain_collateral(conn, {})
+    held = _old_leg(conn)
+    residual = sbw.read_old_leg_residual_usd(conn, token_id="tok-A")
+
+    plan = _plan(conn, held=held, old_leg_residual_usd=residual)
+
+    assert residual == pytest.approx(0.0)
+    assert plan.kind == "ENTER_NEW_BIN"
+    assert plan.allow_entry is True
+    row = conn.execute(
+        "SELECT status FROM family_rebalance_intents WHERE intent_id=?",
+        (plan.lease_intent_id,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_SUBMITTED"
 
 
 def test_old_leg_residual_keeps_local_value_when_chain_collateral_has_token():

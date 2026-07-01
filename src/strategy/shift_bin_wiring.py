@@ -327,9 +327,11 @@ def read_old_leg_residual_usd(
 
     The CLOSE proof for close-before-open: when the old leg has been exited/voided to
     zero (or dust below min-order), no live ``position_current`` row remains for the
-    old token, so this returns 0.0 (== proven closed from canonical truth). A row with
-    positive committed cost in a blocking phase returns that USD (still live → exit
-    first). Chain cost basis is preferred over the projected cost basis (chain truth).
+    old token, or fresh CHAIN collateral proves the sellable token balance is zero, so
+    this returns 0.0 (== proven closed from canonical truth). A row with positive
+    committed cost in a blocking phase returns that USD (still live → exit first).
+    Chain collateral/cost basis is preferred over the projected cost basis (chain
+    truth).
     Fails CLOSED conservatively: a read/schema error returns +inf so the caller treats
     the old leg as STILL LIVE (exit first, never falsely enter) rather than 0.
     """
@@ -377,10 +379,10 @@ def read_old_leg_residual_usd(
     except (TypeError, ValueError):
         row_chain_shares = None
     chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
-    if (
-        chain_available_shares == 0.0
-        and (row_chain_shares is None or row_chain_shares <= _LIVE_CHAIN_SHARE_EPSILON)
-    ):
+    if chain_available_shares == 0.0:
+        # A fresh CHAIN collateral snapshot is the venue-side sellability truth. A
+        # stale local position projection must not keep re-opening EXIT_OLD_LEG after
+        # the wallet has no old-leg collateral left.
         return 0.0
 
     for value in (_g("chain_cost_basis_usd"), _g("cost_basis_usd"), _g("size_usd")):
