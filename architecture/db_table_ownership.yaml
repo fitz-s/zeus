@@ -2179,7 +2179,6 @@ tables:
     notes: >
       K1 2026-05-11 archive snapshot of source_run.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
-    notes: Zeus metadata store (key-value, schema version anchor).
 
   # ---------------------------------------------------------------------------
   # PR-S4b §4 (2026-05-18): 66 legacy_archived ghost entries on db: trade
