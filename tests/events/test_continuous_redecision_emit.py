@@ -1974,6 +1974,51 @@ def test_redecision_screen_opens_pending_snapshot_after_expiry_commit():
     )
 
 
+def test_reactor_emit_lock_is_bounded_and_does_not_rescan_pending_under_lock():
+    """The reactor must not let emit-stage backlog starve monitor/redecision cadence."""
+
+    src = inspect.getsource(main._edli_event_reactor_cycle)
+    emit_block = src[src.index("_emit_mutex = _world_write_mutex()") : src.index(
+        "trade_conn = get_trade_connection_with_world_required"
+    )]
+    assert "_edli_emit_lock_timeout_seconds(edli_cfg)" in emit_block
+    assert "_edli_acquire_mutex(_emit_mutex" in emit_block
+    assert "_edli_pending_entity_keys(" not in emit_block
+
+
+def test_false_forecast_emit_limit_resolves_to_bounded_default_not_unbounded():
+    for raw in (False, "false", "none", "default"):
+        resolved = main._edli_positive_int_or_unbounded(
+            {"forecast_snapshot_emit_limit": raw},
+            "forecast_snapshot_emit_limit",
+            default=12,
+            maximum=20,
+        )
+        assert resolved == 12
+    assert (
+        main._edli_positive_int_or_unbounded(
+            {"forecast_snapshot_emit_limit": "unbounded"},
+            "forecast_snapshot_emit_limit",
+            default=12,
+            maximum=20,
+        )
+        is None
+    )
+
+
+def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pending():
+    """Rest-pull and held-position redecision must retry quickly instead of blocking."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert "_edli_acquire_mutex(prune_mutex" in src
+    assert "_edli_acquire_mutex(emit_mutex" in src
+    emit_block = src[src.rindex("world = get_world_connection()") : src.index(
+        "# 3) CANCEL the pulled rests"
+    )]
+    assert "_edli_pending_entity_keys(world" not in emit_block
+    assert "if event.entity_key in pending:" in emit_block
+
+
 def test_reactor_prune_archives_orphan_processing_rows():
     """Active rows without opportunity_events provenance must leave the working set."""
 

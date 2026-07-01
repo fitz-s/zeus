@@ -1229,6 +1229,105 @@ def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
     assert engine._direction_admitted(nonmodal_yes) is True
 
 
+def test_day0_observed_boundary_uses_served_q_lcb_not_forecast_oof_guards(monkeypatch):
+    """Day0 active qkernel must not let forecast OOF guards zero observed-boundary alpha."""
+
+    case = _case()
+    space = _outcome_space(case)
+    obs = Day0ObservationState(
+        observed=True,
+        station_id=STATION,
+        source="wu_icao",
+        samples_count=8,
+        latest_observed_at_utc=_CAPTURED,
+        observed_high_native=25.0,
+        observed_low_native=None,
+        observed_extreme_native=25.0,
+        raw_observation_hash="day0-observed-boundary",
+    )
+    model_set = _model_set([24.9, 25.0, 25.1], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, obs, has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    assert pd.day0.active is True
+    assert forecast_bin_id(jq) == "b25"
+
+    def _offline_qlcb_guard_must_not_run(**_kwargs):
+        raise AssertionError("forecast OOF q_lcb guard must not run for active Day0")
+
+    def _selection_guard_must_not_run(**_kwargs):
+        raise AssertionError("forecast selection calibrator must not run for active Day0")
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _offline_qlcb_guard_must_not_run)
+    monkeypatch.setattr(
+        fde_mod, "apply_selection_calibrator", _selection_guard_must_not_run
+    )
+
+    def factory(bin_id: str) -> MarketBook:
+        fair = min(max(jq.q_by_bin_id.get(bin_id, 0.0), 0.02), 0.98)
+        ya = _tick(max(fair * 0.55, 0.002))
+        yb = _tick(max(ya - 0.01, 0.001))
+        return _market_book(
+            bin_id,
+            yes_bid=yb,
+            yes_ask=ya,
+            no_bid=_tick(1 - ya),
+            no_ask=_tick(1 - yb),
+            size=5000.0,
+        )
+
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    route_set = build_negrisk_route_set(
+        fb, shares=Decimal("100"), enable_negrisk_routes=False
+    )
+    sizing: dict[tuple[str, str], NativeSideCandidate] = {}
+    for b in space.bins:
+        if not b.executable:
+            continue
+        route = route_set.direct_yes.get(b.bin_id)
+        if route is None or not route.executable:
+            continue
+        q_point = float(jq.q_by_bin_id[b.bin_id])
+        sizing[(b.bin_id, "YES")] = _yes_sizing(
+            space,
+            b.bin_id,
+            q_point=q_point,
+            q_lcb=max(q_point - 0.03, 0.0),
+            price=str(round(float(route.avg_cost.value), 3)),
+        )
+
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=obs, family_book=fb)
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.no_trade_reason is None, decision.no_trade_reason
+    assert decision.selected is not None
+    selected_decision = next(
+        d
+        for d in decision.candidate_decisions
+        if d.economics.candidate_id == decision.selected.candidate_id
+    )
+    assert selected_decision.route.side == "YES"
+    assert selected_decision.route.bin_id == "b25"
+    assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_OBSERVED_BOUNDARY_GUARD_BASIS
+    assert selected_decision.selection_guard_basis == fde_mod.DAY0_OBSERVED_BOUNDARY_GUARD_BASIS
+    assert selected_decision.selection_guard_q_safe == pytest.approx(
+        selected_decision.economics.payoff_q_lcb
+    )
+    assert selected_decision.economics.edge_lcb > 0.0
+
+
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
     """Shanghai correction mirror: an inferior selected NO yields to dominant center YES."""
     case = _case()

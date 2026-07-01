@@ -610,6 +610,10 @@ def build_monitor_refreshed_canonical_write(
         getattr(position, "last_monitor_at", ""),
         projection["updated_at"],
     )
+    projection["updated_at"] = _max_iso_chronological(
+        str(projection["updated_at"] or ""),
+        occurred_at,
+    )
     trade_id = str(getattr(position, "trade_id"))
     slug = f"monitor_refreshed:{sequence_no}"
     payload_dict: dict[str, Any] = {

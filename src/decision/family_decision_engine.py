@@ -235,6 +235,7 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
         "OOF_WILSON_95_POOLED_TAIL",
     }
 )
+DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
 _ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
@@ -937,42 +938,54 @@ class FamilyDecisionEngine:
             for d in enumerated
         )
 
-        # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
-        # The RAW-honest serving rule: deflate each candidate's served q_lcb to
-        # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
-        # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
-        # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
-        # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
-        # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
-        # absent -> scored is byte-identical (no abstain). Moves no μ.
-        guarded = self._apply_qlcb_reliability_guard(
-            scored=pre_coherence_scored,
-            case=case,
-            joint_q=joint_q,
-            band=band,
-            forecast_bin=forecast_bin,
-            matrix=matrix,
-            exposure=portfolio,
-            sizing_candidates=sizing_candidates,
-            max_stake_usd=max_stake_usd,
-        )
+        if bool(getattr(predictive.day0, "active", False)):
+            # Day0 is the same qkernel family decision with a stronger information
+            # state: an observed running extreme has already conditioned the posterior.
+            # The conservative lower bound consumed by edge/DeltaU is therefore the
+            # served Day0 observed-boundary q_lcb, not the offline forecast-selection
+            # OOF cells fitted before that observation existed. Applying those forecast
+            # OOF guards here zeroes near-deterministic Day0 modal bins and permanently
+            # starves the Day0 capital-flow lane.
+            guarded = self._apply_day0_observed_boundary_guard(
+                scored=pre_coherence_scored
+            )
+        else:
+            # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
+            # The RAW-honest serving rule: deflate each candidate's served q_lcb to
+            # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
+            # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
+            # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
+            # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
+            # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
+            # absent -> scored is byte-identical (no abstain). Moves no μ.
+            guarded = self._apply_qlcb_reliability_guard(
+                scored=pre_coherence_scored,
+                case=case,
+                joint_q=joint_q,
+                band=band,
+                forecast_bin=forecast_bin,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
+            )
 
-        # --- (6c) selection-aware settlement guard --------------------------------
-        # The OOF q_lcb guard is price-blind; the selection calibrator is keyed on the
-        # raw side probability that admission selected on, so it catches the adverse
-        # selection that made high-confidence NO entries lose after settlement. It runs
-        # before coherence/selection so live ranking sees guarded edge, stake, and DeltaU.
-        guarded = self._apply_selection_calibrator_guard(
-            scored=guarded,
-            case=case,
-            joint_q=joint_q,
-            band=band,
-            forecast_bin=forecast_bin,
-            matrix=matrix,
-            exposure=portfolio,
-            sizing_candidates=sizing_candidates,
-            max_stake_usd=max_stake_usd,
-        )
+            # --- (6c) selection-aware settlement guard --------------------------------
+            # The OOF q_lcb guard is price-blind; the selection calibrator is keyed on the
+            # raw side probability that admission selected on, so it catches the adverse
+            # selection that made high-confidence NO entries lose after settlement. It runs
+            # before coherence/selection so live ranking sees guarded edge, stake, and DeltaU.
+            guarded = self._apply_selection_calibrator_guard(
+                scored=guarded,
+                case=case,
+                joint_q=joint_q,
+                band=band,
+                forecast_bin=forecast_bin,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
+            )
 
         # --- the market-coherence report over the candidate bins (spec 891) ------
         # A large model/market logit gap is not automatically a live-money incident.
@@ -1248,6 +1261,41 @@ class FamilyDecisionEngine:
             and bool(cell_key)
             and f"|{side}|" in cell_key
         )
+
+    def _apply_day0_observed_boundary_guard(
+        self,
+        *,
+        scored: tuple[CandidateDecision, ...],
+    ) -> tuple[CandidateDecision, ...]:
+        """Stamp Day0 observed-boundary lower-bound provenance without OOF deflation."""
+
+        guarded: list[CandidateDecision] = []
+        for d in scored:
+            try:
+                q_safe = (
+                    float(d.economics.payoff_q_lcb)
+                    if d.economics.payoff_q_lcb is not None
+                    else self._selection_edge_lcb(d) + self._selection_cost(d)
+                )
+            except Exception:  # noqa: BLE001
+                q_safe = 0.0
+            if not math.isfinite(q_safe):
+                q_safe = 0.0
+            q_safe = min(max(float(q_safe), 0.0), 1.0)
+            guarded.append(
+                replace(
+                    d,
+                    q_lcb_guard_basis=DAY0_OBSERVED_BOUNDARY_GUARD_BASIS,
+                    q_lcb_guard_abstained=False,
+                    q_lcb_guard_cell_key="day0_observed_boundary",
+                    selection_guard_basis=DAY0_OBSERVED_BOUNDARY_GUARD_BASIS,
+                    selection_guard_abstained=False,
+                    selection_guard_cell_key="day0_observed_boundary",
+                    selection_guard_n=max(1, int(getattr(d, "selection_guard_n", 0) or 0)),
+                    selection_guard_q_safe=q_safe,
+                )
+            )
+        return tuple(guarded)
 
     def _direction_admitted(self, d: CandidateDecision) -> bool:
         return d.direction_law_ok is True

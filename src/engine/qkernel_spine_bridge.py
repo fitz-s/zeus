@@ -2069,6 +2069,7 @@ def qkernel_candidate_economics_by_bin_side(
 
 
 _GUARDED_FALSE_EDGE_RATE_95_BASES = {
+    "DAY0_OBSERVED_BOUNDARY",
     "OOF_WILSON_95",
     "OOF_WILSON_95_POOLED_TAIL",
     "SELECTION_BETA_95",

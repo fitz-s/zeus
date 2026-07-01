@@ -4334,7 +4334,7 @@ def _edli_event_reactor_cycle() -> None:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         forecast_emit_limit = _edli_positive_int_or_unbounded(
-            edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
+            edli_cfg, "forecast_snapshot_emit_limit", default=12, maximum=20
         )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
         # Live cadence invariant: full coverage is achieved by fair rotation across
@@ -4450,88 +4450,89 @@ def _edli_event_reactor_cycle() -> None:
         # the mutex only covers prune/write/commit.
         # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
         _emit_mutex = _world_write_mutex()
-        _emit_mutex.acquire()
-        try:
-            if edli_cfg.get("forecast_snapshot_trigger_enabled"):
-                # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
-                # opportunity_events to the WAL world DB shared with the market-channel
-                # ingestor and CollateralLedger heartbeat. Under live load that DB hits
-                # transient "database is locked" past the 30s busy_timeout. A locked-out
-                # emit must NOT crash the whole reactor cycle — the cycle should still drain
-                # candidates already queued from prior cycles. Catch ONLY the transient lock
-                # (narrow, by message) and continue; real schema/logic faults still propagate.
-                try:
-                    _current_fsr_pending = _edli_pending_entity_keys(
-                        conn,
-                        event_types=("FORECAST_SNAPSHOT_READY",),
-                    )
-                    _fresh_fsr_events = [
-                        event for event in _fsr_events
-                        if event.entity_key not in _current_fsr_pending
-                    ]
-                    from src.events.event_writer import EventWriter
-
-                    EventWriter(conn).write_many(_fresh_fsr_events)
-                    _log_stage("forecast_snapshot_emit")
-                except sqlite3.OperationalError as _emit_lock_exc:
-                    if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
-                        logger.warning(
-                            "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
-                            "(%r) — skipping emit this cycle, draining already-queued candidates.",
-                            _emit_lock_exc,
-                        )
-                    else:
-                        raise
-            # Continuous re-decision admission is intentionally NOT all-universe here.
-            # The dedicated screen job below owns EDLI_REDECISION_PENDING and admits only
-            # families with confirmed trade value, maker rests needing action, or held
-            # positions with money at risk. The reactor still emits ordinary
-            # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
-            if (
-                edli_cfg.get("day0_extreme_trigger_enabled")
-                and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-            ):
-                _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
-                try:
+        _emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+        _emit_acquired = _edli_acquire_mutex(_emit_mutex, timeout=_emit_lock_timeout_s)
+        if _emit_acquired:
+            try:
+                if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+                    # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
+                    # opportunity_events to the WAL world DB shared with the market-channel
+                    # ingestor and CollateralLedger heartbeat. Under live load that DB hits
+                    # transient "database is locked" past the 30s busy_timeout. A locked-out
+                    # emit must NOT crash the whole reactor cycle — the cycle should still drain
+                    # candidates already queued from prior cycles. Catch ONLY the transient lock
+                    # (narrow, by message) and continue; real schema/logic faults still propagate.
                     try:
-                        _edli_emit_day0_extreme_events(
-                            conn,
-                            _day0_trade_conn,
-                            decision_time=now,
-                            received_at=received_at,
-                            limit=day0_emit_limit,
-                            # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
-                            # (_day0_fast_prefetch above, before acquire); this call
-                            # is the pure write phase.
-                            fast_prefetch=_day0_fast_prefetch,
-                            # Stamp scope-aware emission priority. Production live
-                            # scope makes Day0 tradeable.
-                            day0_is_tradeable=day0_is_tradeable_for_scope(
-                                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-                            ),
-                            budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
-                            family_admission=_day0_family_admission,
-                        )
-                        _log_stage("day0_emit")
-                    except sqlite3.OperationalError as _day0_emit_lock_exc:
-                        if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                        from src.events.event_writer import EventWriter
+
+                        EventWriter(conn).write_many(_fsr_events)
+                        _log_stage("forecast_snapshot_emit")
+                    except sqlite3.OperationalError as _emit_lock_exc:
+                        if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
                             logger.warning(
-                                "EDLI reactor: day0 emit still locked after bounded retry "
-                                "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
-                                _day0_emit_lock_exc,
+                                "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
+                                "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                                _emit_lock_exc,
                             )
                         else:
                             raise
-                finally:
-                    _day0_trade_conn.close()
-            # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
-            # while still holding the world-DB write mutex, so the WAL write lock is
-            # released by the COMMIT before any other writer (ingestor / collateral
-            # heartbeat) can interleave. No HTTP/venue work runs inside this block.
-            conn.commit()
-            _log_stage("emit_commit")
-        finally:
-            _emit_mutex.release()
+                # Continuous re-decision admission is intentionally NOT all-universe here.
+                # The dedicated screen job below owns EDLI_REDECISION_PENDING and admits only
+                # families with confirmed trade value, maker rests needing action, or held
+                # positions with money at risk. The reactor still emits ordinary
+                # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
+                if (
+                    edli_cfg.get("day0_extreme_trigger_enabled")
+                    and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+                ):
+                    _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
+                    try:
+                        try:
+                            _edli_emit_day0_extreme_events(
+                                conn,
+                                _day0_trade_conn,
+                                decision_time=now,
+                                received_at=received_at,
+                                limit=day0_emit_limit,
+                                # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                                # (_day0_fast_prefetch above, before acquire); this call
+                                # is the pure write phase.
+                                fast_prefetch=_day0_fast_prefetch,
+                                # Stamp scope-aware emission priority. Production live
+                                # scope makes Day0 tradeable.
+                                day0_is_tradeable=day0_is_tradeable_for_scope(
+                                    str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+                                ),
+                                budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
+                                family_admission=_day0_family_admission,
+                            )
+                            _log_stage("day0_emit")
+                        except sqlite3.OperationalError as _day0_emit_lock_exc:
+                            if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                                logger.warning(
+                                    "EDLI reactor: day0 emit still locked after bounded retry "
+                                    "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
+                                    _day0_emit_lock_exc,
+                                )
+                            else:
+                                raise
+                    finally:
+                        _day0_trade_conn.close()
+                # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
+                # while still holding the world-DB write mutex, so the WAL write lock is
+                # released by the COMMIT before any other writer (ingestor / collateral
+                # heartbeat) can interleave. No HTTP/venue work runs inside this block.
+                conn.commit()
+                _log_stage("emit_commit")
+            finally:
+                _emit_mutex.release()
+        else:
+            logger.warning(
+                "EDLI reactor emit skipped: world write mutex unavailable after %.3fs; "
+                "draining already-queued candidates so heartbeat/monitor/redecision keep cadence.",
+                _emit_lock_timeout_s,
+            )
+            _log_stage("emit_lock_skipped")
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -5229,8 +5230,19 @@ def _emit_live_redecision_events_for_families(
     world = get_world_connection()
     forecasts_ro = get_forecasts_connection_read_only()
     emit_mutex = _world_write_mutex()
-    emit_mutex.acquire()
+    emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(_settings_section("edli", {}) or {})
+    emit_acquired = False
     try:
+        emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+        if not emit_acquired:
+            logger.warning(
+                "live redecision emit skipped for origin=%s families=%d: "
+                "world write mutex unavailable after %.3fs; next cadence will retry.",
+                origin,
+                len(families),
+                emit_lock_timeout_s,
+            )
+            return 0
         trig = ForecastSnapshotReadyTrigger(
             EventWriter(world),
             live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
@@ -5250,7 +5262,8 @@ def _emit_live_redecision_events_for_families(
         world.commit()
         return sum(1 for result in write_results if result.inserted)
     finally:
-        emit_mutex.release()
+        if emit_acquired:
+            emit_mutex.release()
         try:
             forecasts_ro.close()
         except Exception:  # noqa: BLE001
@@ -6054,16 +6067,26 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
             world = get_world_connection()
             emit_mutex = _world_write_mutex()
-            emit_mutex.acquire()
+            emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+            emit_acquired = False
             try:
-                expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
-                    world,
-                    set(),
-                    decision_time=received_at,
-                )
-                world.commit()
+                emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+                if emit_acquired:
+                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                        world,
+                        set(),
+                        decision_time=received_at,
+                    )
+                    world.commit()
+                else:
+                    logger.warning(
+                        "edli_redecision_screen: stale-pending expiry skipped because "
+                        "world write mutex was unavailable after %.3fs",
+                        emit_lock_timeout_s,
+                    )
             finally:
-                emit_mutex.release()
+                if emit_acquired:
+                    emit_mutex.release()
                 try:
                     world.close()
                 except Exception:  # noqa: BLE001
@@ -6095,7 +6118,19 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         try:
             world_prune = get_world_connection()
             prune_mutex = _world_write_mutex()
-            prune_mutex.acquire()
+            prune_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+            prune_acquired = _edli_acquire_mutex(prune_mutex, timeout=prune_lock_timeout_s)
+            if not prune_acquired:
+                logger.warning(
+                    "edli_redecision_screen skipped: world write mutex unavailable "
+                    "for stale-pending prune after %.3fs; no venue side effect attempted.",
+                    prune_lock_timeout_s,
+                )
+                try:
+                    world_prune.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             try:
                 expired_stale_pending = _edli_expire_unadmitted_redecision_pending(
                     world_prune,
@@ -6152,8 +6187,17 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
         world = get_world_connection()
         emit_mutex = _world_write_mutex()
-        emit_mutex.acquire()
+        emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+        emit_acquired = False
         try:
+            emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+            if not emit_acquired:
+                logger.warning(
+                    "edli_redecision_screen skipped: world write mutex unavailable "
+                    "for redecision emit after %.3fs; no venue side effect attempted.",
+                    emit_lock_timeout_s,
+                )
+                return
             expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
                 world,
                 set(all_families),
@@ -6166,10 +6210,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     decision_time=received_at,
                 )
             )
-            current_pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
             fresh_events = []
             for event in events_to_emit:
-                if event.entity_key in current_pending:
+                if event.entity_key in pending:
                     continue
                 try:
                     payload = json.loads(str(event.payload_json or "{}"))
@@ -6189,7 +6232,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             emitted = EventWriter(world).write_many(fresh_events)
             world.commit()
         finally:
-            emit_mutex.release()
+            if emit_acquired:
+                emit_mutex.release()
             try:
                 world.close()
             except Exception:  # noqa: BLE001
@@ -6406,22 +6450,44 @@ def _edli_positive_int_or_unbounded(
     config: dict, key: str, *, default: int, maximum: int
 ) -> int | None:
     raw = config.get(key, default)
-    if raw is False:
-        return None
-    if isinstance(raw, str) and raw.strip().lower() in {
-        "false",
-        "none",
-        "no_cap",
-        "uncapped",
-        "unbounded",
-        "unlimited",
-    }:
-        return None
+    if raw is False or raw is None:
+        raw = default
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"", "false", "none", "default"}:
+            raw = default
+        elif normalized in {"no_cap", "uncapped", "unbounded", "unlimited"}:
+            return None
     try:
         value = int(raw)
     except (TypeError, ValueError):
         value = default
     return max(1, min(maximum, value))
+
+
+def _edli_emit_lock_timeout_seconds(config: dict) -> float:
+    raw = config.get("reactor_emit_lock_timeout_seconds", 0.5)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.0, min(value, 5.0))
+
+
+def _edli_acquire_mutex(mutex: Any, *, timeout: float) -> bool:
+    """Acquire a runtime mutex with a bounded wait.
+
+    Some unit tests use tiny fake mutexes whose ``acquire`` method accepts no
+    timeout and returns ``None``. Treat that shape as acquired so tests can
+    verify call routing without depending on ``threading.Lock`` internals.
+    """
+
+    try:
+        result = mutex.acquire(timeout=timeout)
+    except TypeError:
+        mutex.acquire()
+        return True
+    return True if result is None else bool(result)
 
 
 def _edli_emit_forecast_snapshot_events(

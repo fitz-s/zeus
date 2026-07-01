@@ -3206,6 +3206,54 @@ def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     assert build_position_current_projection(pending_exit)["order_status"] == "backoff_exhausted"
 
 
+def test_monitor_refreshed_projection_updated_at_tracks_event_time(monkeypatch):
+    from src.engine import lifecycle_events
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-monitor-clock",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="holding",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status="filled",
+    )
+    position.last_monitor_at = "2026-06-24T12:00:00+00:00"
+
+    real_project = lifecycle_events.build_position_current_projection
+
+    def stale_project(pos):
+        projection = real_project(pos)
+        projection["updated_at"] = "2026-06-24T10:00:00+00:00"
+        return projection
+
+    monkeypatch.setattr(lifecycle_events, "build_position_current_projection", stale_project)
+
+    events, projection = lifecycle_events.build_monitor_refreshed_canonical_write(
+        position,
+        sequence_no=7,
+        phase_after="active",
+        source_module="test",
+    )
+
+    assert events[0]["occurred_at"] == "2026-06-24T12:00:00+00:00"
+    assert projection["updated_at"] == "2026-06-24T12:00:00+00:00"
+
+
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
