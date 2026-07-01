@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -737,10 +738,11 @@ def _entry_economics_component(
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
-    effective_min_entry_price = max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE)
+    live_min_entry_price = _live_entry_min_price_floor(intent, actionable_payload)
+    effective_min_entry_price = max(min_entry_price, live_min_entry_price)
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+    elif min_entry_price + 1e-12 < live_min_entry_price:
         reason = "min_entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
@@ -772,7 +774,7 @@ def _entry_economics_component(
             submit_edge=submit_edge,
             expected_profit_usd=expected_profit,
             min_entry_price=min_entry_price,
-            live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
+            live_min_entry_price=live_min_entry_price,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -803,7 +805,7 @@ def _entry_economics_component(
             submit_edge=submit_edge,
             expected_profit_usd=expected_profit,
             min_entry_price=min_entry_price,
-            live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
+            live_min_entry_price=live_min_entry_price,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -917,7 +919,7 @@ def _entry_economics_component(
         submit_edge=submit_edge,
         expected_profit_usd=expected_profit,
         min_entry_price=min_entry_price,
-        live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
+        live_min_entry_price=live_min_entry_price,
         min_expected_profit_usd=min_expected_profit,
         live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         submit_edge_density=edge_density,
@@ -930,6 +932,24 @@ def _entry_economics_component(
         qkernel_edge_lcb=econ_edge_lcb,
         qkernel_false_edge_rate=econ_false_edge_rate,
     )
+
+
+def _live_entry_min_price_floor(
+    intent: ExecutionIntent,
+    actionable_payload: Mapping[str, Any] | None,
+) -> float:
+    strategy_key = ""
+    direction = ""
+    if isinstance(actionable_payload, Mapping):
+        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+        direction = str(actionable_payload.get("direction") or "").strip().lower()
+    if not strategy_key:
+        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
+    if not direction:
+        direction = str(getattr(intent, "direction", "") or "").strip().lower()
+    if strategy_key == "center_buy" and direction == "buy_yes":
+        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
+    return _LIVE_ENTRY_MIN_ENTRY_PRICE
 
 
 def _entry_actionable_certificate_payload_and_component(

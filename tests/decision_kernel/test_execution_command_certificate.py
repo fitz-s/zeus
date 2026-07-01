@@ -435,9 +435,9 @@ def test_final_intent_rejects_venue_order_id_before_submit():
 def test_final_intent_rejects_price_below_current_live_entry_floor():
     parents, final_intent = final_intent_graph(
         final_payload={
-            "limit_price": 0.07,
-            "min_entry_price": 0.05,
-            "notional_usd": 0.70,
+            "limit_price": 0.019,
+            "min_entry_price": 0.01,
+            "notional_usd": 0.19,
             "selection_authority_applied": None,
         }
     )
@@ -657,20 +657,47 @@ def test_final_intent_builder_rejects_entry_price_below_current_live_floor():
     with pytest.raises(ValueError, match="CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR"):
         builder_chain(
             actionable_payload={
-                "c_fee_adjusted": 0.07,
-                "c_cost_95pct": 0.07,
+                "c_fee_adjusted": 0.02,
+                "c_cost_95pct": 0.02,
                 "q_lcb_5pct": 0.30,
-                "trade_score": 0.23,
-                "action_score": 0.23,
-                "min_entry_price": 0.05,
+                "trade_score": 0.28,
+                "action_score": 0.28,
+                "min_entry_price": 0.02,
                 "selection_authority_applied": None,
                 "qkernel_execution_economics": {
                     **_actionable_payload()["qkernel_execution_economics"],
-                    "cost": 0.07,
-                    "edge_lcb": 0.23,
+                    "cost": 0.02,
+                    "edge_lcb": 0.28,
                 },
             }
         )
+
+
+def test_final_intent_builder_allows_center_buy_yes_above_micro_tail_floor():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "c_fee_adjusted": 0.03,
+            "c_cost_95pct": 0.03,
+            "q_live": 0.12,
+            "q_lcb_5pct": 0.08,
+            "trade_score": 0.05,
+            "action_score": 0.05,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": {
+                **_actionable_payload()["qkernel_execution_economics"],
+                "payoff_q_point": 0.12,
+                "payoff_q_lcb": 0.08,
+                "cost": 0.03,
+                "edge_lcb": 0.05,
+                "selection_guard_q_safe": 0.08,
+            },
+        }
+    )
+
+    assert final_intent.payload["strategy_key"] == "center_buy"
+    assert final_intent.payload["direction"] == "buy_yes"
+    assert final_intent.payload["limit_price"] == pytest.approx(0.03)
+    assert final_intent.payload["min_entry_price"] == pytest.approx(0.02)
 
 
 def test_execution_command_builder_rejects_no_submit_parent_certificate():

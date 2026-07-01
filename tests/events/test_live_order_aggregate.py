@@ -634,6 +634,54 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
+def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(
+            strategy_key="center_buy",
+            q_live=0.20,
+            q_lcb_5pct=0.074,
+            limit_price=0.024,
+            expected_edge=0.050,
+            size=30.0,
+            min_entry_price=0.02,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.05,
+            current_best_bid=0.014,
+            current_best_ask=0.034,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "route_id": "DIRECT_YES:b24@proof",
+                "route_type": "direct",
+                "side": "YES",
+                "payoff_q_point": 0.20,
+                "payoff_q_lcb": 0.074,
+                "cost": 0.024,
+                "edge_lcb": 0.050,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.074,
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+
 def test_pre_submit_accepts_day0_observation_authority_without_qkernel():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(

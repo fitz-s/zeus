@@ -114,6 +114,7 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
 _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
@@ -1444,7 +1445,7 @@ def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
     """
 
     floors = {
-        "min_entry_price": _LIVE_ENTRY_MIN_ENTRY_PRICE,
+        "min_entry_price": _live_entry_min_price_floor(payload),
         "min_expected_profit_usd": _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         "min_submit_edge_density": _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     }
@@ -1467,6 +1468,14 @@ def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
         if math.isfinite(value):
             floors[field] = max(floors[field], value)
     return floors
+
+
+def _live_entry_min_price_floor(payload: dict) -> float:
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    direction = str(payload.get("direction") or "").strip().lower()
+    if strategy_key == "center_buy" and direction == "buy_yes":
+        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
+    return _LIVE_ENTRY_MIN_ENTRY_PRICE
 
 
 def _probability_float(value: object, field_name: str) -> float:

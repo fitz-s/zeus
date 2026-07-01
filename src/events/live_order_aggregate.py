@@ -6,7 +6,7 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.events.day0_authority import (
@@ -17,6 +17,7 @@ from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPE
 
 
 _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 _DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 
 
@@ -806,9 +807,10 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
-    if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+    live_min_entry_price = _live_entry_min_price_floor(payload)
+    if min_entry_price + 1e-12 < live_min_entry_price:
         raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-    if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
+    if limit_price + 1e-12 < max(min_entry_price, live_min_entry_price):
         raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
@@ -947,6 +949,14 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     if expected_edge > edge_lcb + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
+
+
+def _live_entry_min_price_floor(payload: Mapping[str, Any]) -> float:
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    direction = str(payload.get("direction") or "").strip().lower()
+    if strategy_key == "center_buy" and direction == "buy_yes":
+        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
+    return _LIVE_ENTRY_MIN_ENTRY_PRICE
 
 
 def _native_curve_side_for_direction(direction: str) -> str | None:

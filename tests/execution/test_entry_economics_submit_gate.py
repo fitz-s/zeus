@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.execution.executor import _entry_economics_component
@@ -150,6 +152,38 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["allowed"] is False
     assert verdict["reason"] == "min_entry_price_below_live_floor"
     assert verdict["details"]["live_min_entry_price"] == 0.10
+
+
+def test_entry_economics_allows_center_buy_yes_above_micro_tail_floor():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.024,
+            q_live=0.20,
+            q_lcb_5pct=0.074,
+            expected_edge=0.050,
+            min_entry_price=0.02,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.05,
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.20,
+                payoff_q_lcb=0.074,
+                cost=0.024,
+                edge_lcb=0.050,
+                optimal_delta_u=0.01,
+                selection_guard_q_safe=0.074,
+            ),
+        ),
+        shares=30.0,
+        actionable_payload={
+            "strategy_key": "center_buy",
+            "direction": "buy_yes",
+        },
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["live_min_entry_price"] == 0.02
+    assert verdict["details"]["expected_profit_usd"] == pytest.approx(1.5)
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():

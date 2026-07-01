@@ -290,23 +290,35 @@ def test_live_quality_floors_are_registry_backed() -> None:
 def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
     """Fast-decay live entry profiles must not admit sub-dollar thin-edge churn."""
 
-    for strategy_key in (
-        "settlement_capture",
-        "center_buy",
-        "opening_inertia",
-        "imminent_open_capture",
-    ):
+    expected_min_entry_prices = {
+        "settlement_capture": 0.10,
+        "center_buy": 0.02,
+        "opening_inertia": 0.10,
+        "imminent_open_capture": 0.10,
+    }
+    for strategy_key, expected_min_entry_price in expected_min_entry_prices.items():
         profile = sp.get(strategy_key)
-        assert profile.min_entry_price == pytest.approx(0.10)
-        assert profile.min_expected_profit_usd == pytest.approx(1.0)
+        assert profile.min_entry_price == pytest.approx(expected_min_entry_price)
         assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
+
+
+def test_center_buy_profit_floor_aligns_with_qkernel_roi_frontier() -> None:
+    """Center-buy uses qkernel ROI frontier quality, not a flat $1 submit cliff."""
+
+    profile = sp.get("center_buy")
+    assert profile.min_expected_profit_usd == pytest.approx(0.25)
+    assert profile.min_entry_price == pytest.approx(0.02)
+    assert profile.min_submit_edge_density == pytest.approx(0.05)
 
 
 def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:
     """Center-buy is a forecast-accuracy strategy, not an ultra-low tail strategy."""
 
     profile = sp.get("center_buy")
-    assert profile.min_entry_price == pytest.approx(0.10)
+    assert profile.min_entry_price == pytest.approx(0.02)
     assert profile.allow_ultra_low_tail is False
 
 

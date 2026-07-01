@@ -3310,6 +3310,7 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
     return (
         "would_cross_book" in suffix_lower
         or _certificate_build_failed_is_book_authority_gap(reason)
+        or _certificate_build_failed_is_maker_book_witness_race(reason)
         or _certificate_build_failed_is_taker_reservation_race(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
@@ -3324,6 +3325,11 @@ def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
         or "pre_submit_book_authority_stale" in suffix_lower
         or "pre_submit_book_authority_jit_" in suffix_lower
     )
+
+
+def _certificate_build_failed_is_maker_book_witness_race(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return "maker_book_fresh_witness_disagreement" in suffix_lower
 
 
 def _certificate_build_failed_is_taker_reservation_race(reason: str) -> bool:
@@ -3367,6 +3373,7 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
         return (
             "would_cross_book" in suffix_lower
             or _certificate_build_failed_is_book_authority_gap(str(reason))
+            or _certificate_build_failed_is_maker_book_witness_race(str(reason))
             or _certificate_build_failed_is_taker_reservation_race(str(reason))
         )
     return False

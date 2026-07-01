@@ -84,7 +84,7 @@ def test_buy_yes_is_identity(monkeypatch):
     assert proof["q_exec_lcb_basis"] == "BUY_YES_IDENTITY"
 
 
-def test_center_buy_taker_quality_uses_current_registry_floor_over_legacy_payload(monkeypatch):
+def test_center_buy_taker_quality_preserves_declared_floor_above_registry(monkeypatch):
     _patch(monkeypatch, _bound())
     payload = dict(
         _BUY_NO,
@@ -102,14 +102,14 @@ def test_center_buy_taker_quality_uses_current_registry_floor_over_legacy_payloa
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload,
         order_mode="TAKER",
-        fresh_best_bid=0.06,
-        fresh_best_ask=0.07,
+        fresh_best_bid=0.03,
+        fresh_best_ask=0.04,
     )
 
     assert proof is not None
     assert proof["passed"] is False
     assert proof["reason"] == "strategy_live_quality_floor_not_met"
-    assert proof["min_entry_price"] == "0.1"
+    assert proof["min_entry_price"] == "0.05"
     assert proof["entry_price_floor_applies"] == "True"
 
 
@@ -163,4 +163,4 @@ def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(mo
     assert proof["entry_price_floor_applies"] == "False"
     assert proof["entry_price_floor_pass"] == "True"
     assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
-    assert proof["min_entry_price"] == "0.1"
+    assert proof["min_entry_price"] == "0.05"

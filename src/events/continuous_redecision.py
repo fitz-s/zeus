@@ -94,6 +94,13 @@ REST_BOOK_DRIFT_TICKS: float = 1.0
 # while allowing the full cert path to re-price before the 20-minute hard
 # rest-then-cross escalation deadline.
 REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
+# Family optimum shifts use the same capital-efficiency shape as q-kernel's
+# ROI frontier, but only with screen-time inputs. Keep ultra-cheap dust from
+# pulling a live family slot; the full submit gate still owns strategy-specific
+# floors and expected-profit checks.
+REST_SHIFT_MIN_EXECUTABLE_COST: float = 0.02
+REST_SHIFT_MIN_PAYOFF_Q_LCB: float = 0.02
+REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO: float = 0.10
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
@@ -218,6 +225,7 @@ class _FamilyRestCandidate:
     bin_label: str
     side: str
     score: float
+    edge: float
     quote: PriceQuote
 
 
@@ -2165,15 +2173,45 @@ def _family_rest_candidate_score(
     if probs is None:
         return None
     posterior, q_lcb = probs
-    score = _entry_screen_robust_trade_score(
+    cost = _entry_screen_c95_cost(float(price), tick_size=tick_size)
+    edge = min(float(q_lcb) - cost, float(posterior) - cost)
+    if not math.isfinite(edge):
+        return None
+    if edge <= 0.0:
+        return edge
+    if cost < REST_SHIFT_MIN_EXECUTABLE_COST - _EPS:
+        return None
+    if float(q_lcb) < REST_SHIFT_MIN_PAYOFF_Q_LCB - _EPS:
+        return None
+    edge_density = edge / cost
+    kelly_fraction_lcb = edge / max(1.0 - cost, _EPS)
+    score = edge_density * kelly_fraction_lcb
+    if not math.isfinite(score):
+        return None
+    return score
+
+
+def _family_rest_candidate_edge(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+    price: float,
+    tick_size: object = None,
+) -> float | None:
+    probs = _belief_side_probability(belief, idx=idx, side=side)
+    if probs is None:
+        return None
+    posterior, q_lcb = probs
+    edge = _entry_screen_robust_trade_score(
         q_posterior=posterior,
         q_lcb_5pct=q_lcb,
         price=float(price),
         tick_size=tick_size,
     )
-    if not math.isfinite(score):
+    if not math.isfinite(edge):
         return None
-    return score
+    return edge
 
 
 def _family_optimum_shift_pull(
@@ -2243,8 +2281,17 @@ def _family_optimum_shift_pull(
             )
             if score is None:
                 continue
+            edge = _family_rest_candidate_edge(
+                belief,
+                idx=idx,
+                side=side,
+                price=float(quote.price),
+                tick_size=quote.tick_size,
+            )
+            if edge is None:
+                continue
             floor = _improve_delta_for_tick(quote.tick_size)
-            if score < floor - _EPS:
+            if edge < floor - _EPS:
                 continue
             if best is None or score > best.score:
                 best = _FamilyRestCandidate(
@@ -2252,17 +2299,18 @@ def _family_optimum_shift_pull(
                     bin_label=label,
                     side=side,
                     score=score,
+                    edge=edge,
                     quote=quote,
                 )
 
     if best is None:
         return None
-    material_floor = max(
-        _improve_delta_for_tick(rest_tick),
-        _improve_delta_for_tick(best.quote.tick_size),
-    )
     score_delta = best.score - current_score
-    if score_delta < material_floor - _EPS:
+    # ``best.edge`` has already cleared the price-unit round-trip floor above.
+    # ``score`` is ROI/growth-density, so compare it to current_score in its own
+    # units instead of comparing a dimensionless score delta to a price tick.
+    required_score_delta = max(abs(current_score) * REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO, _EPS)
+    if score_delta < required_score_delta - _EPS:
         return None
     return RepriceDecision(
         family_id=rest.family_id,

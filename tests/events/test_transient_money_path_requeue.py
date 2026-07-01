@@ -119,6 +119,18 @@ def test_pre_submit_book_authority_gap_is_transient():
     )
 
 
+def test_maker_book_fresh_witness_disagreement_is_transient_refresh():
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT:"
+        "quote_mid=0.070000:fresh_mid=0.995500:"
+        "divergence_ticks=92.55:tolerance_ticks=10.00"
+    )
+
+    assert _is_transient_money_path_reason(reason)
+    assert _is_executable_snapshot_refresh_reason(reason)
+
+
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
 
@@ -295,6 +307,55 @@ def test_pre_submit_book_authority_gap_queues_family_snapshot_refresh():
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
         "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
         "token_id=tok:book_hash=h:best_bid=0.99"
+    )
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            reason=reason,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_maker_book_witness_disagreement_queues_family_snapshot_refresh():
+    """A JIT-vs-proof book split must refresh the family, not terminal-burn Day0."""
+
+    conn, store = _store()
+    event = _event("snap-maker-witness-split")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT:"
+        "quote_mid=0.070000:fresh_mid=0.995500:"
+        "divergence_ticks=92.55:tolerance_ticks=10.00"
     )
 
     def _submit(ev, _decision_time):

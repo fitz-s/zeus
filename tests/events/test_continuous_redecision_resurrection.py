@@ -904,6 +904,169 @@ def test_rest_pull_family_sibling_shift_holds_inside_maker_window():
     assert pulls == []
 
 
+def test_rest_pull_family_sibling_shift_uses_roi_frontier_not_absolute_edge():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.20, 0.125],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.10, 0.115],
+        q_lcb_no_vec=[0.75, 0.80],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.605",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.03",
+        ask="0.04",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.80,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    current_edge = cr._family_rest_candidate_edge(
+        cr.latest_cached_belief(world, family_id=family_id),
+        idx=0,
+        side="buy_no",
+        price=0.60,
+        tick_size=0.01,
+    )
+    center_yes_edge = cr._family_rest_candidate_edge(
+        cr.latest_cached_belief(world, family_id=family_id),
+        idx=1,
+        side="buy_yes",
+        price=0.04,
+        tick_size=0.01,
+    )
+    assert current_edge is not None and center_yes_edge is not None
+    assert current_edge > center_yes_edge
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    _rest, decision = pulls[0]
+    assert decision.reason == "FAMILY_OPTIMUM_SHIFT"
+    assert decision.replacement_condition_id == "0xc30"
+    assert decision.replacement_bin_label == "30C"
+    assert decision.replacement_side == "buy_yes"
+    assert 0.0 < decision.detail < cr.IMPROVE_DELTA
+
+
+def test_rest_pull_family_sibling_shift_ignores_ultra_low_tail_dust():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Chongqing|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Chongqing",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "24C"],
+        p_posterior_vec=[0.20, 0.03],
+        condition_ids=["0xc29", "0xc24"],
+        q_lcb_yes_vec=[0.10, 0.025],
+        q_lcb_no_vec=[0.75, 0.80],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.605",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc24",
+        yes_token_id="yes-c24",
+        no_token_id="no-c24",
+        selected_outcome_token_id="yes-c24",
+        bid="0.003",
+        ask="0.004",
+        snapshot_id="s24",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.80,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Chongqing",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
 def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     world = _mem_world()
     trade = _mem_trade()
