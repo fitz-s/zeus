@@ -277,8 +277,15 @@ changing), not collapsed to one unresolved flag.
 7. Introduce `ReviewWorkItem` as the quarantine owner; keep `phase=quarantined` only as projection in transit.
 8. A8/A9 retirement arc (keep `outcome_type` legacy; populate `resolution_state` only same-transaction — see §11).
 9. Redemption cleanup (delete `REDEEM_SUBMITTED` after zero-row + no-writer proof).
-10. Dead-value deletion (two proofs each). Consult-named provable-dead: `HEARTBEAT_CANCEL_SUSPECTED`,
-    `GHOST_DUPLICATE`, `quarantine_fill_failed`, `quarantine_void_failed`, `REDEEM_SUBMITTED`, retrain `RUNNING`.
+10. Dead-value deletion (two proofs each). **Live-verified 2026-06-30 (audit-before-wiring corrects the
+    consult's step-10 list):** `GHOST_DUPLICATE` + `HEARTBEAT_CANCEL_SUSPECTED` (writer) + `quarantine_fill_
+    failed`/`quarantine_void_failed` were **already removed 2026-06-29** (0 rows, no writer); the only
+    `HEARTBEAT_CANCEL_SUSPECTED` residual is two `db.py` CHECK clauses (schema-only, permits a value nothing
+    writes — a low-value tidy, deferred as a schema/fingerprint touch on the shared live DB module).
+    **`REDEEM_SUBMITTED` is NOT dead** — the consult was wrong against live code: it is written at
+    `settlement_commands.py:804` and mapped in A10 (`settlement_axes.py:280`→`TX_OBSERVED`), deliberately
+    **repurposed** as *third-party* redeem-tx accounting (Zeus never submits; third-party auto-redeem owns
+    the tx). Do not delete it. Remaining genuine dead-value work: retrain `RUNNING` (unverified here).
 11. Core CHECK migrations stay single-DB (all 6 vocab tables are trade-class in `zeus_trades.db` → one
     SAVEPOINT per table; cross-DB still INV-37 ATTACH+SAVEPOINT).
 12. Only then remove compatibility enums — when the owning reducer/projection is wired and the old write
