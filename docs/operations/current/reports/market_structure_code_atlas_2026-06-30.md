@@ -167,4 +167,24 @@ with real external facts (符合真实运行逻辑).
 duplicate-consolidator — from a direct `position_current` UPDATE to appending a typed event the projector folds,
 gated by a replay-diff (INV-PROJ-1). That locks the first step toward the single-writer boundary the rest of the
 atlas depends on. **Prerequisite: build INV-PROJ-1 (replay-diff harness) first — it is the verifier every
-writer-removal needs.**
+writer-removal needs.** ✅ INV-PROJ-1 landed + live-validated (found 2 real drift cases).
+
+### 7D.1 Per-writer removal audit (2026-06-30, grounded in the code) — the migration roadmap
+Each of the 7 `position_current` writers audited for removal path + difficulty (INV-PROJ-1 gates every cut):
+
+| # | Writer | What it writes / liveness | Removal path | Difficulty |
+|---|--------|---------------------------|--------------|------------|
+| 1 | `state/projection.py` `upsert_position_current` | **the sole sanctioned materializer** (full-row upsert + F109/condition_id guards) | — TARGET (keep) | — |
+| 2 | `state/ledger.py` | main write routes through the projector (`:622`); **only bypass** = `backfill_fill_authority` (`:546`), an F3 helper called *only by its test*. **RESOLVED 2026-06-30: NOT dead** — live `position_current` has **558 NULL `fill_authority` rows** (vs 149 `venue_confirmed_full`); F3 (findings_2026_05_28 §F3) wrote+tested the deterministic 4-way classifier but it was **never boot-wired**, so legacy rows stay NULL | **fold the 4-way derivation INTO the projector** so every materialization sets `fill_authority` from facts → the 558 NULL rows resolve AND no separate writer remains (NOT delete, NOT wire-as-a-2nd-writer) | MEDIUM (projector hot-path change; needs a `fill_authority` replay-diff gate alongside INV-PROJ-1) |
+| 3 | `state/position_duplicate_consolidator.py` | F109 duplicate-open-row merge (`:186,:370`) — a row-merge, not a materialization | emit a consolidation **event** the projector folds | MEDIUM |
+| 4 | `events/edli_position_bridge.py` | 1493 lines — fill aggregation + duplicate-fill absorption + chain/size-authority preservation (2 UPDATE sites) | append the fill **fact/event**, projector materializes (the bridge docstring names this as its own long-term fix) | HIGH |
+| 5 | `execution/command_recovery.py` | **co-tenant-hot**; broadest surface (54 w / 319 r across 5 axes) | split into fact-specific reducers; emit facts/review events | HIGH + co-tenant coord |
+| 6 | `execution/exchange_reconcile.py` | **co-tenant-hot**; reconcile repairs | emit `ReconcileFinding`s, not projection patches | MEDIUM + co-tenant coord |
+| 7 | `src/main.py` | **co-tenant-hot** | route through ledger/projector | MEDIUM + co-tenant coord |
+
+**Order:** #2 (ledger — fold fill_authority into projector) → #3 (consolidation event) → #4 (bridge fill event)
+→ #5–7 last (co-tenant coordination required). No cut is byte-trivial — each is a real refactor the INV-PROJ-1
+gate de-risks; cut #2 additionally needs a `fill_authority` replay-diff (the phase gate does not cover it).
+**Separately flagged (data gap):** 558 live rows carry NULL `fill_authority` because the F3 classifier was never
+wired — a latent completeness gap in the FillAuthority provenance facet (affects training-eligibility / recovery
+authority). Repairing it is a live-DB mutation (operator-scoped), tracked out-of-band, not part of this atlas edit.
