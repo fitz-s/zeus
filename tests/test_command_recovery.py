@@ -5269,6 +5269,108 @@ class TestRecoveryResolutionTable:
         payload = json.loads(events[-1]["payload_json"])
         assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
 
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_clears_terminal_positive_entry_review(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Terminal venue order truth plus held chain projection clears review."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-terminal-positive.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-partial",
+            state="CONFIRMED",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            order_id="ord-001",
+            state="MATCHED",
+            matched_size="5.0",
+            remaining_size="0",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 5.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.70,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": "ord-001",
+                "proof_class": "point_order_filled_requires_complete_fill_fact_authority",
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            events = _get_events(check, "cmd-001")
+            state = _get_state(check, "cmd-001")
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        assert state == "FILLED"
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == (
+            "review_required_terminal_order_fact_with_held_projection"
+        )
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,
@@ -11606,6 +11708,71 @@ class TestRecoveryResolutionTable:
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
         assert "REVIEW_REQUIRED" in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
+    def test_partial_remainder_matched_point_order_does_not_degrade_held_fill(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 5.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.70,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+                "filled_size": "3.0",
+                "venue_order_id": "ord-partial",
+            },
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": "ord-partial",
+            "status": "MATCHED",
+            "size_matched": "5.0",
+            "price": "0.34",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_events(conn, "cmd-001")[-1]["event_type"] == "FILL_CONFIRMED"
 
     def test_partial_remainder_without_point_reader_fails_closed(
         self,

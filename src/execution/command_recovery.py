@@ -7337,7 +7337,50 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
         try:
             latest_payload = _latest_review_cancel_blocked_payload(conn, command_id)
             if not _cancel_blocked_by_matched_order(latest_payload):
-                summary["stayed"] += 1
+                order_fact = _latest_order_fact_for_command_order(
+                    conn,
+                    command_id=command_id,
+                    venue_order_id=venue_order_id,
+                )
+                if not _terminal_positive_order_fact_matches_held_projection(
+                    conn,
+                    command=command,
+                    order_fact=order_fact,
+                ):
+                    summary["stayed"] += 1
+                    continue
+                observed_at = str(order_fact.get("observed_at") or _now_iso())
+                safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+                sp_name = f"sp_terminal_positive_review_{safe_command_id}"
+                conn.execute(f"SAVEPOINT {sp_name}")
+                try:
+                    _append_terminal_positive_order_fact_fill(
+                        conn,
+                        command=command,
+                        order_fact=order_fact,
+                        observed_at=observed_at,
+                        reason="review_cleared_confirmed_fill",
+                        proof_class=(
+                            "review_required_terminal_order_fact_with_held_projection"
+                        ),
+                        source_function=(
+                            "command_recovery."
+                            "reconcile_matched_cancel_review_required_entries"
+                        ),
+                        source_reason="terminal_positive_order_fact_review_clearance",
+                        required_predicates_extra={
+                            "command_state_review_required": True,
+                            "latest_event_is_review_boundary": True,
+                            "matched_order_fact_positive": True,
+                            "residual_size_is_dust": True,
+                        },
+                    )
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                except Exception:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    raise
+                summary["advanced"] += 1
                 continue
             trade_summary = _positive_fill_trade_fact_summary(conn, command_id)
             if int(trade_summary.get("count") or 0) <= 0:
@@ -9232,6 +9275,54 @@ def reconcile_partial_remainders(
                 # family's entry lane blocked (unexpired_family_rest=True). Route it to
                 # REVIEW_REQUIRED for fill-fact reconciliation, identical to FILLED.
                 if point_status in ("FILLED", "MATCHED"):
+                    point_matched_size = _point_order_matched_size(
+                        point_order,
+                        fallback=command.get("size"),
+                        side=command.get("side"),
+                    )
+                    point_order_fact = {
+                        "state": point_status,
+                        "matched_size": point_matched_size,
+                        "remaining_size": _matched_remaining_size(
+                            command,
+                            point_matched_size,
+                            venue_status=point_status,
+                        ),
+                        "source": "REST",
+                    }
+                    if _terminal_positive_order_fact_matches_held_projection(
+                        conn,
+                        command=command,
+                        order_fact=point_order_fact,
+                    ):
+                        if command_state == CommandState.FILLED.value:
+                            summary["stayed"] += 1
+                            continue
+                        conn.execute("SAVEPOINT sp_partial_remainder_positive_fill")
+                        try:
+                            _append_terminal_positive_order_fact_fill(
+                                conn,
+                                command=command,
+                                order_fact=point_order_fact,
+                                observed_at=now,
+                                reason=(
+                                    "partial_remainder_point_order_filled_with_held_projection"
+                                ),
+                                proof_class=(
+                                    "point_order_filled_with_active_chain_projection"
+                                ),
+                                source_function=(
+                                    "command_recovery.reconcile_partial_remainders"
+                                ),
+                                source_reason="partial_remainder_terminal_positive_fill",
+                            )
+                            conn.execute("RELEASE SAVEPOINT sp_partial_remainder_positive_fill")
+                        except Exception:
+                            conn.execute("ROLLBACK TO SAVEPOINT sp_partial_remainder_positive_fill")
+                            conn.execute("RELEASE SAVEPOINT sp_partial_remainder_positive_fill")
+                            raise
+                        summary["advanced"] += 1
+                        continue
                     append_event(
                         conn,
                         command_id=command_id,
@@ -9682,6 +9773,126 @@ def _append_cancel_unknown_confirmed_trade_fill(
         source_function="command_recovery._review_required_cancel_unknown_live_order_recovery",
         source_reason="cancel_unknown_confirmed_trade_fill",
     )
+
+
+def _terminal_positive_order_fact_matches_held_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    order_fact: Mapping[str, object],
+) -> bool:
+    state = str(order_fact.get("state") or order_fact.get("order_fact_state") or "").upper()
+    if state not in {"MATCHED", "FILLED"}:
+        return False
+    matched_size = str(
+        order_fact.get("matched_size")
+        or order_fact.get("order_fact_matched_size")
+        or ""
+    )
+    if _positive_decimal_or_none(matched_size) is None:
+        return False
+    remaining_size = _decimal_or_none(
+        order_fact.get("remaining_size")
+        or order_fact.get("order_fact_remaining_size")
+        or "0"
+    )
+    if remaining_size is not None and remaining_size > Decimal("0.011"):
+        return False
+    return _active_projection_matches_confirmed_fill(
+        conn,
+        command=command,
+        venue_order_id=str(command.get("venue_order_id") or ""),
+        filled_size=matched_size,
+    )
+
+
+def _append_terminal_positive_order_fact_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    order_fact: Mapping[str, object],
+    observed_at: str,
+    reason: str,
+    proof_class: str,
+    source_function: str,
+    source_reason: str,
+    required_predicates_extra: Mapping[str, object] | None = None,
+) -> None:
+    command_dict = dict(command)
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    matched_size = str(
+        order_fact.get("matched_size")
+        or order_fact.get("order_fact_matched_size")
+        or command.get("size")
+        or "0"
+    )
+    venue_status = str(
+        order_fact.get("state")
+        or order_fact.get("order_fact_state")
+        or "MATCHED"
+    ).upper()
+    remaining_size = str(
+        order_fact.get("remaining_size")
+        or order_fact.get("order_fact_remaining_size")
+        or _matched_remaining_size(command_dict, matched_size, venue_status=venue_status)
+    )
+    fill_price = str(command.get("price") or command.get("entry_price") or "")
+    required_predicates = {
+        "terminal_positive_order_fact": True,
+        "zero_or_dust_remaining_size": True,
+        "active_projection_matches_confirmed_fill": True,
+    }
+    if required_predicates_extra is not None:
+        required_predicates.update(dict(required_predicates_extra))
+    payload = {
+        "schema_version": 1,
+        "reason": reason,
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "filled_size": matched_size,
+        "fill_price": fill_price,
+        "proof_class": proof_class,
+        "venue_order_proof": {
+            "source": "canonical_venue_order_fact",
+            "observed_at": observed_at,
+            "venue_status": venue_status,
+            "matched_size": matched_size,
+            "remaining_size": remaining_size,
+            "latest_order_fact_id": order_fact.get("fact_id")
+            or order_fact.get("order_fact_id"),
+            "latest_order_fact_source": order_fact.get("source")
+            or order_fact.get("order_fact_source"),
+        },
+        "required_predicates": required_predicates,
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": source_function,
+            "source_reason": source_reason,
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": observed_at,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+        occurred_at=observed_at,
+        payload=payload,
+    )
+    if str(command.get("intent_kind") or "").upper() == "ENTRY":
+        _append_matched_order_fill_projection(
+            conn,
+            command=command_dict,
+            venue_order_id=venue_order_id,
+            matched_size=matched_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            order_fact_source=str(
+                order_fact.get("source") or order_fact.get("order_fact_source") or "REST"
+            ),
+        )
 
 
 def _review_required_cancel_unknown_live_order_recovery(

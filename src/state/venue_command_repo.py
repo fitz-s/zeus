@@ -2018,6 +2018,7 @@ def _validate_review_confirmed_fill_payload(
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
         "review_required_matched_order_fact_with_positive_trade_fact",
+        "review_required_terminal_order_fact_with_held_projection",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -2053,6 +2054,14 @@ def _validate_review_confirmed_fill_payload(
             "latest_event_is_review_boundary",
             "positive_trade_fact",
             "matched_order_fact_positive",
+        )
+    elif proof_class == "review_required_terminal_order_fact_with_held_projection":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "matched_order_fact_positive",
+            "residual_size_is_dust",
+            "active_projection_matches_confirmed_fill",
         )
     else:
         required_true = (
