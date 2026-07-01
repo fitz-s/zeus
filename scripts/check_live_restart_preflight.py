@@ -2521,6 +2521,19 @@ def _payload_has_exit_fill_economics(raw: object, fallback_price: object) -> boo
     return _positive_float(fallback_price) is not None
 
 
+def _terminal_positive_entry_fact_boot_recoverable(item: dict[str, Any]) -> bool:
+    fact_state = str(item.get("latest_fact_state") or "").upper()
+    if fact_state not in {"MATCHED", "FILLED"}:
+        return False
+    if str(item.get("position_phase") or "") not in {"active", "day0_window"}:
+        return False
+    if _positive_float(item.get("latest_fact_matched_size")) is None:
+        return False
+    if _positive_float(item.get("chain_shares")) is None:
+        return False
+    return True
+
+
 def _resting_entry_projection_recoverable_commands(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     try:
         from src.execution.command_recovery import (
@@ -2606,6 +2619,17 @@ def _resting_venue_command_boot_recoverable(
             "risk": risk,
             "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
             "repair_action": "restore_position_pending_exit_for_live_exit_order",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "ENTRY"
+        and _terminal_positive_entry_fact_boot_recoverable(item)
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.matched_cancel_review_required_entries",
+            "repair_action": "terminalize_entry_command_from_positive_match_fact",
         }
     if (
         risk == "command_projection_stale_after_terminal_venue_fact"
