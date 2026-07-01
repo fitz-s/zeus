@@ -202,44 +202,54 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
    efficiency + coupling cost of the split. Either the per-cycle `CycleMarketStateSnapshot` (§7B) reads the
    cross-DB tables ONCE per tick, or redraw the boundary so the execution hot-path never crosses.
 
-### 6C. VERIFIED target architecture (first-principles design panel `wf_e2c56a31`, 2026-06-30)
-A 4-way judge panel (single-DB / clean-3-domain / fact-log-CQRS / re-partition-by-seam) — all scored FLAWED
-(23–28) — synthesized into **"Hybrid 2-DB with typed ownership"**, whose load-bearing claims were repo-verified.
+### 6C. IN-PLACE ownership cleanup (keep the existing 3 DBs) — the right-sized answer
+The task is **clean up the redundancy + re-wire, IN PLACE** — NOT a physical restructure. A rip-and-replace
+(collapse to 2 new DBs) was considered and REJECTED as over-reach: it moves 76GB of live data for a concurrency
+optimization the task did not ask for, against the operator SIMPLIFY / no-over-engineering law. The root fix
+below is independent of the DB count — it fixes the drift within `world`/`forecasts`/`trade` as they stand.
 
 **Root reframe:** the ghosts/inversions/duals/schism are ONE flaw — ownership is set by THREE unbound, drifting
 sources (init-code CREATE-lists · the 3092-line `db_table_ownership.yaml` · runtime writers that write "whatever
-conn they got"). The target makes drift structurally impossible, it does not patch it.
+conn they got"). Collapse them to ONE typed source → drift becomes structurally impossible (not patched-once).
 
-**Two WAL DBs, split on the VERIFIED write-contention axis (not subject-noun):**
-- `zeus_bulk.db` — the forecast-live PROCESS's BULK ingest (verified: 8 live `com.zeus.*` PIDs; `.writer-lock.bulk`
-  exists on forecasts.db, `.live` only on trades.db → SQLite WAL one-writer-per-file means merging to 1 DB
-  re-creates K1 cross-process flock starvation → **1-DB & CQRS correctly rejected**). Holds raw_model_forecasts,
-  ensemble_snapshots, hourly_observations, observations, high-volume telemetry.
-- `zeus_money.db` — the whole live causal chain that must be crash-atomic with a position/settlement mutation:
-  position/venue/settlement/execution + the forecast HOT slice (forecast_posteriors, settlement_outcomes) + the
-  LEARNING surface (platt_models, model_bias, forecast_skill) — because `harvester.py:1059 maybe_refit_bucket`
-  welds the platt write INTO the settlement SAVEPOINT (learning is not a cold third DB).
+**The in-place fix (no new DBs, no data rip-and-replace):**
+1. **Single ownership source** `src/state/domains.py` (`Domain` = the existing WORLD/FORECASTS/TRADE + risk/backtest;
+   `CANONICAL_OWNER` data-grounded). It becomes the sole authority from which init-schema, the registry, and
+   writer-routing are DERIVED. The `db.py:4676-4692` copy-loop (schema replication that mints the 144 ghosts) is
+   deleted in favour of a per-domain CREATE that builds only owned tables → a foreign table can no longer be born.
+2. **Converge the 19 inversions in place** (`CORRECTED_FROM_REGISTRY`): for each, move its `CREATE TABLE` to the
+   init function of the DB whose data it already holds + flip the registry entry + drop the empty shell. The data
+   does NOT move for the 13 world→trade cases (already in trade); only the CREATE + registry catch up. Coupled
+   fix (verified 2026-06-30): a registry-only flip breaks init-coherence, so CREATE + registry move together.
+3. **Drop the 144 ghosts** (bring the 2026-08-09 retention drop forward per-domain) + delete the legacy_archived
+   exclusion in `assert_db_matches_registry` (table_registry.py:352-366) so any extra-on-disk table fails the boot
+   gate LOUD instead of masking a wrong-DB read.
+4. **Consolidate the wiring (接线):** route all cross-DB access through the `state/db.py` factories; antibody
+   forbidding ad-hoc `ATTACH DATABASE`; a `writer(table)` accessor resolves the DB from `domains.py` so a write
+   can no longer land in the wrong file (kills the "writer writes whatever conn it got" root).
 
-**Single ownership source** `src/state/domains.py` (`Domain{BULK,MONEY}` + `TABLES`) derives init-schema (per-domain
-CREATE only → the `db.py:4676-4692` copy-loop that mints the 144 ghosts is DELETED), `owner()` (yaml → generated
-audit export), and the boot gate. **Writer-binding** `writer(table)->DomainWriter` asserts domain before I/O
-(`WrongDomainWrite`). **One bridge** (bulk→money `forecast_posteriors` projection, idempotent, re-derivable)
-replaces 29 ATTACH sites. **Why unrepresentable:** ghost needs a foreign-table CREATE path (none); inversion needs
-two sources to disagree (one dict); dual needs a table in two files (per-domain exclusive CREATE forbids);
-schism dies (`Domain.MONEY.db_path` constant).
+**Why redundancy becomes unrepresentable (same mechanism, zero DB-count change):** ghost needs a foreign-table
+CREATE path (per-domain init has none); inversion needs two sources to disagree (init/registry/writer all read the
+same dict); dual needs a table's data in two files (writer-binding rejects the cross-DB write pre-I/O); schism dies
+(the path is `domains.Domain.<X>.db_filename`, a constant, not a per-callsite string).
 
-**6-phase online-safe migration** (each phase independently shippable + reversible + boot-gate-green; the daemon's
-~20-min auto-restart is the deploy unit): P0 domains.py + reproduction ratchet → P1 per-table inversion converge
-(15/19 need zero row movement) → P2 ghost-drop + init-hardening + delete the legacy-exclusion so the gate fails
-loud → P3 bridge + move forecast HOT slice into money.db → P4 collapse world learning into money.db (settlement
-SAVEPOINT becomes single-file crash-atomic) → P5 DomainWriter cutover + retire the yaml as runtime authority.
+**Migration (in place, each phase independently shippable + reversible + boot-gate-green):** P0 domains.py single
+source + ratchet → P1 per-domain init (delete the copy-loop → no NEW ghosts) → P2 converge the 19 inversions in
+place (move CREATE+registry, drop shells) → P3 drop the 144 ghosts + delete the legacy-exclusion (gate fails loud)
+→ P4 wiring: ATTACH→factories + `writer()` binding + retire the YAML as runtime authority (generated-audit only).
 
-**Status:** ✅ **P0 LANDED** — `src/state/domains.py` (114 live tables, single-source) + `tests/test_domains_reproduces_registry.py`
-ratchet, commit `0da50ced8` (zero runtime effect). **Open risks (from the panel, must clear before data moves):**
-BULK set is PROVISIONAL pending a per-daemon write-set audit (which of the 8 daemons write which MONEY tables on
-contending schedules — if a heavy independent writer lands in money.db, a measured 3rd domain may be needed);
-`settlements`/`settlement_outcomes` true row-holding copy must be row-probed before assigning its domain; the one
-bridge write is an audited allowlisted crack in "unrepresentable", not assumed away.
+**Status:** ✅ **P0 LANDED** — `src/state/domains.py` (120 tables, single source over the existing 3 DBs; 19
+data-grounded corrections = the worklist) + `tests/test_domains_reproduces_registry.py` ratchet, commit
+`05cb6a375` (zero runtime effect). **Open item:** `settlements`/`settlement_outcomes` true row-holding copy
+row-probed before its domain is finalized (settlements=1.25M@forecasts, settlement_outcomes=832k@forecasts —
+both forecast_class, confirmed).
+
+**Footnote — the 2-DB collapse is a SEPARATE, optional concurrency optimization, not this cleanup.** A design panel
+(`wf_e2c56a31`) found that IF one later wants to also cut cross-DB hot-path reads, the concurrency-correct shape is
+2 files split on the forecast-BULK vs LIVE-money write-contention axis (verified: `.writer-lock.bulk` on
+forecasts.db vs `.live` on trades.db; learning welded into the settlement SAVEPOINT at `harvester.py:1059`). That
+is higher-risk (moves live data) and orthogonal to fixing the ownership drift — defer unless a measured hot-path
+contention problem justifies it.
 
 ## 7. Three-goal weak-point audit (地基稳固 / 运行效率高 / 符合真实运行逻辑)
 
