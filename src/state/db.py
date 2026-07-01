@@ -3930,6 +3930,16 @@ _FORECAST_TABLES = (
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
     "forecast_posteriors",
+    # 2026-07-01 DB-ownership cleanup: sync this legacy constant with the registry
+    # forecast_class set (closes test_a1 drift). NOTE: init_schema_forecasts derives its
+    # table list from tables_for_class(FORECAST_CLASS), NOT this constant (P2 refactor
+    # 2026-05-14), so this tuple is a coherence witness only — no runtime driver. These 4
+    # were already forecast_class in the registry but absent here. settlements stays OUT
+    # (B3cont 2026-05-28 dropped its forecasts shell; reclassified legacy_archived here).
+    "raw_model_forecasts",
+    "raw_model_forecast_request_conflicts",
+    "cycle_advance_enqueues",
+    "fusion_upgrade_enqueues",
 )
 
 
@@ -4945,6 +4955,22 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "venue_order_facts",
     "venue_submission_envelopes",
     "venue_trade_facts",
+    # PR-S4b completion 2026-07-01: 13 heritage tables converged to trade_class
+    # (data 100% on zeus_trades.db; world ghosts 0-row legacy_archived). DDL now in
+    # _TRADE_CLASS_DDL above so fresh init_schema_trade_only creates them.
+    "collateral_ledger_snapshots",
+    "collateral_reservations",
+    "decision_log",
+    "exchange_reconcile_findings",
+    "exit_mutex_holdings",
+    "market_price_history",
+    "opportunity_fact",
+    "provenance_envelope_events",
+    "risk_actions",
+    "strategy_health",
+    "token_price_log",
+    "token_suppression",
+    "token_suppression_history",
 })
 
 # DDL for the 9 trade-class tables whose CREATE TABLE lives in db.py /
@@ -5469,6 +5495,256 @@ CREATE TABLE IF NOT EXISTS outcome_fact (
     monitor_count INTEGER,
     chain_corrections_count INTEGER
 );
+-- ============================================================================
+-- PR-S4b completion (2026-07-01): 13 heritage trade tables created by
+-- init_schema_pre_pr_s4b but never migrated into _TRADE_CLASS_DDL. Data lives
+-- 100% on zeus_trades.db (probe: mph 622k, token_price_log 121k, etc.; world
+-- ghost copies are 0-row, legacy_archived, drop-after-2026-08-09). Registry
+-- converged them to trade_class; this wires their exact live DDL into fresh
+-- trade init so init==registry==data. Idempotent CREATE ... IF NOT EXISTS.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pusd_balance_micro INTEGER NOT NULL,
+  pusd_allowance_micro INTEGER NOT NULL,
+  usdc_e_legacy_balance_micro INTEGER NOT NULL,
+  ctf_token_balances_json TEXT NOT NULL,
+  ctf_token_allowances_json TEXT NOT NULL,
+  reserved_pusd_for_buys_micro INTEGER NOT NULL DEFAULT 0,
+  reserved_tokens_for_sells_json TEXT NOT NULL DEFAULT '{}',
+  captured_at TEXT NOT NULL,
+  authority_tier TEXT NOT NULL CHECK (authority_tier IN ('CHAIN','VENUE','DEGRADED')),
+  raw_balance_payload_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS collateral_reservations (
+  command_id TEXT PRIMARY KEY,
+  reservation_type TEXT NOT NULL CHECK (reservation_type IN ('PUSD_BUY','CTF_SELL')),
+  token_id TEXT,
+  amount INTEGER NOT NULL CHECK (amount >= 0),
+  created_at TEXT NOT NULL,
+  released_at TEXT,
+  release_reason TEXT,
+  CHECK (
+    (reservation_type = 'PUSD_BUY' AND token_id IS NULL)
+    OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL)
+  )
+);
+CREATE TABLE IF NOT EXISTS decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        , env TEXT NOT NULL DEFAULT 'live');
+CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
+CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
+          finding_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'exchange_ghost_order','local_orphan_order','unrecorded_trade',
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+          )),
+          subject_id TEXT NOT NULL,
+          context TEXT NOT NULL CHECK (context IN (
+            'periodic','ws_gap','heartbeat_loss','cutover','operator'
+          )),
+          evidence_json TEXT NOT NULL,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          resolution TEXT,
+          resolved_by TEXT
+        );
+CREATE INDEX IF NOT EXISTS idx_findings_unresolved
+          ON exchange_reconcile_findings (resolved_at)
+          WHERE resolved_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
+          ON exchange_reconcile_findings (kind, subject_id, context)
+          WHERE resolved_at IS NULL;
+CREATE TABLE IF NOT EXISTS exit_mutex_holdings (
+          mutex_key TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id) DEFERRABLE INITIALLY DEFERRED,
+          acquired_at TEXT NOT NULL,
+          released_at TEXT,
+          release_reason TEXT
+        );
+CREATE TABLE IF NOT EXISTS market_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_slug TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                price REAL NOT NULL CHECK (price >= 0.0 AND price <= 1.0),
+                recorded_at TEXT NOT NULL,
+                hours_since_open REAL,
+                hours_to_resolution REAL,
+                market_price_linkage TEXT NOT NULL DEFAULT 'price_only'
+                    CHECK (market_price_linkage IN ('price_only', 'full')),
+                source TEXT NOT NULL DEFAULT 'GAMMA_SCANNER',
+                best_bid REAL CHECK (best_bid IS NULL OR (best_bid >= 0.0 AND best_bid <= 1.0)),
+                best_ask REAL CHECK (best_ask IS NULL OR (best_ask >= 0.0 AND best_ask <= 1.0)),
+                raw_orderbook_hash TEXT,
+                snapshot_id TEXT,
+                condition_id TEXT,
+                UNIQUE(token_id, recorded_at)
+            );
+CREATE INDEX IF NOT EXISTS idx_market_price_history_condition_recorded
+                ON market_price_history(condition_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_slug_recorded
+                ON market_price_history(market_slug, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_snapshot
+                ON market_price_history(snapshot_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_market_price_history_token_recorded
+                ON market_price_history(token_id, recorded_at);
+CREATE TABLE IF NOT EXISTS "opportunity_fact" (
+    decision_id TEXT PRIMARY KEY,
+    candidate_id TEXT,
+    city TEXT,
+    target_date TEXT,
+    range_label TEXT,
+    direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+    strategy_key TEXT,
+    discovery_mode TEXT,
+    entry_method TEXT,
+    snapshot_id TEXT,
+    p_raw REAL,
+    p_cal REAL,
+    p_market REAL,
+    alpha REAL,
+    best_edge REAL,
+    ci_width REAL,
+    rejection_stage TEXT,
+    rejection_reason_json TEXT,
+    availability_status TEXT CHECK (availability_status IN (
+        'ok',
+        'missing',
+        'stale',
+        'rate_limited',
+        'unavailable',
+        'chain_unavailable'
+    )),
+    should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
+    recorded_at TEXT NOT NULL
+, observation_authority_id TEXT, day0_context_json TEXT);
+CREATE TABLE IF NOT EXISTS provenance_envelope_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_type TEXT NOT NULL CHECK (subject_type IN ('command','order','trade','lot','settlement','wrap_unwrap','heartbeat')),
+          subject_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          UNIQUE (subject_type, subject_id, local_sequence)
+        );
+CREATE INDEX IF NOT EXISTS idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);
+CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_delete
+        BEFORE DELETE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_update
+        BEFORE UPDATE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+CREATE TABLE IF NOT EXISTS risk_actions (
+    action_id TEXT PRIMARY KEY,
+    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
+        'settlement_capture',
+        'shoulder_sell',
+        'center_buy',
+        'opening_inertia'
+    )),
+    action_type TEXT NOT NULL CHECK (action_type IN (
+        'gate',
+        'allocation_multiplier',
+        'threshold_multiplier',
+        'exit_only'
+    )),
+    value TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    effective_until TEXT,
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('riskguard', 'manual', 'system')),
+    precedence INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked'))
+);
+CREATE TABLE IF NOT EXISTS "strategy_health" (
+            strategy_key TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            open_exposure_usd REAL NOT NULL DEFAULT 0,
+            settled_trades_30d INTEGER NOT NULL DEFAULT 0,
+            realized_pnl_30d REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            win_rate_30d REAL,
+            brier_30d REAL,
+            fill_rate_14d REAL,
+            edge_trend_30d REAL,
+            risk_level TEXT,
+            execution_decay_flag INTEGER NOT NULL DEFAULT 0 CHECK (execution_decay_flag IN (0, 1)),
+            edge_compression_flag INTEGER NOT NULL DEFAULT 0 CHECK (edge_compression_flag IN (0, 1)),
+            PRIMARY KEY (strategy_key, as_of)
+        );
+CREATE TABLE IF NOT EXISTS token_price_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            price REAL NOT NULL,
+            volume REAL,
+            bid REAL,
+            ask REAL,
+            spread REAL,
+            source_timestamp TEXT,
+            timestamp TEXT NOT NULL
+        );
+CREATE INDEX IF NOT EXISTS idx_token_price_token
+            ON token_price_log(token_id, timestamp);
+CREATE TABLE IF NOT EXISTS token_suppression (
+    token_id TEXT PRIMARY KEY,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'chain_only_quarantined',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+    ON token_suppression(suppression_reason, updated_at);
+CREATE TABLE IF NOT EXISTS token_suppression_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id TEXT NOT NULL,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'chain_only_quarantined',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_token_suppression_history_id_time
+    ON token_suppression_history(token_id, history_id DESC);
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_delete
+BEFORE DELETE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_update
+BEFORE UPDATE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
 """
 
 

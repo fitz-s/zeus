@@ -133,7 +133,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'settlement_day_observation_authority': Domain.TRADE,
     'settlement_outcomes': Domain.FORECASTS,
     'settlement_schema_migrations': Domain.TRADE,
-    'settlements': Domain.FORECASTS,
     'shoulder_exposure_ledger': Domain.WORLD,
     'solar_daily': Domain.WORLD,
     'source_contract_audit_events': Domain.WORLD,
