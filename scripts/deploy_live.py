@@ -114,8 +114,10 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
-LAUNCHD_BOOTSTRAP_ATTEMPTS = 3
-LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 1.0
+LAUNCHD_BOOTSTRAP_ATTEMPTS = 6
+LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 2.0
+LAUNCHD_UNLOAD_WAIT_SECONDS = 8.0
+LAUNCHD_UNLOAD_POLL_SECONDS = 0.5
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
@@ -231,6 +233,15 @@ def _launchctl_service_loaded(label: str) -> bool:
     return res.returncode == 0
 
 
+def _wait_for_launchctl_unloaded(label: str) -> bool:
+    deadline = time.monotonic() + LAUNCHD_UNLOAD_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not _launchctl_service_loaded(label):
+            return True
+        time.sleep(LAUNCHD_UNLOAD_POLL_SECONDS)
+    return not _launchctl_service_loaded(label)
+
+
 def _launch_or_restart_label(label: str) -> tuple[bool, str]:
     plist = _plist_path_for_label(label)
     if not plist.exists():
@@ -246,6 +257,8 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
         )
         if stop.returncode != 0:
             return False, f"FAILED reload stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
+        if not _wait_for_launchctl_unloaded(label):
+            return False, f"FAILED reload stop {label}: service still loaded after bootout"
 
     last_boot: subprocess.CompletedProcess | None = None
     for attempt in range(1, LAUNCHD_BOOTSTRAP_ATTEMPTS + 1):
@@ -261,7 +274,7 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
             suffix = "" if attempt == 1 else f" after {attempt} attempts"
             return True, f"{verb} {label} from {plist}{suffix}"
         if attempt < LAUNCHD_BOOTSTRAP_ATTEMPTS:
-            time.sleep(LAUNCHD_BOOTSTRAP_RETRY_SECONDS)
+            time.sleep(LAUNCHD_BOOTSTRAP_RETRY_SECONDS * attempt)
     assert last_boot is not None
     return (
         False,

@@ -513,16 +513,25 @@ def test_deploy_live_reloads_when_service_loaded(monkeypatch, tmp_path):
     plist = tmp_path / "com.zeus.live-trading.plist"
     plist.write_text("plist")
     calls = []
+    loaded = True
 
     def _fake_run(cmd, **kwargs):
         import subprocess
+        nonlocal loaded
 
         calls.append(cmd)
         if cmd[:2] == ["launchctl", "print"]:
-            return subprocess.CompletedProcess(cmd, 0, "state = running", "")
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if loaded else 3,
+                "state = running" if loaded else "",
+                "" if loaded else "Could not find service",
+            )
         if cmd[:2] == ["launchctl", "bootout"]:
+            loaded = False
             return subprocess.CompletedProcess(cmd, 0, "", "")
         if cmd[:2] == ["launchctl", "bootstrap"]:
+            loaded = True
             return subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"unexpected subprocess call: {cmd!r}")
 
@@ -533,7 +542,7 @@ def test_deploy_live_reloads_when_service_loaded(monkeypatch, tmp_path):
 
     assert ok is True
     assert "reloaded" in detail
-    assert calls[-2] == ["launchctl", "bootout", f"{dl.GUI_DOMAIN}/{label}"]
+    assert ["launchctl", "bootout", f"{dl.GUI_DOMAIN}/{label}"] in calls
     assert calls[-1] == ["launchctl", "bootstrap", dl.GUI_DOMAIN, str(plist)]
 
 
@@ -543,19 +552,28 @@ def test_deploy_live_retries_bootstrap_after_reload_race(monkeypatch, tmp_path):
     plist = tmp_path / "com.zeus.forecast-live.plist"
     plist.write_text("plist")
     calls = []
+    loaded = True
 
     def _fake_run(cmd, **kwargs):
         import subprocess
+        nonlocal loaded
 
         calls.append(cmd)
         if cmd[:2] == ["launchctl", "print"]:
-            return subprocess.CompletedProcess(cmd, 0, "state = running", "")
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if loaded else 3,
+                "state = running" if loaded else "",
+                "" if loaded else "Could not find service",
+            )
         if cmd[:2] == ["launchctl", "bootout"]:
+            loaded = False
             return subprocess.CompletedProcess(cmd, 0, "", "")
         if cmd[:2] == ["launchctl", "bootstrap"]:
             bootstrap_count = sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"])
             if bootstrap_count == 1:
                 return subprocess.CompletedProcess(cmd, 5, "", "Bootstrap failed: 5")
+            loaded = True
             return subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"unexpected subprocess call: {cmd!r}")
 
