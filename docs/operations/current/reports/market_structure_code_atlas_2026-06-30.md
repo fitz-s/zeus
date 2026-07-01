@@ -86,23 +86,32 @@ venue HTTP call (PR#404 P0-2). Settlement writes are cross-DB atomic (INV-37 ATT
 - **`position_current`**: full-table load every 2-min exit cycle (O(positions×lots)); **60+ row writes per
   cycle** on transitions; the write-lock is held for the ENTIRE monitoring phase; `evaluate_exit` runs
   per-position, not batched. → in-cycle cached snapshot + write-through only on exit-state change.
-- **`venue_commands` / `venue_order_facts`**: **full-table scans** by the 3-min recovery sweep
-  (`command_recovery.py`) and the 2-min exit monitor, for want of a `(state, updated_at)` /
-  `(state, venue_order_id)` index.
-- **`position_lots`**: all-lots-per-position read every monitor cycle; wants `(position_id, state)` index.
+- **Repeated per-cycle reads**: the EDLI redecision screen opens multiple read connections and recomputes
+  overlapping candidate/rest/held-family scopes in one tick — the real efficiency lever is a single memoized
+  `CycleMarketStateSnapshot` per tick, NOT indexes (the `(state,…)` indexes `idx_order_facts_state`,
+  `idx_position_lots_state`, `idx_venue_commands_state` already exist in `db.py` — the trace's "missing index"
+  note was wrong, corrected in §7B).
+- **Command-recovery breadth**: 54 writes / 319 reads across 5 axes on a tight cadence — split into
+  fact-specific reducers.
 - **Write fan-out**: `position_current` written by **7 modules** (INV-OWNER-1 baseline) — the worst
-  amplification; the single-reducer collapse (§12 migration step 7) removes it and the per-cycle write storm
-  at once. **This is where 地基稳固 and 运行效率高 are the same fix.**
+  amplification; the single-reducer collapse (§7D) removes it and the per-cycle write storm at once.
+  **This is where 地基稳固 and 运行效率高 are the same fix.**
 
 ## 5. Layer 4 — the invariants that keep the atlas solid (the anti-rot antibodies)
+
+Consult round-3 finalized the set. Two invariants + the atlas-anchor guard are landed; four are proposed with
+cheap enforcement defined.
 
 | Invariant | Forbids | Enforcement | Status |
 |-----------|---------|-------------|--------|
 | **INV-CL-1** | branching on raw venue status strings outside ingress normalizers | lexical antibody, baseline shrinks | ✅ `tests/test_inv_cl1_no_raw_venue_status_branching.py` (baseline 9→3) |
-| **INV-OWNER-1** | a second SQL writer for a stored mechanism | writer-set antibody, per-mechanism baseline | ✅ `tests/test_single_writer_per_state_mechanism.py` (locks 4, baselines 3; `position_current`=7 writers pinned) |
-| **INV-PROJ-PURE** (candidate) | a projection column with an independent writer / a materialized projection that diffs from its reducer | replay-diff antibody (recompute A5/A6 from facts, assert zero-diff) | proposed — see consult round-3 |
-| **INV-REDUCE-MONO** (candidate) | a truth reducer regressing a stronger proof to a weaker one | property test over `OrderProofClass` / settlement DAG transitions | proposed |
-| **INV-INGRESS-TOTAL** (candidate) | a raw venue string that folds to neither a canonical member nor a loud failure | totality test over each `normalize_*` fold | proposed |
+| **INV-OWNER-1** | a second SQL writer for a stored mechanism | writer-set antibody, per-mechanism baseline | ✅ `tests/test_single_writer_per_state_mechanism.py` (locks 4, baselines 3; `position_current`=7 pinned) |
+| **INV-ATLAS-1** | an atlas-named reducer/normalizer/cycle owner silently moving/renaming (map rot) | anchor-existence antibody | ✅ `tests/test_market_structure_atlas_anchors.py` (20 anchors) |
+| **INV-REVIEW-1** | new `*_quarantined/*_wiped/*_suspected/*_failed` scar members in a **lifecycle** enum/CHECK | lexical baseline over the position/chain lifecycle vocabularies (may only shrink) | ✅ landed this session (`tests/test_no_new_scar_state.py`) |
+| **INV-PROJ-1** | a materialized projection not recomputable from source facts / a projection writer bypassing the projector | CI replay-diff: recompute `position_current.phase`/exposure/exit-progress, assert zero-diff (`scripts/dev/replay_position_phase.py --assert-no-diff`) | proposed — **enabler for §7D** |
+| **INV-REDUCER-1** | a weaker fact regressing a stronger proof (chain-absence voiding a confirmed fill; `VENUE_WIPED` over positive trade proof; stale terminal reopening state) | property test over the proof lattice: CONFIRMED fill > MATCHED/MINED > partial > open > absence | proposed |
+| **INV-INGRESS-2** | an unknown venue status silently defaulting instead of fail-loud; missing `delayed` support | golden fixtures from captured payloads → canonical member or typed `UnmappedVenueStatus` | proposed (normalizers already fail-loud; add `delayed` model) |
+| **INV-CYCLE-1** | hot-cycle modules each doing their own full scan for the same mechanism | query-count instrument; assert cycle consumes `CycleMarketStateSnapshot` | proposed |
 
 ## 6. Physical placement (K1 three-DB split)
 
@@ -113,5 +122,49 @@ forecasts/world/trades together remain INV-37 (ATTACH + SAVEPOINT, never indepen
 
 ## 7. Three-goal weak-point audit (地基稳固 / 运行效率高 / 符合真实运行逻辑)
 
-*Landing this session from consult round-3 — the concrete file:line violations per goal (multi-writer
-fan-out, hot-path redundant I/O, venue-logic mismatches) + the single highest-leverage structural fix.*
+Consult round-3 (thread `6a42bc3d`, web-grounded in Polymarket/UMA docs) — third independent convergence.
+
+### 7A. 地基稳固 — structural correctness
+| # | Weak point | Root defect | Fix |
+|---|-----------|-------------|-----|
+| S1 | **`position_current` 7-writer projection** (the worst) | a materialized projection with 7 writers can diverge from the fact logs | `state/projection.py` becomes the SOLE writer; the other 6 append facts/events + call the projector. Legit-layer vs true-2nd-writer: projection.py=materializer; ledger.py=append-then-project (shouldn't own SQL shape); edli_position_bridge/consolidator/command_recovery/exchange_reconcile/main=repair/orchestration → must emit facts |
+| S1 | command-state cross-axis write | `venue_commands.state` stores venue terminals (FILLED/CANCELLED/EXPIRED) that are A2/A3 facts | command repo owns local side-effect state; project venue terminals from A2/A3 (`project_legacy_command_display`) |
+| S1 | phantom-void scar | `command_recovery.py:repair_confirmed_phantom_voids` — a chain-absence pass outranks a stronger positive-fill proof | **monotonic reducer**: positive trade proof > absence; the repair path becomes unreachable |
+| S1 | chain-state enum accretion | `CHAIN_CONFIRMED_ZERO` was added after its first live firing crashed `load_portfolio` (loader not total) | store balance facts + review items; writer-set-subset antibody |
+| S1 | A6 double-owner | exit progress stored in `ExitState` AND `position.order_status` AND exit-command facts | `derive_exit_progress()` the only view; sell truth = exit command + venue facts |
+| S2 | A8/A9 forward-prep not retired | legacy `outcome_type` remains a semantic trap (NULL live) | keep legacy-only; populate `resolution_state` only same-transaction with every revision writer |
+
+### 7B. 运行效率高 — runtime efficiency
+| # | Weak point | Fix |
+|---|-----------|-----|
+| S2 | repeated per-cycle DB reads (EDLI redecision opens multiple read conns, recomputes overlapping scopes) | build ONE typed `CycleMarketStateSnapshot` per tick (beliefs, open rests, held families, exposure, chain completeness, settlement eligibility) |
+| S2 | command-recovery broad scan (**54 writes / 319 reads across 5 axes** on a tight cadence) | split into fact-specific reducers; memoize the unresolved-command set |
+| S2 | `position_current` write amplification (repairs UPDATE the row directly + a companion event) | append one fact/event; projector materializes once at end of txn |
+| S3 | **exemplars to copy**: `wrap_unwrap_commands.py` CAS predecessor + terminal absorption; `chain_reconciliation.py` immutable per-cycle `ChainPositionView` | replicate these patterns into the other reducers |
+
+*Correction to §4: the trace's "missing index" note was wrong — `idx_order_facts_state`, `idx_position_lots_state`, `idx_venue_commands_state` all exist (`db.py`). The real efficiency lever is per-cycle read memoization + killing the write fan-out, not new indexes.*
+
+### 7C. 符合真实运行逻辑 — conforms to real market logic
+| # | Weak point | Fix |
+|---|-----------|-----|
+| S1 | "position status" over-modeling (`ChainState`/phase/quarantine model a lifecycle Polymarket never exposes — a position is a token balance) | external truth = token balance; local phase = projection; review = work item (`chain_reconciliation.py` already emits `ChainOnlyFact`, no synthetic Position — finish it) |
+| S1 | `VENUE_WIPED` as a venue order state | it's an **absence inference**, not a CLOB state → `ReconcileFinding.ORDER_ABSENT_UNKNOWN` (preserve projection until replay proves 0 behavior change; only 3 live rows) |
+| S1 | **`DELAYED` order state UNDER-modeled** (a real *missing* state, not redundancy) | Polymarket `delayed` is real + not-cancellable; `normalize_venue_order_status` has no `DELAYED` (a raw `delayed` fails loud today). Model it: `VenueOrderStatus.DELAYED_PENDING_MATCH`, reduced separately from LIVE, non-cancellable |
+| S2 | heartbeat-cancel modeled as health/gate, not fact | heartbeat loss → `ReconcileFinding.HEARTBEAT_CANCEL_WINDOW` + open-order poll, never a stored venue state |
+| S2 | UMA liveness/dispute distinction | **keep distinct** (`DISPUTED`/`VOID_50_50`/`SOURCE_REVISION` are action-changing) — do not collapse to one unresolved flag |
+
+### 7D. The single highest-leverage fix (improves all three goals at once)
+**Make `state/projection.py` the sole `position_current` writer + introduce a `ReviewWorkItem` owner.** Define
+`PositionProjectionReducer.reduce(position_id, facts) -> PositionCurrentProjection`; move the 6 non-owner writers
+to append-only source facts/events; `ledger.py` = event-append orchestration only; add a `ReviewWorkItem`
+table (OPEN/EXPIRED/RESOLVED + reason codes) that absorbs chain-only/size-mismatch/entry-authority/phantom/stale
+debt; replay-diff zero-diff, then tighten INV-OWNER-1 `position_current` 7→1. This removes the root class behind
+phantom-void repair, stale-terminal ignore-filters, chain-enum crashes, and quarantine drift (地基稳固), kills the
+repair write-amplification + gives one memoization point (运行效率高), and replaces invented "position statuses"
+with real external facts (符合真实运行逻辑).
+
+**Next tactical cut (consult, lowest-risk first):** move ONE repair writer — the EDLI bridge or the
+duplicate-consolidator — from a direct `position_current` UPDATE to appending a typed event the projector folds,
+gated by a replay-diff (INV-PROJ-1). That locks the first step toward the single-writer boundary the rest of the
+atlas depends on. **Prerequisite: build INV-PROJ-1 (replay-diff harness) first — it is the verifier every
+writer-removal needs.**
