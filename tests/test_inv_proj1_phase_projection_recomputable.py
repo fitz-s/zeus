@@ -3,12 +3,13 @@
 # Authority basis: docs/operations/current/reports/market_structure_code_atlas_2026-06-30.md §5 (INV-PROJ-1);
 #   consult round-3 (thread 6a42bc3d). Exercises scripts/dev/replay_position_phase.py drift detector.
 
-"""INV-PROJ-1 antibody: the position_current.phase projection is recomputable from the event log.
+"""INV-PROJ-1 antibody: the position_current.phase projection is event-sourced.
 
-Proves the replay-diff detector (find_phase_projection_drift) correctly (a) passes a consistent
-projection, (b) flags a position whose materialized phase was written bypassing the event log —
-the multi-writer drift class the atlas §7D single-owner fix removes. Uses minimal fixture tables so
-the test pins the detection LOGIC, independent of the full schema's CHECK constraints.
+Proves the replay-diff detector (find_phase_projection_drift): (a) passes a phase produced by an event,
+(b) FLAGS a phase no event ever produced (a writer that bypassed the event log), and — the correctness
+case that broke the naive first cut — (c) does NOT flag a terminal phase (voided) that a real event
+produced, even when later observational MONITOR_REFRESHED events carry a stale phase_after=active. Uses
+minimal fixture tables so the test pins the detection LOGIC independent of full-schema CHECKs.
 """
 
 from __future__ import annotations
@@ -39,18 +40,18 @@ def _fixture_db() -> sqlite3.Connection:
     return conn
 
 
-def test_consistent_projection_has_no_drift() -> None:
+def test_event_sourced_phase_has_no_drift() -> None:
     conn = _fixture_db()
     conn.execute("INSERT INTO position_current VALUES ('P1', 'active')")
     conn.executemany(
         "INSERT INTO position_events VALUES (?, ?, ?)",
-        [("P1", 1, "pending_entry"), ("P1", 2, "active"), ("P1", 3, None)],  # 3 = MONITOR_REFRESHED, null
+        [("P1", 1, "pending_entry"), ("P1", 2, "active"), ("P1", 3, None)],
     )
     assert find_phase_projection_drift(conn) == []
 
 
-def test_bypassing_writer_drift_is_detected() -> None:
-    # Latest phase-setting event says 'active', but a writer set position_current directly to 'voided'.
+def test_unsourced_phase_is_detected() -> None:
+    # Stored 'voided' but no event ever produced 'voided' — a writer bypassed the event log.
     conn = _fixture_db()
     conn.execute("INSERT INTO position_current VALUES ('P2', 'voided')")
     conn.executemany(
@@ -61,22 +62,46 @@ def test_bypassing_writer_drift_is_detected() -> None:
     assert len(drift) == 1
     assert drift[0]["position_id"] == "P2"
     assert drift[0]["stored_phase"] == "voided"
-    assert drift[0]["event_phase_after"] == "active"
 
 
-def test_trailing_null_phase_events_do_not_falsely_flag() -> None:
-    # The latest *phase-setting* event matches; later null-phase events (monitor refreshes) are skipped.
+def test_terminal_phase_then_stale_monitor_noise_is_not_drift() -> None:
+    # Reproduces live position edli...a2: ADMIN_VOIDED produced 'voided', then MONITOR_REFRESHED events
+    # carry a stale phase_after='active'. Stored 'voided' IS event-sourced (the ADMIN_VOIDED) → NOT drift.
+    # The naive "latest event phase_after" check wrongly flagged this; the event-sourcing check must not.
     conn = _fixture_db()
-    conn.execute("INSERT INTO position_current VALUES ('P3', 'settled')")
+    conn.execute("INSERT INTO position_current VALUES ('P3', 'voided')")
     conn.executemany(
         "INSERT INTO position_events VALUES (?, ?, ?)",
-        [("P3", 1, "active"), ("P3", 2, "settled"), ("P3", 3, None), ("P3", 4, None)],
+        [
+            ("P3", 1, "pending_entry"),
+            ("P3", 2, "active"),
+            ("P3", 3, "voided"),   # ADMIN_VOIDED — the authoritative terminal transition
+            ("P3", 4, "active"),   # stale MONITOR_REFRESHED noise after the void
+            ("P3", 5, "active"),
+        ],
+    )
+    assert find_phase_projection_drift(conn) == []
+
+
+def test_economically_closed_then_quarantine_noise_is_not_drift() -> None:
+    # Reproduces live position 8e2710ed: EXIT_ORDER_FILLED produced 'economically_closed', then
+    # REVIEW_REQUIRED/MONITOR carry 'quarantined'. A5 authority keeps stored 'economically_closed' — sourced.
+    conn = _fixture_db()
+    conn.execute("INSERT INTO position_current VALUES ('P4', 'economically_closed')")
+    conn.executemany(
+        "INSERT INTO position_events VALUES (?, ?, ?)",
+        [
+            ("P4", 1, "active"),
+            ("P4", 2, "pending_exit"),
+            ("P4", 3, "economically_closed"),
+            ("P4", 4, "quarantined"),
+            ("P4", 5, "quarantined"),
+        ],
     )
     assert find_phase_projection_drift(conn) == []
 
 
 def test_position_without_events_is_not_flagged() -> None:
-    # No phase-setting event to compare against — the JOIN excludes it (reported separately if needed).
     conn = _fixture_db()
-    conn.execute("INSERT INTO position_current VALUES ('P4', 'pending_entry')")
+    conn.execute("INSERT INTO position_current VALUES ('P5', 'pending_entry')")
     assert find_phase_projection_drift(conn) == []
