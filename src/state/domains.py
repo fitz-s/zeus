@@ -32,24 +32,11 @@ class Domain(Enum):
 
 # Tables whose data-grounded owner DIFFERS from the current registry (the in-place migration worklist).
 CORRECTED_FROM_REGISTRY: frozenset[str] = frozenset({
-    'collateral_ledger_snapshots',
-    'collateral_reservations',
-    'decision_log',
-    'exchange_reconcile_findings',
-    'exit_mutex_holdings',
     'historical_forecasts',
     'hko_hourly_accumulator',
     'hourly_observations',
-    'market_price_history',
     'model_bias',
-    'opportunity_fact',
-    'provenance_envelope_events',
-    'risk_actions',
     'settlements',
-    'strategy_health',
-    'token_price_log',
-    'token_suppression',
-    'token_suppression_history',
     'trade_decisions',
 })
 

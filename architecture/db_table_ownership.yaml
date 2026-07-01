@@ -639,14 +639,14 @@ tables:
 
   - name: collateral_ledger_snapshots
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: snapshot_id
 
   - name: collateral_reservations
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: reservation_id
@@ -709,7 +709,7 @@ tables:
 
   - name: decision_log
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: decision_id
@@ -742,7 +742,7 @@ tables:
 
   - name: exchange_reconcile_findings
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -783,7 +783,7 @@ tables:
 
   - name: exit_mutex_holdings
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -817,7 +817,7 @@ tables:
 
   - name: market_price_history
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -916,7 +916,7 @@ tables:
 
   - name: opportunity_fact
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1535,7 +1535,7 @@ tables:
 
   - name: provenance_envelope_events
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1557,7 +1557,7 @@ tables:
 
   - name: risk_actions
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1658,7 +1658,7 @@ tables:
 
   - name: strategy_health
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1672,21 +1672,21 @@ tables:
 
   - name: token_price_log
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
 
   - name: token_suppression
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
 
   - name: token_suppression_history
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -2255,7 +2255,7 @@ tables:
 
   - name: collateral_ledger_snapshots
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2263,7 +2263,7 @@ tables:
 
   - name: collateral_reservations
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2311,7 +2311,7 @@ tables:
 
   - name: decision_log
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2542,7 +2542,7 @@ tables:
 
   - name: exchange_reconcile_findings
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2637,7 +2637,7 @@ tables:
 
   - name: exit_mutex_holdings
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2693,7 +2693,7 @@ tables:
 
   - name: market_price_history
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2757,7 +2757,7 @@ tables:
 
   - name: opportunity_fact
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2809,7 +2809,7 @@ tables:
 
   - name: provenance_envelope_events
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2841,7 +2841,7 @@ tables:
 
   - name: risk_actions
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2913,7 +2913,7 @@ tables:
 
   - name: strategy_health
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2929,7 +2929,7 @@ tables:
 
   - name: token_price_log
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2937,7 +2937,7 @@ tables:
 
   - name: token_suppression
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
@@ -2953,7 +2953,7 @@ tables:
 
   - name: token_suppression_history
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
