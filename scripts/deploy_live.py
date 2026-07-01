@@ -145,10 +145,14 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS", "240")
 )
+LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS", "240")
+)
 LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
 LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
 )
+EDLI_REACTOR_PROCESSING_LEASE_SECONDS = 300.0
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
 # scripts/*.py from the live checkout (external review 2026-06-12). deploy/launchd
@@ -493,6 +497,136 @@ def _wait_for_post_start_monitor_cadence(
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
+def _wait_for_post_start_edli_queue_progress(
+    *,
+    launched_after: datetime,
+    timeout_seconds: float = LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait until the EDLI reactor proves it can move claimable queue work."""
+
+    world_db = Path(_require_live_repo()) / "state" / "zeus-world.db"
+    launched_floor = launched_after.astimezone(timezone.utc) - timedelta(
+        seconds=max(0.0, LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS)
+    )
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_detail = "not checked"
+
+    while True:
+        now = datetime.now(timezone.utc)
+        stale_cutoff = now - timedelta(seconds=EDLI_REACTOR_PROCESSING_LEASE_SECONDS)
+        try:
+            conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
+            conn.row_factory = sqlite3.Row
+            tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "opportunity_event_processing" not in tables:
+                conn.close()
+                last_detail = "opportunity_event_processing table missing"
+            else:
+                row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN processing_status = 'pending' THEN 1 ELSE 0 END)
+                            AS pending_count,
+                        SUM(CASE WHEN processing_status = 'processing' THEN 1 ELSE 0 END)
+                            AS processing_count,
+                        SUM(
+                            CASE
+                            WHEN processing_status = 'pending'
+                             AND (claimed_at IS NULL OR claimed_at <= ?)
+                            THEN 1 ELSE 0 END
+                        ) AS claimable_pending_count,
+                        SUM(
+                            CASE
+                            WHEN processing_status = 'processing'
+                             AND claimed_at IS NOT NULL
+                             AND claimed_at <= ?
+                            THEN 1 ELSE 0 END
+                        ) AS stale_processing_count,
+                        MIN(
+                            CASE
+                            WHEN processing_status = 'processing'
+                             AND claimed_at IS NOT NULL
+                             AND claimed_at <= ?
+                            THEN claimed_at ELSE NULL END
+                        ) AS oldest_stale_claimed_at,
+                        SUM(
+                            CASE
+                            WHEN processing_status = 'processing'
+                             AND claimed_at IS NOT NULL
+                             AND claimed_at >= ?
+                            THEN 1
+                            WHEN processing_status IN ('processed','failed','dead_letter','expired')
+                             AND processed_at IS NOT NULL
+                             AND processed_at >= ?
+                            THEN 1
+                            ELSE 0 END
+                        ) AS claim_or_terminal_after_launch_count
+                      FROM opportunity_event_processing
+                     WHERE consumer_name = 'edli_reactor_v1'
+                       AND processing_status IN (
+                            'pending','processing','processed','failed',
+                            'dead_letter','expired'
+                       )
+                    """,
+                    (
+                        now.isoformat(),
+                        stale_cutoff.isoformat(),
+                        stale_cutoff.isoformat(),
+                        launched_floor.isoformat(),
+                        launched_floor.isoformat(),
+                    ),
+                ).fetchone()
+                conn.close()
+                pending_count = int(row["pending_count"] or 0)
+                processing_count = int(row["processing_count"] or 0)
+                claimable_pending_count = int(row["claimable_pending_count"] or 0)
+                stale_processing_count = int(row["stale_processing_count"] or 0)
+                progressed_count = int(row["claim_or_terminal_after_launch_count"] or 0)
+                claimable_work_count = claimable_pending_count + stale_processing_count
+                oldest_stale_claimed_at = str(row["oldest_stale_claimed_at"] or "")
+                if claimable_work_count == 0:
+                    if progressed_count > 0:
+                        return (
+                            True,
+                            "post-start EDLI queue progress verified: "
+                            f"processing={processing_count} progressed={progressed_count}",
+                        )
+                    return (
+                        True,
+                        "post-start EDLI queue progress skipped: no claimable reactor work",
+                    )
+                if stale_processing_count == 0 and progressed_count > 0:
+                    return (
+                        True,
+                        "post-start EDLI queue progress verified: "
+                        f"claimable_pending={claimable_pending_count} "
+                        f"processing={processing_count} progressed={progressed_count}",
+                    )
+                last_detail = (
+                    f"pending={pending_count} processing={processing_count} "
+                    f"claimable_pending={claimable_pending_count} "
+                    f"stale_processing={stale_processing_count} "
+                    f"oldest_stale_claimed_at={oldest_stale_claimed_at or '<none>'} "
+                    f"progressed_after_launch={progressed_count} "
+                    f"launched_floor={launched_floor.isoformat()}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            last_detail = f"EDLI queue read failed: {type(exc).__name__}: {exc}"
+
+        if time.monotonic() >= deadline:
+            return (
+                False,
+                "post-start EDLI queue progress did not verify after restart: "
+                + last_detail,
+            )
+        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
 def _stop_label(label: str) -> tuple[bool, str]:
     """Stop/unload a launchd label so preflight can inspect an absent process."""
 
@@ -746,6 +880,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
             if not runtime_ok:
                 rc_all = 1
             else:
+                queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
+                    launched_after=launched_after,
+                )
+                print(queue_detail)
+                if not queue_ok:
+                    rc_all = 1
                 monitor_ok, monitor_detail = _wait_for_post_start_monitor_cadence(
                     launched_after=launched_after,
                 )

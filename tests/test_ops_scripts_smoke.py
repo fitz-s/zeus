@@ -912,6 +912,130 @@ def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
     assert "future_monitor_events=1" in detail
 
 
+def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        )
+        """
+    )
+    return conn
+
+
+def test_deploy_live_post_start_edli_queue_wait_rejects_stale_processing_claim(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_edli_queue_wait_stale", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world_db = state / "zeus-world.db"
+    launched = datetime.now(timezone.utc)
+    conn = _init_edli_queue_db(world_db)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-stale', 'processing', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (launched - timedelta(minutes=20)).isoformat(),
+            (launched - timedelta(minutes=20)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "stale_processing=1" in detail
+    assert "oldest_stale_claimed_at" in detail
+
+
+def test_deploy_live_post_start_edli_queue_wait_accepts_reclaimed_claim(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_edli_queue_wait_reclaimed", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world_db = state / "zeus-world.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = _init_edli_queue_db(world_db)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-reclaimed', 'processing', 2, ?, NULL, NULL, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start EDLI queue progress verified" in detail
+
+
+def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_edli_queue_wait_future_retry", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world_db = state / "zeus-world.db"
+    launched = datetime.now(timezone.utc)
+    conn = _init_edli_queue_db(world_db)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-future', 'pending', 1, ?, NULL, NULL, ?)
+        """,
+        (
+            (launched + timedelta(minutes=10)).isoformat(),
+            launched.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "no claimable reactor work" in detail
+
+
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
@@ -943,11 +1067,16 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("monitor", "post-start"))
         return True, "post-start monitor cadence verified"
 
+    def _queue(**kwargs):
+        calls.append(("queue", "post-start"))
+        return True, "post-start EDLI queue progress verified"
+
     monkeypatch.setattr(dl, "_stop_label", _stop)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
     monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
+    monkeypatch.setattr(dl, "_wait_for_post_start_edli_queue_progress", _queue)
     monkeypatch.setattr(dl, "_wait_for_post_start_monitor_cadence", _monitor)
 
     rc = dl.main(["restart", "live-trading"])
@@ -961,6 +1090,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
+        ("queue", "post-start"),
         ("monitor", "post-start"),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
@@ -999,6 +1129,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     )
     monkeypatch.setattr(
         dl,
+        "_wait_for_post_start_edli_queue_progress",
+        lambda **kwargs: (calls.append(("queue", "post-start")) or (True, "queue verified")),
+    )
+    monkeypatch.setattr(
+        dl,
         "_wait_for_post_start_monitor_cadence",
         lambda **kwargs: (calls.append(("monitor", "post-start")) or (True, "monitor verified")),
     )
@@ -1013,6 +1148,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     assert calls.index(("verify", "dddddddd")) > live_launch_index
+    assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
     non_live_launches = [
         call for call in calls[1:recovery_index]
