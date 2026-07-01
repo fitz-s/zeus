@@ -39,6 +39,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -4357,6 +4358,106 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             logger.error(
                 "recovery: filled entry projection repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _terminal_positive_entry_projection_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_order_facts", "position_current")
+    ):
+        return []
+    sql = "WITH " + _canonical_order_truth_cte(cte_name="latest_order") + """
+        SELECT
+            cmd.*,
+            latest_order.fact_id AS order_fact_id,
+            latest_order.state AS order_fact_state,
+            latest_order.matched_size AS order_fact_matched_size,
+            latest_order.remaining_size AS order_fact_remaining_size,
+            latest_order.observed_at AS order_fact_observed_at,
+            latest_order.source AS order_fact_source,
+            pc.phase AS position_phase,
+            pc.chain_state AS position_chain_state,
+            pc.shares AS position_shares,
+            pc.chain_shares AS position_chain_shares,
+            pc.cost_basis_usd AS position_cost_basis_usd,
+            pc.chain_cost_basis_usd AS position_chain_cost_basis_usd
+          FROM venue_commands cmd
+          JOIN latest_order
+            ON latest_order.command_id = cmd.command_id
+           AND latest_order.venue_order_id = cmd.venue_order_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+           AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+           AND cmd.state = 'FILLED'
+           AND UPPER(COALESCE(latest_order.state, '')) IN ('MATCHED', 'FILLED')
+           AND CAST(COALESCE(latest_order.matched_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(latest_order.remaining_size, '0') AS REAL) <= 0.011
+           AND pc.phase IN ('active', 'day0_window')
+           AND COALESCE(pc.chain_state, '') IN ('synced', 'chain_present')
+           AND CAST(COALESCE(pc.chain_shares, pc.shares, '0') AS REAL) > 0
+           AND (
+                ABS(CAST(COALESCE(pc.shares, '0') AS REAL)
+                    - CAST(COALESCE(latest_order.matched_size, '0') AS REAL)) > 0.011
+                OR (
+                    CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0
+                    AND ABS(CAST(COALESCE(pc.chain_shares, '0') AS REAL)
+                        - CAST(COALESCE(latest_order.matched_size, '0') AS REAL)) <= 0.02
+                    AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)
+                        - (CAST(COALESCE(latest_order.matched_size, '0') AS REAL)
+                           * CAST(COALESCE(cmd.price, '0') AS REAL))) > 0.011
+                )
+           )
+         ORDER BY datetime(cmd.updated_at), cmd.command_id
+    """
+    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+
+
+def reconcile_terminal_positive_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair FILLED entry projections when terminal order truth outruns trade facts."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _terminal_positive_entry_projection_repair_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        order_fact = {
+            "state": candidate.get("order_fact_state"),
+            "matched_size": candidate.get("order_fact_matched_size"),
+            "remaining_size": candidate.get("order_fact_remaining_size"),
+            "source": candidate.get("order_fact_source"),
+            "fact_id": candidate.get("order_fact_id"),
+        }
+        if not _terminal_positive_order_fact_matches_held_projection(
+            conn,
+            command=candidate,
+            order_fact=order_fact,
+        ):
+            summary["stayed"] += 1
+            continue
+        sp_name = f"sp_terminal_positive_entry_projection_{uuid.uuid4().hex[:12]}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            _append_matched_order_fill_projection(
+                conn,
+                command=candidate,
+                venue_order_id=str(candidate.get("venue_order_id") or ""),
+                matched_size=str(candidate.get("order_fact_matched_size") or ""),
+                fill_price=str(candidate.get("price") or ""),
+                observed_at=str(candidate.get("order_fact_observed_at") or _now_iso()),
+                order_fact_source=str(candidate.get("order_fact_source") or "REST"),
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: terminal positive entry projection repair failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -14517,6 +14618,16 @@ def _reconcile_passes_inline(
         summary["advanced"] += matched_cancel_review_summary["advanced"]
         summary["errors"] += matched_cancel_review_summary["errors"]
 
+        terminal_positive_entry_projection_summary = (
+            reconcile_terminal_positive_entry_projection_repairs(conn)
+        )
+        summary["terminal_positive_entry_projection_repair"] = (
+            terminal_positive_entry_projection_summary
+        )
+        summary["advanced"] += terminal_positive_entry_projection_summary["advanced"]
+        summary["stayed"] += terminal_positive_entry_projection_summary["stayed"]
+        summary["errors"] += terminal_positive_entry_projection_summary["errors"]
+
         edli_pre_venue_summary = _reconcile_edli_pre_venue_unknown_thresholds(conn)
         summary["edli_pre_venue_unknown_thresholds"] = edli_pre_venue_summary
         summary["advanced"] += edli_pre_venue_summary["advanced"]
@@ -15331,6 +15442,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fold_stayed=False,
         )
         _boot_db_pass(
+            "terminal_positive_entry_projection_repair",
+            reconcile_terminal_positive_entry_projection_repairs,
+            "terminal_positive_entry_projection_repair",
+        )
+        _boot_db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
@@ -15494,6 +15610,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fold_stayed=False,
         )
         _db_pass(
+            "terminal_positive_entry_projection_repair",
+            reconcile_terminal_positive_entry_projection_repairs,
+            "terminal_positive_entry_projection_repair",
+        )
+        _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
@@ -15594,6 +15715,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "matched_cancel_review_required_entries",
             fold_stayed=False,
         )
+        _db_pass(
+            "terminal_positive_entry_projection_repair",
+            reconcile_terminal_positive_entry_projection_repairs,
+            "terminal_positive_entry_projection_repair",
+        )
         if scope == "live_tick":
             _client_pass(
                 "partial_remainders",
@@ -15631,6 +15757,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              reconcile_matched_cancel_review_required_entries,
              "matched_cancel_review_required_entries",
              fold_stayed=False)
+    _db_pass("terminal_positive_entry_projection_repair",
+             reconcile_terminal_positive_entry_projection_repairs,
+             "terminal_positive_entry_projection_repair")
     _db_pass("edli_pre_venue_unknown_thresholds",
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
     _db_pass("venue_command_absence_sync",

@@ -5392,6 +5392,131 @@ class TestRecoveryResolutionTable:
             "order_status": "filled",
         }
 
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_repairs_terminal_positive_entry_projection_size(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-terminal-positive-projection.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-partial",
+            state="CONFIRMED",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            order_id="ord-001",
+            state="MATCHED",
+            matched_size="5.0",
+            remaining_size="0",
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+                "command_id": "cmd-001",
+                "venue_order_id": "ord-001",
+                "trade_id": "trade-partial",
+                "filled_size": "3.0",
+                "fill_price": "0.34",
+                "required_predicates": {
+                    "latest_event_is_cancel_replace_blocked": True,
+                    "semantic_cancel_status_cancel_unknown": True,
+                    "requires_m5_reconcile": True,
+                    "positive_trade_fact": True,
+                },
+                "source_proof": {
+                    "source_commit": "test",
+                    "source_function": (
+                        "command_recovery._review_required_cancel_unknown_live_order_recovery"
+                    ),
+                    "source_reason": "cancel_unknown_confirmed_trade_fill",
+                },
+                "cleared_at": "2026-04-26T00:08:00Z",
+            },
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 3.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.02,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:08:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["terminal_positive_entry_projection_repair"]["advanced"] == 1
+        assert dict(current) == {
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "entry_price": 0.34,
+            "order_status": "filled",
+        }
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,
