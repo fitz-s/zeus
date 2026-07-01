@@ -9038,6 +9038,9 @@ def log_execution_fact(
         logger.info("Execution fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "execution_fact"}
 
+    from src.state.owner_routed_write import require_owner_main
+    require_owner_main(conn, "execution_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
+
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
 
@@ -9195,6 +9198,9 @@ def log_outcome_fact(
     if not _table_exists(conn, "outcome_fact"):
         logger.info("Outcome fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "outcome_fact"}
+
+    from src.state.owner_routed_write import require_owner_main
+    require_owner_main(conn, "outcome_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
 
     current = conn.execute(
         """

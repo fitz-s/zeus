@@ -30,6 +30,12 @@ _DB_FILENAME: dict[Domain, str] = {
 }
 
 
+# The real physical DB filenames. A conn whose MAIN is one of these is a LIVE canonical connection; a conn
+# rooted anywhere else (":memory:", a tempfile, an ad-hoc test DB) is NOT a live inversion and fails-open, so
+# the guards never spuriously break in-memory/tempfile tests — they only fire on a real cross-canonical write.
+_KNOWN_DB_FILENAMES: frozenset[str] = frozenset(_DB_FILENAME.values())
+
+
 class WrongDomainWrite(RuntimeError):
     """A write was attempted against a connection that cannot reach the table's owning DB."""
 
@@ -71,10 +77,39 @@ def assert_owner_conn(conn: sqlite3.Connection, table_name: str) -> None:
     main, attached = _database_files(conn)
     if main == want or want in attached:
         return
+    if main is None or main not in _KNOWN_DB_FILENAMES:
+        return  # ":memory:" / tempfile / ad-hoc conn (not a live canonical DB) — fail-open
     raise WrongDomainWrite(
         f"refusing write to {table_name!r}: owner is {want} but the connection is rooted at "
-        f"{main or '?'} with {want} not ATTACHed — a bare write would silently hit a ghost copy. "
+        f"{main} with {want} not ATTACHed — a bare write would silently hit a ghost copy. "
         f"Self-open the owner's factory or ATTACH+schema-qualify (see owner_qualified_name)."
+    )
+
+
+def require_owner_main(conn: sqlite3.Connection, table_name: str) -> None:
+    """Contract guard for BARE-write helpers (helpers that `INSERT/UPDATE INTO <bare_table>`, which SQLite
+    resolves to the connection's MAIN): assert the connection's MAIN file IS the table's owner.
+
+    Stricter than assert_owner_conn (which also permits an ATTACHed owner) — a bare write lands in MAIN, so
+    the owner MUST be MAIN or the row silently hits a ghost / wrong DB. Use this at the top of a bare-write
+    helper to fail-closed instead: a caller that hands the wrong-rooted connection (the inversion root) now
+    raises rather than writing the ghost. No-op when the caller already passes an owner-rooted conn.
+
+    Prefer this over owner_qualified_name when the helper's SQL is complex (e.g. UPSERT DO-UPDATE clauses that
+    reference the target table by name) so nothing in the statement needs schema-rewriting.
+    """
+    want = owner_db_filename(table_name)
+    if want is None:
+        return
+    main, _ = _database_files(conn)
+    if main == want:
+        return
+    if main is None or main not in _KNOWN_DB_FILENAMES:
+        return  # ":memory:" / tempfile / ad-hoc conn (not a live canonical DB) — fail-open
+    raise WrongDomainWrite(
+        f"bare write to {table_name!r} requires a connection rooted at its owner {want}; got "
+        f"{main} — a bare INSERT/UPDATE would silently hit a ghost copy. Pass the owner's "
+        f"connection (self-open its factory or route through the owning domain)."
     )
 
 

@@ -69,12 +69,30 @@ def test_unknown_table_fails_open() -> None:
         wc.close()
 
 
-def test_naming_schism_decoy_raises() -> None:
-    # A conn on the DECOY zeus-trades.db (hyphen) writing a trade table -> raise (filename mismatch).
-    from src.state.owner_routed_write import assert_owner_conn, WrongDomainWrite
+def test_memory_and_adhoc_conns_fail_open() -> None:
+    # A :memory: or ad-hoc-named conn is NOT a live canonical DB — the guards must NOT fire, else every
+    # in-memory / tempfile test (and ad-hoc runtime conn) breaks. Only a conn rooted at a real WRONG
+    # canonical DB is a live inversion. This leniency is load-bearing for not breaking the suite.
+    from src.state.owner_routed_write import assert_owner_conn, require_owner_main
+
+    mc = sqlite3.connect(":memory:")
+    mc.row_factory = sqlite3.Row
+    assert_owner_conn(mc, "execution_fact")   # no raise
+    require_owner_main(mc, "execution_fact")  # no raise
+    mc.close()
+    with tempfile.TemporaryDirectory() as d:
+        ac = _conn_named(d, "scratch_test.db")    # ad-hoc filename, not canonical
+        assert_owner_conn(ac, "execution_fact")   # no raise
+        require_owner_main(ac, "execution_fact")  # no raise
+        ac.close()
+
+
+def test_require_owner_main_raises_on_wrong_canonical_db() -> None:
+    # The bare-write contract: a conn rooted at a KNOWN-but-WRONG canonical DB (the live inversion) raises.
+    from src.state.owner_routed_write import require_owner_main, WrongDomainWrite
 
     with tempfile.TemporaryDirectory() as d:
-        dc = _conn_named(d, "zeus-trades.db")  # WRONG separator (owner is zeus_trades.db)
+        wc = _conn_named(d, "zeus-world.db")  # known canonical, wrong owner for a trade-owned table
         with pytest.raises(WrongDomainWrite):
-            assert_owner_conn(dc, "execution_fact")
-        dc.close()
+            require_owner_main(wc, "execution_fact")
+        wc.close()

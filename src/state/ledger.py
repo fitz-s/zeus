@@ -591,6 +591,12 @@ def append_many_and_project(
     """
     import secrets
 
+    from src.state.owner_routed_write import require_owner_main
+
+    # bare-write helper (position_events + upsert_position_current, both trade-owned):
+    # fail-closed unless the caller's conn is trade-rooted, instead of silently writing a ghost.
+    require_owner_main(conn, "position_events")
+
     assert_canonical_transaction_schema(conn)
     require_payload_fields(
         projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
