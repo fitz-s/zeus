@@ -4274,6 +4274,9 @@ def _build_event_bound_no_submit_receipt_core(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            strategy_policy_conn=trade_conn,
+            strategy_policy_event_type=event.event_type,
+            decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
             honor_admission_rejections=False,
             enforce_win_rate_floor=False,
@@ -4327,6 +4330,9 @@ def _build_event_bound_no_submit_receipt_core(
             proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            strategy_policy_conn=trade_conn,
+            strategy_policy_event_type=event.event_type,
+            decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
             extra_exposure_by_bin_id=(_selection_exposure or None),
         )
@@ -4337,6 +4343,9 @@ def _build_event_bound_no_submit_receipt_core(
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=trade_conn,
+        strategy_policy_conn=trade_conn,
+        strategy_policy_event_type=event.event_type,
+        decision_time=decision_time,
         allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
         selection_exposure_by_outcome=_selection_exposure,
@@ -4563,6 +4572,9 @@ def _build_event_bound_no_submit_receipt_core(
                     selected_proof=proof,
                     locked_opportunity_conn=locked_opportunity_conn,
                     held_position_conn=trade_conn,
+                    strategy_policy_conn=trade_conn,
+                    strategy_policy_event_type=event.event_type,
+                    decision_time=decision_time,
                     allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                     qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
                     selection_exposure_by_outcome=_selection_exposure,
@@ -11566,6 +11578,9 @@ def _selection_scoped_proofs(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
     enforce_win_rate_floor: bool = True,
@@ -11577,6 +11592,9 @@ def _selection_scoped_proofs(
         for proof in executable
         if _live_selection_rejection_reason(
             proof,
+            strategy_policy_conn=strategy_policy_conn,
+            strategy_policy_event_type=strategy_policy_event_type,
+            decision_time=decision_time,
             enforce_win_rate_floor=enforce_win_rate_floor,
             enforce_strategy_entry_floors=enforce_strategy_entry_floors,
         )
@@ -11670,9 +11688,63 @@ def _selection_scoped_proofs(
     return tuple(scoped)
 
 
+def _strategy_policy_selection_rejection_reason(
+    proof: _CandidateProof,
+    *,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
+) -> str | None:
+    """Return the strategy-governance reason that removes an entry proof.
+
+    Legacy evaluator entry already resolves ``risk_actions`` via
+    ``resolve_strategy_policy``.  EDLI/qkernel is the newer live selection authority,
+    so it must consume the same policy surface before ranking a family; otherwise a
+    strategy degraded by settled/live performance can keep submitting through the
+    qkernel path.
+    """
+
+    if strategy_policy_conn is None or strategy_policy_event_type is None:
+        return None
+    try:
+        strategy_key = _event_bound_strategy_key(
+            event_type=str(strategy_policy_event_type),
+            direction=str(getattr(proof, "direction", "") or ""),
+            metric=str(
+                getattr(getattr(proof, "candidate", None), "metric", "")
+                or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
+                or ""
+            ),
+            require_metric_live=False,
+        )
+        policy_now = decision_time
+        if policy_now is None:
+            policy_now = datetime.now(timezone.utc)
+            logger.warning(
+                "DECISION_TIME_FABRICATED_AT_EDLI_STRATEGY_POLICY: strategy_key=%s policy_now=%s",
+                strategy_key,
+                policy_now,
+            )
+        from src.riskguard.policy import resolve_strategy_policy
+
+        policy = resolve_strategy_policy(strategy_policy_conn, strategy_key, policy_now)
+    except Exception as exc:  # noqa: BLE001
+        return f"STRATEGY_POLICY_UNAVAILABLE:{type(exc).__name__}"
+
+    sources = ",".join(str(source) for source in policy.sources) or "none"
+    if policy.gated:
+        return f"STRATEGY_POLICY_GATED:{strategy_key}:sources={sources}"
+    if policy.exit_only:
+        return f"STRATEGY_POLICY_EXIT_ONLY:{strategy_key}:sources={sources}"
+    return None
+
+
 def _live_selection_rejection_reason(
     proof: _CandidateProof,
     *,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
     enforce_win_rate_floor: bool = True,
     enforce_strategy_entry_floors: bool = False,
 ) -> str | None:
@@ -11718,6 +11790,15 @@ def _live_selection_rejection_reason(
                 f"side=YES:cost={cost:.9f}:min_entry_price={min_entry_price:.9f}"
             )
 
+    strategy_policy_reason = _strategy_policy_selection_rejection_reason(
+        proof,
+        strategy_policy_conn=strategy_policy_conn,
+        strategy_policy_event_type=strategy_policy_event_type,
+        decision_time=decision_time,
+    )
+    if strategy_policy_reason is not None:
+        return strategy_policy_reason
+
     cert = getattr(proof, "qkernel_execution_economics", None)
     if cert is None:
         return None
@@ -11738,6 +11819,9 @@ def _opportunity_book_proofs_with_selection_rejections(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     excluded_by_id: dict[str, str] = {}
@@ -11747,6 +11831,9 @@ def _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            strategy_policy_conn=strategy_policy_conn,
+            strategy_policy_event_type=strategy_policy_event_type,
+            decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     }
@@ -11769,6 +11856,13 @@ def _opportunity_book_proofs_with_selection_rejections(
             )
             if allow_same_family_monitor_owned and _is_entry_held_redecision_reason(reason):
                 reason = None
+        if reason is None:
+            reason = _strategy_policy_selection_rejection_reason(
+                proof,
+                strategy_policy_conn=strategy_policy_conn,
+                strategy_policy_event_type=strategy_policy_event_type,
+                decision_time=decision_time,
+            )
         if reason is not None:
             excluded_by_id[proof_id] = reason
     if not excluded_by_id:
@@ -12002,6 +12096,9 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "legacy_rounded_mu_direction"),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
+    ("STRATEGY_POLICY_GATED", "strategy_policy"),
+    ("STRATEGY_POLICY_EXIT_ONLY", "strategy_policy"),
+    ("STRATEGY_POLICY_UNAVAILABLE", "strategy_policy"),
     (_ENTRY_HELD_FAMILY_REASON_BASE, "held_family_monitor_owned"),
     (_ENTRY_HELD_POSITION_REASON_BASE, "held_position_monitor_owned"),
     # Genuinely-no-book classes (proof had execution_price None): the maker-quote
@@ -12110,6 +12207,9 @@ def _opportunity_book_from_proofs(
     selected_proof: _CandidateProof | None = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
     qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
     selection_exposure_by_outcome: Mapping[str, float] | None = None,
@@ -12138,6 +12238,9 @@ def _opportunity_book_from_proofs(
             proofs=book_proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            strategy_policy_conn=strategy_policy_conn,
+            strategy_policy_event_type=strategy_policy_event_type,
+            decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )
@@ -14409,7 +14512,8 @@ def _evaluate_submit_recapture_for_selected(
                 decision,
                 detail=(
                     "recapture selected candidate not tradeable: "
-                    f"{getattr(reason, 'value', str(reason))}; no executable cost curve"
+                    f"{getattr(reason, 'value', str(reason))}; "
+                    "no executable cost curve; fail closed"
                 ),
             )
         return decision, 0.0, None
@@ -14862,6 +14966,9 @@ def _selected_candidate_proof(
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_event_type: str | None = None,
+    decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
     extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
@@ -14901,6 +15008,9 @@ def _selected_candidate_proof(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            strategy_policy_conn=strategy_policy_conn,
+            strategy_policy_event_type=strategy_policy_event_type,
+            decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )

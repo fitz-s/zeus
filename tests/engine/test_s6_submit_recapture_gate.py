@@ -42,6 +42,7 @@ from __future__ import annotations
 import inspect
 import json as _json
 from dataclasses import replace as dataclass_replace
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -673,6 +674,102 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
     assert era._family_rank_reversed_at_recapture(
         family_key="fam", selected_proof=qkernel_selected, all_proofs=(qkernel_selected, sibling),
     ) is False
+
+
+def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(monkeypatch):
+    import sqlite3
+
+    from src.riskguard import policy as risk_policy
+
+    monkeypatch.setattr(risk_policy, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(risk_policy, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    decision_time = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE risk_actions (
+            action_id TEXT,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO risk_actions (
+            action_id, strategy_key, action_type, value, issued_at, effective_until,
+            precedence, status
+        ) VALUES (
+            'riskguard:gate:opening_inertia', 'opening_inertia', 'gate', 'true',
+            '2026-06-30T00:00:00+00:00', NULL, 1, 'active'
+        )
+        """
+    )
+
+    no_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        no_asks=(("0.45", "1000000"),),
+        condition_id="cond-no",
+        yes_token_id="yes-no",
+        no_token_id="no-no",
+        snapshot_id="snap-no",
+    )
+    no_proof = _proof_from_row(
+        direction="buy_no",
+        row=no_row,
+        token_id="no-no",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_X,
+    )
+    yes_row = _snapshot_row(
+        yes_asks=(("0.45", "1000000"),),
+        condition_id="cond-yes",
+        yes_token_id="yes-yes",
+        no_token_id="no-yes",
+        snapshot_id="snap-yes",
+    )
+    yes_proof = _proof_from_row(
+        direction="buy_yes",
+        row=yes_row,
+        token_id="yes-yes",
+        q_posterior=0.70,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_Y,
+    )
+
+    scoped = era._selection_scoped_proofs(
+        proofs=(no_proof, yes_proof),
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+        enforce_win_rate_floor=False,
+    )
+
+    assert scoped == (yes_proof,)
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(no_proof,),
+        selected_proof=None,
+        strategy_policy_conn=conn,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+    )
+    reason = book.evaluations[0].missing_reason
+    assert reason is not None
+    assert reason.startswith("STRATEGY_POLICY_GATED:opening_inertia:")
+    family_reason = era._family_all_candidates_rejected_reason(book)
+    assert family_reason is not None
+    assert "strategy_policy=1" in family_reason
 
 
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():
