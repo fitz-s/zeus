@@ -864,7 +864,7 @@ def test_durable_fill_bridge_repairs_command_linked_short_position_projection(co
     assert repaired["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
 
-def test_bridge_allows_day0_buy_no_settlement_capture(conn):
+def test_bridge_resolves_day0_buy_no_to_qkernel_entry_strategy(conn):
     aggregate_id = "agg-edli-day0-buyno-1"
     pre_submit = {
         "event_id": EVENT_ID,
@@ -913,11 +913,11 @@ def test_bridge_allows_day0_buy_no_settlement_capture(conn):
 
     assert result is not None
     row = _position_current_rows(conn)[0]
-    assert row["strategy_key"] == "settlement_capture"
+    assert row["strategy_key"] == "opening_inertia"
     assert row["direction"] == "buy_no"
 
 
-def test_bridge_allows_day0_buy_yes_settlement_capture(conn):
+def test_bridge_resolves_day0_buy_yes_to_qkernel_entry_strategy(conn):
     aggregate_id = "agg-edli-day0-buyyes-1"
     pre_submit = {
         "event_id": EVENT_ID,
@@ -975,7 +975,7 @@ def test_bridge_allows_day0_buy_yes_settlement_capture(conn):
 
     assert result is not None
     row = _position_current_rows(conn)[0]
-    assert row["strategy_key"] == "settlement_capture"
+    assert row["strategy_key"] == "center_buy"
     assert row["direction"] == "buy_yes"
     assert row["token_id"] == ELECTED_YES_TOKEN
     assert row["no_token_id"] in (None, "")

@@ -93,7 +93,26 @@ def _valid_day0_pre_submit_payload(**overrides):
         "balance_allowance_authority_id": "balance-auth",
         "balance_allowance_checked_at": "2026-06-30T17:18:35+00:00",
         "event_type": "DAY0_EXTREME_UPDATED",
-        "qkernel_execution_economics": None,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.96,
+            "payoff_q_lcb": 0.95,
+            "cost": 0.70,
+            "edge_lcb": 0.25,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
+        },
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
         "station_match_status": "MATCH",
@@ -107,7 +126,7 @@ def _valid_day0_pre_submit_payload(**overrides):
     return payload
 
 
-def test_day0_presubmit_revalidation_uses_observation_authority_without_qkernel():
+def test_day0_presubmit_revalidation_uses_observation_authority_with_qkernel():
     from src.events.live_order_aggregate import _validate_pre_submit_revalidation_payload
 
     _validate_pre_submit_revalidation_payload(_valid_day0_pre_submit_payload())
@@ -1250,6 +1269,8 @@ def _insert_actionable_certificate_for_recovery(
             "payoff_q_lcb": payoff_q_lcb,
             "cost": cost,
             "edge_lcb": edge_lcb,
+            "delta_u_at_min": max(edge_lcb, 0.01),
+            "optimal_stake_usd": 10.0,
             "optimal_delta_u": max(edge_lcb, 0.01),
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
@@ -6138,6 +6159,8 @@ class TestRecoveryResolutionTable:
                     "payoff_q_lcb": 0.76,
                     "cost": 0.01,
                     "edge_lcb": 0.75,
+                    "delta_u_at_min": 0.75,
+                    "optimal_stake_usd": 10.0,
                     "optimal_delta_u": 0.75,
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
@@ -6249,6 +6272,8 @@ class TestRecoveryResolutionTable:
                     "payoff_q_lcb": 0.82,
                     "cost": 0.61,
                     "edge_lcb": 0.21,
+                    "delta_u_at_min": 0.21,
+                    "optimal_stake_usd": 10.0,
                     "optimal_delta_u": 0.21,
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
@@ -6467,6 +6492,8 @@ class TestRecoveryResolutionTable:
                     "payoff_q_lcb": 0.77,
                     "cost": 0.01,
                     "edge_lcb": 0.76,
+                    "delta_u_at_min": 0.76,
+                    "optimal_stake_usd": 10.0,
                     "optimal_delta_u": 0.76,
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,

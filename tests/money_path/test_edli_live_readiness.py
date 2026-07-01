@@ -1599,8 +1599,8 @@ def test_live_execution_command_preserves_quality_floors_to_pre_submit():
     )
     pre_submit = next(cert for cert in certificates if cert.certificate_type == claims.PRE_SUBMIT_REVALIDATION)
 
-    assert pre_submit.payload["min_expected_profit_usd"] == pytest.approx(0.05)
-    assert pre_submit.payload["min_submit_edge_density"] == pytest.approx(0.02)
+    assert pre_submit.payload["min_expected_profit_usd"] == pytest.approx(0.25)
+    assert pre_submit.payload["min_submit_edge_density"] == pytest.approx(0.05)
 
 
 def test_live_execution_command_blocks_identity_fallback_calibration():
@@ -1773,10 +1773,8 @@ def test_day0_actionable_payload_reads_authority_from_event_payload_json():
     )
     receipt = replace(
         _accepted_receipt(event),
-        q_source="day0_observation",
-        selection_authority_applied=None,
-        qkernel_execution_economics=None,
-        opportunity_book={},
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
     )
     live_cap = SimpleNamespace(
         payload={
@@ -1797,6 +1795,8 @@ def test_day0_actionable_payload_reads_authority_from_event_payload_json():
     assert payload["rounding_status"] == "MATCH"
     assert payload["source_authorized_status"] == "AUTHORIZED"
     assert payload["live_authority_status"] == "live"
+    assert payload["selection_authority_applied"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
     adapter._assert_live_entry_submit_authority(payload)
 
 
@@ -1882,7 +1882,10 @@ def test_live_execution_command_requires_qkernel_book_certificate_match():
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     receipt_cert = _qkernel_execution_cert(payoff_q_lcb=0.72)
-    book_cert = _qkernel_execution_cert(payoff_q_lcb=0.73)
+    book_cert = _qkernel_execution_cert(
+        payoff_q_point=0.73,
+        payoff_q_lcb=0.73,
+    )
     accepted = replace(
         _accepted_receipt(event),
         q_source="qkernel_spine",
@@ -2129,12 +2132,11 @@ def test_live_execution_command_requires_opportunity_book_selection_match():
         )
 
 
-def test_crossing_post_only_pre_submit_witness_blocks_command():
-    # Tests that a POST_ONLY MAKER order whose limit_price >= current_best_ask
-    # (i.e. would cross the book) is rejected by the pre-submit verifier with
-    # "would_cross_book=false".  The receipt must have low EV (trade_score=0.0,
-    # p_fill_lcb=0.0) so the EV boundary selects MAKER (post_only=True);
-    # a TAKER order has post_only=False and skips the crossing check by design.
+def test_crossing_maker_proof_upgrades_to_taker_when_fresh_book_clears_quality():
+    # A maker proof whose limit would cross the fresh book is not emitted as a
+    # mixed post-only/crossing order. The same rest-then-cross policy may upgrade
+    # it to a taker order, which then has post_only=False and must pass taker
+    # quality on the fresh book.
     from src.engine import event_reactor_adapter as adapter
     from src.state.schema.edli_live_cap_usage_schema import ensure_table
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
@@ -2144,14 +2146,15 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
     ensure_table(conn)
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    # Low trade_score + p_fill_lcb keeps EV boundary False → MAKER (post_only=True).
-    # With limit_price ~0.4 and witness ask=0.39, would_cross=True → verifier raises.
+    # With limit_price ~0.4 and witness ask=0.39, the maker proof would cross.
+    # Current live semantics upgrade the order to FOK taker only if the fresh
+    # taker quality proof clears; otherwise it aborts for re-decision.
     # P0 mode-authority: declare the PROVEN maker mode so the fresh-book validator (which
     # also computes MAKER from the low EV) confirms it and proceeds to the would_cross verifier
     # check, rather than aborting on a proof/fresh mode disagreement.
     accepted = replace(
         _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.40),
-        trade_score=0.0,
+        trade_score=0.001,
         p_fill_lcb=0.0,
     )
     accepted = replace(
@@ -2159,14 +2162,20 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
     )
 
-    with pytest.raises(Exception, match="would_cross_book=false"):
-        adapter._build_live_execution_command_certificates(
-            event=event,
-            receipt=accepted,
-            decision_time=decision_time,
-            live_cap_conn=conn,
-            pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
-        )
+    certificates = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
+    )
+    final_intent = next(cert for cert in certificates if cert.certificate_type == "FinalIntentCertificate")
+    pre_submit = next(cert for cert in certificates if cert.certificate_type == "PreSubmitRevalidationCertificate")
+
+    assert final_intent.payload["post_only"] is False
+    assert final_intent.payload["order_type"] == "FOK_LIMIT"
+    assert pre_submit.payload["would_cross_book"] is True
+    assert pre_submit.payload["post_only"] is False
 
 
 def test_fresh_pre_submit_book_upgrades_proven_maker_to_taker_when_crossing_clears():

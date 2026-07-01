@@ -588,6 +588,14 @@ def test_pre_submit_allows_exact_strategy_entry_floor_for_day0_authority():
             min_submit_edge_density=0.05,
             current_best_bid=0.09,
             current_best_ask=0.11,
+            qkernel_execution_economics={
+                **_pre_submit_payload()["qkernel_execution_economics"],
+                "payoff_q_point": 0.50,
+                "payoff_q_lcb": 0.20,
+                "cost": 0.10,
+                "edge_lcb": 0.10,
+                "selection_guard_q_safe": 0.20,
+            },
         ),
         occurred_at=NOW,
         source_authority="engine_adapter",
@@ -787,7 +795,7 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
     )
 
 
-def test_pre_submit_accepts_direct_qkernel_yes_below_declared_floor_when_roi_clear():
+def test_pre_submit_rejects_direct_qkernel_yes_below_strategy_floor_even_when_roi_clear():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -797,47 +805,48 @@ def test_pre_submit_accepts_direct_qkernel_yes_below_declared_floor_when_roi_cle
         source_authority="decision_kernel",
     )
 
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="PreSubmitRevalidated",
-        payload=_pre_submit_payload(
-            strategy_key="center_buy",
-            q_live=0.82,
-            q_lcb_5pct=0.72,
-            limit_price=0.006,
-            expected_edge=0.714,
-            size=1497.78,
-            min_entry_price=0.10,
-            min_expected_profit_usd=1.0,
-            min_submit_edge_density=0.05,
-            current_best_bid=0.001,
-            current_best_ask=0.007,
-            qkernel_execution_economics={
-                "source": "qkernel_spine",
-                "route_id": "DIRECT_YES:b20@proof",
-                "route_type": "direct",
-                "side": "YES",
-                "payoff_q_point": 0.82,
-                "payoff_q_lcb": 0.72,
-                "cost": 0.006,
-                "edge_lcb": 0.714,
-                "delta_u_at_min": 0.01,
-                "optimal_stake_usd": 1497.78,
-                "optimal_delta_u": 0.01,
-                "false_edge_rate": 0.01,
-                "direction_law_ok": True,
-                "coherence_allows": True,
-                "selection_guard_basis": "SELECTION_BETA_95",
-                "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.72,
-            },
-        ),
-        occurred_at=NOW,
-        source_authority="engine_adapter",
-    )
+    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                strategy_key="center_buy",
+                q_live=0.82,
+                q_lcb_5pct=0.72,
+                limit_price=0.006,
+                expected_edge=0.714,
+                size=1497.78,
+                min_entry_price=0.10,
+                min_expected_profit_usd=1.0,
+                min_submit_edge_density=0.05,
+                current_best_bid=0.001,
+                current_best_ask=0.007,
+                qkernel_execution_economics={
+                    "source": "qkernel_spine",
+                    "route_id": "DIRECT_YES:b20@proof",
+                    "route_type": "direct",
+                    "side": "YES",
+                    "payoff_q_point": 0.82,
+                    "payoff_q_lcb": 0.72,
+                    "cost": 0.006,
+                    "edge_lcb": 0.714,
+                    "delta_u_at_min": 0.01,
+                    "optimal_stake_usd": 1497.78,
+                    "optimal_delta_u": 0.01,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.72,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
-def test_pre_submit_accepts_day0_observation_authority_without_qkernel():
+def test_pre_submit_accepts_day0_observation_authority_with_qkernel():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -858,7 +867,7 @@ def test_pre_submit_accepts_day0_observation_authority_without_qkernel():
     pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
     assert pre_submit is not None
     assert pre_submit.payload["event_type"] == "DAY0_EXTREME_UPDATED"
-    assert pre_submit.payload["qkernel_execution_economics"] is None
+    assert pre_submit.payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
 
 
 def test_pre_submit_rejects_day0_missing_observation_authority():
@@ -881,7 +890,7 @@ def test_pre_submit_rejects_day0_missing_observation_authority():
         )
 
 
-def test_pre_submit_rejects_day0_qkernel_authority_mix():
+def test_pre_submit_rejects_day0_missing_qkernel_economics():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -891,15 +900,11 @@ def test_pre_submit_rejects_day0_qkernel_authority_mix():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="day0 must not carry qkernel"):
+    with pytest.raises(LiveOrderAggregateError, match="requires qkernel_execution_economics"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
-            payload=_day0_pre_submit_payload(
-                qkernel_execution_economics=_pre_submit_payload()[
-                    "qkernel_execution_economics"
-                ]
-            ),
+            payload=_day0_pre_submit_payload(qkernel_execution_economics=None),
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
@@ -1154,7 +1159,6 @@ def _pre_submit_payload(**overrides):
 def _day0_pre_submit_payload(**overrides):
     payload = _pre_submit_payload(
         event_type="DAY0_EXTREME_UPDATED",
-        qkernel_execution_economics=None,
         source_match_status="MATCH",
         local_date_status="MATCH",
         station_match_status="MATCH",

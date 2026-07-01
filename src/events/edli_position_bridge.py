@@ -487,7 +487,7 @@ def _resolve_strategy_key_from_pre_submit(
     if not strategy_key:
         event_type = str(pre_submit.get("event_type") or "").strip()
         if event_type == "DAY0_EXTREME_UPDATED":
-            strategy_key = "settlement_capture"
+            strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
         elif event_type == "FORECAST_SNAPSHOT_READY":
             strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
         else:

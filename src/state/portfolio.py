@@ -1028,6 +1028,7 @@ class Position:
 
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
+            applied.append("day0_standard_exit_optimizer")
             if not ExitContext._is_finite(exit_context.best_bid):
                 applied.append("best_bid_unavailable")
                 applied.append("exit_context_incomplete")
@@ -1038,38 +1039,6 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
-            if self.direction == "buy_no":
-                day0_decision = self._buy_no_exit(
-                    forward_edge,
-                    current_p_posterior=float(exit_context.fresh_prob),
-                    current_market_price=float(exit_context.current_market_price),
-                    best_bid=exit_context.best_bid,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    day0_active=True,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-            else:
-                day0_decision = self._buy_yes_exit(
-                    forward_edge,
-                    current_p_posterior=float(exit_context.fresh_prob),
-                    best_bid=exit_context.best_bid,
-                    day0_active=True,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-            if day0_decision.should_exit:
-                return day0_decision
-            if day0_decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
-                return day0_decision
-            # Don't return False here — fall through to SETTLEMENT_IMMINENT
-            # and other force-exit checks (whale toxicity, edge reversal).
-            # Without this fallthrough, positions with expired target_dates
-            # loop forever in day0_window.
-            applied = list(day0_decision.applied_validations or applied)
 
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
@@ -1280,20 +1249,25 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="CI_SEPARATED_REVERSAL",
                 )
-            # CI present but NOT a separated-below reversal: the belief CI still overlaps entry
-            # (a noisy snapshot / large point move) → HOLD. Suppress the flat 2-confirm exit; a
-            # bare price move must NOT close the position. Reset the flat counter so a transient
-            # overlapping dip cannot accumulate toward a later flat exit.
-            self.neg_edge_count = 0
-            applied.append("ci_overlap_hold")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "CI_OVERLAP_HOLD",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="CI_OVERLAP_HOLD",
-            )
+            # CI present but NOT a separated-below reversal: for ordinary positions,
+            # a noisy overlapping interval suppresses flat exits. For Day0 the
+            # observed-boundary remaining-window CI is often deliberately wide; a
+            # terminal hold here prevents the standard EV/consecutive optimizer from
+            # ever reacting to the same fresh belief. Keep the overlap as evidence,
+            # but let Day0 continue into the normal exit optimizer.
+            if exit_context.day0_active:
+                applied.append("ci_overlap_nonterminal_day0")
+            else:
+                self.neg_edge_count = 0
+                applied.append("ci_overlap_hold")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "CI_OVERLAP_HOLD",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="CI_OVERLAP_HOLD",
+                )
 
         # Direction-specific exit logic
         if self.direction == "buy_no":
@@ -1303,7 +1277,7 @@ class Position:
                 current_market_price=float(exit_context.current_market_price),
                 best_bid=exit_context.best_bid,
                 hours_to_settlement=exit_context.hours_to_settlement,
-                day0_active=bool(exit_context.day0_active),
+                day0_active=False,
                 applied=applied,
                 portfolio_positions=exit_context.portfolio_positions,
                 bankroll=exit_context.bankroll,
@@ -1314,7 +1288,7 @@ class Position:
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=best_bid,
-                day0_active=bool(exit_context.day0_active),
+                day0_active=False,
                 hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
                 portfolio_positions=exit_context.portfolio_positions,

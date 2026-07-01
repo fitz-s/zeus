@@ -143,7 +143,7 @@ def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
     assert float(proof["effective_min_entry_price"]) == pytest.approx(0.10)
 
 
-def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(monkeypatch):
+def test_qkernel_center_buy_taker_rejects_price_below_entry_floor_even_when_profit_and_edge_clear(monkeypatch):
     _patch(monkeypatch, _bound())
     payload = dict(
         _BUY_NO,
@@ -189,10 +189,11 @@ def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(mo
     )
 
     assert proof is not None
-    assert proof["passed"] is True
-    assert proof["entry_price_floor_applies"] == "False"
-    assert proof["entry_price_floor_pass"] == "True"
-    assert proof["effective_min_entry_price"] == "0.0"
-    assert proof["qkernel_low_price_floor_authorized"] == "True"
+    assert proof["passed"] is False
+    assert proof["reason"] == "strategy_live_quality_floor_not_met"
+    assert proof["entry_price_floor_applies"] == "True"
+    assert proof["entry_price_floor_pass"] == "False"
+    assert proof["effective_min_entry_price"] == "0.05"
+    assert proof["qkernel_low_price_floor_authorized"] == "False"
     assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
     assert proof["min_entry_price"] == "0.05"

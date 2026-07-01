@@ -216,6 +216,14 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
     assert conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM world.selection_family_fact").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM world.selection_hypothesis_fact").fetchone()[0] == 1
+    family_row = conn.execute(
+        "SELECT strategy_key FROM world.selection_family_fact"
+    ).fetchone()
+    assert family_row["strategy_key"] == "center_buy"
+    hypothesis_row = conn.execute(
+        "SELECT meta_json FROM world.selection_hypothesis_fact"
+    ).fetchone()
+    assert json.loads(hypothesis_row["meta_json"])["strategy_key"] == "center_buy"
     conn.close()
 
 
@@ -298,7 +306,7 @@ def test_day0_legacy_selection_facts_write_to_attached_world_not_trade_local(tmp
     family_row = conn.execute(
         "SELECT strategy_key, discovery_mode, meta_json FROM world.selection_family_fact"
     ).fetchone()
-    assert family_row["strategy_key"] == "settlement_capture"
+    assert family_row["strategy_key"] == "center_buy"
     assert family_row["discovery_mode"] == "DAY0_EXTREME_UPDATED"
     family_meta = json.loads(family_row["meta_json"])
     assert family_meta["source"] == "event_bound_legacy_selector"
@@ -529,8 +537,29 @@ def _day0_payload(**overrides) -> dict:
     return payload
 
 
-def test_live_entry_day0_gate_accepts_live_observation_authority_without_qkernel():
-    _assert_live_entry_submit_authority(_day0_payload(selection_authority_applied=None))
+def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
+    _assert_live_entry_submit_authority(
+        _day0_payload(
+            selection_authority_applied="qkernel_spine",
+            direction="buy_yes",
+            strategy_key="center_buy",
+            candidate_bin_id="bin-1",
+            q_live=0.70,
+            q_lcb_5pct=0.60,
+            min_entry_price=0.10,
+            qkernel_execution_economics=_qkernel_cert(),
+        )
+    )
+
+
+def test_live_entry_day0_gate_rejects_missing_qkernel_economics():
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED"):
+        _assert_live_entry_submit_authority(
+            _day0_payload(
+                selection_authority_applied="qkernel_spine",
+                qkernel_execution_economics=None,
+            )
+        )
 
 
 def test_live_entry_day0_gate_rejects_missing_live_observation_authority():
@@ -567,24 +596,25 @@ def test_day0_fdr_rejection_reason_carries_route_evidence():
     assert "probability_authority=day0_absorbing_hard_fact" in reason
 
 
-def test_day0_pre_submit_payload_preserves_observation_authority():
+def test_day0_pre_submit_payload_preserves_observation_authority_and_qkernel():
+    qkernel_cert = _qkernel_cert()
     final_intent = SimpleNamespace(
         certificate_hash="final-hash",
         payload={
             "event_id": "event-1",
             "event_type": "DAY0_EXTREME_UPDATED",
             "final_intent_id": "intent-1",
-            "strategy_key": "settlement_capture",
+            "strategy_key": "center_buy",
             "condition_id": "condition-1",
-            "token_id": "token-no",
+            "token_id": "token-yes",
             "side": "BUY",
-            "direction": "buy_no",
+            "direction": "buy_yes",
             "city": "Chicago",
             "target_date": "2026-05-24",
             "metric": "high",
             "temperature_metric": "high",
-            "bin_label": "79F or below",
-            "outcome_label": "No",
+            "bin_label": "80F",
+            "outcome_label": "Yes",
             "unit": "F",
             "order_type": "LIMIT",
             "time_in_force": "GTC",
@@ -600,8 +630,8 @@ def test_day0_pre_submit_payload_preserves_observation_authority():
             "min_submit_edge_density": 0.05,
             "c_fee_adjusted": 0.40,
             "c_cost_95pct": 0.45,
-            "selection_authority_applied": None,
-            "qkernel_execution_economics": None,
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": qkernel_cert,
             "source_match_status": "MATCH",
             "local_date_status": "MATCH",
             "station_match_status": "MATCH",
@@ -646,7 +676,8 @@ def test_day0_pre_submit_payload_preserves_observation_authority():
     )
 
     assert payload["event_type"] == "DAY0_EXTREME_UPDATED"
-    assert payload["qkernel_execution_economics"] is None
+    assert payload["selection_authority_applied"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"] == qkernel_cert
     assert payload["source_match_status"] == "MATCH"
     assert payload["local_date_status"] == "MATCH"
     assert payload["station_match_status"] == "MATCH"

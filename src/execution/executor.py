@@ -695,8 +695,7 @@ def _entry_economics_component(
         from src.events.day0_authority import day0_live_payload_authority_errors
 
         day0_authority_errors = day0_live_payload_authority_errors(actionable_payload)
-    day0_authorized = day0_authority_errors == ()
-    if not isinstance(economics, Mapping) and not day0_authorized:
+    if not isinstance(economics, Mapping):
         missing.append("qkernel_execution_economics")
     if missing:
         return _capability_component(
@@ -819,32 +818,6 @@ def _entry_economics_component(
                 reason="day0_observation_authority_missing",
                 missing=",".join(day0_authority_errors),
             )
-        if isinstance(economics, Mapping):
-            return _capability_component(
-                "entry_economics",
-                allowed=False,
-                reason="day0_qkernel_authority_mix",
-            )
-        return _capability_component(
-            "entry_economics",
-            q_live=q_live,
-            q_lcb_5pct=q_lcb,
-            expected_edge=expected_edge,
-            limit_price=limit_price,
-            submit_edge=submit_edge,
-            expected_profit_usd=expected_profit,
-            min_entry_price=min_entry_price,
-            live_min_entry_price=live_min_entry_price,
-            effective_min_entry_price=effective_min_entry_price,
-            qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
-            min_expected_profit_usd=min_expected_profit,
-            live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
-            submit_edge_density=edge_density,
-            min_submit_edge_density=min_edge_density,
-            live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
-            shares=submitted_shares,
-            probability_authority="day0_observation_authority",
-        )
     direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
@@ -985,6 +958,7 @@ def _entry_economics_component(
         qkernel_cost=econ_cost,
         qkernel_edge_lcb=econ_edge_lcb,
         qkernel_false_edge_rate=econ_false_edge_rate,
+        day0_observation_authority=(day0_authority_errors == ()),
     )
 def _entry_actionable_certificate_payload_and_component(
     conn: sqlite3.Connection,

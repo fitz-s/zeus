@@ -266,8 +266,6 @@ def test_day0_final_intent_preserves_observation_authority_fields():
     _actionable, final_intent, _expressibility, _live_cap = builder_chain(
         actionable_payload={
             "event_type": "DAY0_EXTREME_UPDATED",
-            "qkernel_execution_economics": None,
-            "selection_authority_applied": None,
             "source_match_status": "MATCH",
             "local_date_status": "MATCH",
             "station_match_status": "MATCH",
@@ -280,7 +278,8 @@ def test_day0_final_intent_preserves_observation_authority_fields():
     )
 
     assert final_intent.payload["event_type"] == "DAY0_EXTREME_UPDATED"
-    assert final_intent.payload["qkernel_execution_economics"] is None
+    assert final_intent.payload["selection_authority_applied"] == "qkernel_spine"
+    assert final_intent.payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
     assert final_intent.payload["source_match_status"] == "MATCH"
     assert final_intent.payload["local_date_status"] == "MATCH"
     assert final_intent.payload["station_match_status"] == "MATCH"
@@ -300,7 +299,27 @@ def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
         verify_execution_command(command, parents)
 
 
-def test_execution_command_accepts_day0_observation_authority_without_qkernel():
+def test_execution_command_accepts_day0_observation_authority_with_qkernel():
+    day0_authority = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    parents, command = execution_graph(
+        actionable_payload=day0_authority,
+        command_payload=day0_authority,
+    )
+
+    verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_day0_missing_qkernel_economics():
     day0_authority = {
         "event_type": "DAY0_EXTREME_UPDATED",
         "selection_authority_applied": None,
@@ -319,7 +338,8 @@ def test_execution_command_accepts_day0_observation_authority_without_qkernel():
         command_payload=day0_authority,
     )
 
-    verify_execution_command(command, parents)
+    with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
+        verify_execution_command(command, parents)
 
 
 def test_execution_command_rejects_missing_qkernel_selection_guard():
@@ -749,38 +769,34 @@ def test_final_intent_builder_allows_center_buy_yes_above_micro_tail_floor():
     assert final_intent.payload["min_entry_price"] == pytest.approx(0.02)
 
 
-def test_final_intent_builder_allows_direct_qkernel_yes_below_declared_floor():
-    actionable, final_intent, _expressibility, _live_cap = builder_chain(
-        actionable_payload={
-            "c_fee_adjusted": 0.01,
-            "c_cost_95pct": 0.01,
-            "q_live": 0.82,
-            "q_lcb_5pct": 0.72,
-            "trade_score": 0.71,
-            "action_score": 0.71,
-            "min_entry_price": 0.10,
-            "qkernel_execution_economics": {
-                **_actionable_payload()["qkernel_execution_economics"],
-                "candidate_id": "YES:b20:DIRECT_YES:b20@proof",
-                "bin_id": "b20",
-                "route_id": "DIRECT_YES:b20@proof",
-                "route_type": "direct",
-                "payoff_q_point": 0.82,
-                "payoff_q_lcb": 0.72,
-                "cost": 0.01,
-                "edge_lcb": 0.71,
-                "delta_u_at_min": 0.01,
-                "optimal_stake_usd": 100.0,
-                "optimal_delta_u": 0.01,
-                "selection_guard_q_safe": 0.72,
-            },
-        }
-    )
-
-    assert final_intent.payload["strategy_key"] == "center_buy"
-    assert final_intent.payload["direction"] == "buy_yes"
-    assert final_intent.payload["limit_price"] == pytest.approx(0.01)
-    assert final_intent.payload["min_entry_price"] == pytest.approx(0.10)
+def test_final_intent_builder_rejects_direct_qkernel_yes_below_strategy_floor():
+    with pytest.raises(ValueError, match="CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR"):
+        builder_chain(
+            actionable_payload={
+                "c_fee_adjusted": 0.01,
+                "c_cost_95pct": 0.01,
+                "q_live": 0.82,
+                "q_lcb_5pct": 0.72,
+                "trade_score": 0.71,
+                "action_score": 0.71,
+                "min_entry_price": 0.10,
+                "qkernel_execution_economics": {
+                    **_actionable_payload()["qkernel_execution_economics"],
+                    "candidate_id": "YES:b20:DIRECT_YES:b20@proof",
+                    "bin_id": "b20",
+                    "route_id": "DIRECT_YES:b20@proof",
+                    "route_type": "direct",
+                    "payoff_q_point": 0.82,
+                    "payoff_q_lcb": 0.72,
+                    "cost": 0.01,
+                    "edge_lcb": 0.71,
+                    "delta_u_at_min": 0.01,
+                    "optimal_stake_usd": 100.0,
+                    "optimal_delta_u": 0.01,
+                    "selection_guard_q_safe": 0.72,
+                },
+            }
+        )
 
 
 def test_execution_command_builder_rejects_no_submit_parent_certificate():

@@ -77,7 +77,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_allows_direct_qkernel_low_price_yes_when_roi_clear():
+def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_when_roi_clear():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -104,10 +104,11 @@ def test_entry_economics_allows_direct_qkernel_low_price_yes_when_roi_clear():
         },
     )
 
-    assert verdict["allowed"] is True
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
     assert verdict["details"]["live_min_entry_price"] == 0.02
-    assert verdict["details"]["effective_min_entry_price"] == 0.0
-    assert verdict["details"]["qkernel_low_price_floor_authorized"] is True
+    assert verdict["details"]["effective_min_entry_price"] == 0.10
+    assert verdict["details"]["qkernel_low_price_floor_authorized"] is False
 
 
 def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
@@ -136,7 +137,7 @@ def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
-def test_entry_economics_allows_exact_strategy_floor_for_day0_authority():
+def test_entry_economics_rejects_day0_without_qkernel_at_strategy_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.10,
@@ -165,10 +166,9 @@ def test_entry_economics_allows_exact_strategy_floor_for_day0_authority():
         },
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["details"]["limit_price"] == pytest.approx(0.10)
-    assert verdict["details"]["effective_min_entry_price"] == pytest.approx(0.10)
-    assert verdict["details"]["probability_authority"] == "day0_observation_authority"
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "missing_entry_economics"
+    assert "qkernel_execution_economics" in verdict["details"]["missing"]
 
 
 def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
@@ -318,7 +318,7 @@ def test_entry_economics_blocks_missing_receipt_fields():
     assert "qkernel_execution_economics" in verdict["details"]["missing"]
 
 
-def test_entry_economics_accepts_day0_observation_authority_without_qkernel():
+def test_entry_economics_accepts_day0_observation_authority_with_qkernel():
     verdict = _entry_economics_component(
         _intent(
             q_live=0.96,
@@ -328,7 +328,13 @@ def test_entry_economics_accepts_day0_observation_authority_without_qkernel():
             min_entry_price=0.10,
             min_expected_profit_usd=0.05,
             min_submit_edge_density=0.02,
-            qkernel_execution_economics=None,
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.96,
+                payoff_q_lcb=0.954,
+                cost=0.70,
+                edge_lcb=0.254,
+                selection_guard_q_safe=0.954,
+            ),
         ),
         shares=10.0,
         actionable_payload={
@@ -345,7 +351,8 @@ def test_entry_economics_accepts_day0_observation_authority_without_qkernel():
     )
 
     assert verdict["allowed"] is True
-    assert verdict["details"]["probability_authority"] == "day0_observation_authority"
+    assert verdict["details"]["qkernel_source"] == "qkernel_spine"
+    assert verdict["details"]["day0_observation_authority"] is True
     assert abs(verdict["details"]["submit_edge"] - 0.254) < 1e-9
 
 

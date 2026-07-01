@@ -300,9 +300,8 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 )
 
 # The day0/same-day event lane (a DAY0_EXTREME_UPDATED prices against an observed
-# running extreme). Module-level so the qkernel seam can hard-block the spine on it
-# (the spine reads no day0 observation; consult_review_pr409_round2.md §3). The day0
-# boundary guard inside the live adapter references this same constant.
+# running extreme). Module-level so qkernel can feed the observed boundary into the
+# same family optimizer while the live adapter still applies Day0 authority guards.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
 
 
@@ -1817,11 +1816,12 @@ def _event_bound_strategy_key(
 
     normalized_direction = str(direction or "").strip().lower()
     normalized_metric = str(metric or "").strip().lower()
-    if event_type == "DAY0_EXTREME_UPDATED":
-        strategy = "settlement_capture"
-    elif event_type in _FORECAST_DECISION_EVENT_TYPES:
-        # EDLI_REDECISION_PENDING resolves to the forecast strategy (it re-decides a forecast
-        # family on a fresh price; the strategy is unchanged, only the trigger differs).
+    if event_type in (_FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES):
+        # EDLI_REDECISION_PENDING and DAY0_EXTREME_UPDATED resolve to the same
+        # qkernel entry strategy as FORECAST_SNAPSHOT_READY. Day0 changes the
+        # belief input by adding an observed-boundary fact; it is not a separate
+        # execution strategy unless an observation-locked capture path explicitly
+        # emits settlement_capture itself.
         strategy = "opening_inertia" if normalized_direction == "buy_no" else "center_buy"
     else:
         raise ValueError(f"EDLI_STRATEGY_UNSUPPORTED_EVENT_TYPE:{event_type}")
@@ -3170,6 +3170,7 @@ def event_bound_live_adapter_from_trade_conn(
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
                     ),
+                    savepoint_name="edli_submit_disabled_live_order_build",
                 )
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
@@ -3380,18 +3381,22 @@ def event_bound_live_adapter_from_trade_conn(
 def _run_live_order_build_savepoint(
     conn: sqlite3.Connection,
     build: Callable[[], tuple[DecisionCertificate, ...]],
+    *,
+    savepoint_name: str = "edli_live_order_build",
 ) -> tuple[DecisionCertificate, ...]:
+    if not savepoint_name.replace("_", "").isalnum():
+        raise ValueError("live order build savepoint name must be alphanumeric/underscore")
     retry_delays = _live_order_build_lock_retry_delays()
     saved_busy_timeout_ms = _sqlite_busy_timeout_ms(conn)
     build_busy_timeout_ms = _live_order_build_busy_timeout_ms()
     try:
         _set_sqlite_busy_timeout_ms(conn, build_busy_timeout_ms)
         for attempt in range(1, len(retry_delays) + 2):
-            conn.execute("SAVEPOINT edli_live_order_build")
+            conn.execute(f"SAVEPOINT {savepoint_name}")
             try:
                 result = build()
             except sqlite3.OperationalError as exc:
-                _rollback_release_live_order_build_savepoint(conn)
+                _rollback_release_live_order_build_savepoint(conn, savepoint_name=savepoint_name)
                 if not _is_sqlite_lock_error(exc) or attempt > len(retry_delays):
                     raise
                 logging.getLogger(__name__).warning(
@@ -3405,10 +3410,25 @@ def _run_live_order_build_savepoint(
                 )
                 _time.sleep(retry_delays[attempt - 1])
                 continue
-            except Exception:
-                _rollback_release_live_order_build_savepoint(conn)
+            except Exception as exc:
+                try:
+                    _rollback_release_live_order_build_savepoint(conn, savepoint_name=savepoint_name)
+                except sqlite3.OperationalError:
+                    logging.getLogger(__name__).exception(
+                        "live order build savepoint rollback failed after build error; "
+                        "preserving original build exception: %r",
+                        exc,
+                    )
                 raise
-            conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+            try:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            except sqlite3.OperationalError as exc:
+                if "no such savepoint" not in str(exc).lower():
+                    raise
+                logging.getLogger(__name__).warning(
+                    "live order build savepoint %s was already released after a successful build",
+                    savepoint_name,
+                )
             return result
     finally:
         _set_sqlite_busy_timeout_ms(conn, saved_busy_timeout_ms)
@@ -3434,11 +3454,15 @@ def _release_live_order_build_stale_transaction(conn: sqlite3.Connection, *, pha
     conn.commit()
 
 
-def _rollback_release_live_order_build_savepoint(conn: sqlite3.Connection) -> None:
+def _rollback_release_live_order_build_savepoint(
+    conn: sqlite3.Connection,
+    *,
+    savepoint_name: str,
+) -> None:
     try:
-        conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
     finally:
-        conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
 
 
 def _persist_live_command_certificates_before_executor_submit(
@@ -3929,6 +3953,7 @@ def _record_qkernel_selection_family_facts(
 
     economics_by_key = qkernel_candidate_economics_by_bin_side(decision)
     rows: list[dict[str, Any]] = []
+    selected_strategy_key = ""
     for candidate_decision in candidate_decisions:
         route = getattr(candidate_decision, "route", None)
         economics = getattr(candidate_decision, "economics", None)
@@ -3941,6 +3966,15 @@ def _record_qkernel_selection_family_facts(
             continue
         payload = dict(economics_by_key.get((bin_id, side), {}) or {})
         direction = "buy_yes" if side == "YES" else "buy_no"
+        strategy_key = ""
+        try:
+            strategy_key = _event_bound_strategy_key(
+                event_type=str(getattr(event, "event_type", "") or ""),
+                direction=direction,
+                metric=str(getattr(family, "metric", "") or ""),
+            )
+        except Exception:
+            strategy_key = ""
         edge_lcb = _optional_float(payload.get("edge_lcb"))
         q_point = _optional_float(payload.get("payoff_q_point"))
         q_lcb = _optional_float(payload.get("payoff_q_lcb"))
@@ -3954,6 +3988,8 @@ def _record_qkernel_selection_family_facts(
             and optimal_delta_u > 0.0
         )
         selected_post_fdr = bool(candidate_id and candidate_id == selected_candidate_id)
+        if selected_post_fdr:
+            selected_strategy_key = strategy_key
         rejection_stage = None
         rejection_detail = None
         if not selected_post_fdr:
@@ -4007,6 +4043,7 @@ def _record_qkernel_selection_family_facts(
                     "route_id": str(payload.get("route_id") or getattr(economics, "route_id", "") or ""),
                     "side": side,
                     "bin_id": bin_id,
+                    "strategy_key": strategy_key,
                     "qkernel_execution_economics": payload,
                 },
             }
@@ -4038,7 +4075,7 @@ def _record_qkernel_selection_family_facts(
         decision_snapshot_id=decision_snapshot_id,
         city=family.city,
         target_date=family.target_date,
-        strategy_key="",
+        strategy_key=selected_strategy_key,
         discovery_mode=event.event_type,
         decision_time_status="live",
         require_attached_world=True,
@@ -4132,13 +4169,12 @@ def _record_day0_selection_family_facts(
     decision_time: datetime,
     decision_snapshot_id: str | None,
 ) -> dict[str, Any]:
-    """Persist Day0's observation-aware selector facts to the canonical world DB.
+    """Persist legacy Day0 selector facts to the canonical world DB.
 
-    Day0 uses the observed-extreme masking selector rather than the forecast
-    qkernel spine. That is correct probability semantics, but it must not make
-    the live lane opaque: every processed DAY0_EXTREME_UPDATED event needs a
-    structural family/hypothesis record explaining the selected leg or no-trade
-    reason. This writer records evidence only; it does not re-rank or gate.
+    New live Day0 entry routes through qkernel with an observed-boundary input.
+    This writer remains for older observation-aware selector evidence and must
+    still record the selected leg's real strategy identity instead of stamping
+    every Day0 row as settlement_capture.
     """
 
     if conn is None:
@@ -4159,6 +4195,21 @@ def _record_day0_selection_family_facts(
     )
     recorded_at = decision_time.astimezone(UTC).isoformat()
     selected_count = sum(1 for ev in evaluations if ev.candidate_id == selected_candidate_id)
+    selected_direction = ""
+    for ev in evaluations:
+        if ev.candidate_id == selected_candidate_id:
+            selected_direction = str(getattr(ev, "direction", "") or "")
+            break
+    selected_strategy_key = ""
+    if selected_direction:
+        try:
+            selected_strategy_key = _event_bound_strategy_key(
+                event_type=str(getattr(event, "event_type", "") or ""),
+                direction=selected_direction,
+                metric=str(getattr(family, "metric", "") or ""),
+            )
+        except Exception:
+            selected_strategy_key = ""
     passed_prefilter_count = sum(1 for ev in evaluations if bool(ev.passed_prefilter))
     admitted_count = sum(
         1
@@ -4179,6 +4230,7 @@ def _record_day0_selection_family_facts(
         "admitted_count": admitted_count,
         "selected_post_fdr": selected_count,
         "selected_candidate_id": selected_candidate_id,
+        "selected_strategy_key": selected_strategy_key,
         "selection_authority": str(
             opportunity_book.cache_summary.get("selection_authority")
             or "robust_marginal_utility"
@@ -4196,7 +4248,7 @@ def _record_day0_selection_family_facts(
         decision_snapshot_id=decision_snapshot_id,
         city=family.city,
         target_date=family.target_date,
-        strategy_key="settlement_capture",
+        strategy_key=selected_strategy_key,
         discovery_mode=event.event_type,
         decision_time_status="live",
         require_attached_world=True,
@@ -4618,16 +4670,16 @@ def _build_event_bound_no_submit_receipt_core(
         qkernel_spine_enabled,
     )
 
-    # DAY0 -> OBSERVATION LANE (consult_review_pr409_round2.md §3): the forecast
-    # qkernel bridge reads no Day0 observation yet, so a Day0 family must NOT be
-    # decided by the forecast spine (it could price physically impossible bins
-    # below the observed running high / above the observed running low). Day0 events
-    # are NOT in _FORECAST_DECISION_EVENT_TYPES, so they are selected by the existing
-    # observation-aware selector seam. Forecast events with the qkernel flag OFF do
-    # NOT use that seam as a fallback; they emit QKERNEL_SPINE_REQUIRED.
+    # DAY0 is the same family optimizer with an observed-boundary input. The qkernel
+    # bridge now reads DAY0_EXTREME_UPDATED payload authority into a Day0ObservationState
+    # and consumes the reactor-served Day0 q/q_lcb proof surface, so it must not fall
+    # back to the legacy scalar selector. Forecast/Day0 events with the qkernel flag
+    # OFF emit QKERNEL_SPINE_REQUIRED.
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
-    _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    _spine_eligible_event = event.event_type in (
+        _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
+    )
     _spine_candidate_economics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     # Fix #4 generalized: pass REAL current per-bin family exposure into the
     # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
@@ -4645,10 +4697,10 @@ def _build_event_bound_no_submit_receipt_core(
             selection_exposure_by_outcome=_selection_exposure,
         )
     )
-    if _spine_eligible_event and not _is_day0_event and not _spine_flag_on:
+    if _spine_eligible_event and not _spine_flag_on:
         proof = None
         _spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"
-    elif _spine_flag_on and _spine_eligible_event and not _is_day0_event:
+    elif _spine_flag_on and _spine_eligible_event:
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
@@ -8008,6 +8060,7 @@ def _build_live_execution_command_certificates(
         expressibility, pre_submit, command = _run_live_order_build_savepoint(
             live_cap_conn,
             _append_live_order_state,
+            savepoint_name="edli_execution_command_build",
         )
     except Exception:
         raise
@@ -8124,7 +8177,7 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
 
 
 def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mapping[str, object]) -> None:
-    """Day0 live ENTRY submit is licensed by observation truth, not forecast qkernel."""
+    """Day0 live ENTRY submit requires observation truth plus qkernel economics."""
 
     from src.events.day0_authority import (
         Day0AuthorityError,
@@ -8135,6 +8188,7 @@ def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mappi
         assert_live_day0_payload_authority(actionable_payload)
     except Day0AuthorityError as exc:
         raise ValueError(f"LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:{exc}") from None
+    _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
 
 
 def _actionable_payload_from_receipt(
@@ -12882,6 +12936,11 @@ def _generate_candidate_proofs(
         capital_objective_evidence=capital_objective_evidence,
         provenance_capture=provenance_capture,
     )
+    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
+        _day0_metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
+        _day0_observed_extreme = _observed_day0_extreme_native(payload, _day0_metric)
+        if _day0_observed_extreme is not None:
+            payload["_edli_spine_day0_observed_extreme_native"] = float(_day0_observed_extreme)
     # P1 BELIEF CAPTURE (continuous re-decision resurrection 2026-06-12). Buffer this family's
     # belief (YES q-posterior + condition_id per bin) into the per-call provenance_capture dict so
     # the reactor can persist it through its OWN world conn inside the open SAVEPOINT — NO second
@@ -13103,6 +13162,7 @@ def _generate_candidate_proofs(
                     "_edli_spine_debiased_members_native",
                     "_edli_spine_q_vector",
                     "_edli_spine_source_cycle_time_utc",
+                    "_edli_spine_day0_observed_extreme_native",
                     "_edli_spine_pre_day0_low_carryover",
                     "_edli_spine_pre_day0_low_block_reason",
                     "_edli_q_source",

@@ -371,105 +371,6 @@ def _finite_submit_float(value: object) -> float | None:
     return float(parsed)
 
 
-def _qkernel_direct_route(economics: Mapping[str, object]) -> bool:
-    route_id = str(economics.get("route_id") or "").strip().upper()
-    route_type = str(economics.get("route_type") or "").strip().lower()
-    return bool(route_type == "direct" or route_id.startswith("DIRECT_"))
-
-
-def qkernel_direct_low_price_entry_authorized(
-    *,
-    strategy_key: object,
-    direction: object,
-    selection_authority_applied: object,
-    economics: Mapping[str, object] | None,
-    q_live: object,
-    q_lcb: object,
-    limit_price: object,
-) -> bool:
-    """Whether qkernel evidence may replace the static low-price entry floor.
-
-    This is deliberately narrower than "qkernel-selected": only a direct
-    center-buy YES leg with internally consistent payoff probabilities and a
-    useful ROI frontier can submit below the static/strategy entry floor. Cheap
-    YES is not banned; it must be proven by the same math that selected it.
-    """
-
-    direction_text = str(direction or "").strip().lower()
-    if str(strategy_key or "").strip() != "center_buy" or direction_text != "buy_yes":
-        return False
-    if str(selection_authority_applied or "").strip() != "qkernel_spine":
-        return False
-    if not isinstance(economics, Mapping):
-        return False
-    if str(economics.get("source") or "").strip() != "qkernel_spine":
-        return False
-    if not _qkernel_direct_route(economics):
-        return False
-    route = economics.get("route") if isinstance(economics.get("route"), Mapping) else {}
-    side = str(route.get("side") or economics.get("side") or "").strip().upper()
-    if side != "YES" or native_curve_side_for_direction(direction_text) != side:
-        return False
-    if economics.get("direction_law_ok") is not True:
-        return False
-    if economics.get("coherence_allows") is not True:
-        return False
-    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
-    if not selection_guard_basis or selection_guard_basis == "SIDE_NOT_ARMED":
-        return False
-    if economics.get("selection_guard_abstained") is not False:
-        return False
-    selection_guard_q_safe = _finite_submit_float(economics.get("selection_guard_q_safe"))
-    if selection_guard_q_safe is None or not (0.0 < selection_guard_q_safe <= 1.0):
-        return False
-
-    submit_q = _finite_submit_float(q_live)
-    submit_q_lcb = _finite_submit_float(q_lcb)
-    submit_price = _finite_submit_float(limit_price)
-    payoff_q_point = _finite_submit_float(economics.get("payoff_q_point"))
-    payoff_q_lcb = _finite_submit_float(economics.get("payoff_q_lcb"))
-    cost = _finite_submit_float(economics.get("cost"))
-    edge_lcb = _finite_submit_float(economics.get("edge_lcb"))
-    delta_u_at_min = _finite_submit_float(economics.get("delta_u_at_min"))
-    optimal_stake_usd = _finite_submit_float(economics.get("optimal_stake_usd"))
-    if (
-        submit_q is None
-        or submit_q_lcb is None
-        or submit_price is None
-        or payoff_q_point is None
-        or payoff_q_lcb is None
-        or cost is None
-        or edge_lcb is None
-        or delta_u_at_min is None
-        or optimal_stake_usd is None
-    ):
-        return False
-    if not (0.0 <= submit_q_lcb <= submit_q <= 1.0):
-        return False
-    if submit_price <= 0.0 or submit_price >= 1.0:
-        return False
-    if cost <= 0.0 or cost >= 1.0:
-        return False
-    if submit_price > cost + 1e-6:
-        return False
-    if not math.isclose(payoff_q_point, submit_q, rel_tol=1e-9, abs_tol=1e-6):
-        return False
-    if not math.isclose(payoff_q_lcb, submit_q_lcb, rel_tol=1e-9, abs_tol=1e-6):
-        return False
-    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
-        return False
-    if edge_lcb <= 0.0 or submit_q_lcb - submit_price <= 0.0:
-        return False
-    return roi_frontier_useful_values(
-        side=side,
-        cost=cost,
-        payoff_q_lcb=payoff_q_lcb,
-        edge_lcb=edge_lcb,
-        stake=optimal_stake_usd,
-        delta_u_at_min=delta_u_at_min,
-    )
-
-
 def entry_price_floor_decision(
     *,
     strategy_key: object,
@@ -498,19 +399,10 @@ def entry_price_floor_decision(
     declared_floor = _finite_submit_float(declared_min_entry_price)
     if declared_floor is None:
         declared_floor = 0.0
-    authorized = qkernel_direct_low_price_entry_authorized(
-        strategy_key=strategy_key,
-        direction=direction,
-        selection_authority_applied=selection_authority_applied,
-        economics=economics,
-        q_live=q_live,
-        q_lcb=q_lcb,
-        limit_price=limit_price,
-    )
     return EntryPriceFloorDecision(
         live_min_entry_price=live_floor,
-        effective_min_entry_price=0.0 if authorized else max(declared_floor, live_floor),
-        qkernel_low_price_floor_authorized=authorized,
+        effective_min_entry_price=max(declared_floor, live_floor),
+        qkernel_low_price_floor_authorized=False,
     )
 
 

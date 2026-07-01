@@ -33,12 +33,10 @@ def test_actionable_accepts_redecision_as_forecast_lane():
     verify_actionable_trade(action, parents)
 
 
-def test_actionable_accepts_day0_observation_authority_without_qkernel():
+def test_actionable_accepts_day0_observation_authority_with_qkernel():
     parents, action = actionable_graph(
         action_payload={
             "event_type": "DAY0_EXTREME_UPDATED",
-            "selection_authority_applied": None,
-            "qkernel_execution_economics": None,
             "source_match_status": "MATCH",
             "local_date_status": "MATCH",
             "station_match_status": "MATCH",

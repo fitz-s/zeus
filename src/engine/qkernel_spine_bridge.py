@@ -906,16 +906,112 @@ class _ReactorServedPredictiveBuilder:
         )
 
 
-class _NoDay0Reader:
-    """A ``Day0Reader`` that serves no observation (the reactor's forecast lane).
+def _payload_float(payload: Mapping[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(parsed):
+            return parsed
+    return None
 
-    The forecast decision lane has no day0 observed extreme at this seam; the spine's
-    predictive builder treats ``None`` as the inactive (NO_DAY0) identity transform.
-    A day0-scope wiring is a follow-up; this bridge serves the forecast lane.
+
+def _payload_datetime_utc(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+class _PayloadDay0Reader:
+    """Read a live Day0 observed extreme from the same event payload the reactor prices.
+
+    Day0 is not a separate order type here. It is the same family decision with one
+    extra fact: a live-authorized observed running extreme that conditions the
+    predictive identity. The selected probabilities still come from the reactor's
+    served Day0 q/q_lcb proof surface passed into ``served_joint_q``.
     """
 
+    def __init__(self, payload: Mapping[str, Any], family: Any, *, enabled: bool) -> None:
+        self._state: Optional[Day0ObservationState] = None
+        self._block_reason: Optional[str] = None
+        if not enabled:
+            return
+        try:
+            from src.events.day0_authority import assert_live_day0_payload_authority
+
+            assert_live_day0_payload_authority(payload)
+        except Exception as exc:  # noqa: BLE001 - typed into a no-trade reason by caller.
+            self._block_reason = f"DAY0_OBSERVATION_AUTHORITY_REQUIRED:{exc}"
+            return
+
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
+        if metric == "high":
+            observed_extreme = _payload_float(payload, "high_so_far", "raw_value", "rounded_value")
+            observed_high = observed_extreme
+            observed_low = _payload_float(payload, "low_so_far")
+        elif metric == "low":
+            observed_extreme = _payload_float(payload, "low_so_far", "raw_value", "rounded_value")
+            observed_high = _payload_float(payload, "high_so_far")
+            observed_low = observed_extreme
+        else:
+            self._block_reason = f"DAY0_OBSERVATION_METRIC_UNSUPPORTED:{metric or 'missing'}"
+            return
+        if observed_extreme is None:
+            self._block_reason = "DAY0_OBSERVED_EXTREME_MISSING"
+            return
+
+        samples = payload.get("samples_count", payload.get("sample_count", 1))
+        try:
+            samples_count = max(1, int(samples))
+        except (TypeError, ValueError):
+            samples_count = 1
+        observation_id = str(
+            payload.get("observation_context_id")
+            or payload.get("payload_hash")
+            or payload.get("event_id")
+            or ""
+        )
+        raw_hash = hashlib.sha256(
+            (
+                f"{payload.get('city') or getattr(family, 'city', '')}|"
+                f"{payload.get('target_date') or getattr(family, 'target_date', '')}|"
+                f"{metric}|{observed_extreme!r}|{payload.get('observation_time') or ''}|"
+                f"{observation_id}"
+            ).encode("utf-8")
+        ).hexdigest()
+        self._state = Day0ObservationState(
+            observed=True,
+            station_id=str(payload.get("station_id") or ""),
+            source=str(payload.get("settlement_source") or payload.get("source") or ""),
+            samples_count=samples_count,
+            latest_observed_at_utc=_payload_datetime_utc(
+                payload.get("observation_time") or payload.get("observation_available_at")
+            ),
+            observed_high_native=observed_high,
+            observed_low_native=observed_low,
+            observed_extreme_native=observed_extreme,
+            raw_observation_hash=raw_hash,
+        )
+
+    @property
+    def block_reason(self) -> Optional[str]:
+        return self._block_reason
+
     def read(self, case: ForecastCase) -> Optional[Day0ObservationState]:  # noqa: ARG002
-        return None
+        return self._state
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1258,17 @@ def decide_family_via_spine(
         case = build_forecast_case(
             family, source_cycle_time_utc=served["source_cycle_time_utc"]
         )
+        event_type = str(
+            payload.get("event_type") or getattr(family, "event_type", "") or ""
+        )
+        is_day0_family = event_type == "DAY0_EXTREME_UPDATED"
+        day0_reader = _PayloadDay0Reader(payload, family, enabled=is_day0_family)
+        if day0_reader.block_reason is not None:
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{day0_reader.block_reason}",
+                decision=None,
+            )
         # LEAD-BUCKET ADMISSION (2026-06-15). The prior "only 24h" restriction was tied to
         # the settlement-EV REPLAY (round-2 §3) — which the operator DELETED (price replay is
         # not the validation; settlement-σ coverage is). Every FORECAST lead bucket
@@ -1171,11 +1278,12 @@ def decide_family_via_spine(
         # the spine's own edge_lcb>0 filter sets a strictly HIGHER edge bar at long lead. The
         # q is therefore calibration-honest at every forecast lead, and edge_lcb>0 (not a
         # bucket whitelist) is the EV gate — the spine self-restricts to genuine positive
-        # edge. day0 (lead<24h) is still excluded: it has no Day0Reader in the spine and
-        # routes to the legacy lane.
+        # edge. For DAY0_EXTREME_UPDATED, the same family optimizer is now fed the live
+        # observed extreme through ``day0_reader``; Day0 is a belief input, not a separate
+        # legacy selector.
         from src.forecast.sigma_authority import lead_bucket_for
 
-        if lead_bucket_for(case) == "day0":
+        if lead_bucket_for(case) == "day0" and not is_day0_family:
             return SpineDecisionResult(
                 selected_proof=None,
                 no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
@@ -1223,7 +1331,7 @@ def decide_family_via_spine(
         _engine_kwargs["band_alpha"] = _band_alpha
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
-            day0_reader=_NoDay0Reader(),
+            day0_reader=day0_reader,
             # The belief authority at this seam is the reactor-served live predictive
             # payload: center/day0/raw-law structure is assembled by the spine builder
             # over the RAW multi-model member envelope, while σ is preserved from the

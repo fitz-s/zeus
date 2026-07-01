@@ -440,10 +440,7 @@ def _verify_actionable_probability_authority(
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(payload, label="actionable")
-        if payload.get("qkernel_execution_economics") not in (None, ""):
-            raise CertificateVerificationError(
-                "actionable day0 must not carry qkernel_execution_economics"
-            )
+        _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
 
@@ -853,10 +850,7 @@ def _verify_pre_submit_probability_authority(
     event_type = str(pre_submit.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
-        if pre_submit.get("qkernel_execution_economics") not in (None, ""):
-            raise CertificateVerificationError(
-                "pre-submit day0 must not carry qkernel_execution_economics"
-            )
+        _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
 

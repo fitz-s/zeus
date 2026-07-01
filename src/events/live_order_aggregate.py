@@ -881,10 +881,7 @@ def _validate_pre_submit_probability_authority(
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == _DAY0_EVENT_TYPE:
         _validate_day0_submit_observation_authority(payload)
-        if payload.get("qkernel_execution_economics") not in (None, ""):
-            raise LiveOrderAggregateError(
-                "PreSubmitRevalidated day0 must not carry qkernel_execution_economics"
-            )
+        _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
         return
     _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
 

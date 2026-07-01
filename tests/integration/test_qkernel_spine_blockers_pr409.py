@@ -10,8 +10,8 @@
 #     2. route identity: PROOF-NATIVE single-leg routing (maker AND taker), edge from
 #        the proof's own execution_price (NOT the negrisk ask ladder); synthetic/arb
 #        disabled; non-direct selection refused.
-#     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES are excluded from the forecast
-#        spine call.
+#     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
+#        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
@@ -792,25 +792,17 @@ def test_non_direct_selection_is_refused_as_typed_no_trade():
 
 
 # ===========================================================================
-# BLOCKER 3 — day0 routes to its observation lane, never to the forecast spine.
-# The spine bridge reads no day0 observation (_NoDay0Reader), so a day0 family
-# must NOT be decided by the forecast spine. The replacement is an explicit day0 lane,
-# while forecast flag-off remains QKERNEL_SPINE_REQUIRED no-trade.
+# BLOCKER 3 — day0 is an observed-boundary input to the same qkernel family optimizer.
 # ===========================================================================
-def test_day0_event_type_is_in_day0_lane_and_excluded_from_forecast_lane():
-    """The reactor's module-level lanes: DAY0_EXTREME_UPDATED is the day0 lane and is NOT
-    a forecast decision type. The seam routes the day0 lane outside the forecast spine.
-    """
+def test_day0_event_type_is_in_day0_lane_not_forecast_event_type():
+    """DAY0 remains a distinct authority lane while still being qkernel-decidable."""
     assert "DAY0_EXTREME_UPDATED" in era._DAY0_LANE_EVENT_TYPES
     assert "DAY0_EXTREME_UPDATED" not in era._FORECAST_DECISION_EVENT_TYPES
     assert "FORECAST_SNAPSHOT_READY" in era._FORECAST_DECISION_EVENT_TYPES
 
 
-def test_reactor_seam_routes_day0_to_observation_lane_not_forecast_spine():
-    """Structural RED-on-revert: the reactor seam EXCLUDES the day0 lane from the spine
-    and no longer emits the QKERNEL_DAY0_NOT_WIRED hard-block. If the hard-block is
-    re-introduced — or the ``not _is_day0_event`` exclusion is dropped — this fails.
-    """
+def test_reactor_seam_routes_day0_through_qkernel_with_observed_boundary():
+    """Day0 uses the same qkernel selector with a live observed-boundary input."""
     import inspect
 
     src = inspect.getsource(era)
@@ -818,22 +810,87 @@ def test_reactor_seam_routes_day0_to_observation_lane_not_forecast_spine():
     assert "_is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES" in src, (
         "the day0 lane gate is missing from the reactor seam"
     )
-    # The spine runs ONLY on a forecast-eligible, NON-day0 event — day0 is excluded.
-    assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" in src, (
-        "the day0 exclusion from the spine call is missing (day0 would regress to the spine)"
-    )
-    # The QKERNEL_DAY0_NOT_WIRED hard-block no-trade must NOT be emitted at the seam.
-    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src, (
-        "the QKERNEL_DAY0_NOT_WIRED hard-block was re-introduced — day0 must route to "
-        "its observation lane, not to a typed forecast-spine no-trade"
-    )
-    # Forecast flag-off must no-trade; it must not use the day0 selector as fallback.
-    assert 'if _spine_eligible_event and not _is_day0_event and not _spine_flag_on' in src
+    assert "_FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES" in src
+    assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" not in src
+    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src
+    # Forecast/Day0 flag-off must no-trade; neither may use the legacy selector as fallback.
+    assert "if _spine_eligible_event and not _spine_flag_on" in src
     assert '_spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"' in src
-    # Day0 still has an observation-lane selector seam.
-    assert "_selected_candidate_proof(" in src, (
-        "the day0 observation selector seam is missing"
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
     )
+    payload = _payload(mu=20.0, sigma=1.0, members=[19.8, 20.0, 20.2])
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-14T10:00:00Z",
+            "observation_available_at": "2026-06-14T10:01:00Z",
+        }
+    )
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    assert result.decision.predictive.day0.active is True
+    assert result.decision.predictive.day0.status == "HIGH_CLAMPED"
+    assert result.selected_proof is not None
+    assert result.selected_proof.qkernel_execution_economics["source"] == "qkernel_spine"
+
+
+def test_spine_accepts_day0_event_type_from_payload_when_family_event_type_is_generic():
+    """The live event payload is enough to activate the Day0 observed-boundary input."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
+    )
+    payload = _payload(mu=20.0, sigma=1.0, members=[19.8, 20.0, 20.2])
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-14T10:00:00Z",
+            "observation_available_at": "2026-06-14T10:01:00Z",
+        }
+    )
+
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    assert result.decision.predictive.day0.active is True
+    assert result.selected_proof is not None
 
 
 # ===========================================================================
