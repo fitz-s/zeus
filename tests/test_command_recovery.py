@@ -5259,6 +5259,13 @@ class TestRecoveryResolutionTable:
         try:
             events = _get_events(check, "cmd-001")
             state = _get_state(check, "cmd-001")
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
         finally:
             check.close()
 
@@ -5359,6 +5366,13 @@ class TestRecoveryResolutionTable:
         try:
             events = _get_events(check, "cmd-001")
             state = _get_state(check, "cmd-001")
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
         finally:
             check.close()
 
@@ -5370,6 +5384,13 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == (
             "review_required_terminal_order_fact_with_held_projection"
         )
+        assert dict(current) == {
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "entry_price": 0.34,
+            "order_status": "filled",
+        }
 
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,

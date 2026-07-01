@@ -4465,11 +4465,17 @@ def _entry_fill_economics_for_command(
             continue
         shares += filled
         cost_basis += filled * price
-    if shares > Decimal("0") and cost_basis > Decimal("0"):
-        return shares, cost_basis / shares, cost_basis
-
     fallback_shares = _positive_decimal_or_none(fallback_filled_size)
     fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if shares > Decimal("0") and cost_basis > Decimal("0"):
+        if (
+            fallback_shares is not None
+            and fallback_price is not None
+            and fallback_shares > shares
+        ):
+            return fallback_shares, fallback_price, fallback_shares * fallback_price
+        return shares, cost_basis / shares, cost_basis
+
     if fallback_shares is None or fallback_price is None:
         return None
     return fallback_shares, fallback_price, fallback_shares * fallback_price
