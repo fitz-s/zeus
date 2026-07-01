@@ -9131,11 +9131,12 @@ def _edli_pre_submit_jit_book_quote_provider():
 def _edli_decision_family_snapshot_refresher(topology_conn):
     """Build the decision-triggered targeted executable-substrate refresher.
 
-    The live daemon normally consumes sidecar-produced executable snapshots.  When the
-    selected row is already stale inside the money path, waiting for a later sidecar tick
-    marks an exact sidecar priority scope.  The order daemon remains a consumer: it
-    does not run the substrate producer inline, so it cannot fight the sidecar for
-    the shared market_substrate_refresh lock or block the reactor on venue I/O.
+    Broad warming remains sidecar-owned. When the selected row is already stale
+    inside the money path, the decision needs a current executable book, not just
+    an asynchronous marker. The refresher first leaves the priority marker as a
+    sidecar fallback, then asks the substrate producer for an exact scoped refresh
+    under the shared cross-process lock. It returns True only after a fresh
+    condition read proves the selected scope is current.
     """
 
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
@@ -9158,13 +9159,78 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
+        clean_condition_ids = tuple(
+            str(condition_id or "").strip()
+            for condition_id in (condition_ids or ())
+            if str(condition_id or "").strip()
+        )
+        summary = None
+        try:
+            from src.data.substrate_observer import refresh_money_path_substrate_now
+
+            refresh_budget_s = max(
+                1.0,
+                float(os.environ.get("ZEUS_DECISION_TARGETED_REFRESH_BUDGET_SECONDS", "8.0")),
+            )
+            snapshot_reserve_s = min(
+                max(
+                    0.5,
+                    float(
+                        os.environ.get(
+                            "ZEUS_DECISION_TARGETED_REFRESH_SNAPSHOT_RESERVE_SECONDS",
+                            "2.0",
+                        )
+                    ),
+                ),
+                max(0.1, refresh_budget_s - 0.1),
+            )
+            summary = refresh_money_path_substrate_now(
+                families=[family],
+                condition_ids=clean_condition_ids,
+                reason="decision_triggered_targeted_refresh",
+                refresh_budget_seconds=refresh_budget_s,
+                snapshot_reserve_seconds=snapshot_reserve_s,
+                include_money_risk_families=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "decision family refresh: inline substrate refresh failed for %s/%s/%s: %r",
+                family[0],
+                family[1],
+                family[2],
+                exc,
+            )
+            summary = {"status": "inline_error", "error": str(exc)}
+        proved_fresh = False
+        if clean_condition_ids:
+            try:
+                proved_fresh = family in _edli_families_with_fresh_scoped_executable_substrate(
+                    {family: set(clean_condition_ids)},
+                    now_utc=datetime.now(timezone.utc),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "decision family refresh: scoped freshness proof failed for %s/%s/%s: %r",
+                    family[0],
+                    family[1],
+                    family[2],
+                    exc,
+                )
+                proved_fresh = False
+        else:
+            status = str((summary or {}).get("status") or "")
+            proved_fresh = status in {"refreshed", "all_fresh"}
         logger.info(
-            "decision family refresh delegated to substrate-observer sidecar: %s/%s/%s",
+            "decision family refresh completed: %s/%s/%s condition_ids=%d "
+            "proved_fresh=%s summary=%r",
             family[0],
             family[1],
             family[2],
+            len(clean_condition_ids),
+            proved_fresh,
+            summary,
         )
-        return False
+        return bool(proved_fresh)
 
     return _refresh
 

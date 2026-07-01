@@ -237,9 +237,9 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
 )
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
-_ROI_FRONTIER_LOW_PRICE_YES_COST_CEILING = 0.05
-_ROI_FRONTIER_LOW_PRICE_YES_MIN_PAYOFF_Q_LCB = 0.07
-_ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB = 0.04
+_ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
+_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB = 0.07
+_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN = 0.05
 LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 
@@ -252,13 +252,14 @@ class EntryPriceFloorDecision:
 
 
 def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
-    """Conservative live floor for low-priced YES routes.
+    """Conservative live floor for cheap YES routes.
 
     Cheap YES routes are valid when the forecast genuinely prices a tail too low,
     but raw edge/cost over-rewards lottery-like tails whose lower-bound probability
-    barely clears the book. Require an absolute and edge-over-cost conservative q
-    floor for sub-5c YES while leaving normal-priced and NO routes on the global
-    frontier floor.
+    barely clears the book. Require an absolute lower q floor and a continuous
+    edge-over-cost margin that decays with price, instead of a discontinuous sub-5c
+    special case. Normal-priced and NO routes stay on the global frontier floor
+    plus the existing positive-edge/growth-density gates.
     """
 
     floor = float(_ROI_FRONTIER_MIN_PAYOFF_Q_LCB)
@@ -266,12 +267,16 @@ def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
     if (
         side_text == "YES"
         and np.isfinite(cost)
-        and 0.0 < float(cost) < _ROI_FRONTIER_LOW_PRICE_YES_COST_CEILING
+        and 0.0 < float(cost) < _ROI_FRONTIER_CHEAP_YES_COST_CEILING
     ):
+        cost_f = float(cost)
+        edge_margin = float(_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN) * (
+            1.0 - (cost_f / float(_ROI_FRONTIER_CHEAP_YES_COST_CEILING))
+        )
         floor = max(
             floor,
-            float(_ROI_FRONTIER_LOW_PRICE_YES_MIN_PAYOFF_Q_LCB),
-            float(cost) + float(_ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB),
+            float(_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB),
+            cost_f + max(0.0, edge_margin),
         )
     return floor
 

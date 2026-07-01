@@ -886,11 +886,11 @@ def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
     assert selected is high_confidence_yes
 
 
-def test_select_roi_frontier_keeps_live_small_edge_yes(monkeypatch):
-    """Live qkernel must not stall when a small YES has positive edge and profit LCB."""
+def test_select_roi_frontier_rejects_six_cent_yes_with_barely_positive_safe_q(monkeypatch):
+    """A 6c YES needs more than a barely-positive q_lcb edge to avoid tail punts."""
     case = _case()
     space = _outcome_space(case)
-    live_yes = _hand_decision(
+    barely_positive_yes = _hand_decision(
         _hand_route(space, side="YES", bin_id="b25", cost=0.06),
         edge_lcb=0.01770,
         optimal_delta_u=0.000189,
@@ -899,14 +899,36 @@ def test_select_roi_frontier_keeps_live_small_edge_yes(monkeypatch):
         optimal_stake_usd=Decimal("1.559569057373046875"),
         payoff_q_lcb=0.07770,
     )
-    thin_tail = _hand_decision(
-        _hand_route(space, side="YES", bin_id="b24", cost=0.005),
-        edge_lcb=0.005,
-        optimal_delta_u=0.01,
-        delta_u_at_min=0.001,
-        robust_trade_score=0.10,
-        optimal_stake_usd=Decimal("1.50"),
-        payoff_q_lcb=0.010,
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([barely_positive_yes])
+
+    assert engine._profit_lcb_usd(barely_positive_yes) > 0.25
+    assert engine._payoff_q_lcb(barely_positive_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.06,
+    )
+    assert engine._roi_frontier_useful(barely_positive_yes) is False
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
+    """A cheap center YES remains live when its q_lcb clears the continuous margin."""
+    case = _case()
+    space = _outcome_space(case)
+    strong_center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.07),
+        edge_lcb=0.11,
+        optimal_delta_u=0.0025,
+        delta_u_at_min=0.0002,
+        robust_trade_score=0.11,
+        optimal_stake_usd=Decimal("2.50"),
+        payoff_q_lcb=0.18,
     )
 
     engine = FamilyDecisionEngine(
@@ -914,15 +936,15 @@ def test_select_roi_frontier_keeps_live_small_edge_yes(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
-    selected, reason = engine._select([thin_tail, live_yes])
+    selected, reason = engine._select([strong_center_yes])
 
-    assert engine._profit_lcb_usd(live_yes) > 0.25
-    assert 0.0025 <= engine._robust_kelly_growth_density(live_yes) < 0.01
-    assert engine._payoff_q_lcb(live_yes) >= 0.02
-    assert engine._roi_frontier_useful(live_yes) is True
-    assert engine._roi_frontier_useful(thin_tail) is False
+    assert engine._payoff_q_lcb(strong_center_yes) >= fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.07,
+    )
+    assert engine._roi_frontier_useful(strong_center_yes) is True
     assert reason is None
-    assert selected is live_yes
+    assert selected is strong_center_yes
 
 
 def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):

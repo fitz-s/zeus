@@ -2728,3 +2728,140 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def refresh_money_path_substrate_now(
+    *,
+    families: Iterable[tuple[str, str, str]],
+    condition_ids: Iterable[str] | None = None,
+    reason: str = "money_path_targeted_refresh",
+    refresh_budget_seconds: float | None = None,
+    snapshot_reserve_seconds: float | None = None,
+    include_money_risk_families: bool = False,
+) -> dict:
+    """Synchronously refresh the exact executable substrate needed by a money-path decision.
+
+    Broad warming remains sidecar-owned. This entry point is the producer-side
+    escape hatch for an already-selected live-money family whose current decision
+    would otherwise fail only because its executable book row is stale. It uses the
+    same cross-process substrate lock and snapshot writer as the sidecar priority
+    lane, then returns the actual refresh summary to the consumer.
+    """
+
+    clean_families = {
+        (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        for city, target_date, metric in (families or ())
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    clean_condition_ids = {
+        str(condition_id or "").strip()
+        for condition_id in (condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not clean_families and not clean_condition_ids:
+        return {
+            "status": "no_money_path_refresh_scope",
+            "reason": str(reason or ""),
+            "families_requested": 0,
+            "condition_ids_requested": 0,
+        }
+
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        return {
+            "status": "inline_skipped_in_process_lock_busy",
+            "reason": str(reason or ""),
+            "families_requested": len(clean_families),
+            "condition_ids_requested": len(clean_condition_ids),
+        }
+
+    process_lock_ctx = None
+    world_conn = None
+    forecasts_conn = None
+    try:
+        from src.data.dual_run_lock import acquire_lock
+
+        process_lock_ctx = acquire_lock("market_substrate_refresh")
+        substrate_process_acquired = process_lock_ctx.__enter__()
+        if not substrate_process_acquired:
+            return {
+                "status": "inline_skipped_cross_process_lock_busy",
+                "reason": str(reason or ""),
+                "families_requested": len(clean_families),
+                "condition_ids_requested": len(clean_condition_ids),
+            }
+
+        from src.state.db import (
+            ZEUS_FORECASTS_DB_PATH,
+            get_forecasts_connection_read_only,
+            get_world_connection,
+        )
+
+        world_conn = get_world_connection()
+        try:
+            attached = {row[1] for row in world_conn.execute("PRAGMA database_list").fetchall()}
+            if "forecasts" not in attached:
+                world_conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except Exception as attach_exc:  # noqa: BLE001
+            logger.warning(
+                "money-path substrate inline refresh: ATTACH forecasts failed "
+                "(continuing with direct forecasts connection): %r",
+                attach_exc,
+            )
+        forecasts_conn = get_forecasts_connection_read_only()
+        summary = _refresh_pending_family_snapshots(
+            world_conn,
+            forecasts_conn,
+            extra_priority_families=clean_families,
+            include_pending_families=False,
+            priority_condition_ids=clean_condition_ids,
+            refresh_budget_seconds=refresh_budget_seconds,
+            snapshot_reserve_seconds=snapshot_reserve_seconds,
+            include_money_risk_families=include_money_risk_families,
+        )
+        out = dict(summary or {})
+        out.update(
+            {
+                "serviced_by": "inline_money_path_substrate_refresh",
+                "reason": str(reason or ""),
+                "families_requested": len(clean_families),
+                "condition_ids_requested": len(clean_condition_ids),
+            }
+        )
+        logger.info("money-path substrate inline refresh: %r", out)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("money-path substrate inline refresh failed: %s", exc, exc_info=True)
+        return {
+            "status": "inline_error",
+            "reason": str(reason or ""),
+            "error": str(exc),
+            "families_requested": len(clean_families),
+            "condition_ids_requested": len(clean_condition_ids),
+        }
+    finally:
+        if forecasts_conn is not None:
+            try:
+                forecasts_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if world_conn is not None:
+            try:
+                world_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if process_lock_ctx is not None:
+            try:
+                process_lock_ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass

@@ -7,6 +7,7 @@ class ReasonCode(str, Enum):
     MANUAL_KILL_FOR_LOSSES = "manual_kill_for_losses"
     EDGE_COMPRESSION = "edge_compression"
     EXECUTION_DECAY = "execution_decay"
+    RISKGUARD_ACTION = "riskguard_action"
     OPERATOR_OVERRIDE = "operator_override"
     PHASE_1_CANARY_RESTRICTION = "phase_1_canary_restriction"
     UNSPECIFIED = "unspecified"

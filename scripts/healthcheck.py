@@ -161,12 +161,13 @@ def _forecast_db_path() -> Path:
 
 
 def _scheduler_business_liveness_status() -> dict:
-    """Expose per-mode money-path progress from scheduler health.
+    """Expose money-path progress from current scheduler health.
 
-    ``status_summary.json`` can be a pulse-only artifact between trading cycles.
-    The per-mode scheduler surface is the durable place where run-mode
-    liveness records candidates, final intents, submit attempts, and terminal
-    frontier class for each mode.
+    Legacy ``run_mode:*`` rows are still useful for pre-EDLI daemons, but the
+    current live money path is ``edli_event_reactor``. Treating stale
+    ``run_mode:day0_capture`` as the Day0 authority in EDLI mode is misleading:
+    Day0 now enters through the shared EDLI reactor and the composite
+    ``day0_decision_trace`` surface.
     """
 
     path = _scheduler_health_path()
@@ -195,7 +196,23 @@ def _scheduler_business_liveness_status() -> dict:
             "modes": {},
         }
     modes: dict[str, dict] = {}
+    edli_reactor: dict[str, object] | None = None
     for key, entry in payload.items():
+        if key == "edli_event_reactor" and isinstance(entry, dict):
+            liveness = entry.get("business_liveness")
+            if not isinstance(liveness, dict):
+                liveness = {}
+            edli_reactor = {
+                "status": entry.get("status"),
+                "last_run_at": entry.get("last_run_at"),
+                "last_started_at": entry.get("last_started_at"),
+                "last_success_at": entry.get("last_success_at"),
+                "last_skip_at": entry.get("last_skip_at"),
+                "last_skip_reason": entry.get("last_skip_reason"),
+                "consecutive_skips": int(entry.get("consecutive_skips") or 0),
+                "business_liveness": dict(liveness),
+            }
+            continue
         if not isinstance(key, str) or not key.startswith("run_mode:"):
             continue
         if not isinstance(entry, dict):
@@ -214,14 +231,52 @@ def _scheduler_business_liveness_status() -> dict:
             "consecutive_skips": int(entry.get("consecutive_skips") or 0),
             "business_liveness": dict(liveness),
         }
-    if not modes:
+    if not modes and edli_reactor is None:
         return {
             "ok": False,
             "path": str(path),
-            "issue": "RUN_MODE_BUSINESS_LIVENESS_MISSING",
+            "issue": "SCHEDULER_BUSINESS_LIVENESS_MISSING",
             "modes": {},
+            "legacy_run_modes": {},
+            "edli_event_reactor": None,
+            "day0_decision_trace": _day0_decision_trace_status(),
         }
-    return {"ok": True, "path": str(path), "issue": None, "modes": modes}
+    return {
+        "ok": True,
+        "path": str(path),
+        "issue": None,
+        "modes": modes,
+        "legacy_run_modes": modes,
+        "edli_event_reactor": edli_reactor,
+        "day0_decision_trace": _day0_decision_trace_status(),
+    }
+
+
+def _day0_decision_trace_status() -> dict:
+    path = _live_health_composite_path()
+    if not path.exists():
+        return {"status": "missing_composite", "path": str(path)}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        return {"status": "composite_unparseable", "path": str(path), "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"status": "composite_not_object", "path": str(path)}
+    surfaces = payload.get("surfaces")
+    surface = surfaces.get("day0_decision_trace") if isinstance(surfaces, dict) else None
+    if not isinstance(surface, dict):
+        return {"status": "missing_surface", "path": str(path)}
+    return {
+        "status": "ok" if surface.get("ok") is not False else "degraded",
+        "ok": surface.get("ok"),
+        "issue": surface.get("issue"),
+        "recent_event_count": surface.get("recent_event_count"),
+        "processed_event_count": surface.get("processed_event_count"),
+        "traced_processed_event_count": surface.get("traced_processed_event_count"),
+        "missing_trace_count": surface.get("missing_trace_count"),
+        "lookback_seconds": surface.get("lookback_seconds"),
+        "path": str(path),
+    }
 
 
 def _riskguard_label() -> str:

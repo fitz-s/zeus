@@ -24,6 +24,7 @@ from src.control.control_plane import (
     is_entries_paused,
     recommended_autosafe_commands_from_status,
     recommended_commands_from_status,
+    refresh_control_state,
     review_required_commands_from_status,
     strategy_gates,
 )
@@ -1306,6 +1307,10 @@ def _get_execution_capability_status() -> dict:
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     generated_at = datetime.now(timezone.utc).isoformat()
+    try:
+        refresh_control_state()
+    except Exception as exc:  # noqa: BLE001 - status write must surface, not crash
+        logger.error("control_state_refresh_failed_before_status_write: %s", exc, exc_info=True)
     risk_details = _get_risk_details()
     riskguard_level = _get_risk_level()
     cycle_summary_from_prior = cycle_summary is None

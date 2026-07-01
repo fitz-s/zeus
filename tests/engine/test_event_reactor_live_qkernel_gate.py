@@ -380,6 +380,38 @@ def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_f
         )
 
 
+def test_live_entry_qkernel_gate_rejects_six_to_eight_cent_barely_positive_yes():
+    cert = _qkernel_cert()
+    cert.update(
+        route_id="DIRECT_YES:b67@proof",
+        candidate_id="YES:b67:DIRECT_YES:b67@proof",
+        bin_id="b67",
+        payoff_q_point=0.100000,
+        payoff_q_lcb=0.078120,
+        cost=0.067140,
+        edge_lcb=0.010980,
+        delta_u_at_min=0.000060,
+        optimal_stake_usd=7.05,
+        optimal_delta_u=0.000420,
+        selection_guard_q_safe=0.078120,
+    )
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "center_buy",
+                "candidate_bin_id": "b67",
+                "q_live": 0.100000,
+                "q_lcb_5pct": 0.078120,
+                "min_entry_price": 0.02,
+                "qkernel_execution_economics": cert,
+            }
+        )
+
+
 def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
     cert = _qkernel_cert()
     cert.update(delta_u_at_min=-0.01)

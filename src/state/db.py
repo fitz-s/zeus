@@ -11397,7 +11397,9 @@ def query_control_override_state(
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    if not _table_exists(conn, "control_overrides_history"):
+    control_overrides_ref = _control_overrides_authority_ref(conn)
+    risk_actions_ref = _strategy_risk_actions_authority_ref(conn)
+    if control_overrides_ref is None and risk_actions_ref is None:
         return {
             "status": "missing_table",
             "entries_paused": False,
@@ -11406,17 +11408,20 @@ def query_control_override_state(
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    rows = conn.execute(
-        """
-        SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
-        FROM control_overrides
-        WHERE target_type IN ('global', 'strategy')
-          AND issued_at <= ?
-          AND (effective_until IS NULL OR effective_until > ?)
-        ORDER BY precedence DESC, issued_at DESC, override_id DESC
-        """,
-        (current_time, current_time),
-    ).fetchall()
+    if control_overrides_ref is None:
+        rows = []
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
+            FROM {control_overrides_ref}
+            WHERE target_type IN ('global', 'strategy')
+              AND issued_at <= ?
+              AND (effective_until IS NULL OR effective_until > ?)
+            ORDER BY precedence DESC, issued_at DESC, override_id DESC
+            """,
+            (current_time, current_time),
+        ).fetchall()
     entries_paused = False
     entries_pause_source = None
     entries_pause_reason = None
@@ -11472,6 +11477,37 @@ def query_control_override_state(
                 "gated_by": str(row["issued_by"] or "unknown"),
             }
             seen_strategy_gate.add(target_key)
+    if risk_actions_ref is not None:
+        action_rows = conn.execute(
+            f"""
+            SELECT action_id, strategy_key, action_type, value, issued_at, effective_until,
+                   reason, source, precedence, status
+            FROM {risk_actions_ref}
+            WHERE action_type = 'gate'
+              AND status = 'active'
+              AND issued_at <= ?
+              AND (effective_until IS NULL OR effective_until > ?)
+            ORDER BY precedence DESC, issued_at DESC, action_id DESC
+            """,
+            (current_time, current_time),
+        ).fetchall()
+        for row in action_rows:
+            target_key = str(row["strategy_key"] or "")
+            if not target_key or target_key in seen_strategy_gate:
+                continue
+            strategy_gates[target_key] = {
+                "enabled": not _parse_boolish_text(str(row["value"] or "")),
+                "reason_code": "riskguard_action",
+                "reason_snapshot": {
+                    "action_id": str(row["action_id"] or ""),
+                    "reason": str(row["reason"] or ""),
+                    "source": str(row["source"] or ""),
+                    "precedence": int(row["precedence"] or 0),
+                },
+                "gated_at": str(row["issued_at"] or ""),
+                "gated_by": f"auto:{str(row['source'] or 'risk_action')}",
+            }
+            seen_strategy_gate.add(target_key)
     return {
         "status": "ok",
         "entries_paused": entries_paused,
@@ -11480,6 +11516,67 @@ def query_control_override_state(
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }
+
+
+def _database_files_by_schema(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        try:
+            schema = str(row["name"] or "")
+            file_name = str(row["file"] or "")
+        except (KeyError, IndexError, TypeError):
+            schema = str(row[1] or "")
+            file_name = str(row[2] or "")
+        if schema:
+            out[schema] = file_name
+    return out
+
+
+def _schema_has_object(conn: sqlite3.Connection, schema: str, name: str) -> bool:
+    if not schema.replace("_", "").isalnum():
+        return False
+    try:
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM {schema}.sqlite_master
+            WHERE name = ?
+              AND type IN ('table', 'view')
+            LIMIT 1
+            """,
+            (name,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _control_overrides_authority_ref(conn: sqlite3.Connection) -> str | None:
+    databases = _database_files_by_schema(conn)
+    if _schema_has_object(conn, "world", "control_overrides"):
+        return "world.control_overrides"
+    main_file = Path(databases.get("main", "")).name
+    if main_file == "zeus_trades.db":
+        return None
+    if _schema_has_object(conn, "main", "control_overrides"):
+        return "control_overrides"
+    return None
+
+
+def _strategy_risk_actions_authority_ref(conn: sqlite3.Connection) -> str | None:
+    databases = _database_files_by_schema(conn)
+    if _schema_has_object(conn, "trades", "risk_actions"):
+        return "trades.risk_actions"
+    main_file = Path(databases.get("main", "")).name
+    if main_file == "zeus-world.db":
+        return None
+    if _schema_has_object(conn, "main", "risk_actions"):
+        return "risk_actions"
+    return None
 
 
 def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:

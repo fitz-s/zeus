@@ -688,16 +688,39 @@ def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     assert "family_snapshot_refresher=_reactor_family_snapshot_refresher" in cycle_src
 
 
-def test_decision_refresher_delegates_scoped_priority_to_sidecar(monkeypatch):
-    """Selected-row stale handling must not run substrate producer I/O inline."""
+def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeypatch):
+    """Selected-row stale handling refreshes exact substrate without owning producer code."""
 
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     assert "mark_money_path_substrate_priority(" in refresh_src
+    assert "refresh_money_path_substrate_now(" in refresh_src
     assert "_edli_money_path_substrate_priority_cycle()" not in refresh_src
     assert "refresh_executable_market_substrate_snapshots(" not in refresh_src
     assert "get_trade_connection" not in refresh_src
     assert "PolymarketClient" not in refresh_src
     assert "acquire_lock(\"market_substrate_refresh\")" not in refresh_src
+
+    import src.data.substrate_observer as substrate_observer_module
+    import src.data.substrate_priority as substrate_priority
+
+    marked: list[dict] = []
+    refreshed: list[dict] = []
+
+    def _mark(**kwargs):
+        marked.append(kwargs)
+
+    def _refresh_now(**kwargs):
+        refreshed.append(kwargs)
+        return {"status": "refreshed", "inserted": 2}
+
+    def _fresh_scope(scope, *, now_utc):
+        assert now_utc.tzinfo is not None
+        assert scope == {("Paris", "2026-06-20", "low"): {"cond-1"}}
+        return {("Paris", "2026-06-20", "low")}
+
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(substrate_observer_module, "refresh_money_path_substrate_now", _refresh_now)
+    monkeypatch.setattr(main_module, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
 
     refresher = main_module._edli_decision_family_snapshot_refresher(None)
     assert refresher(
@@ -705,7 +728,26 @@ def test_decision_refresher_delegates_scoped_priority_to_sidecar(monkeypatch):
         target_date="2026-06-20",
         metric="low",
         condition_ids=("cond-1",),
-    ) is False
+    ) is True
+    assert marked == [
+        {
+            "reason": "decision_triggered_targeted_refresh",
+            "ttl_seconds": 45.0,
+            "families": [("Paris", "2026-06-20", "low")],
+            "condition_ids": ("cond-1",),
+            "merge_existing": True,
+        }
+    ]
+    assert refreshed == [
+        {
+            "families": [("Paris", "2026-06-20", "low")],
+            "condition_ids": ("cond-1",),
+            "reason": "decision_triggered_targeted_refresh",
+            "refresh_budget_seconds": 8.0,
+            "snapshot_reserve_seconds": 2.0,
+            "include_money_risk_families": False,
+        }
+    ]
 
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
@@ -2125,14 +2167,18 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    producer_src = inspect.getsource(substrate_observer.refresh_money_path_substrate_now)
 
     assert 'reason="edli_event_reactor_cycle"' not in cycle_src
     assert "clear_money_path_substrate_priority(" not in cycle_src
     assert "mark_money_path_substrate_priority(" in refresh_src
+    assert "refresh_money_path_substrate_now(" in refresh_src
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
     assert "families=[family]" in refresh_src
     assert "condition_ids=condition_ids" in refresh_src
     assert "merge_existing=True" in refresh_src
+    assert 'acquire_lock("market_substrate_refresh")' in producer_src
+    assert "_refresh_pending_family_snapshots(" in producer_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
     assert "families=clean_families" in confirm_src

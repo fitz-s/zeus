@@ -18,6 +18,7 @@ from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
     get_world_connection,
+    get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
 )
@@ -511,7 +512,7 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_world_connection()
+        conn = get_world_connection_with_trades_required()
         durable_state = query_control_override_state(conn)
         _refresh_live_allowed_strategy_cache(conn)
     except Exception:
