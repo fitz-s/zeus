@@ -109,11 +109,13 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
                 "started_at": cycle_time,
                 "completed_at": cycle_time,
                 "candidates": 1,
-                "entry_orders_submitted": 0,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "venue_acks": 1,
                 "trades": 0,
                 "exits": 0,
-                "no_trades": 1,
-                "top_no_trade_reasons": {"EDGE_INSUFFICIENT": 1},
+                "no_trades": 0,
+                "top_no_trade_reasons": {},
                 "command_recovery": {"scanned": 0, "advanced": 0},
                 "chain_sync": {"synced": 0},
             },
@@ -788,6 +790,21 @@ def test_loaded_sha_mismatch_yields_degraded_even_when_heartbeat_is_fresh(tmp_pa
     assert "runtime_code" in result["failing_surfaces"]
     assert result["surfaces"]["runtime_code"]["ok"] is False
     assert result["surfaces"]["runtime_code"]["issue"].startswith("LOADED_SHA_MISMATCH")
+
+
+def test_loaded_sha_invalid_shape_yields_degraded(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "loaded_sha.json",
+        {"loaded_sha": "abc123", "generated_at": _now_iso(-10)},
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["runtime_code"]["issue"] == "LOADED_SHA_INVALID:loaded=abc123"
 
 
 def test_status_summary_dead_main_pid_yields_degraded(

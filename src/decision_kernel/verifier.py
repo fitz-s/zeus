@@ -807,7 +807,7 @@ def _verify_pre_submit_revalidation_for_command(
         min_submit_edge_density,
         floors["min_submit_edge_density"],
     )
-    if _entry_floor_applies(pre_submit) and limit_price <= effective_min_entry_price + 1e-12:
+    if _entry_floor_applies(pre_submit) and limit_price + 1e-12 < effective_min_entry_price:
         raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
     if size <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation size must be positive")
@@ -895,7 +895,7 @@ def _verify_final_intent_payload(
             limit_price=limit_price,
         )
         effective_min_entry_price = floor_decision.effective_min_entry_price
-        if limit_price <= effective_min_entry_price + 1e-12:
+        if limit_price + 1e-12 < effective_min_entry_price:
             raise CertificateVerificationError("final intent limit_price below strategy entry floor")
     # Integrity guard (NOT a cap): the order notional must not exceed the
     # Kelly-sized notional that was reserved for this event. This runs
@@ -1005,7 +1005,7 @@ def _verify_executor_expressibility_payload(
             limit_price=limit_price,
         )
         effective_min_entry_price = floor_decision.effective_min_entry_price
-        if limit_price <= effective_min_entry_price + 1e-12:
+        if limit_price + 1e-12 < effective_min_entry_price:
             raise CertificateVerificationError("executor expressibility limit_price below strategy entry floor")
     if size < min_order_size:
         raise CertificateVerificationError("executor expressibility size below min_order_size")

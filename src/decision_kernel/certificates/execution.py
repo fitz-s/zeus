@@ -105,7 +105,7 @@ def build_final_intent_certificate_from_actionable(
             limit_price=limit_price,
         )
         effective_entry_floor = floor_decision.effective_min_entry_price
-        if limit_price <= effective_entry_floor + 1e-12:
+        if limit_price + 1e-12 < effective_entry_floor:
             raise ValueError(
                 "CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
                 f" limit_price={limit_price!r}"

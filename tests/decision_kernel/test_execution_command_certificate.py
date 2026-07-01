@@ -446,6 +446,19 @@ def test_final_intent_rejects_price_below_current_live_entry_floor():
         verify_final_intent(final_intent, parents)
 
 
+def test_final_intent_allows_price_equal_current_live_entry_floor():
+    parents, final_intent = final_intent_graph(
+        final_payload={
+            "limit_price": 0.10,
+            "min_entry_price": 0.10,
+            "notional_usd": 1.0,
+            "selection_authority_applied": None,
+        }
+    )
+
+    verify_final_intent(final_intent, parents)
+
+
 def test_final_intent_notional_must_not_exceed_reserved_integrity_guard():
     # PRESERVED guarantee (NOT a cap): the order notional must never exceed the
     # Kelly-sized notional that was reserved for this event. This integrity guard
@@ -590,6 +603,19 @@ def test_executor_expressibility_rejects_price_below_final_intent_live_floor():
         verify_executor_expressibility(expressibility, parents)
 
 
+def test_executor_expressibility_allows_price_equal_final_intent_live_floor():
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={
+            "limit_price": 0.10,
+            "min_entry_price": 0.10,
+            "notional_usd": 1.0,
+            "selection_authority_applied": None,
+        }
+    )
+
+    verify_executor_expressibility(expressibility, parents)
+
+
 def test_executor_expressibility_rejects_neg_risk_mismatch():
     parents, expressibility = executor_expressibility_graph(
         express_payload={"neg_risk": True},
@@ -671,6 +697,25 @@ def test_final_intent_builder_rejects_entry_price_below_current_live_floor():
                 },
             }
         )
+
+
+def test_final_intent_builder_allows_price_equal_current_live_floor():
+    actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "c_fee_adjusted": 0.10,
+            "c_cost_95pct": 0.10,
+            "q_lcb_5pct": 0.40,
+            "trade_score": 0.30,
+            "action_score": 0.30,
+            "kelly_size_usd": 1.0,
+            "min_entry_price": 0.10,
+            "selection_authority_applied": None,
+            "qkernel_execution_economics": None,
+        }
+    )
+
+    assert final_intent.payload["limit_price"] == pytest.approx(0.10)
+    assert final_intent.payload["min_entry_price"] == pytest.approx(0.10)
 
 
 def test_final_intent_builder_allows_center_buy_yes_above_micro_tail_floor():

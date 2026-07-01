@@ -7303,7 +7303,7 @@ def _build_event_bound_taker_quality_proof(
         and taker_expected_profit_usd >= required_profit
         and model_confidence >= min_model_confidence
     )
-    entry_price_floor_pass = bool(touch_dec > effective_min_entry_price)
+    entry_price_floor_pass = bool(touch_dec + Decimal("1e-12") >= effective_min_entry_price)
     strategy_quality_floor_pass = bool(
         entry_price_floor_pass
         and taker_expected_profit_usd >= min_expected_profit

@@ -136,6 +136,41 @@ def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
+def test_entry_economics_allows_exact_strategy_floor_for_day0_authority():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.10,
+            q_live=0.50,
+            q_lcb_5pct=0.20,
+            expected_edge=0.10,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.50,
+            min_submit_edge_density=0.05,
+            selection_authority_applied=None,
+            qkernel_execution_economics=None,
+        ),
+        shares=10.0,
+        actionable_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "strategy_key": "center_buy",
+            "direction": "buy_yes",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        },
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["limit_price"] == pytest.approx(0.10)
+    assert verdict["details"]["effective_min_entry_price"] == pytest.approx(0.10)
+    assert verdict["details"]["probability_authority"] == "day0_observation_authority"
+
+
 def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     verdict = _entry_economics_component(
         _intent(

@@ -170,6 +170,8 @@ def _check_loaded_sha(expected_sha: str, loaded_sha_file: Path | None) -> GateRe
                 FAIL,
                 f"expected_sha_unavailable:{type(exc).__name__}:{exc}",
             )
+    if not _is_full_git_sha(expected):
+        return GateResult("loaded_sha", FAIL, f"invalid_expected_sha:{expected}")
     payload = _json_load(loaded_sha_file) if loaded_sha_file else {}
     loaded = (
         payload.get("loaded_sha")
@@ -179,8 +181,15 @@ def _check_loaded_sha(expected_sha: str, loaded_sha_file: Path | None) -> GateRe
     )
     if not loaded:
         return GateResult("loaded_sha", FAIL, "missing_loaded_sha")
+    if not _is_full_git_sha(loaded):
+        return GateResult("loaded_sha", FAIL, f"invalid_loaded_sha:{loaded}")
     status = PASS if str(loaded).strip() == expected else FAIL
     return GateResult("loaded_sha", status, f"loaded={loaded} expected={expected}")
+
+
+def _is_full_git_sha(value: object) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in text)
 
 
 _CANONICAL_WORLD_TABLES = frozenset({

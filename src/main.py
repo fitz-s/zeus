@@ -337,6 +337,11 @@ REQUIRED_STAGE_FILES_BY_MODE = {
 _BOOT_STATE: dict = {"sha": None, "ts": None}
 
 
+def _is_full_git_sha(value: object) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in text)
+
+
 @dataclass(frozen=True)
 class EdliStageReadiness:
     stage: str
@@ -1074,10 +1079,14 @@ def _edli_stage_loaded_sha_reasons(path: str) -> list[str]:
         return [f"EDLI_STAGE_LOADED_SHA_INVALID_JSON:{path}"]
     loaded_sha = str(payload.get("loaded_sha") or payload.get("boot_sha") or payload.get("current_sha") or "").strip()
     expected_sha = str(_BOOT_STATE.get("sha") or "").strip()
-    if expected_sha and loaded_sha and loaded_sha != expected_sha:
-        return [f"EDLI_STAGE_LOADED_SHA_MISMATCH:loaded={loaded_sha}:expected={expected_sha}"]
     if not loaded_sha:
         return ["EDLI_STAGE_LOADED_SHA_MISSING_VALUE"]
+    if not _is_full_git_sha(loaded_sha):
+        return [f"EDLI_STAGE_LOADED_SHA_INVALID_VALUE:{loaded_sha}"]
+    if expected_sha and not _is_full_git_sha(expected_sha):
+        return [f"EDLI_STAGE_EXPECTED_SHA_INVALID_VALUE:{expected_sha}"]
+    if expected_sha and loaded_sha and loaded_sha != expected_sha:
+        return [f"EDLI_STAGE_LOADED_SHA_MISMATCH:loaded={loaded_sha}:expected={expected_sha}"]
     return []
 
 
@@ -3002,6 +3011,12 @@ def _write_loaded_sha_state(boot_sha: str | None) -> None:
         logger.warning(
             "loaded_sha: boot SHA unavailable (ZEUS_ACCEPT_STALE_DEPLOY override?); "
             "skipping state/loaded_sha.json write — release gate will read missing_loaded_sha"
+        )
+        return
+    if not _is_full_git_sha(boot_sha):
+        logger.error(
+            "loaded_sha: refusing to write invalid boot SHA %r — release gate will fail closed",
+            boot_sha,
         )
         return
     from src.config import state_path

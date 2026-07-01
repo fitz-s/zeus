@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -38,6 +39,10 @@ from pathlib import Path
 
 import pytest
 import src.data.substrate_observer as substrate_observer
+
+
+def _test_git_sha() -> str:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
 def test_edli_online_config_defaults_inert_under_legacy_cron():
@@ -873,13 +878,14 @@ def test_edli_live_readiness_boot_defers_self_written_status_summary_staleness(m
     db_path = tmp_path / "world.db"
     _init_stage_world_db(db_path).close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
-    monkeypatch.setitem(main._BOOT_STATE, "sha", "abc123")
+    sha = _test_git_sha()
+    monkeypatch.setitem(main._BOOT_STATE, "sha", sha)
     loaded = tmp_path / "loaded_sha.json"
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = datetime.now(timezone.utc)
     promotion = tmp_path / "promotion.json"
-    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    loaded.write_text(json.dumps({"loaded_sha": sha}))
     source.write_text(json.dumps({"generated_at": now.isoformat()}))
     status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
     promotion.write_text(json.dumps({"ok": True}))
@@ -1126,7 +1132,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
-    monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": _test_git_sha(), "ts": None})
     monkeypatch.setattr(main, "_write_loaded_sha_state", lambda _sha: None)
     monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
     monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
@@ -1207,7 +1213,7 @@ def _stage_evidence_updates(tmp_path):
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = "2026-05-26T12:00:00+00:00"
-    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    loaded.write_text(json.dumps({"loaded_sha": _test_git_sha()}))
     source.write_text(json.dumps({"generated_at": now}))
     status.write_text(json.dumps({"generated_at": now}))
     return {

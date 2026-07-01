@@ -564,6 +564,38 @@ def test_pre_submit_rejects_lucknow_negative_submit_edge():
         )
 
 
+def test_pre_submit_allows_exact_strategy_entry_floor_for_day0_authority():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    event = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_day0_pre_submit_payload(
+            limit_price=0.10,
+            q_live=0.50,
+            q_lcb_5pct=0.20,
+            expected_edge=0.10,
+            size=10.0,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.50,
+            min_submit_edge_density=0.05,
+            current_best_bid=0.09,
+            current_best_ask=0.11,
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    assert event.event_type == "PreSubmitRevalidated"
+
+
 def test_pre_submit_rejects_weak_qkernel_without_selection_guard():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(

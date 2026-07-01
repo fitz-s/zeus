@@ -23,6 +23,8 @@ import src.config as zeus_config
 import src.main as zeus_main
 from src.main import _assert_edli_stage_readiness
 
+_VALID_TEST_SHA = "a" * 40
+
 
 def _empty_world_conn():
     """In-memory SQLite with the tables _assert_edli_stage_readiness probes."""
@@ -65,6 +67,15 @@ def test_live_boot_blocks_on_absent_stage_surfaces(tmp_path):
         _assert_edli_stage_readiness(live_cfg)
 
 
+def test_live_stage_loaded_sha_rejects_test_shape(tmp_path):
+    loaded = tmp_path / "loaded_sha.json"
+    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+
+    reasons = zeus_main._edli_stage_loaded_sha_reasons(str(loaded))
+
+    assert reasons == ["EDLI_STAGE_LOADED_SHA_INVALID_VALUE:abc123"]
+
+
 def test_live_stage_relative_state_paths_resolve_against_runtime_root(tmp_path, monkeypatch):
     """Relative state/* stage surfaces must use ZEUS_PRIMARY_ROOT state, not cwd.
 
@@ -75,13 +86,13 @@ def test_live_stage_relative_state_paths_resolve_against_runtime_root(tmp_path, 
     runtime_state = tmp_path / "runtime" / "state"
     runtime_state.mkdir(parents=True)
     now = datetime.now(timezone.utc).isoformat()
-    (runtime_state / "loaded_sha.json").write_text(json.dumps({"loaded_sha": "abc123", "generated_at": now}))
+    (runtime_state / "loaded_sha.json").write_text(json.dumps({"loaded_sha": _VALID_TEST_SHA, "generated_at": now}))
     (runtime_state / "source_health.json").write_text(json.dumps({"generated_at": now, "sources": {}}))
     (runtime_state / "status_summary.json").write_text(json.dumps({"generated_at": now}))
 
     monkeypatch.setattr(zeus_config, "RUNTIME_ROOT", tmp_path / "runtime")
     monkeypatch.setattr(zeus_config, "STATE_DIR", runtime_state)
-    monkeypatch.setitem(zeus_main._BOOT_STATE, "sha", "abc123")
+    monkeypatch.setitem(zeus_main._BOOT_STATE, "sha", _VALID_TEST_SHA)
 
     result = _assert_edli_stage_readiness(
         {

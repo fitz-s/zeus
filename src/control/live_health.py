@@ -85,6 +85,12 @@ def _runtime_code_surface(state_dir: Path) -> dict:
     ).strip()
     if not loaded_sha:
         return {"ok": False, "issue": "LOADED_SHA_EMPTY", "loaded_sha": loaded_sha}
+    if not _is_full_git_sha(loaded_sha):
+        return {
+            "ok": False,
+            "issue": f"LOADED_SHA_INVALID:loaded={loaded_sha}",
+            "loaded_sha": loaded_sha,
+        }
     current_sha = _current_git_head()
     if not current_sha:
         return {
@@ -105,6 +111,11 @@ def _runtime_code_surface(state_dir: Path) -> dict:
         "loaded_sha": loaded_sha,
         "current_sha": current_sha,
     }
+
+
+def _is_full_git_sha(value: object) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in text)
 
 
 def _int_or_none(value: object) -> int | None:

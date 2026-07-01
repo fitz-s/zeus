@@ -113,6 +113,36 @@ def test_center_buy_taker_quality_preserves_declared_floor_above_registry(monkey
     assert proof["entry_price_floor_applies"] == "True"
 
 
+def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.40",
+        q_lcb_5pct="0.40",
+        kelly_size_usd="10.0",
+        min_entry_price="0.10",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+        selection_authority_applied=None,
+        qkernel_execution_economics=None,
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.09,
+        fresh_best_ask=0.10,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is True
+    assert proof["entry_price_floor_pass"] == "True"
+    assert float(proof["effective_min_entry_price"]) == pytest.approx(0.10)
+
+
 def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(monkeypatch):
     _patch(monkeypatch, _bound())
     payload = dict(
