@@ -137,11 +137,11 @@ def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(mo
             "side": "YES",
             "payoff_q_point": 0.30,
             "payoff_q_lcb": 0.30,
-            "edge_lcb": 0.23,
+            "edge_lcb": 0.26,
             "delta_u_at_min": 0.01,
             "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.02,
-            "cost": 0.07,
+            "cost": 0.04,
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
@@ -154,13 +154,15 @@ def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(mo
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload,
         order_mode="TAKER",
-        fresh_best_bid=0.06,
-        fresh_best_ask=0.07,
+        fresh_best_bid=0.03,
+        fresh_best_ask=0.04,
     )
 
     assert proof is not None
     assert proof["passed"] is True
     assert proof["entry_price_floor_applies"] == "False"
     assert proof["entry_price_floor_pass"] == "True"
+    assert proof["effective_min_entry_price"] == "0.0"
+    assert proof["qkernel_low_price_floor_authorized"] == "True"
     assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
     assert proof["min_entry_price"] == "0.05"

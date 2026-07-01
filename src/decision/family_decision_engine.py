@@ -246,6 +246,15 @@ _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
 _ROI_FRONTIER_LOW_PRICE_YES_COST_CEILING = 0.05
 _ROI_FRONTIER_LOW_PRICE_YES_MIN_PAYOFF_Q_LCB = 0.07
 _ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB = 0.04
+LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
+
+
+@dataclass(frozen=True)
+class EntryPriceFloorDecision:
+    live_min_entry_price: float
+    effective_min_entry_price: float
+    qkernel_low_price_floor_authorized: bool
 
 
 def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
@@ -271,6 +280,10 @@ def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
             float(cost) + float(_ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB),
         )
     return floor
+
+
+def roi_frontier_min_profit_lcb_usd() -> float:
+    return float(_ROI_FRONTIER_MIN_PROFIT_LCB_USD)
 
 
 def roi_frontier_growth_density(
@@ -333,6 +346,177 @@ def roi_frontier_useful_values(
                 payoff_q_lcb=payoff_q_lcb,
             )
         )
+    )
+
+
+def native_curve_side_for_direction(direction: object) -> str | None:
+    normalized = str(direction or "").strip().lower()
+    if normalized.endswith("_yes"):
+        return "YES"
+    if normalized.endswith("_no"):
+        return "NO"
+    return None
+
+
+def live_entry_min_price_floor(*, strategy_key: object, direction: object) -> float:
+    if (
+        str(strategy_key or "").strip() == "center_buy"
+        and str(direction or "").strip().lower() == "buy_yes"
+    ):
+        return float(CENTER_BUY_YES_MIN_ENTRY_PRICE)
+    return float(LIVE_ENTRY_MIN_ENTRY_PRICE)
+
+
+def _finite_submit_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
+def _qkernel_direct_route(economics: Mapping[str, object]) -> bool:
+    route_id = str(economics.get("route_id") or "").strip().upper()
+    route_type = str(economics.get("route_type") or "").strip().lower()
+    return bool(route_type == "direct" or route_id.startswith("DIRECT_"))
+
+
+def qkernel_direct_low_price_entry_authorized(
+    *,
+    strategy_key: object,
+    direction: object,
+    selection_authority_applied: object,
+    economics: Mapping[str, object] | None,
+    q_live: object,
+    q_lcb: object,
+    limit_price: object,
+) -> bool:
+    """Whether qkernel evidence may replace the static low-price entry floor.
+
+    This is deliberately narrower than "qkernel-selected": only a direct
+    center-buy YES leg with internally consistent payoff probabilities and a
+    useful ROI frontier can submit below the static/strategy entry floor. Cheap
+    YES is not banned; it must be proven by the same math that selected it.
+    """
+
+    direction_text = str(direction or "").strip().lower()
+    if str(strategy_key or "").strip() != "center_buy" or direction_text != "buy_yes":
+        return False
+    if str(selection_authority_applied or "").strip() != "qkernel_spine":
+        return False
+    if not isinstance(economics, Mapping):
+        return False
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return False
+    if not _qkernel_direct_route(economics):
+        return False
+    route = economics.get("route") if isinstance(economics.get("route"), Mapping) else {}
+    side = str(route.get("side") or economics.get("side") or "").strip().upper()
+    if side != "YES" or native_curve_side_for_direction(direction_text) != side:
+        return False
+    if economics.get("direction_law_ok") is not True:
+        return False
+    if economics.get("coherence_allows") is not True:
+        return False
+    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
+    if not selection_guard_basis or selection_guard_basis == "SIDE_NOT_ARMED":
+        return False
+    if economics.get("selection_guard_abstained") is not False:
+        return False
+    selection_guard_q_safe = _finite_submit_float(economics.get("selection_guard_q_safe"))
+    if selection_guard_q_safe is None or not (0.0 < selection_guard_q_safe <= 1.0):
+        return False
+
+    submit_q = _finite_submit_float(q_live)
+    submit_q_lcb = _finite_submit_float(q_lcb)
+    submit_price = _finite_submit_float(limit_price)
+    payoff_q_point = _finite_submit_float(economics.get("payoff_q_point"))
+    payoff_q_lcb = _finite_submit_float(economics.get("payoff_q_lcb"))
+    cost = _finite_submit_float(economics.get("cost"))
+    edge_lcb = _finite_submit_float(economics.get("edge_lcb"))
+    delta_u_at_min = _finite_submit_float(economics.get("delta_u_at_min"))
+    optimal_stake_usd = _finite_submit_float(economics.get("optimal_stake_usd"))
+    if (
+        submit_q is None
+        or submit_q_lcb is None
+        or submit_price is None
+        or payoff_q_point is None
+        or payoff_q_lcb is None
+        or cost is None
+        or edge_lcb is None
+        or delta_u_at_min is None
+        or optimal_stake_usd is None
+    ):
+        return False
+    if not (0.0 <= submit_q_lcb <= submit_q <= 1.0):
+        return False
+    if submit_price <= 0.0 or submit_price >= 1.0:
+        return False
+    if cost <= 0.0 or cost >= 1.0:
+        return False
+    if submit_price > cost + 1e-6:
+        return False
+    if not math.isclose(payoff_q_point, submit_q, rel_tol=1e-9, abs_tol=1e-6):
+        return False
+    if not math.isclose(payoff_q_lcb, submit_q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        return False
+    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+        return False
+    if edge_lcb <= 0.0 or submit_q_lcb - submit_price <= 0.0:
+        return False
+    return roi_frontier_useful_values(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake_usd,
+        delta_u_at_min=delta_u_at_min,
+    )
+
+
+def entry_price_floor_decision(
+    *,
+    strategy_key: object,
+    direction: object,
+    declared_min_entry_price: object,
+    selection_authority_applied: object,
+    economics: Mapping[str, object] | None,
+    q_live: object,
+    q_lcb: object,
+    limit_price: object,
+) -> EntryPriceFloorDecision:
+    candidate_live_floor = live_entry_min_price_floor(
+        strategy_key=strategy_key,
+        direction=direction,
+    )
+    qkernel_floor_candidate = bool(
+        str(strategy_key or "").strip() == "center_buy"
+        and str(direction or "").strip().lower() == "buy_yes"
+        and str(selection_authority_applied or "").strip() == "qkernel_spine"
+        and isinstance(economics, Mapping)
+        and str(economics.get("source") or "").strip() == "qkernel_spine"
+    )
+    live_floor = (
+        candidate_live_floor if qkernel_floor_candidate else float(LIVE_ENTRY_MIN_ENTRY_PRICE)
+    )
+    declared_floor = _finite_submit_float(declared_min_entry_price)
+    if declared_floor is None:
+        declared_floor = 0.0
+    authorized = qkernel_direct_low_price_entry_authorized(
+        strategy_key=strategy_key,
+        direction=direction,
+        selection_authority_applied=selection_authority_applied,
+        economics=economics,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=limit_price,
+    )
+    return EntryPriceFloorDecision(
+        live_min_entry_price=live_floor,
+        effective_min_entry_price=0.0 if authorized else max(declared_floor, live_floor),
+        qkernel_low_price_floor_authorized=authorized,
     )
 
 

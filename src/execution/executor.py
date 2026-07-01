@@ -43,6 +43,10 @@ from src.contracts.execution_price import (
 )
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
+from src.decision.family_decision_engine import (
+    entry_price_floor_decision,
+    roi_frontier_useful_values,
+)
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
@@ -52,59 +56,6 @@ logger = logging.getLogger(__name__)
 
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
-_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
-_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
-
-
-def _qkernel_roi_frontier_useful(
-    *,
-    side: str | None,
-    cost: float,
-    payoff_q_lcb: float,
-    edge_lcb: float,
-    stake: float,
-    delta_u_at_min: float,
-) -> bool:
-    try:
-        from src.decision.family_decision_engine import roi_frontier_useful_values
-
-        return roi_frontier_useful_values(
-            side=side,
-            cost=cost,
-            payoff_q_lcb=payoff_q_lcb,
-            edge_lcb=edge_lcb,
-            stake=stake,
-            delta_u_at_min=delta_u_at_min,
-        )
-    except Exception:  # noqa: BLE001
-        min_q_lcb = 0.02
-        if (
-            str(side or "").strip().upper() == "YES"
-            and math.isfinite(cost)
-            and 0.0 < cost < 0.05
-        ):
-            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
-        profit_lcb_usd = (
-            stake * (edge_lcb / cost)
-            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
-            else float("-inf")
-        )
-        growth_density = (
-            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
-            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
-            else float("-inf")
-        )
-        return bool(
-            math.isfinite(stake)
-            and stake > 0.0
-            and math.isfinite(delta_u_at_min)
-            and delta_u_at_min > 0.0
-            and math.isfinite(payoff_q_lcb)
-            and payoff_q_lcb >= min_q_lcb
-            and math.isfinite(profit_lcb_usd)
-            and profit_lcb_usd >= 0.25
-            and math.isfinite(growth_density)
-        )
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -789,11 +740,36 @@ def _entry_economics_component(
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
-    live_min_entry_price = _live_entry_min_price_floor(intent, actionable_payload)
-    effective_min_entry_price = max(min_entry_price, live_min_entry_price)
+    strategy_key = ""
+    direction_for_floor = ""
+    if isinstance(actionable_payload, Mapping):
+        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+        direction_for_floor = str(actionable_payload.get("direction") or "").strip().lower()
+    if not strategy_key:
+        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
+    if not direction_for_floor:
+        direction_for_floor = str(getattr(intent, "direction", "") or "").strip().lower()
+    floor_decision = entry_price_floor_decision(
+        strategy_key=strategy_key,
+        direction=direction_for_floor,
+        declared_min_entry_price=min_entry_price,
+        selection_authority_applied=getattr(intent, "selection_authority_applied", ""),
+        economics=economics if isinstance(economics, Mapping) else None,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=limit_price,
+    )
+    live_min_entry_price = floor_decision.live_min_entry_price
+    effective_min_entry_price = floor_decision.effective_min_entry_price
+    qkernel_low_price_floor_authorized = (
+        floor_decision.qkernel_low_price_floor_authorized
+    )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif min_entry_price + 1e-12 < live_min_entry_price:
+    elif (
+        min_entry_price + 1e-12 < live_min_entry_price
+        and not qkernel_low_price_floor_authorized
+    ):
         reason = "min_entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
@@ -826,6 +802,8 @@ def _entry_economics_component(
             expected_profit_usd=expected_profit,
             min_entry_price=min_entry_price,
             live_min_entry_price=live_min_entry_price,
+            effective_min_entry_price=effective_min_entry_price,
+            qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -857,6 +835,8 @@ def _entry_economics_component(
             expected_profit_usd=expected_profit,
             min_entry_price=min_entry_price,
             live_min_entry_price=live_min_entry_price,
+            effective_min_entry_price=effective_min_entry_price,
+            qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -933,7 +913,7 @@ def _entry_economics_component(
         reason = "qkernel_direction_law_not_ok"
     elif economics.get("coherence_allows") is not True:
         reason = "qkernel_coherence_blocks"
-    elif not _qkernel_roi_frontier_useful(
+    elif not roi_frontier_useful_values(
         side=econ_side,
         cost=econ_cost,
         payoff_q_lcb=payoff_q_lcb,
@@ -992,6 +972,8 @@ def _entry_economics_component(
         expected_profit_usd=expected_profit,
         min_entry_price=min_entry_price,
         live_min_entry_price=live_min_entry_price,
+        effective_min_entry_price=effective_min_entry_price,
+        qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
         min_expected_profit_usd=min_expected_profit,
         live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         submit_edge_density=edge_density,
@@ -1004,26 +986,6 @@ def _entry_economics_component(
         qkernel_edge_lcb=econ_edge_lcb,
         qkernel_false_edge_rate=econ_false_edge_rate,
     )
-
-
-def _live_entry_min_price_floor(
-    intent: ExecutionIntent,
-    actionable_payload: Mapping[str, Any] | None,
-) -> float:
-    strategy_key = ""
-    direction = ""
-    if isinstance(actionable_payload, Mapping):
-        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
-        direction = str(actionable_payload.get("direction") or "").strip().lower()
-    if not strategy_key:
-        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
-    if not direction:
-        direction = str(getattr(intent, "direction", "") or "").strip().lower()
-    if strategy_key == "center_buy" and direction == "buy_yes":
-        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
-    return _LIVE_ENTRY_MIN_ENTRY_PRICE
-
-
 def _entry_actionable_certificate_payload_and_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,

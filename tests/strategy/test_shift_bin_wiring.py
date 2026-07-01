@@ -39,7 +39,8 @@ CREATE TABLE position_current (
     bin_label TEXT, direction TEXT, condition_id TEXT, city TEXT,
     target_date TEXT, temperature_metric TEXT, p_posterior REAL,
     entry_ci_width REAL, cost_basis_usd REAL, chain_cost_basis_usd REAL,
-    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
+    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT,
+    chain_state TEXT
 )
 """
 
@@ -95,6 +96,7 @@ def _insert_held(
     cost_basis_usd=4.0,
     chain_cost_basis_usd=None,
     chain_shares=10.0,
+    chain_state="synced",
     city="Tokyo",
     target_date="2026-06-23",
     metric="high",
@@ -104,12 +106,14 @@ def _insert_held(
         INSERT INTO position_current (
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
-            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares, size_usd, updated_at
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
         ) VALUES (?, ?, ?, ?, ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
-                  ?, '2026-06-22T06:00:00')
+                  ?, '2026-06-22T06:00:00', ?)
         """,
         (position_id, phase, token_id, no_token_id, bin_label, direction, city, target_date,
-         metric, cost_basis_usd, chain_cost_basis_usd, chain_shares, cost_basis_usd),
+         metric, cost_basis_usd, chain_cost_basis_usd, chain_shares, cost_basis_usd,
+         chain_state),
     )
 
 
@@ -201,7 +205,6 @@ def test_sibling_reads_attached_chain_backed_zero_cost_quarantine():
     conn.row_factory = sqlite3.Row
     conn.execute("ATTACH DATABASE ':memory:' AS trade")
     conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
-    conn.execute("ALTER TABLE trade.position_current ADD COLUMN chain_state TEXT")
     ensure_table(conn)
     conn.execute(
         """
@@ -421,9 +424,10 @@ def test_old_leg_residual_chain_zero_overrides_stale_local_projection():
     """Fresh CHAIN zero is closure truth even when local position_current is stale.
 
     This is the live redecision bug: after a sell/zero-collateral proof, the local
-    projection can still carry chain_shares/cost. Close-before-open must not keep
-    emitting EXIT_OLD_LEG from that stale row; otherwise the selected new YES/NO leg
-    never reaches final intent.
+    projection can still carry cost. Close-before-open must not keep emitting
+    EXIT_OLD_LEG from a row whose chain_state has already been marked zero; otherwise
+    the selected new YES/NO leg never reaches final intent. A positive synced
+    chain_shares row is different: it is current chain evidence and must stay live.
     """
     conn = _conn()
     _insert_held(
@@ -432,14 +436,67 @@ def test_old_leg_residual_chain_zero_overrides_stale_local_projection():
         cost_basis_usd=4.0,
         chain_cost_basis_usd=7.0,
         chain_shares=10.0,
+        chain_state="chain_confirmed_zero",
     )
     _insert_chain_collateral(conn, {})
 
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
 
 
+def test_old_leg_residual_keeps_synced_chain_position_over_collateral_zero():
+    """Regression for Kuala Lumpur 2026-07-02.
+
+    A fresh collateral snapshot that lacks the token is not allowed to erase an
+    active/synced position_current row with positive chain_shares. That false
+    zero made shift-bin think the 33C NO old leg was closed and admitted a new
+    34C YES entry in the same family.
+    """
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-33",
+        no_token_id="no-33",
+        bin_label="33C",
+        direction="buy_no",
+        cost_basis_usd=15.9313,
+        chain_cost_basis_usd=15.9313,
+        chain_shares=20.69,
+        chain_state="synced",
+        city="Kuala Lumpur",
+        target_date="2026-07-02",
+        metric="high",
+    )
+    _insert_chain_collateral(conn, {})
+
+    residual = sbw.read_old_leg_residual_usd(conn, token_id="no-33")
+
+    assert residual == pytest.approx(15.9313)
+
+
+def test_old_leg_residual_keeps_zero_cost_current_risk_chain_position():
+    """Current chain risk cannot disappear just because cost projection is zero."""
+
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        direction="buy_no",
+        cost_basis_usd=0.0,
+        chain_cost_basis_usd=0.0,
+        chain_shares=29.14,
+        chain_state="entry_authority_quarantined",
+    )
+    _insert_chain_collateral(conn, {})
+
+    residual = sbw.read_old_leg_residual_usd(conn, token_id="no-30")
+
+    assert residual == pytest.approx(29.14)
+
+
 def test_chain_zero_old_leg_admits_new_bin_under_shift_lease():
-    """Once chain collateral proves the old leg is zero, shift-bin admits new entry."""
+    """Once chain collateral and chain_state prove the old leg is zero, shift-bin admits new entry."""
     conn = _conn()
     _insert_held(
         conn,
@@ -449,6 +506,7 @@ def test_chain_zero_old_leg_admits_new_bin_under_shift_lease():
         cost_basis_usd=4.0,
         chain_cost_basis_usd=7.0,
         chain_shares=10.0,
+        chain_state="chain_confirmed_zero",
     )
     _insert_chain_collateral(conn, {})
     held = _old_leg(conn)

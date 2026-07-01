@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from src.decision.family_decision_engine import (
+    entry_price_floor_decision,
+    native_curve_side_for_direction,
+    roi_frontier_useful_values,
+)
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.events.day0_authority import (
     Day0AuthorityError,
@@ -15,61 +20,7 @@ from src.events.day0_authority import (
 )
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
 
-
-_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
-_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 _DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
-
-
-def _qkernel_roi_frontier_useful(
-    *,
-    side: str | None,
-    cost: float,
-    payoff_q_lcb: float,
-    edge_lcb: float,
-    stake: float,
-    delta_u_at_min: float,
-) -> bool:
-    try:
-        from src.decision.family_decision_engine import roi_frontier_useful_values
-
-        return roi_frontier_useful_values(
-            side=side,
-            cost=cost,
-            payoff_q_lcb=payoff_q_lcb,
-            edge_lcb=edge_lcb,
-            stake=stake,
-            delta_u_at_min=delta_u_at_min,
-        )
-    except Exception:  # noqa: BLE001
-        min_q_lcb = 0.02
-        if (
-            str(side or "").strip().upper() == "YES"
-            and math.isfinite(cost)
-            and 0.0 < cost < 0.05
-        ):
-            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
-        profit_lcb_usd = (
-            stake * (edge_lcb / cost)
-            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
-            else float("-inf")
-        )
-        growth_density = (
-            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
-            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
-            else float("-inf")
-        )
-        return bool(
-            math.isfinite(stake)
-            and stake > 0.0
-            and math.isfinite(delta_u_at_min)
-            and delta_u_at_min > 0.0
-            and math.isfinite(payoff_q_lcb)
-            and payoff_q_lcb >= min_q_lcb
-            and math.isfinite(profit_lcb_usd)
-            and profit_lcb_usd >= 0.25
-            and math.isfinite(growth_density)
-        )
 
 
 PRE_SUBMIT_REQUIRED_FIELDS = (
@@ -858,10 +809,25 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
-    live_min_entry_price = _live_entry_min_price_floor(payload)
-    if min_entry_price + 1e-12 < live_min_entry_price:
+    economics = payload.get("qkernel_execution_economics")
+    floor_decision = entry_price_floor_decision(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+        declared_min_entry_price=min_entry_price,
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        economics=economics if isinstance(economics, Mapping) else None,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=limit_price,
+    )
+    live_min_entry_price = floor_decision.live_min_entry_price
+    effective_min_entry_price = floor_decision.effective_min_entry_price
+    if (
+        min_entry_price + 1e-12 < live_min_entry_price
+        and not floor_decision.qkernel_low_price_floor_authorized
+    ):
         raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-    if limit_price + 1e-12 < max(min_entry_price, live_min_entry_price):
+    if limit_price + 1e-12 < effective_min_entry_price:
         raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
@@ -967,7 +933,7 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
             "PreSubmitRevalidated qkernel selection_guard_q_safe requires probability"
         )
     route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
-    native_side = _native_curve_side_for_direction(str(payload.get("direction") or ""))
+    native_side = native_curve_side_for_direction(str(payload.get("direction") or ""))
     qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
     if qkernel_side and native_side is not None and qkernel_side != native_side:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel side must match submit direction")
@@ -1008,7 +974,7 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     if expected_edge > edge_lcb + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
-    if not _qkernel_roi_frontier_useful(
+    if not roi_frontier_useful_values(
         side=qkernel_side,
         cost=cost,
         payoff_q_lcb=payoff_q_lcb,
@@ -1017,23 +983,6 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         delta_u_at_min=delta_u_at_min,
     ):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel roi frontier not useful")
-
-
-def _live_entry_min_price_floor(payload: Mapping[str, Any]) -> float:
-    strategy_key = str(payload.get("strategy_key") or "").strip()
-    direction = str(payload.get("direction") or "").strip().lower()
-    if strategy_key == "center_buy" and direction == "buy_yes":
-        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
-    return _LIVE_ENTRY_MIN_ENTRY_PRICE
-
-
-def _native_curve_side_for_direction(direction: str) -> str | None:
-    normalized = str(direction or "").strip().lower()
-    if normalized.endswith("_yes"):
-        return "YES"
-    if normalized.endswith("_no"):
-        return "NO"
-    return None
 
 
 def _non_negative_number(value: Any, name: str) -> float:

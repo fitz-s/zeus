@@ -755,6 +755,56 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
     )
 
 
+def test_pre_submit_accepts_direct_qkernel_yes_below_declared_floor_when_roi_clear():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(
+            strategy_key="center_buy",
+            q_live=0.82,
+            q_lcb_5pct=0.72,
+            limit_price=0.006,
+            expected_edge=0.714,
+            size=1497.78,
+            min_entry_price=0.10,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.05,
+            current_best_bid=0.001,
+            current_best_ask=0.007,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "route_id": "DIRECT_YES:b20@proof",
+                "route_type": "direct",
+                "side": "YES",
+                "payoff_q_point": 0.82,
+                "payoff_q_lcb": 0.72,
+                "cost": 0.006,
+                "edge_lcb": 0.714,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 1497.78,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.72,
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+
 def test_pre_submit_accepts_day0_observation_authority_without_qkernel():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(

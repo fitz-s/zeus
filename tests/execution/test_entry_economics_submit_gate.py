@@ -77,7 +77,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_blocks_low_price_even_when_qkernel_authority_and_profit_clear():
+def test_entry_economics_allows_direct_qkernel_low_price_yes_when_roi_clear():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -88,6 +88,8 @@ def test_entry_economics_blocks_low_price_even_when_qkernel_authority_and_profit
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
             qkernel_execution_economics=_econ(
+                route_id="DIRECT_YES:b20@proof",
+                route_type="direct",
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
                 cost=0.006,
@@ -96,11 +98,16 @@ def test_entry_economics_blocks_low_price_even_when_qkernel_authority_and_profit
             ),
         ),
         shares=1497.78,
+        actionable_payload={
+            "strategy_key": "center_buy",
+            "direction": "buy_yes",
+        },
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["live_min_entry_price"] == 0.10
+    assert verdict["allowed"] is True
+    assert verdict["details"]["live_min_entry_price"] == 0.02
+    assert verdict["details"]["effective_min_entry_price"] == 0.0
+    assert verdict["details"]["qkernel_low_price_floor_authorized"] is True
 
 
 def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():

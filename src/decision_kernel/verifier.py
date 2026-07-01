@@ -12,6 +12,12 @@ from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
+from src.decision.family_decision_engine import (
+    EntryPriceFloorDecision,
+    entry_price_floor_decision,
+    live_entry_min_price_floor,
+    native_curve_side_for_direction,
+)
 from src.events.day0_authority import (
     Day0AuthorityError,
     assert_live_day0_payload_authority,
@@ -113,8 +119,6 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
-_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
-_CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
@@ -468,7 +472,7 @@ def _verify_actionable_qkernel_economics(
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
     _verify_qkernel_selection_guard(economics, label="actionable qkernel")
-    native_side = _native_curve_side_for_direction(payload.get("direction"))
+    native_side = native_curve_side_for_direction(payload.get("direction"))
     qkernel_side = str(economics.get("side") or "").upper()
     if native_side is not None and qkernel_side != native_side:
         raise CertificateVerificationError("actionable qkernel side must match direction")
@@ -788,8 +792,13 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
     if expected_edge > submit_edge + 1e-6:
         raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
+    floor_decision = _entry_price_floor_decision_for_payload(
+        pre_submit,
+        declared_min_entry_price=min_entry_price,
+        limit_price=limit_price,
+    )
+    effective_min_entry_price = floor_decision.effective_min_entry_price
     floors = _effective_live_entry_quality_floors(pre_submit)
-    effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
     effective_min_expected_profit_usd = max(
         min_expected_profit_usd,
         floors["min_expected_profit_usd"],
@@ -880,8 +889,12 @@ def _verify_final_intent_payload(
         )
         if min_entry_price < 0.0:
             raise CertificateVerificationError("final intent min_entry_price must be non-negative")
-        floors = _effective_live_entry_quality_floors(payload)
-        effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
+        floor_decision = _entry_price_floor_decision_for_payload(
+            payload,
+            declared_min_entry_price=min_entry_price,
+            limit_price=limit_price,
+        )
+        effective_min_entry_price = floor_decision.effective_min_entry_price
         if limit_price <= effective_min_entry_price + 1e-12:
             raise CertificateVerificationError("final intent limit_price below strategy entry floor")
     # Integrity guard (NOT a cap): the order notional must not exceed the
@@ -986,8 +999,12 @@ def _verify_executor_expressibility_payload(
             final_intent.get("min_entry_price"),
             "final intent min_entry_price",
         )
-        floors = _effective_live_entry_quality_floors(final_intent)
-        effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
+        floor_decision = _entry_price_floor_decision_for_payload(
+            final_intent,
+            declared_min_entry_price=min_entry_price,
+            limit_price=limit_price,
+        )
+        effective_min_entry_price = floor_decision.effective_min_entry_price
         if limit_price <= effective_min_entry_price + 1e-12:
             raise CertificateVerificationError("executor expressibility limit_price below strategy entry floor")
     if size < min_order_size:
@@ -1470,12 +1487,38 @@ def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
     return floors
 
 
+def _entry_price_floor_decision_for_payload(
+    payload: dict,
+    *,
+    declared_min_entry_price: object,
+    limit_price: object,
+) -> EntryPriceFloorDecision:
+    floors = _effective_live_entry_quality_floors(payload)
+    try:
+        declared_floor = max(float(declared_min_entry_price), floors["min_entry_price"])
+    except (TypeError, ValueError):
+        declared_floor = floors["min_entry_price"]
+    return entry_price_floor_decision(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+        declared_min_entry_price=declared_floor,
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        economics=(
+            payload.get("qkernel_execution_economics")
+            if isinstance(payload.get("qkernel_execution_economics"), dict)
+            else None
+        ),
+        q_live=payload.get("q_live"),
+        q_lcb=payload.get("q_lcb_5pct"),
+        limit_price=limit_price,
+    )
+
+
 def _live_entry_min_price_floor(payload: dict) -> float:
-    strategy_key = str(payload.get("strategy_key") or "").strip()
-    direction = str(payload.get("direction") or "").strip().lower()
-    if strategy_key == "center_buy" and direction == "buy_yes":
-        return _CENTER_BUY_YES_MIN_ENTRY_PRICE
-    return _LIVE_ENTRY_MIN_ENTRY_PRICE
+    return live_entry_min_price_floor(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+    )
 
 
 def _probability_float(value: object, field_name: str) -> float:
@@ -1485,22 +1528,13 @@ def _probability_float(value: object, field_name: str) -> float:
     return parsed
 
 
-def _native_curve_side_for_direction(direction: object) -> str | None:
-    normalized = str(direction or "").strip().lower()
-    if normalized.endswith("_yes"):
-        return "YES"
-    if normalized.endswith("_no"):
-        return "NO"
-    return None
-
-
 def _qkernel_direction_admitted(economics: dict, *, direction: object) -> bool:
     if economics.get("direction_law_ok") is not True:
         return False
     side = str(economics.get("side") or "").strip().upper()
     if side not in {"YES", "NO"}:
         return False
-    native_side = _native_curve_side_for_direction(direction)
+    native_side = native_curve_side_for_direction(direction)
     if native_side is not None and side != native_side:
         return False
     return True
@@ -1547,7 +1581,7 @@ def _verify_pre_submit_qkernel_economics(
         return
     _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
     route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
-    native_side = _native_curve_side_for_direction(pre_submit.get("direction"))
+    native_side = native_curve_side_for_direction(pre_submit.get("direction"))
     qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
     if qkernel_side and native_side is not None and qkernel_side != native_side:
         raise CertificateVerificationError("pre-submit qkernel side must match submit direction")

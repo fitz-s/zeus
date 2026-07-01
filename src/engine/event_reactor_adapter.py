@@ -171,6 +171,14 @@ from src.contracts.native_side_candidate import (
     CandidateNoTradeReason,
     NativeSideCandidate,
 )
+from src.decision.family_decision_engine import (
+    entry_price_floor_decision,
+    roi_frontier_growth_density,
+    roi_frontier_min_payoff_q_lcb,
+    roi_frontier_min_profit_lcb_usd,
+    roi_frontier_profit_lcb_usd,
+    roi_frontier_useful_values,
+)
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, build_certificate
@@ -7064,7 +7072,6 @@ def _build_event_bound_taker_quality_proof(
     direction = str(actionable_payload.get("direction") or "")
     touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
     q_lcb_source = "q_lcb_5pct"
-    qkernel_authoritative_forecast_entry = False
     if actionable_payload.get("qkernel_execution_economics") is not None:
         # B3 (PR415, 2026-06-20) — MANDATORY authority stamp + STRICT selected-candidate
         # identity match BEFORE the qkernel payoff_q_lcb may drive the money-path taker
@@ -7209,12 +7216,6 @@ def _build_event_bound_taker_quality_proof(
                 "incremental_expected_profit_usd": "0",
             }
         q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
-        qkernel_authoritative_forecast_entry = (
-            str(actionable_payload.get("event_type") or "").strip()
-            in _FORECAST_DECISION_EVENT_TYPES
-            and str(actionable_payload.get("selection_authority_applied") or "").strip()
-            == "qkernel_spine"
-        )
     else:
         q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
@@ -7272,7 +7273,22 @@ def _build_event_bound_taker_quality_proof(
     min_model_confidence = Decimal(str(actionable_payload.get("min_taker_model_confidence") or "0.60"))
     min_profit_ratio = Decimal(str(actionable_payload.get("min_taker_profit_ratio") or "1.20"))
     live_quality_floors = _event_bound_effective_live_quality_floors(actionable_payload)
-    min_entry_price = Decimal(str(live_quality_floors["min_entry_price"]))
+    declared_min_entry_price = Decimal(str(live_quality_floors["min_entry_price"]))
+    floor_decision = entry_price_floor_decision(
+        strategy_key=actionable_payload.get("strategy_key"),
+        direction=actionable_payload.get("direction"),
+        declared_min_entry_price=declared_min_entry_price,
+        selection_authority_applied=actionable_payload.get("selection_authority_applied"),
+        economics=(
+            actionable_payload.get("qkernel_execution_economics")
+            if isinstance(actionable_payload.get("qkernel_execution_economics"), Mapping)
+            else None
+        ),
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=touch,
+    )
+    effective_min_entry_price = Decimal(str(floor_decision.effective_min_entry_price))
     min_expected_profit = Decimal(str(live_quality_floors["min_expected_profit_usd"]))
     min_submit_edge_density = Decimal(str(live_quality_floors["min_submit_edge_density"]))
     required_profit = max(
@@ -7287,7 +7303,7 @@ def _build_event_bound_taker_quality_proof(
         and taker_expected_profit_usd >= required_profit
         and model_confidence >= min_model_confidence
     )
-    entry_price_floor_pass = bool(qkernel_authoritative_forecast_entry or touch_dec > min_entry_price)
+    entry_price_floor_pass = bool(touch_dec > effective_min_entry_price)
     strategy_quality_floor_pass = bool(
         entry_price_floor_pass
         and taker_expected_profit_usd >= min_expected_profit
@@ -7324,8 +7340,14 @@ def _build_event_bound_taker_quality_proof(
         "min_taker_incremental_profit_usd": str(min_incremental_profit),
         "min_taker_model_confidence": str(min_model_confidence),
         "min_taker_profit_ratio": str(min_profit_ratio),
-        "min_entry_price": str(min_entry_price),
-        "entry_price_floor_applies": str(not qkernel_authoritative_forecast_entry),
+        "min_entry_price": str(declared_min_entry_price),
+        "effective_min_entry_price": str(effective_min_entry_price),
+        "qkernel_low_price_floor_authorized": str(
+            floor_decision.qkernel_low_price_floor_authorized
+        ),
+        "entry_price_floor_applies": str(
+            not floor_decision.qkernel_low_price_floor_authorized
+        ),
         "entry_price_floor_pass": str(entry_price_floor_pass),
         "min_expected_profit_usd": str(min_expected_profit),
         "min_submit_edge_density": str(min_submit_edge_density),
@@ -11529,46 +11551,14 @@ def _qkernel_roi_frontier_useful_cert(
     stake: float,
     delta_u_at_min: float,
 ) -> bool:
-    try:
-        from src.decision.family_decision_engine import roi_frontier_useful_values
-
-        return roi_frontier_useful_values(
-            side=side,
-            cost=cost,
-            payoff_q_lcb=payoff_q_lcb,
-            edge_lcb=edge_lcb,
-            stake=stake,
-            delta_u_at_min=delta_u_at_min,
-        )
-    except Exception:  # noqa: BLE001
-        min_q_lcb = 0.02
-        if (
-            str(side or "").strip().upper() == "YES"
-            and math.isfinite(cost)
-            and 0.0 < cost < 0.05
-        ):
-            min_q_lcb = max(min_q_lcb, 0.07, cost + 0.04)
-        profit_lcb_usd = (
-            stake * (edge_lcb / cost)
-            if cost > 0.0 and math.isfinite(stake) and math.isfinite(edge_lcb)
-            else float("-inf")
-        )
-        growth_density = (
-            (edge_lcb / cost) * ((payoff_q_lcb - cost) / (1.0 - cost))
-            if 0.0 < cost < 1.0 and payoff_q_lcb > cost
-            else float("-inf")
-        )
-        return bool(
-            math.isfinite(stake)
-            and stake > 0.0
-            and math.isfinite(delta_u_at_min)
-            and delta_u_at_min > 0.0
-            and math.isfinite(payoff_q_lcb)
-            and payoff_q_lcb >= min_q_lcb
-            and math.isfinite(profit_lcb_usd)
-            and profit_lcb_usd >= 0.25
-            and math.isfinite(growth_density)
-        )
+    return roi_frontier_useful_values(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=stake,
+        delta_u_at_min=delta_u_at_min,
+    )
 
 
 def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
@@ -12444,46 +12434,7 @@ def _proofs_with_qkernel_candidate_economics(
     """
     if not qkernel_economics_by_bin_side:
         return proofs
-    try:
-        from src.decision import family_decision_engine as _fde_thresholds
-
-        min_profit_lcb_usd = float(_fde_thresholds._ROI_FRONTIER_MIN_PROFIT_LCB_USD)
-        min_payoff_q_lcb_fn = _fde_thresholds.roi_frontier_min_payoff_q_lcb
-    except Exception:  # noqa: BLE001
-        min_profit_lcb_usd = 0.25
-
-        def min_payoff_q_lcb_fn(*, side: str | None, cost: float) -> float:
-            floor = 0.02
-            if (
-                str(side or "").strip().upper() == "YES"
-                and math.isfinite(cost)
-                and 0.0 < cost < 0.05
-            ):
-                floor = max(floor, 0.07, cost + 0.04)
-            return floor
-
-    def _qkernel_growth_density(*, cost: float, edge_lcb: float, payoff_q_lcb: float) -> float:
-        if not (
-            math.isfinite(cost)
-            and math.isfinite(edge_lcb)
-            and math.isfinite(payoff_q_lcb)
-            and 0.0 < cost < 1.0
-            and payoff_q_lcb > cost
-        ):
-            return float("-inf")
-        roi = edge_lcb / cost
-        return roi * ((payoff_q_lcb - cost) / (1.0 - cost))
-
-    def _qkernel_profit_lcb_usd(*, stake: float, cost: float, edge_lcb: float) -> float:
-        if not (
-            math.isfinite(stake)
-            and stake > 0.0
-            and math.isfinite(cost)
-            and cost > 0.0
-            and math.isfinite(edge_lcb)
-        ):
-            return float("-inf")
-        return stake * (edge_lcb / cost)
+    min_profit_lcb_usd = roi_frontier_min_profit_lcb_usd()
 
     def _qkernel_receipt_rejection_reason(
         cert: Mapping[str, Any],
@@ -12524,13 +12475,13 @@ def _proofs_with_qkernel_candidate_economics(
                 "QKERNEL_STAKE_NON_POSITIVE:"
                 f"stake={optimal_stake_usd:.6f}:edge_lcb={edge_lcb:.6f}"
             )
-        growth_density = _qkernel_growth_density(
+        growth_density = roi_frontier_growth_density(
             cost=cost,
             edge_lcb=edge_lcb,
             payoff_q_lcb=payoff_q_lcb,
         )
-        min_payoff_q_lcb = float(min_payoff_q_lcb_fn(side=side, cost=cost))
-        profit_lcb_usd = _qkernel_profit_lcb_usd(
+        min_payoff_q_lcb = float(roi_frontier_min_payoff_q_lcb(side=side, cost=cost))
+        profit_lcb_usd = roi_frontier_profit_lcb_usd(
             stake=optimal_stake_usd,
             cost=cost,
             edge_lcb=edge_lcb,

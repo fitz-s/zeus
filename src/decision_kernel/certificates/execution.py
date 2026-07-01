@@ -17,7 +17,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
 from src.decision_kernel.verifier import (
-    _effective_live_entry_quality_floors,
+    _entry_price_floor_decision_for_payload,
     _entry_floor_applies,
     verify_execution_command,
     verify_execution_receipt,
@@ -98,13 +98,13 @@ def build_final_intent_certificate_from_actionable(
             "candidate reservation below minimum tradeable price — skip"
         )
     if _entry_floor_applies(action):
-        effective_entry_floor = _effective_live_entry_quality_floors(action)["min_entry_price"]
         declared_entry_floor = action.get("min_entry_price")
-        try:
-            if declared_entry_floor is not None:
-                effective_entry_floor = max(effective_entry_floor, float(declared_entry_floor))
-        except (TypeError, ValueError):
-            pass
+        floor_decision = _entry_price_floor_decision_for_payload(
+            action,
+            declared_min_entry_price=declared_entry_floor,
+            limit_price=limit_price,
+        )
+        effective_entry_floor = floor_decision.effective_min_entry_price
         if limit_price <= effective_entry_floor + 1e-12:
             raise ValueError(
                 "CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"

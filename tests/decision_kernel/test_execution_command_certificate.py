@@ -700,6 +700,40 @@ def test_final_intent_builder_allows_center_buy_yes_above_micro_tail_floor():
     assert final_intent.payload["min_entry_price"] == pytest.approx(0.02)
 
 
+def test_final_intent_builder_allows_direct_qkernel_yes_below_declared_floor():
+    actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "c_fee_adjusted": 0.01,
+            "c_cost_95pct": 0.01,
+            "q_live": 0.82,
+            "q_lcb_5pct": 0.72,
+            "trade_score": 0.71,
+            "action_score": 0.71,
+            "min_entry_price": 0.10,
+            "qkernel_execution_economics": {
+                **_actionable_payload()["qkernel_execution_economics"],
+                "candidate_id": "YES:b20:DIRECT_YES:b20@proof",
+                "bin_id": "b20",
+                "route_id": "DIRECT_YES:b20@proof",
+                "route_type": "direct",
+                "payoff_q_point": 0.82,
+                "payoff_q_lcb": 0.72,
+                "cost": 0.01,
+                "edge_lcb": 0.71,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 100.0,
+                "optimal_delta_u": 0.01,
+                "selection_guard_q_safe": 0.72,
+            },
+        }
+    )
+
+    assert final_intent.payload["strategy_key"] == "center_buy"
+    assert final_intent.payload["direction"] == "buy_yes"
+    assert final_intent.payload["limit_price"] == pytest.approx(0.01)
+    assert final_intent.payload["min_entry_price"] == pytest.approx(0.10)
+
+
 def test_execution_command_builder_rejects_no_submit_parent_certificate():
     actionable, final_intent, expressibility, live_cap = builder_chain()
     live_pre_submit = _pre_submit_cert(final_intent, live_cap)

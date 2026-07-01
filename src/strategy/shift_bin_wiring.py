@@ -53,7 +53,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    has_current_money_risk_chain_state,
+)
 from src.strategy.family_rebalance import (
     ActiveRebalanceLease,
     ShiftBinDecision,
@@ -349,11 +352,37 @@ def read_old_leg_residual_usd(
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
     phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
-    cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
-    if not cost_terms:
+    positive_terms = [
+        (f"COALESCE({c},0) > 0", ())
+        for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+        if c in cols
+    ]
+    if "chain_shares" in cols:
+        if "chain_state" in cols:
+            chain_state_placeholders = ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
+            positive_terms.append(
+                (
+                    f"(COALESCE(chain_shares,0) > ? AND chain_state IN ({chain_state_placeholders}))",
+                    (_LIVE_CHAIN_SHARE_EPSILON, *_CURRENT_MONEY_RISK_CHAIN_STATES),
+                )
+            )
+        else:
+            positive_terms.append(
+                ("COALESCE(chain_shares,0) > ?", (_LIVE_CHAIN_SHARE_EPSILON,))
+            )
+    if not positive_terms:
         return float("inf")
-    positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
-    selected_names = ("chain_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_shares")
+    positive_sql = " AND (" + " OR ".join(term for term, _ in positive_terms) + ")"
+    positive_params: list[object] = []
+    for _, params_for_term in positive_terms:
+        positive_params.extend(params_for_term)
+    selected_names = (
+        "chain_cost_basis_usd",
+        "cost_basis_usd",
+        "size_usd",
+        "chain_shares",
+        "chain_state",
+    )
     select_cols = [c if c in cols else f"NULL AS {c}" for c in selected_names]
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -363,6 +392,7 @@ def read_old_leg_residual_usd(
     params: list[object] = []
     params.extend(phase_params)
     params.extend(token for _ in token_cols)
+    params.extend(positive_params)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
     except sqlite3.Error:
@@ -378,20 +408,42 @@ def read_old_leg_residual_usd(
         row_chain_shares = float(_g("chain_shares")) if _g("chain_shares") is not None else None
     except (TypeError, ValueError):
         row_chain_shares = None
-    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
-    if chain_available_shares == 0.0:
-        # A fresh CHAIN collateral snapshot is the venue-side sellability truth. A
-        # stale local position projection must not keep re-opening EXIT_OLD_LEG after
-        # the wallet has no old-leg collateral left.
-        return 0.0
 
+    row_live_usd = 0.0
     for value in (_g("chain_cost_basis_usd"), _g("cost_basis_usd"), _g("size_usd")):
         try:
             v = float(value) if value is not None else 0.0
         except (TypeError, ValueError):
             v = 0.0
         if v > 0.0:
-            return v
+            row_live_usd = v
+            break
+
+    row_chain_state = _g("chain_state")
+    row_asserts_current_chain_risk = (
+        row_chain_shares is not None
+        and row_chain_shares > _LIVE_CHAIN_SHARE_EPSILON
+        and (
+            "chain_state" not in cols
+            or has_current_money_risk_chain_state(row_chain_state)
+        )
+    )
+    if row_asserts_current_chain_risk:
+        if row_live_usd > 0.0:
+            return row_live_usd
+        return float(row_chain_shares or 0.0)
+
+    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
+    if chain_available_shares == 0.0:
+        # A fresh CHAIN collateral snapshot is the venue-side sellability truth. A
+        # stale local position projection must not keep re-opening EXIT_OLD_LEG after
+        # the wallet has no old-leg collateral left. This may only override rows that
+        # do NOT still assert current chain risk in position_current; a synced positive
+        # chain_shares row is itself chain evidence and must stay live.
+        return 0.0
+
+    if row_live_usd > 0.0:
+        return row_live_usd
     return 0.0
 
 
