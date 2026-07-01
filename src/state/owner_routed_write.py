@@ -86,6 +86,37 @@ def assert_owner_conn(conn: sqlite3.Connection, table_name: str) -> None:
     )
 
 
+def owner_write_target(conn: sqlite3.Connection, table_name: str) -> str | None:
+    """Resolve the schema-qualified write target that routes `table_name` to its owner — or None to SKIP.
+
+    - owner is the connection's MAIN        -> bare ``table`` (a bare INSERT lands correctly)
+    - owner is ATTACHed under an alias       -> ``alias.table`` (schema-qualified to the owner)
+    - owner is a KNOWN-but-WRONG canonical DB, unreachable on this conn -> None  (SKIP: never write the ghost)
+    - conn is non-canonical (:memory:/tempfile/ad-hoc test) -> bare ``table`` (legacy behavior, suite-safe)
+
+    Returning None signals the caller to SKIP the write rather than silently populate an unread ghost copy in
+    the wrong DB (the inversion). Use for bare-write helpers whose caller may legitimately run on a non-owner
+    connection without the owner ATTACHed (e.g. the world-rooted execution_feasibility_evidence writer).
+    """
+    want = owner_db_filename(table_name)
+    if want is None:
+        return table_name
+    main: str | None = None
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        path = row[2] if not isinstance(row, sqlite3.Row) else row["file"]
+        if not path:
+            continue
+        fn = Path(str(path)).name
+        if name == "main":
+            main = fn
+        if fn == want:
+            return table_name if name == "main" else f"{name}.{table_name}"
+    if main is not None and main in _KNOWN_DB_FILENAMES:
+        return None  # owner is a known canonical DB but unreachable here -> skip (no ghost)
+    return table_name  # non-canonical conn (memory/tempfile) -> legacy bare
+
+
 def require_owner_main(conn: sqlite3.Connection, table_name: str) -> None:
     """Contract guard for BARE-write helpers (helpers that `INSERT/UPDATE INTO <bare_table>`, which SQLite
     resolves to the connection's MAIN): assert the connection's MAIN file IS the table's owner.

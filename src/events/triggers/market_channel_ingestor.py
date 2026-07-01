@@ -1403,8 +1403,18 @@ def insert_execution_feasibility_evidence(
         raise ValueError(
             f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
         )
-    table = "execution_feasibility_evidence" if not schema else f"{schema}.execution_feasibility_evidence"
-    latest_table = "execution_feasibility_latest" if not schema else f"{schema}.execution_feasibility_latest"
+    if schema:
+        table = f"{schema}.execution_feasibility_evidence"
+        latest_table = f"{schema}.execution_feasibility_latest"
+    else:
+        # Owner-routed (2026-07-01): both tables are trade-owned; the world copy is an unread ghost (12.9M
+        # stray rows). Route to the owner (trades) when reachable, else SKIP so a world-rooted caller never
+        # writes the ghost. Non-canonical (:memory:/test) conns keep the legacy bare behavior.
+        from src.state.owner_routed_write import owner_write_target
+        table = owner_write_target(conn, "execution_feasibility_evidence")
+        latest_table = owner_write_target(conn, "execution_feasibility_latest")
+        if table is None or latest_table is None:
+            return
     values = dict(row)
     values.setdefault("schema_version", 1)
     values.setdefault("created_at", datetime.now(UTC).isoformat())
