@@ -116,6 +116,8 @@ def lookup_affine(city: str, metric: str) -> tuple[float, float]:
             return 0.0, 1.0
         with open(path, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
+        if artifact.get("enabled") is False:  # kill switch: disable the whole layer without deleting it
+            return 0.0, 1.0
         entry = (((artifact.get("metrics") or {}).get(str(metric)) or {}).get("cities") or {}).get(str(city))
         if not isinstance(entry, dict) or not entry.get("serve"):
             return 0.0, 1.0

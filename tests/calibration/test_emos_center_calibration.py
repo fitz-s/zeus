@@ -102,3 +102,27 @@ def test_lookup_failsoft_on_malformed(tmp_path, monkeypatch):
     (tmp_path / "emos_center_calibration.json").write_text("{ bad json", encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
     assert lookup_affine("Seoul", "high") == (0.0, 1.0)   # never raises
+
+
+def test_kill_switch_disables_whole_layer(tmp_path, monkeypatch):
+    art = {"enabled": False, "metrics": {"high": {"cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}}}}
+    (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
+    monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
+    assert lookup_affine("Seoul", "high") == (0.0, 1.0)   # enabled=false -> identity even for a served city
+
+
+def test_lookup_reads_both_metrics(tmp_path, monkeypatch):
+    art = {"metrics": {"high": {"cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}},
+                       "low": {"cities": {"Seoul": {"a": -0.2, "b": 0.98, "serve": True}}}}}
+    (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
+    monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
+    assert lookup_affine("Seoul", "high") == (pytest.approx(0.5), pytest.approx(1.06))
+    assert lookup_affine("Seoul", "low") == (pytest.approx(-0.2), pytest.approx(0.98))
+
+
+def test_clamp_boundary_slope_round_trips(tmp_path, monkeypatch):
+    art = {"metrics": {"high": {"cities": {"Taipei": {"a": -3.12, "b": SLOPE_MAX, "serve": True}}}}}
+    (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
+    monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
+    a, b = lookup_affine("Taipei", "high")
+    assert b == pytest.approx(SLOPE_MAX) and a == pytest.approx(-3.12)

@@ -160,28 +160,10 @@ def _pooled_block_ci(cells, *, nboot=1000, seed=7):
     return statistics.mean(boots), boots[int(0.025 * nboot)], boots[int(0.975 * nboot)]
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Fit per-city affine EMOS center calibration (candidate-safe).")
-    ap.add_argument("--kappa", type=float, default=DEFAULT_KAPPA)
-    ap.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN)
-    ap.add_argument("--metric", default="high", choices=["high", "low"])
-    ap.add_argument("--lead", type=int, default=1)
-    ap.add_argument("--serve-min-n", type=int, default=40)
-    ap.add_argument("--live-min-n", type=int, default=10)
-    ap.add_argument("--out", default=OUT_DEFAULT)
-    ap.add_argument("--dry-run", action="store_true")
-    a = ap.parse_args()
-
-    conn = get_forecasts_connection_read_only()
-    recs = _replay_runtime_center(conn, a.metric, a.lead)
-    livep = _live_served_pairs(conn, a.metric)
-
-    try:
-        from src.strategy.live_inference.source_clock_city_weights import GRID_AWARE_ARTIFACT_NAME  # noqa: PLC0415
-        scheme_art = str(GRID_AWARE_ARTIFACT_NAME)
-    except Exception:
-        scheme_art = None
-
+def _fit_one_metric(conn, metric, a):
+    """Fit + dual-gate one metric; return (cities_out, validation, report, recs_count)."""
+    recs = _replay_runtime_center(conn, metric, a.lead)
+    livep = _live_served_pairs(conn, metric)
     cities_out = {}
     served_cells = []
     report = []
@@ -227,31 +209,62 @@ def main() -> int:
         report.append((oos, city, A, B, n, serve))
 
     pooled, plo, phi = _pooled_block_ci(served_cells) if served_cells else (0.0, 0.0, 0.0)
+    validation = {
+        "served_pooled_oos_dmse": round(pooled, 4),
+        "served_pooled_block_ci95": [round(plo, 4), round(phi, 4)],
+        "served_pooled_lower_ci_gt0": bool(plo > 0),
+        "n_served": sum(1 for v in cities_out.values() if v["serve"]),
+        "n_cities": len(cities_out),
+    }
+    report.sort(reverse=True)
+    return cities_out, validation, report, len(recs)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Fit per-city affine EMOS center calibration (candidate-safe).")
+    ap.add_argument("--kappa", type=float, default=DEFAULT_KAPPA)
+    ap.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN)
+    ap.add_argument("--metric", default="both", choices=["high", "low", "both"])
+    ap.add_argument("--lead", type=int, default=1)
+    ap.add_argument("--serve-min-n", type=int, default=40)
+    ap.add_argument("--live-min-n", type=int, default=10)
+    ap.add_argument("--out", default=OUT_DEFAULT)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--disabled", action="store_true", help="write the artifact with enabled=false (kill switch OFF).")
+    a = ap.parse_args()
+
+    conn = get_forecasts_connection_read_only()
+    try:
+        from src.strategy.live_inference.source_clock_city_weights import GRID_AWARE_ARTIFACT_NAME  # noqa: PLC0415
+        scheme_art = str(GRID_AWARE_ARTIFACT_NAME)
+    except Exception:
+        scheme_art = None
+
+    metrics_to_fit = ["high", "low"] if a.metric == "both" else [a.metric]
+    metrics_out, validations = {}, {}
+    for metric in metrics_to_fit:
+        cities_out, validation, report, n_recs = _fit_one_metric(conn, metric, a)
+        metrics_out[metric] = {"cities": cities_out}
+        validations[metric] = validation
+        print(f"=== EMOS affine center calibration (metric={metric} lead={a.lead} κ={a.kappa} min_train={a.min_train}) ===")
+        print(f"served {validation['n_served']}/{n_recs}  served-pooled OOS ΔMSE={validation['served_pooled_oos_dmse']:+.4f} "
+              f"CI95={validation['served_pooled_block_ci95']} lower>0={validation['served_pooled_lower_ci_gt0']}")
+        for oos, city, A, B, n, serve in report:
+            if serve:
+                print(f"  {city:16s} a={A:>+7.2f} b={B:>7.3f} oos_dmse={oos:>+9.4f} n={n}")
+
     artifact = {
         "authority": ARTIFACT_AUTHORITY, "fit_on_scheme_artifact": scheme_art,
-        "model": "affine_ngr_center: mu' = a + b*mu_runtime (shrunk to identity)",
+        "enabled": (not a.disabled),  # kill switch: enabled=false => lookup returns identity for all
+        "model": "affine_ngr_center: mu' = a + b*mu_runtime (per-unit, shrunk-to-identity, slope-clamped)",
         "kappa": a.kappa, "min_train": a.min_train, "lead": a.lead,
         "serve_rule": ("STRUCT(walk_forward_affine_oos_dmse_lower95CI>=0, n>=serve_min_n) AND "
                        "TRANSFER(live_single_runs_affine_dmse_lower95CI>=0, live_n>=live_min_n); "
                        "STRUCT+point-positive but CI-unproven rows are tier=canary, serve=false"),
         "serve_min_n": a.serve_min_n, "live_min_n": a.live_min_n,
-        "metrics": {a.metric: {"cities": cities_out}},
-        "validation": {
-            "served_pooled_oos_dmse": round(pooled, 4),
-            "served_pooled_block_ci95": [round(plo, 4), round(phi, 4)],
-            "served_pooled_lower_ci_gt0": bool(plo > 0),
-            "n_served": sum(1 for v in cities_out.values() if v["serve"]),
-            "n_cities": len(cities_out),
-        },
+        "metrics": metrics_out,
+        "validation": validations,
     }
-
-    report.sort(reverse=True)
-    ns = artifact["validation"]["n_served"]
-    print(f"=== EMOS affine center calibration (metric={a.metric} lead={a.lead} κ={a.kappa} min_train={a.min_train}) ===")
-    print(f"served {ns}/{len(recs)}  served-pooled OOS ΔMSE={pooled:+.4f} block-CI95=[{plo:+.4f},{phi:+.4f}] lower>0={plo>0}")
-    print(f"\n{'city':16s} {'a':>7} {'b':>7} {'oos_dmse':>9} {'n':>4} serve")
-    for oos, city, A, B, n, serve in report:
-        print(f"{city:16s} {A:>+7.2f} {B:>7.3f} {oos:>+9.4f} {n:>4} {'YES' if serve else '.'}")
     if a.dry_run:
         print("\n[dry-run] artifact NOT written.")
     else:
