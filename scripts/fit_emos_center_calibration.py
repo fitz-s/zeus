@@ -38,6 +38,11 @@ import tempfile
 from collections import defaultdict
 
 DECISION_LEAD = 1  # day-ahead: the primary traded decision lead (target_date − cycle_date, days)
+STABILITY_MIN_FREQ = 2.0 / 3.0  # production bar: a city must be reselected in >= 2/3 of nested
+#   global-date folds (a supermajority) to serve real capital. A city that clears the per-city
+#   no-harm gate on the FULL sample but is reselected in only a minority of folds is policy-unstable
+#   (its serve decision hinges on a few dates) → demoted to canary. Data-derived: the observed
+#   per-city selection-frequency gap separates the stable core from the tail, not a hand-picked list.
 
 
 def _source_commit():
@@ -221,6 +226,18 @@ def _reselect(pool, train_dates, min_days):
     return selected
 
 
+def _serve_tier(layer_ok, city_ok, stable):
+    """(serve, tier) from the three gates. production = layer enabled AND per-city no-harm AND
+    policy-stable (reselected in >= STABILITY_MIN_FREQ of nested folds). A city that clears no-harm
+    but is policy-unstable, or clears it while the whole layer is disabled, is canary (serve=False,
+    accruing live obs). A city failing no-harm is not served at all (tier None)."""
+    if layer_ok and city_ok and stable:
+        return True, "production"
+    if city_ok:
+        return False, "canary"
+    return False, None
+
+
 def _nested_portfolio(pool, min_days):
     """NESTED selection validation — the honest LAYER-enable gate (consult BLOCKER). Outer
     leave-one-GLOBAL-date-out; inside each fold RESELECT cities on the training dates only, apply
@@ -230,9 +247,12 @@ def _nested_portfolio(pool, min_days):
     Returns (mean, lcb95, median_reselected)."""
     dates = sorted({d for c in pool for d in pool[c]})
     port, counts = [], []
+    sel_count = {c: 0 for c in pool}   # per-city: in how many nested folds was this city reselected
     for D in dates:
         selected = _reselect(pool, [x for x in dates if x != D], min_days)
         counts.append(len(selected))
+        for c in selected:
+            sel_count[c] += 1
         num, den = 0.0, 0
         for c in pool:
             if D in pool[c]:
@@ -243,9 +263,12 @@ def _nested_portfolio(pool, min_days):
                     num += (s - x) ** 2 - (s - apply_affine(x, a, b)) ** 2
         if den:
             port.append(num / den)
+    n_folds = len(dates)
+    sel_freq = {c: (sel_count[c] / n_folds if n_folds else 0.0) for c in pool}
     if len(port) < 3:
-        return 0.0, float("-inf"), 0
-    return statistics.mean(port), _date_block_lcb(port), (statistics.median(counts) if counts else 0)
+        return 0.0, float("-inf"), 0, sel_freq
+    return (statistics.mean(port), _date_block_lcb(port),
+            (statistics.median(counts) if counts else 0), sel_freq)
 
 
 def _served_sigma(conn, metric):
@@ -318,7 +341,7 @@ def _fit_metric(conn, metric, a):
 
     # center-MSE nested is necessary; the DECISION-level nested (traded-q log-loss on the real settled
     # bin) is the SUFFICIENT live-capital gate. The layer serves ONLY if the DECISION gate lcb>0.
-    port_mean, port_lcb, med_resel = _nested_portfolio(pool, a.min_days)
+    port_mean, port_lcb, med_resel, sel_freq = _nested_portfolio(pool, a.min_days)
     dec_mean, dec_lcb = _decision_nested_portfolio(pool, sigma_map, a.min_days)
     layer_ok = dec_lcb > 0.0
 
@@ -333,7 +356,7 @@ def _fit_metric(conn, metric, a):
         if city not in pool:
             cities_out[city] = {"a": 0.0, "b": 1.0, "serve": False, "tier": None, "n_dates": n_dates,
                                 "bias_c": bias, "x_lo": None, "x_hi": None,
-                                "lodo_dmse": None, "lodo_dmse_lcb95": None}
+                                "lodo_dmse": None, "lodo_dmse_lcb95": None, "nested_sel_freq": 0.0}
             continue
         A, B = eb_full.get(city, (0.0, 1.0))
         centers = [x for x, _ in pool[city].values()]
@@ -343,12 +366,14 @@ def _fit_metric(conn, metric, a):
         lcb = _date_block_lcb(cells)
         is_identity = (abs(A) < 1e-9 and abs(B - 1.0) < 1e-9)
         city_ok = (not is_identity) and oos > 0.0 and lcb >= 0.0
-        serve = bool(layer_ok and city_ok)               # serve ONLY if the layer passed nested selection
-        tier = "production" if serve else ("canary" if city_ok else None)
+        freq = sel_freq.get(city, 0.0)                    # nested-fold reselection frequency
+        stable = freq >= STABILITY_MIN_FREQ              # policy-stable: served set robust to any date
+        serve, tier = _serve_tier(layer_ok, city_ok, stable)
         cities_out[city] = {
             "a": round(A, 5), "b": round(B, 5), "serve": serve, "tier": tier,
             "n_dates": n_dates, "bias_c": bias, "x_lo": x_lo, "x_hi": x_hi,
             "lodo_dmse": round(oos, 4), "lodo_dmse_lcb95": round(lcb, 4) if math.isfinite(lcb) else None,
+            "nested_sel_freq": round(freq, 3),
         }
         if serve:
             served_cells += cells

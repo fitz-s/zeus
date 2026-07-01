@@ -254,3 +254,29 @@ def test_date_block_lcb_positive_when_every_date_improves():
 
 def test_date_block_lcb_negative_when_dates_mostly_harm():
     assert fit_script._date_block_lcb([-1.0, -0.8, 0.1, -0.5, -0.9, -0.7]) < 0.0
+
+
+# ---- policy-stability tier gate (production requires nested-fold reselection stability) ------
+# A city may pass the per-city no-harm gate on the FULL data yet be policy-unstable: reselected in
+# only a minority of nested global-date folds. Such a city is demoted to canary (serve=False,
+# accruing) rather than served with real capital — the shipped production set must be robust to
+# dropping any single date, not just positive on the full sample. Threshold is a documented
+# supermajority (2/3), data-derived: the observed freq gap separates the stable core from the tail.
+@pytest.mark.parametrize(
+    "layer_ok,city_ok,stable,exp_serve,exp_tier",
+    [
+        (True, True, True, True, "production"),   # passes all three -> served
+        (True, True, False, False, "canary"),     # no-harm OK but policy-unstable -> canary
+        (False, True, True, False, "canary"),     # layer disabled -> canary (accruing)
+        (True, False, True, False, None),         # fails per-city no-harm -> not served at all
+        (False, False, False, False, None),
+    ],
+)
+def test_serve_tier(layer_ok, city_ok, stable, exp_serve, exp_tier):
+    assert fit_script._serve_tier(layer_ok, city_ok, stable) == (exp_serve, exp_tier)
+
+
+def test_stability_threshold_is_documented_supermajority():
+    # The production bar is a supermajority of nested folds (2/3), NOT a hand-tuned cutoff picked to
+    # slice a specific city list. Locked so an audit sees the bar explicitly.
+    assert fit_script.STABILITY_MIN_FREQ == pytest.approx(2.0 / 3.0)
