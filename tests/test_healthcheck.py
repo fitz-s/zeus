@@ -1316,7 +1316,7 @@ def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh
     assert result["stale_or_missing_positions"][0]["position_id"] == "pos-2"
 
 
-def test_monitor_cadence_status_includes_quarantined_current_chain_risk(
+def test_monitor_cadence_status_reports_quarantined_chain_risk_without_blocking(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "zeus_trades.db"
@@ -1356,10 +1356,14 @@ def test_monitor_cadence_status_includes_quarantined_current_chain_risk(
 
     result = _ORIGINAL_MONITOR_CADENCE_STATUS()
 
-    assert result["ok"] is False
-    assert result["issue"] == "MONITOR_CADENCE_NO_REFRESH_EVENT"
-    assert result["open_position_count"] == 1
-    assert result["stale_or_missing_positions"][0]["position_id"] == "pos-q"
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["open_position_count"] == 0
+    assert result["non_monitor_chain_risk_position_count"] == 1
+    assert result["non_monitor_chain_risk_role"] == (
+        "chain_reconciliation_not_monitor_cadence"
+    )
+    assert result["non_monitor_chain_risk_positions"][0]["position_id"] == "pos-q"
 
 
 def test_monitor_cadence_status_excludes_quarantined_zero_chain_risk(
@@ -1404,6 +1408,7 @@ def test_monitor_cadence_status_excludes_quarantined_zero_chain_risk(
 
     assert result["ok"] is True
     assert result["open_position_count"] == 0
+    assert result["non_monitor_chain_risk_position_count"] == 0
 
 
 def test_healthcheck_is_not_healthy_when_monitor_cadence_stale(monkeypatch):

@@ -15,7 +15,7 @@ from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
 MONITOR_CADENCE_EXPOSURE_EPS = 0.01
 MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
-MONITOR_CADENCE_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
+NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
 
 
 def collect_monitor_cadence_evidence(
@@ -37,6 +37,10 @@ def collect_monitor_cadence_evidence(
     position_columns = _table_columns(conn, "position_current")
     event_columns = _table_columns(conn, "position_events")
     monitored_rows = _monitor_cadence_position_rows(conn, position_columns)
+    non_monitor_chain_risk_rows = _non_monitor_chain_risk_position_rows(
+        conn,
+        position_columns,
+    )
     now_utc = _ensure_utc(now)
     min_occurred_utc = _ensure_utc(min_occurred_at) if min_occurred_at else None
     stale_or_missing: list[dict[str, Any]] = []
@@ -84,6 +88,9 @@ def collect_monitor_cadence_evidence(
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
         "future_monitor_event_count": len(future_events),
         "future_monitor_events": future_events[:sample_limit],
+        "non_monitor_chain_risk_position_count": len(non_monitor_chain_risk_rows),
+        "non_monitor_chain_risk_positions": non_monitor_chain_risk_rows[:sample_limit],
+        "non_monitor_chain_risk_role": "chain_reconciliation_not_monitor_cadence",
     }
 
 
@@ -120,13 +127,7 @@ def _monitor_cadence_position_rows(
             shares > MONITOR_CADENCE_EXPOSURE_EPS
             or chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
         )
-        current_chain_risk = (
-            chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
-            and chain_state in CURRENT_MONEY_RISK_CHAIN_STATES
-        )
-        if phase in MONITOR_CADENCE_CHAIN_RISK_PHASES:
-            should_monitor = current_chain_risk
-        elif phase:
+        if phase:
             should_monitor = phase in MONITOR_CADENCE_POSITION_PHASES and exposure_positive
         else:
             should_monitor = exposure_positive
@@ -139,6 +140,44 @@ def _monitor_cadence_position_rows(
                 }
             )
     return monitored
+
+
+def _non_monitor_chain_risk_position_rows(
+    conn: sqlite3.Connection,
+    position_columns: set[str],
+) -> list[dict[str, object]]:
+    if "position_id" not in position_columns:
+        return []
+    optional_selects = []
+    for column in ("phase", "shares", "chain_shares", "chain_state"):
+        optional_selects.append(column if column in position_columns else f"NULL AS {column}")
+    rows = conn.execute(
+        f"""
+        SELECT position_id, {", ".join(optional_selects)}
+          FROM position_current
+        """
+    ).fetchall()
+    chain_risk_rows: list[dict[str, object]] = []
+    for row in rows:
+        phase = str(row["phase"] or "").strip().lower()
+        chain_state = str(row["chain_state"] or "").strip()
+        chain_shares = _float_or_zero(row["chain_shares"])
+        if phase not in NON_MONITOR_CHAIN_RISK_PHASES:
+            continue
+        if chain_shares <= MONITOR_CADENCE_EXPOSURE_EPS:
+            continue
+        if chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES:
+            continue
+        chain_risk_rows.append(
+            {
+                "position_id": str(row["position_id"] or ""),
+                "phase": phase,
+                "chain_state": chain_state,
+                "shares": _float_or_zero(row["shares"]),
+                "chain_shares": chain_shares,
+            }
+        )
+    return chain_risk_rows
 
 
 def _latest_monitor_refreshed_at(
