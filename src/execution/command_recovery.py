@@ -14119,10 +14119,10 @@ def reconcile_unresolved_commands(
     scheduler start, but deliberately skips historical maker-fill economics and
     partial-remainder maintenance so boot cannot be delayed by old filled rows.
     ``scope="restart_preflight"`` is the deploy-time recovery seam: it runs only
-    the venue-backed in-flight command scan, the DB-local ACKED live-entry
-    projection repair, and the no-venue EXIT retry projection needed to clear
-    restart-dangerous pending entries/exits before the read-only restart
-    preflight. It must stay narrower than ``live_tick``.
+    the venue-backed in-flight command scan, DB-local ACKED/live-entry and
+    matched-cancel entry projection repair, and the no-venue EXIT retry
+    projection needed to clear restart-dangerous pending entries/exits before
+    the read-only restart preflight. It must stay narrower than ``live_tick``.
 
     DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
@@ -15114,6 +15114,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
         _boot_db_pass(
+            "matched_cancel_review_required_entries",
+            reconcile_matched_cancel_review_required_entries,
+            "matched_cancel_review_required_entries",
+            fold_stayed=False,
+        )
+        _boot_db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
@@ -15271,6 +15277,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
         _db_pass(
+            "matched_cancel_review_required_entries",
+            reconcile_matched_cancel_review_required_entries,
+            "matched_cancel_review_required_entries",
+            fold_stayed=False,
+        )
+        _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
@@ -15364,6 +15376,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
+        )
+        _db_pass(
+            "matched_cancel_review_required_entries",
+            reconcile_matched_cancel_review_required_entries,
+            "matched_cancel_review_required_entries",
+            fold_stayed=False,
         )
         if scope == "live_tick":
             _client_pass(

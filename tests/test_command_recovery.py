@@ -5160,6 +5160,115 @@ class TestRecoveryResolutionTable:
         assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
         assert _get_state(conn, "cmd-001") == "FILLED"
 
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_clears_matched_cancel_entry_review(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Narrow live scopes must not leave matched held entries stranded."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="CONFIRMED",
+            filled_size="4.995",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            state="PARTIALLY_MATCHED",
+            matched_size="4.995",
+            remaining_size="0.005",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 4.995,
+                   chain_shares = 4.995,
+                   cost_basis_usd = 1.6983,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-001", "source": "maker_rest_escalation"},
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:08:02Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-001",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            events = _get_events(check, "cmd-001")
+            state = _get_state(check, "cmd-001")
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        assert state == "FILLED"
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,
