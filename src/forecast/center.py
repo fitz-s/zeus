@@ -440,6 +440,40 @@ def raw_precision_center(
 # robust, on the real previous_runs fusion (operator "improve until ideal").
 # ---------------------------------------------------------------------------
 
+
+def cross_model_second_moment(
+    residuals_by_model: "Mapping[str, Mapping[object, float]]",
+    *,
+    min_overlap: int = 10,
+) -> "dict[tuple[str, str], float]":
+    """Cross-model RAW second-moment matrix Ê[e_i·e_j], date-aligned, for the covariance fusion.
+
+    ``residuals_by_model[m]`` maps an alignment key (date) -> that model's RAW residual (forecast
+    minus settlement, in the weights' unit basis) over its strictly-prior walk-forward history. For
+    each ordered pair (i, j) the entry is the mean of ``e_i·e_j`` over the dates BOTH models
+    cover; the diagonal is the existing per-model raw second moment Ê[(x_m−Y)²]. RAW basis
+    (NO demeaning) — consistent with the 2026-06-18 diagonal law, extended off-diagonal. A pair
+    with fewer than ``min_overlap`` common dates is OMITTED (the covariance helper treats an absent
+    off-diagonal as 0.0 → that pair contributes only its diagonal precision). Symmetric.
+    """
+    models = list(residuals_by_model.keys())
+    out: "dict[tuple[str, str], float]" = {}
+    for a in range(len(models)):
+        for b in range(a, len(models)):
+            mi, mj = models[a], models[b]
+            ri, rj = residuals_by_model[mi], residuals_by_model[mj]
+            keys = ri.keys() & rj.keys() if mi != mj else ri.keys()
+            if len(keys) < min_overlap:
+                if mi == mj and keys:
+                    v = sum(float(ri[k]) * float(ri[k]) for k in keys) / len(keys)
+                    out[(mi, mi)] = v
+                continue
+            v = sum(float(ri[k]) * float(rj[k]) for k in keys) / len(keys)
+            out[(mi, mj)] = v
+            out[(mj, mi)] = v
+    return out
+
+
 def covariance_min_variance_weights(
     second_moment: "Mapping[tuple[str, str], float]",
     models: "Sequence[str]",
