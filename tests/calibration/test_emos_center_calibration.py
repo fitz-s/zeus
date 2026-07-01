@@ -10,65 +10,61 @@ import pytest
 from scripts import fit_emos_center_calibration as fit_script
 
 from src.calibration.emos_center_calibration import (
-    DEFAULT_KAPPA,
-    SLOPE_MAX,
-    SLOPE_MIN,
     apply_affine,
-    current_affine,
-    fit_affine,
+    fit_affine_eb,
     lookup_affine,
-    walk_forward_affine,
 )
 
 
-# ---- affine estimator -----------------------------------------------------------------------
-def test_identity_data_gives_identity():
-    a, b = fit_affine([(float(c), float(c)) for c in range(10, 40)])
-    assert abs(a) < 1e-6 and abs(b - 1.0) < 1e-6  # settle==center -> no correction
+# ---- EB affine estimator (data-derived shrink, no kappa / no clamp) --------------------------
+def _pool(n_cities=4, lo=10, hi=30):
+    """An unbiased pool: settle == center for every city (identity target)."""
+    return {f"c{i}": [(float(t), float(t)) for t in range(lo, hi)] for i in range(n_cities)}
 
 
-def test_constant_bias_recovers_shrunk_intercept():
-    # settle = center + 2: OLS (a=2,b=1); shrink-to-identity pulls a below 2 but keeps b≈1.
-    a, b = fit_affine([(float(c), float(c) + 2.0) for c in range(0, 120)])
-    assert 1.2 < a < 2.0
+def test_eb_identity_when_all_cities_unbiased():
+    out = fit_affine_eb(_pool(5))
+    assert all(abs(a) < 1e-6 and abs(b - 1.0) < 1e-6 for a, b in out.values())
+
+
+def test_eb_pool_too_small_returns_identity():
+    cp = {"a": [(float(t), float(t) + 2.0) for t in range(10, 25)],
+          "b": [(float(t), float(t)) for t in range(10, 25)]}
+    out = fit_affine_eb(cp)                                   # < 3 cities -> cannot estimate tau^2
+    assert out["a"] == (0.0, 1.0) and out["b"] == (0.0, 1.0)
+
+
+def test_eb_degenerate_city_is_identity():
+    cp = _pool(4)
+    cp["thin"] = [(1.0, 3.0)]                                 # < MIN_CITY_POINTS -> identity
+    assert fit_affine_eb(cp)["thin"] == (0.0, 1.0)
+
+
+def test_eb_recovers_clean_constant_bias():
+    # A perfectly clean +3 bias (se==0) is recovered ~fully: EB shrinks by uncertainty, and there is
+    # none here. Slope stays ~1 (constant offset, not a tilt).
+    cp = _pool(4)
+    cp["hot"] = [(float(t), float(t) + 3.0) for t in range(10, 30)]
+    a, b = fit_affine_eb(cp)["hot"]
+    mx = sum(range(10, 30)) / 20
+    assert (a + b * mx - mx) == pytest.approx(3.0, abs=0.2)
     assert abs(b - 1.0) < 0.05
 
 
-def test_slope_bias_shrinks_toward_identity_before_clamp():
-    # settle = 1.30*center: enough evidence to move the slope, but not enough to serve raw OLS.
-    a, b = fit_affine([(float(c), 1.30 * c) for c in range(10, 40)])
-    assert b <= SLOPE_MAX + 1e-9
-    assert b >= 1.0
-    n = 30
-    expected_weight = n / (n + DEFAULT_KAPPA)
-    assert b == pytest.approx(1.0 + expected_weight * 0.30)
-    mx = sum(range(10, 40)) / 30
-    assert (a + b * mx) < (1.30 * mx)  # shrinkage deliberately pulls back from raw OLS.
-
-
-def test_slope_clamp_never_exceeds_band():
-    for target_b in (0.4, 0.6, 1.5, 2.0):
-        _, b = fit_affine([(float(c), target_b * c + 5.0) for c in range(15, 45)])
-        assert SLOPE_MIN - 1e-9 <= b <= SLOPE_MAX + 1e-9
-
-
-def test_thin_data_is_identity():
-    assert fit_affine([(1.0, 3.0), (2.0, 4.0)]) == (0.0, 1.0)
+def test_eb_shrinks_noisy_bias_below_raw():
+    # A city whose mean bias is +1 but ESTIMATED with noise gets pulled below +1: the shrink is a
+    # function of the city's own sampling variance, not a hand-set constant.
+    cp = _pool(4)
+    cp["noisy"] = [(float(t), float(t) + 1.0 + (2.0 if t % 2 else -2.0)) for t in range(10, 30)]
+    a, b = fit_affine_eb(cp)["noisy"]
+    mx = sum(range(10, 30)) / 20
+    corr = a + b * mx - mx
+    assert 0.0 < corr < 1.0                                   # raw mean bias +1, shrunk below it
 
 
 def test_apply_affine():
     assert apply_affine(20.0, 0.0, 1.0) == 20.0            # identity
     assert apply_affine(20.0, 1.0, 1.05) == pytest.approx(22.0)
-
-
-def test_walk_forward_warmup_is_identity():
-    series = walk_forward_affine([(f"d{i:03d}", float(i), float(i) + 2.0) for i in range(40)], min_train=25)
-    assert all((a, b) == (0.0, 1.0) for _, a, b in series[:25])   # warmup -> identity
-    assert any(abs(a) > 0.1 for _, a, b in series[25:])           # then it corrects
-
-
-def test_current_affine_below_min_train_is_none():
-    assert current_affine([(f"d{i}", float(i), float(i) + 2.0) for i in range(10)], min_train=25) is None
 
 
 # ---- artifact lookup (fail-soft) ------------------------------------------------------------
@@ -123,12 +119,12 @@ def test_lookup_reads_both_metrics(tmp_path, monkeypatch):
     assert lookup_affine("Seoul", "low") == (pytest.approx(-0.2), pytest.approx(0.98))
 
 
-def test_clamp_boundary_slope_round_trips(tmp_path, monkeypatch):
-    art = {"metrics": {"high": {"cities": {"Taipei": {"a": -3.12, "b": SLOPE_MAX, "serve": True}}}}}
+def test_lookup_round_trips_served_coeffs(tmp_path, monkeypatch):
+    art = {"metrics": {"high": {"cities": {"Taipei": {"a": -1.31, "b": 1.085, "serve": True}}}}}
     (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
     a, b = lookup_affine("Taipei", "high")
-    assert b == pytest.approx(SLOPE_MAX) and a == pytest.approx(-3.12)
+    assert b == pytest.approx(1.085) and a == pytest.approx(-1.31)
 
 
 # ---- fitter ground truth --------------------------------------------------------------------
@@ -220,3 +216,16 @@ def test_fitter_ground_truth_prefers_verified_venue_settlement_when_present():
 
     assert high[("Paris", "2026-06-20")] == pytest.approx(24.0)
     assert low[("Paris", "2026-06-20")] == pytest.approx(15.0)
+
+
+# ---- date-blocked validation (one ΔMSE per held-out date -> bootstrap over dates) -----------
+def test_date_block_lcb_needs_three_dates():
+    assert fit_script._date_block_lcb([1.0, 1.0]) == float("-inf")
+
+
+def test_date_block_lcb_positive_when_every_date_improves():
+    assert fit_script._date_block_lcb([0.5, 0.6, 0.4, 0.55, 0.5, 0.6]) > 0.0
+
+
+def test_date_block_lcb_negative_when_dates_mostly_harm():
+    assert fit_script._date_block_lcb([-1.0, -0.8, 0.1, -0.5, -0.9, -0.7]) < 0.0

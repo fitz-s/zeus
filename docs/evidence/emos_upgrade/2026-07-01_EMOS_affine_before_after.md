@@ -1,5 +1,38 @@
 # EMOS affine center calibration — before/after (2026-07-01)
 
+## ★ AUTHORITATIVE (2026-07-01, EB rewrite): no hard-coded shrink, day-ahead one-per-date basis
+Supersedes every number below it. Three corrections to what shipped:
+
+1. **NO hard-coded numbers.** The prior fit hard-coded a shrink strength κ=40 AND a slope clamp
+   [0.85,1.15] — 7 of 14 "served" cities had their b pinned to the clamp value 0.850, i.e. their
+   coefficient was the hard-code, not the runtime data. Replaced with **empirical-Bayes shrinkage**:
+   each city is pulled toward identity by w = τ²/(τ²+se²), where se² is the city's OWN sampling
+   variance and τ² is the cross-city spread of true effects, estimated by method of moments. Every
+   quantity is a function of the runtime data — no κ, no clamp.
+2. **Independent unit = date, at the day-ahead DECISION lead.** ONE served center per (city,date) at
+   lead-1 (the freshest day-ahead cycle — the point that feeds the primary traded decision), NOT all
+   cycles. The prior "all rows" basis deflated se² (adjacent cycles are correlated → ~150 rows but
+   only ~19 independent dates), which is exactly what made a hard clamp look necessary. Honest se on
+   ~19 dates lets EB shrink correctly on its own.
+3. **Validation = leave-one-DATE-out, EB refit per fold, date-block bootstrap CI≥0.**
+
+**Served (gate: LODO ΔMSE>0 AND date-block 95% lower-CI≥0):**
+- **HIGH: 13 cities** — Buenos Aires, Busan, Chicago, Dallas, Guangzhou, Karachi, Kuala Lumpur,
+  Los Angeles, Milan, Munich, Seoul, Taipei, Tokyo. Pooled LODO ΔMSE +1.15.
+- **LOW: 0 cities.** Low is world-class (|bias| ≤0.8, τ_b²→0 so every b→1); no low city's correction
+  survives the date-block CI. The earlier "Paris/NYC low +32.2%" was the hard CLAMP forcing b=0.850 —
+  overfit, RETRACTED. Honest low = nothing to serve yet.
+- **Leak-free OOS (date-blocked, served-13 only; other 36 high cities stay identity byte-for-byte):**
+  RMSE **1.596→1.182 (+26.0%)**, |bias| 0.57→0.11, 238 held-out cells.
+- The intercept `a` can look large (e.g. Karachi a=+10.72) but that is only the line's y-intercept at
+  0°C; the NET correction across each city's OBSERVED temperature range is bounded and small near the
+  mean, larger only at temperature extremes where the models genuinely diverge (representativeness).
+  Marginal cities (Tokyo/Karachi/Munich, date-block lcb barely >0) are the weakest served units.
+  σ untouched. Kill switch: artifact `enabled:false`, or delete the file → lookup returns identity.
+
+**Every number below this section (κ-shrink, clamp, "20 high", "14 high", low "+32.2%") is
+superseded — do NOT cite it.**
+
 ## FINAL BASIS (operator sentence #1): the RUNTIME served center, not any raw endpoint
 "使用真实参与概率计算的运行态组合数据". The 运行态组合数据 IS the served fused center
 `forecast_posteriors.anchor_value_c` — the value that literally feeds the live probability q.
