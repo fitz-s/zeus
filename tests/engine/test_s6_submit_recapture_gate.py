@@ -942,6 +942,47 @@ def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(
     )
 
 
+def test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes():
+    low_tail_row = _snapshot_row(
+        yes_asks=(("0.041", "1000000"),),
+        condition_id="cond-low-tail",
+        yes_token_id="yes-low-tail",
+        no_token_id="no-low-tail",
+        snapshot_id="snap-low-tail",
+    )
+    low_tail_proof = _proof_from_row(
+        direction="buy_yes",
+        row=low_tail_row,
+        token_id="yes-low-tail",
+        q_posterior=0.24833093804728934,
+        q_lcb_5pct=0.0990451308919892,
+        bin_obj=_BIN_X,
+    )
+    high_confidence_row = _snapshot_row(
+        yes_asks=(("0.27", "1000000"),),
+        condition_id="cond-high-yes",
+        yes_token_id="yes-high",
+        no_token_id="no-high",
+        snapshot_id="snap-high",
+    )
+    high_confidence_proof = _proof_from_row(
+        direction="buy_yes",
+        row=high_confidence_row,
+        token_id="yes-high",
+        q_posterior=0.80,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_Y,
+    )
+
+    scoped = era._selection_scoped_proofs(
+        proofs=(low_tail_proof, high_confidence_proof),
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+    assert scoped == (high_confidence_proof,)
+
+
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():
     import sqlite3
 

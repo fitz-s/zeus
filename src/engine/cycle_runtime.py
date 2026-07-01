@@ -46,6 +46,7 @@ from src.state.portfolio import (
     ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     INACTIVE_RUNTIME_STATES,
     get_open_positions,
@@ -3596,6 +3597,32 @@ def _day0_hard_fact_position_eligible(pos) -> bool:
     return _position_state_value(pos) == "day0_window" or _quarantined_position_can_redecision(pos)
 
 
+def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
+    """Monitor real venue fills even before chain reconciliation catches up."""
+
+    state_value = _position_state_value(pos)
+    if state_value in INACTIVE_RUNTIME_STATES or state_value in {"pending_entry", "pending_tracked"}:
+        return False
+    if _position_chain_state_value(pos) != "local_only":
+        return False
+    fill_authority = str(getattr(pos, "fill_authority", "") or "")
+    if fill_authority not in {
+        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    }:
+        return False
+    if _position_real_exposure_shares(pos) <= 0.01:
+        return False
+    for attr in ("effective_cost_basis_usd", "cost_basis_usd", "size_usd"):
+        try:
+            value = float(getattr(pos, attr, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return True
+    return False
+
+
 def _monitoring_phase_positions(portfolio) -> list:
     """Open positions plus quarantine rows that need explicit monitor receipts."""
 
@@ -3606,6 +3633,10 @@ def _monitoring_phase_positions(portfolio) -> list:
         seen.add(id(pos))
     for pos in list(getattr(portfolio, "positions", []) or []):
         if id(pos) in seen:
+            continue
+        if _venue_confirmed_local_fill_needs_monitor(pos):
+            out.append(pos)
+            seen.add(id(pos))
             continue
         if _requires_quarantine_monitor_resolution(pos):
             out.append(pos)

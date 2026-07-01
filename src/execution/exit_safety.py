@@ -445,6 +445,17 @@ def _reason_from(value: Any, fallback: str) -> str:
     return str(value) or fallback
 
 
+def _reason_is_already_canceled(value: Any) -> bool:
+    reason = _reason_from(value, "").lower()
+    normalized = reason.replace("_", " ").replace("-", " ")
+    return (
+        "already canceled" in normalized
+        or "already cancelled" in normalized
+        or "order is canceled" in normalized
+        or "order is cancelled" in normalized
+    )
+
+
 def parse_cancel_response(raw: Any) -> CancelOutcome:
     """Normalize venue cancel payloads into the M4 typed outcome surface."""
 
@@ -457,6 +468,12 @@ def parse_cancel_response(raw: Any) -> CancelOutcome:
     not_canceled = response.get("not_canceled", response.get("not_cancelled"))
 
     if _nonempty(not_canceled):
+        if _reason_is_already_canceled(not_canceled):
+            return CancelOutcome(
+                "CANCELED",
+                "already_canceled_terminal",
+                response,
+            )
         return CancelOutcome(
             "NOT_CANCELED",
             _reason_from(not_canceled, "not_canceled"),
@@ -483,9 +500,12 @@ def parse_cancel_response(raw: Any) -> CancelOutcome:
     if response.get("success") is True and status in {"", "OK", "SUCCESS"}:
         return CancelOutcome("CANCELED", None, response)
     if status in {"NOT_CANCELED", "NOT_CANCELLED", "CANCEL_NOT_CANCELED"}:
+        reason_value = response.get("errorMessage") or response.get("error") or status
+        if _reason_is_already_canceled(reason_value):
+            return CancelOutcome("CANCELED", "already_canceled_terminal", response)
         return CancelOutcome(
             "NOT_CANCELED",
-            _reason_from(response.get("errorMessage") or response.get("error") or status, "not_canceled"),
+            _reason_from(reason_value, "not_canceled"),
             response,
         )
     return CancelOutcome("UNKNOWN", "unrecognized_cancel_response", response)

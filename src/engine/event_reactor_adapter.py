@@ -4501,7 +4501,6 @@ def _build_event_bound_no_submit_receipt_core(
             decision_time=decision_time,
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
-            enforce_win_rate_floor=False,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:

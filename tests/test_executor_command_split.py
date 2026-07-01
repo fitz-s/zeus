@@ -1153,12 +1153,12 @@ class TestLiveOrderCommandSplit:
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
 
-    def test_entry_same_token_terminal_no_fill_redecision_reposts_before_cooldown(
+    def test_entry_same_token_terminal_no_fill_redecision_cools_down_before_repost(
         self,
         mem_conn,
         monkeypatch,
     ):
-        """A proven zero-fill terminal ENTRY must not suppress continuous redecision."""
+        """A proven zero-fill terminal ENTRY releases exposure but not cooldown."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
 
@@ -1241,15 +1241,9 @@ class TestLiveOrderCommandSplit:
             },
         )
 
-        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
-            mock_inst = MagicMock()
-            MockClient.return_value = mock_inst
-            mock_inst.v2_preflight.return_value = None
-            bound = _capture_bound_submission_envelope(mock_inst)
-            mock_inst.place_limit_order.side_effect = (
-                lambda **kwargs: _final_submit_result(bound, order_id="ord-terminal-nofill-repost")
-            )
-
+        with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
             result = _live_order(
                 trade_id="trd-terminal-nofill-repost",
                 intent=intent,
@@ -1258,9 +1252,11 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-terminal-nofill-repost",
             )
 
-        assert result.status == "pending"
-        assert result.order_id == "ord-terminal-nofill-repost"
-        assert mock_inst.place_limit_order.called
+        assert result.status == "rejected"
+        assert result.reason == "entry_cooldown:same_token_terminal_no_fill_cooling_down"
+        assert result.command_state == "REJECTED"
+        insert_command.assert_not_called()
+        MockClient.assert_not_called()
         assert (
             mem_conn.execute(
                 """
@@ -1270,7 +1266,7 @@ class TestLiveOrderCommandSplit:
                 """,
                 (token_id,),
             ).fetchone()[0]
-            == 2
+            == 1
         )
 
     def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):

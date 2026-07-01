@@ -305,8 +305,18 @@ class TestLayer2VerifyPreSubmitForCommand:
             self._call(ps)
 
     def test_negative_submit_edge_raises(self):
-        ps = _maker_pre_submit(q_live=0.0054, q_lcb_5pct=0.003, limit_price=0.006)
+        ps = _maker_pre_submit(q_live=0.70, q_lcb_5pct=0.60, limit_price=0.61)
         with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
+            self._call(ps)
+
+    def test_below_live_win_rate_floor_raises(self):
+        ps = _maker_pre_submit(
+            q_live=0.24833093804728934,
+            q_lcb_5pct=0.0990451308919892,
+            limit_price=0.041,
+            expected_edge=0.0580451308919892,
+        )
+        with pytest.raises(CertificateVerificationError, match="ADMISSION_WIN_RATE_FLOOR"):
             self._call(ps)
 
     def test_micro_edge_density_raises(self):
@@ -333,6 +343,7 @@ class TestLayer2VerifyPreSubmitForCommand:
             limit_price=0.95,
             expected_edge=0.030,
             min_submit_edge_density=0.0,
+            selection_authority_applied="qkernel_spine",
             qkernel_execution_economics={
                 "route_id": "DIRECT_NO:b24@proof",
                 "side": "NO",

@@ -1089,6 +1089,8 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     auto_recoverable_invalid_pending_entries: list[dict[str, Any]] = []
     auto_recoverable_terminal_no_fill_entry_count = 0
     auto_recoverable_terminal_no_fill_entries: list[dict[str, Any]] = []
+    auto_recoverable_invalid_open_entry_authority_count = 0
+    auto_recoverable_invalid_open_entry_authorities: list[dict[str, Any]] = []
     checked = 0
     for row in rows:
         checked += 1
@@ -1140,9 +1142,9 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                     }
                 )
             if restart_relevant:
-                matched_commands = restart_relevant_commands.get(
-                    str(payload.get("event_id") or ""),
-                    [],
+                matched_commands = _restart_relevant_entry_commands_matching_payload(
+                    payload,
+                    restart_relevant_commands,
                 )
                 sample["matched_restart_commands"] = matched_commands[
                     :LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT
@@ -1153,6 +1155,10 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                 )
                 terminal_no_fill_recoverable = bool(matched_commands) and all(
                     bool(command.get("boot_recoverable_terminal_no_fill_entry"))
+                    for command in matched_commands
+                )
+                invalid_open_authority_recoverable = bool(matched_commands) and all(
+                    bool(command.get("boot_recoverable_invalid_open_entry_authority"))
                     for command in matched_commands
                 )
                 if auto_recoverable:
@@ -1173,6 +1179,15 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                     )
                     if len(auto_recoverable_terminal_no_fill_entries) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
                         auto_recoverable_terminal_no_fill_entries.append(sample)
+                elif invalid_open_authority_recoverable:
+                    auto_recoverable_invalid_open_entry_authority_count += len(matched_commands)
+                    sample["restart_relevant"] = False
+                    sample["auto_recoverable_invalid_open_entry_authority"] = True
+                    sample["restart_recovery"] = (
+                        "boot_invalid_open_entry_authority_review_before_reactor"
+                    )
+                    if len(auto_recoverable_invalid_open_entry_authorities) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        auto_recoverable_invalid_open_entry_authorities.append(sample)
                 else:
                     risky_count += 1
                     if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
@@ -1200,6 +1215,12 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     evidence["auto_recoverable_terminal_no_fill_entries"] = (
         auto_recoverable_terminal_no_fill_entries
     )
+    evidence["auto_recoverable_invalid_open_entry_authority_count"] = (
+        auto_recoverable_invalid_open_entry_authority_count
+    )
+    evidence["auto_recoverable_invalid_open_entry_authorities"] = (
+        auto_recoverable_invalid_open_entry_authorities
+    )
     evidence["risky"] = risky
     evidence["historical_risky"] = historical_risky
     if risky:
@@ -1213,6 +1234,11 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         detail = (
             "restart-relevant invalid pending entry certificates are covered by "
             "boot terminal no-fill recovery before reactor"
+        )
+    elif auto_recoverable_invalid_open_entry_authority_count:
+        detail = (
+            "restart-relevant invalid open entry certificates are covered by "
+            "boot command recovery before monitor"
         )
     else:
         detail = "restart-relevant actionable certificates verify under current qkernel money law"
@@ -1362,6 +1388,11 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
             "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
             "NULL AS latest_fact_remaining_size"
         )
+        trade_join = ""
+        trade_select = (
+            "NULL AS positive_trade_fact_state, NULL AS positive_trade_filled_size, "
+            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at"
+        )
         if _table_exists(conn, "main", "venue_order_facts"):
             fact_cols = {
                 str(row[1])
@@ -1396,15 +1427,50 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
                 ON lf.command_id = cmd.command_id
                AND lf.venue_order_id = cmd.venue_order_id
             """
+        if _table_exists(conn, "main", "venue_trade_facts"):
+            trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+            required_trade_columns = {
+                "command_id",
+                "state",
+                "filled_size",
+                "fill_price",
+                "observed_at",
+            }
+            if required_trade_columns <= trade_columns:
+                trade_select = (
+                    "lft.state AS positive_trade_fact_state, "
+                    "lft.filled_size AS positive_trade_filled_size, "
+                    "lft.fill_price AS positive_trade_fill_price, "
+                    "lft.observed_at AS positive_trade_observed_at"
+                )
+                trade_join = """
+                  LEFT JOIN (
+                    SELECT command_id, state, filled_size, fill_price, observed_at
+                      FROM (
+                        SELECT tf.command_id, tf.state, tf.filled_size, tf.fill_price, tf.observed_at,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tf.command_id
+                                   ORDER BY datetime(tf.observed_at) DESC, tf.rowid DESC
+                               ) AS rn
+                          FROM venue_trade_facts tf
+                         WHERE CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                           AND CAST(COALESCE(tf.fill_price, '0') AS REAL) > 0
+                      )
+                     WHERE rn = 1
+                  ) lft
+                    ON lft.command_id = cmd.command_id
+                """
         rows = conn.execute(
             f"""
             SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
                    cmd.state, cmd.venue_order_id, cmd.created_at, cmd.updated_at,
                    {pc_select},
-                   {fact_select}
+                   {fact_select},
+                   {trade_select}
               FROM venue_commands cmd
               {pc_join}
               {fact_join}
+              {trade_join}
              WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
                AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
                AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
@@ -1432,6 +1498,9 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
         )
         item["boot_recoverable_terminal_no_fill_entry"] = (
             _restart_relevant_entry_command_terminal_no_fill_recoverable(item)
+        )
+        item["boot_recoverable_invalid_open_entry_authority"] = (
+            _restart_relevant_entry_command_invalid_open_authority_recoverable(item)
         )
         index.setdefault(event_id, []).append(item)
     return index
@@ -1486,6 +1555,37 @@ def _restart_relevant_entry_command_terminal_no_fill_recoverable(command: dict[s
     return bool(str(command.get("venue_order_id") or "").strip())
 
 
+def _restart_relevant_entry_command_has_positive_exposure(command: dict[str, Any]) -> bool:
+    return not (
+        _decimal_zero_or_missing(command.get("position_shares"))
+        and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
+        and _decimal_zero_or_missing(command.get("position_chain_shares"))
+    )
+
+
+def _restart_relevant_entry_command_invalid_open_authority_recoverable(
+    command: dict[str, Any],
+) -> bool:
+    state = str(command.get("state") or command.get("command_state") or "").upper()
+    if state != "REVIEW_REQUIRED":
+        return False
+    if str(command.get("position_phase") or "") not in {
+        "active",
+        "day0_window",
+        "pending_exit",
+        "quarantined",
+    }:
+        return False
+    if not _restart_relevant_entry_command_has_positive_exposure(command):
+        return False
+    if not bool(str(command.get("venue_order_id") or "").strip()):
+        return False
+    positive_trade_size = _positive_float(command.get("positive_trade_filled_size"))
+    if positive_trade_size is None:
+        return False
+    return True
+
+
 def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
     """Current nonterminal ENTRY orders whose venue point truth must match local truth."""
 
@@ -1501,6 +1601,11 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
         fact_select = (
             "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
             "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at"
+        )
+        trade_join = ""
+        trade_select = (
+            "NULL AS positive_trade_fact_state, NULL AS positive_trade_filled_size, "
+            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at"
         )
         position_join = ""
         position_select = (
@@ -1549,16 +1654,51 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
                 ON lf.command_id = cmd.command_id
                AND lf.venue_order_id = cmd.venue_order_id
             """
+        if _table_exists(conn, "main", "venue_trade_facts"):
+            trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+            required_trade_columns = {
+                "command_id",
+                "state",
+                "filled_size",
+                "fill_price",
+                "observed_at",
+            }
+            if required_trade_columns <= trade_columns:
+                trade_select = (
+                    "lft.state AS positive_trade_fact_state, "
+                    "lft.filled_size AS positive_trade_filled_size, "
+                    "lft.fill_price AS positive_trade_fill_price, "
+                    "lft.observed_at AS positive_trade_observed_at"
+                )
+                trade_join = """
+                  LEFT JOIN (
+                    SELECT command_id, state, filled_size, fill_price, observed_at
+                      FROM (
+                        SELECT tf.command_id, tf.state, tf.filled_size, tf.fill_price, tf.observed_at,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tf.command_id
+                                   ORDER BY datetime(tf.observed_at) DESC, tf.rowid DESC
+                               ) AS rn
+                          FROM venue_trade_facts tf
+                         WHERE CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                           AND CAST(COALESCE(tf.fill_price, '0') AS REAL) > 0
+                      )
+                     WHERE rn = 1
+                  ) lft
+                    ON lft.command_id = cmd.command_id
+                """
         rows = conn.execute(
             f"""
             SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
                    cmd.state, cmd.venue_order_id, cmd.size, cmd.price,
                    cmd.created_at, cmd.updated_at,
                    {position_select},
-                   {fact_select}
+                   {fact_select},
+                   {trade_select}
               FROM venue_commands cmd
               {position_join}
               {fact_join}
+              {trade_join}
              WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
                AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
                AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
@@ -1661,6 +1801,16 @@ def _find_open_order_payload(adapter: Any, venue_order_id: str) -> dict[str, Any
 
 def _venue_point_order_boot_recoverable(item: dict[str, Any]) -> dict[str, Any] | None:
     risk = str(item.get("risk") or "")
+    if (
+        risk == "venue_point_order_status_unknown"
+        and _restart_relevant_entry_command_invalid_open_authority_recoverable(item)
+    ):
+        return {
+            **item,
+            "repair_action": "terminalize_review_required_entry_from_positive_trade_fact",
+            "repair_owner": "src.execution.command_recovery.matched_cancel_review_required_entries",
+            "restart_resolution": "command_recovery.matched_cancel_review_required_entries",
+        }
     if risk == "venue_positive_match_not_projected_locally":
         return {
             **item,
@@ -1811,6 +1961,14 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                 "position_id": command.get("position_id"),
                 "command_state": command.get("state"),
                 "venue_order_id": venue_order_id,
+                "position_phase": command.get("position_phase"),
+                "position_shares": command.get("position_shares"),
+                "position_cost_basis_usd": command.get("position_cost_basis_usd"),
+                "position_chain_shares": command.get("position_chain_shares"),
+                "positive_trade_fact_state": command.get("positive_trade_fact_state"),
+                "positive_trade_filled_size": command.get("positive_trade_filled_size"),
+                "positive_trade_fill_price": command.get("positive_trade_fill_price"),
+                "positive_trade_observed_at": command.get("positive_trade_observed_at"),
                 "venue_status": status,
                 "venue_matched_size": venue_matched,
                 "local_fact_state": local_state,
@@ -1822,7 +1980,12 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             if payload is None:
                 risky.append({**item, "risk": "venue_point_order_not_found"})
             elif status in {"", "UNKNOWN"}:
-                risky.append({**item, "risk": "venue_point_order_status_unknown"})
+                risk_item = {**item, "risk": "venue_point_order_status_unknown"}
+                recoverable = _venue_point_order_boot_recoverable(risk_item)
+                if recoverable is not None:
+                    boot_recoverable.append(recoverable)
+                else:
+                    risky.append(risk_item)
             elif venue_matched is None and status in VENUE_POINT_MATCH_STATUSES:
                 risky.append({**item, "risk": "venue_point_order_matched_size_missing"})
             else:
@@ -2121,16 +2284,27 @@ def _payload_matches_restart_relevant_entry_command(
     payload: dict[str, Any],
     command_index: dict[str, list[dict[str, Any]]],
 ) -> bool:
+    return bool(_restart_relevant_entry_commands_matching_payload(payload, command_index))
+
+
+def _restart_relevant_entry_commands_matching_payload(
+    payload: dict[str, Any],
+    command_index: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
     event_id = str(payload.get("event_id") or "").strip()
     if not event_id:
-        return False
+        return []
     commands = command_index.get(event_id)
     if not commands:
-        return False
+        return []
     token_id = str(payload.get("token_id") or "").strip()
     if not token_id:
-        return True
-    return any(str(command.get("token_id") or "").strip() == token_id for command in commands)
+        return commands
+    return [
+        command
+        for command in commands
+        if str(command.get("token_id") or "").strip() == token_id
+    ]
 
 
 def _live_money_certificate_parent_mode_check() -> CheckResult:
@@ -2374,6 +2548,11 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
             "NULL AS latest_fact_matched_size, NULL AS latest_fact_remaining_size, "
             "NULL AS latest_fact_raw_payload_json"
         )
+        trade_join = ""
+        trade_select = (
+            "NULL AS positive_trade_fact_state, NULL AS positive_trade_filled_size, "
+            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at"
+        )
         if _table_exists(conn, "main", "venue_order_facts"):
             fact_columns = _table_columns(conn, "main", "venue_order_facts")
             matched_select = (
@@ -2417,6 +2596,39 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 remaining_select=remaining_select,
                 raw_select=raw_select,
             )
+        if _table_exists(conn, "main", "venue_trade_facts"):
+            trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+            required_trade_columns = {
+                "command_id",
+                "state",
+                "filled_size",
+                "fill_price",
+                "observed_at",
+            }
+            if required_trade_columns <= trade_columns:
+                trade_select = (
+                    "lft.state AS positive_trade_fact_state, "
+                    "lft.filled_size AS positive_trade_filled_size, "
+                    "lft.fill_price AS positive_trade_fill_price, "
+                    "lft.observed_at AS positive_trade_observed_at"
+                )
+                trade_join = """
+                  LEFT JOIN (
+                    SELECT command_id, state, filled_size, fill_price, observed_at
+                      FROM (
+                        SELECT tf.command_id, tf.state, tf.filled_size, tf.fill_price, tf.observed_at,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tf.command_id
+                                   ORDER BY datetime(tf.observed_at) DESC, tf.rowid DESC
+                               ) AS rn
+                          FROM venue_trade_facts tf
+                         WHERE CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                           AND CAST(COALESCE(tf.fill_price, '0') AS REAL) > 0
+                      )
+                     WHERE rn = 1
+                  ) lft
+                    ON lft.command_id = cmd.command_id
+                """
         terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
         rows = conn.execute(
             f"""
@@ -2436,11 +2648,13 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 pc.bin_label,
                 pc.direction,
                 pc.chain_shares,
-                {fact_select}
+                {fact_select},
+                {trade_select}
               FROM venue_commands cmd
               LEFT JOIN position_current pc
                 ON pc.position_id = cmd.position_id
               {fact_join}
+              {trade_join}
              WHERE UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
                AND COALESCE(cmd.venue_order_id, '') != ''
              ORDER BY datetime(cmd.updated_at) DESC
@@ -2459,9 +2673,17 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         intent_kind = str(row["intent_kind"] or "").upper()
         phase = str(row["position_phase"] or "")
         fact_state = str(row["latest_fact_state"] or "").upper()
+        command_state = str(row["command_state"] or "").upper()
         risk = ""
-        if fact_state in TERMINAL_VENUE_FACT_STATES and str(row["command_state"] or "").upper() not in TERMINAL_VENUE_COMMAND_STATES:
+        if fact_state in TERMINAL_VENUE_FACT_STATES and command_state not in TERMINAL_VENUE_COMMAND_STATES:
             risk = "command_projection_stale_after_terminal_venue_fact"
+        elif (
+            intent_kind == "ENTRY"
+            and command_state == "REVIEW_REQUIRED"
+            and phase in {"active", "day0_window"}
+            and _positive_float(row["positive_trade_filled_size"]) is not None
+        ):
+            risk = "review_required_entry_with_positive_trade_fact"
         elif intent_kind == "EXIT" and phase != "pending_exit":
             risk = "resting_exit_order_without_pending_exit_lifecycle"
         elif intent_kind == "ENTRY" and phase not in {"pending_entry", "active", "day0_window"}:
@@ -2632,6 +2854,18 @@ def _resting_venue_command_boot_recoverable(
             "risk": risk,
             "restart_resolution": "command_recovery.matched_cancel_review_required_entries",
             "repair_action": "terminalize_entry_command_from_positive_match_fact",
+        }
+    if (
+        risk == "review_required_entry_with_positive_trade_fact"
+        and intent_kind == "ENTRY"
+        and phase in {"active", "day0_window"}
+        and _positive_float(item.get("positive_trade_filled_size")) is not None
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.matched_cancel_review_required_entries",
+            "repair_action": "terminalize_review_required_entry_from_positive_trade_fact",
         }
     if (
         risk == "command_projection_stale_after_terminal_venue_fact"

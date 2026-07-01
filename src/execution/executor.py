@@ -935,6 +935,29 @@ def _entry_economics_component(
                 selection_guard_q_safe if selection_guard_q_safe is not None else ""
             ),
         )
+    from src.strategy.live_inference.live_admission import (
+        live_win_rate_floor_rejection_reason,
+    )
+
+    live_win_rate_floor_reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    if live_win_rate_floor_reason is not None:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=live_win_rate_floor_reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            limit_price=limit_price,
+            submit_edge=submit_edge,
+            expected_profit_usd=expected_profit,
+            shares=submitted_shares,
+            qkernel_source=econ_source,
+            qkernel_side=econ_side,
+            qkernel_cost=econ_cost,
+            qkernel_edge_lcb=econ_edge_lcb,
+            qkernel_payoff_q_lcb=payoff_q_lcb,
+        )
     return _capability_component(
         "entry_economics",
         q_live=q_live,
@@ -1380,29 +1403,16 @@ def _entry_same_token_cooldown_component(
         command_id=command_id,
         state=state,
     )
-    if terminal_no_fill:
-        return {
-            "component": "entry_same_token_cooldown",
-            "allowed": True,
-            "reason": "allowed_terminal_no_fill_no_exposure_redecision",
-            "age_seconds": int(age_seconds),
-            "existing_command_id": command_id,
-            "existing_position_id": position_id,
-            "existing_command_state": state,
-            "existing_updated_at": str(updated_at or ""),
-            "existing_created_at": str(created_at or ""),
-            "existing_price": str(prior_price or ""),
-            "existing_size": str(prior_size or ""),
-            "candidate_price": str(limit_price or ""),
-            "candidate_shares": str(shares or ""),
-        }
-
     remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
             "allowed": False,
-            "reason": "same_token_entry_cooling_down",
+            "reason": (
+                "same_token_terminal_no_fill_cooling_down"
+                if terminal_no_fill
+                else "same_token_entry_cooling_down"
+            ),
             "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
             "remaining_seconds": int(remaining_seconds),
             "existing_command_id": command_id,
@@ -1418,11 +1428,22 @@ def _entry_same_token_cooldown_component(
     return {
         "component": "entry_same_token_cooldown",
         "allowed": True,
-        "reason": "allowed_cooldown_elapsed",
+        "reason": (
+            "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
+            if terminal_no_fill
+            else "allowed_cooldown_elapsed"
+        ),
         "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
         "age_seconds": int(age_seconds),
         "existing_command_id": command_id,
+        "existing_position_id": position_id,
         "existing_command_state": state,
+        "existing_updated_at": str(updated_at or ""),
+        "existing_created_at": str(created_at or ""),
+        "existing_price": str(prior_price or ""),
+        "existing_size": str(prior_size or ""),
+        "candidate_price": str(limit_price or ""),
+        "candidate_shares": str(shares or ""),
     }
 
 

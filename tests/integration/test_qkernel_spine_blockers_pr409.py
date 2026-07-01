@@ -654,6 +654,69 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
     assert selected_decision.coherence_allows is True
 
 
+def test_sparse_pooled_oof_does_not_crush_strong_modal_yes_qkernel_edge(monkeypatch):
+    """Sparse pooled-tail OOF evidence must not turn a superior center YES into adjacent NO.
+
+    This is the Shanghai-class live failure: the served qkernel proof says the
+    modal point bin has q=0.80 and qLCB=0.65 at a 0.27 YES cost, while adjacent
+    NO substitutes have only thin positive edges. A sparse high-qLCB OOF table
+    may license the modal YES as a known claim family, but it must not overwrite
+    the exact served qLCB with a much lower pooled bucket and thereby force the
+    selector back into an inferior NO expression.
+    """
+
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    sparse_cells: dict[str, tuple[int, float]] = {}
+    for precision in ("fine_nest", "coarse_global"):
+        sparse_cells.update(
+            {
+                f"high|L2_3|YES|modal|qb5|{precision}": (64, 0.3125),
+                f"high|L2_3|YES|modal|qb6|{precision}": (23, 0.391304347826087),
+                f"high|L2_3|YES|modal|qb7|{precision}": (10, 0.4),
+            }
+        )
+        for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+            sparse_cells[f"high|L2_3|NO|nonmodal|qb{qb}|{precision}"] = (1000, 0.95)
+            sparse_cells[f"high|L2_3|YES|nonmodal|qb{qb}|{precision}"] = (1000, 0.95)
+
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", sparse_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20]),
+    )
+
+    assert result.no_trade_reason is None
+    assert result.selected_proof is not None
+    assert result.selected_proof.direction == "buy_yes"
+    assert result.selected_proof.candidate.bin.label == "20C"
+    center_yes = next(
+        d
+        for d in result.decision.candidate_decisions
+        if d.route.side == "YES"
+        and d.route.bin_id == era._candidate_bin_id(result.selected_proof)
+    )
+    assert center_yes.q_lcb_guard_basis == "OOF_WILSON_95_POOLED_TAIL"
+    assert center_yes.coherence_allows is True
+    assert center_yes.economics.payoff_q_lcb == pytest.approx(0.65)
+    assert center_yes.economics.edge_lcb == pytest.approx(0.38)
+    assert center_yes.economics.optimal_delta_u > 0.0
+
+
 def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypatch):
     """Point-bin q uses the reactor-served sigma, not a rebuilt generic fallback.
 

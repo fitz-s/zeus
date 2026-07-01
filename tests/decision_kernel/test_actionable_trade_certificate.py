@@ -96,6 +96,30 @@ def test_actionable_rejects_q_lcb_above_q_live():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_rejects_below_live_win_rate_floor():
+    parents, action = actionable_graph(
+        action_payload={
+            "q_live": 0.24833093804728934,
+            "q_lcb_5pct": 0.0990451308919892,
+            "c_fee_adjusted": 0.041,
+            "c_cost_95pct": 0.041,
+            "trade_score": 0.0580451308919892,
+            "action_score": 0.0580451308919892,
+            "qkernel_execution_economics": {
+                **_action_payload()["qkernel_execution_economics"],
+                "payoff_q_point": 0.24833093804728934,
+                "payoff_q_lcb": 0.0990451308919892,
+                "cost": 0.041,
+                "edge_lcb": 0.0580451308919892,
+                "selection_guard_q_safe": 0.0990451308919892,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="ADMISSION_WIN_RATE_FLOOR"):
+        verify_actionable_trade(action, parents)
+
+
 def test_actionable_requires_qkernel_spine_selection_authority():
     parents, action = actionable_graph(action_payload={"selection_authority_applied": None})
 
@@ -134,10 +158,10 @@ def test_actionable_rejects_side_not_armed_qkernel_selection_guard():
 def test_actionable_rejects_qkernel_payoff_probability_mismatch():
     parents, action = actionable_graph(
         action_payload={
-            "q_live": 0.005426579861923467,
-            "q_lcb_5pct": 0.003,
-            "c_fee_adjusted": 0.014885316546202029,
-            "c_cost_95pct": 0.011,
+            "q_live": 0.65,
+            "q_lcb_5pct": 0.60,
+            "c_fee_adjusted": 0.40,
+            "c_cost_95pct": 0.40,
             "p_fill_lcb": 0.9997671696598043,
             "trade_score": 0.04049776073684555,
             "action_score": 0.04049776073684555,
@@ -254,20 +278,20 @@ def test_actionable_rejects_wrong_cost_source_for_sell_yes():
 def test_actionable_rejects_low_price_yes_below_roi_frontier_confidence_floor():
     parents, action = actionable_graph(
         action_payload={
-            "q_live": 0.12180248510788458,
-            "q_lcb_5pct": 0.06052567908958011,
-            "c_fee_adjusted": 0.04001526925923045,
-            "c_cost_95pct": 0.04001526925923045,
+            "q_live": 0.65,
+            "q_lcb_5pct": 0.55,
+            "c_fee_adjusted": 0.54,
+            "c_cost_95pct": 0.54,
             "p_fill_lcb": 0.95,
-            "trade_score": 0.020510409830349664,
-            "action_score": 0.020510409830349664,
+            "trade_score": 0.01,
+            "action_score": 0.01,
             "qkernel_execution_economics": {
                 "source": "qkernel_spine",
                 "side": "YES",
-                "payoff_q_point": 0.12180248510788458,
-                "payoff_q_lcb": 0.06052567908958011,
-                "cost": 0.04001526925923045,
-                "edge_lcb": 0.020510409830349664,
+                "payoff_q_point": 0.65,
+                "payoff_q_lcb": 0.55,
+                "cost": 0.54,
+                "edge_lcb": 0.01,
                 "optimal_delta_u": 0.00009152233738979263,
                 "delta_u_at_min": 0.00009152233738979263,
                 "optimal_stake_usd": "1.4412832709285736083984375",
@@ -276,7 +300,7 @@ def test_actionable_rejects_low_price_yes_below_roi_frontier_confidence_floor():
                 "coherence_allows": True,
                 "selection_guard_basis": "SELECTION_BETA_95",
                 "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.06052567908958011,
+                "selection_guard_q_safe": 0.55,
             },
         }
     )

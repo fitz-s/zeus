@@ -5887,6 +5887,154 @@ class TestRecoveryResolutionTable:
             },
         ]
 
+    def test_cancel_failed_already_canceled_positive_entry_fill_releases_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Already-canceled cancel responses must not hide a real partial fill."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-canceled")
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-canceled",
+            trade_id="trade-partial-canceled",
+            state="CONFIRMED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-partial-canceled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-partial-canceled",
+                "reason": "ord-partial-canceled: the order is already canceled",
+                "cancel_outcome": {
+                    "canceled": [],
+                    "not_canceled": {
+                        "ord-partial-canceled": "the order is already canceled",
+                    },
+                },
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        command_events = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM venue_command_events
+                 WHERE command_id = 'cmd-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert command_events[-1] == "FILL_CONFIRMED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "matched_size": "2.127658",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "filled",
+        }
+
+    def test_matched_cancel_review_required_pass_clears_already_canceled_positive_trade_fact(
+        self,
+        conn,
+    ):
+        """DB-only boot recovery must clear already-canceled REVIEW_REQUIRED fills."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-canceled")
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-canceled",
+            trade_id="trade-partial-canceled",
+            state="CONFIRMED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-partial-canceled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-partial-canceled",
+                "reason": "ord-partial-canceled: the order is already canceled",
+                "cancel_outcome": {
+                    "orderID": "ord-partial-canceled",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "ord-partial-canceled: the order is already canceled"
+                    ),
+                },
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["source_proof"]["source_reason"] == (
+            "cancel_failed_already_canceled_positive_entry_fill"
+        )
+
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
         conn,

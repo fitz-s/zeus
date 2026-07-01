@@ -844,7 +844,6 @@ class DecisionSourceContext:
         {
             "day0_live_observation",
             "day0_observed_probability",
-            "day0_base_distribution",
         }
     )
     _DAY0_AUTHORITY_TIERS: ClassVar[frozenset[str]] = frozenset({"OBSERVATION", "DAY0_OBSERVATION"})

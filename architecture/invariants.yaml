@@ -810,6 +810,40 @@ invariants:
     basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D1 + Wave 5+6
     added: 2026-05-27
 
+  - id: INV-41
+    zones: [K2_runtime, live_venue_submit, decision_kernel]
+    statement: >
+      Every live entry for a selected buy_yes or buy_no side must prove the
+      selected-side q_lcb_5pct is at least LIVE_DIRECTION_WIN_RATE_FLOOR at
+      selection, actionable certificate verification, and pre-submit/submit
+      economics. Positive expected value, cheap ask price, ROI density, or
+      taker/maker route quality cannot waive this selected-side conservative
+      win-rate proof.
+    why: >
+      The 2026-07-01 Buenos Aires 11C YES incident showed a 4.1c tail price
+      could make a low-confidence side look positive-EV even though the live
+      decision payload carried q_live≈0.248 and q_lcb≈0.099. That is not
+      high-confidence market alpha. Live money entry requires both positive
+      edge against price and a conservative selected-side win-rate floor; long
+      tail research can remain outside submit authority.
+    enforced_by:
+      tests:
+        - tests/decision_kernel/test_actionable_trade_certificate.py::test_actionable_rejects_below_live_win_rate_floor
+        - tests/decision_kernel/test_presubmit_would_cross_taker.py::TestLayer2VerifyPreSubmitForCommand::test_below_live_win_rate_floor_raises
+        - tests/execution/test_entry_economics_submit_gate.py::test_entry_economics_blocks_buenos_aires_tail_yes_live_incident
+        - tests/engine/test_s6_submit_recapture_gate.py::test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes
+        - tests/integration/test_qkernel_spine_blockers_pr409.py::test_sparse_pooled_oof_does_not_crush_strong_modal_yes_qkernel_edge
+      negative_constraints: []
+    capability_tags: [live_venue_submit, decision_certificate_write, kelly_boundary]
+    relationship_tests:
+      - tests/decision_kernel/test_actionable_trade_certificate.py
+      - tests/decision_kernel/test_presubmit_would_cross_taker.py
+      - tests/execution/test_entry_economics_submit_gate.py
+      - tests/engine/test_s6_submit_recapture_gate.py
+      - tests/integration/test_qkernel_spine_blockers_pr409.py
+    basis: live incident Buenos Aires 2026-07-01 plus Zeus high-confidence live-money objective
+    added: 2026-07-01
+
   - id: INV-37
     zones: [K1_db_split, K2_runtime]
     statement: >

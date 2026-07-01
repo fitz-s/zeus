@@ -576,7 +576,14 @@ def observation_context_to_live_observation(
     )
     source_match_status = (
         "MATCH"
-        if city_source_type == "wu_icao" and source == "wu_api" and coverage_status == "OK"
+        if (
+            (
+                city_source_type == "wu_icao"
+                and source in {"wu_api", "same_station_fast_tail", "wu_api+same_station_fast_tail"}
+                and coverage_status in {"OK", "LOW_COVERAGE"}
+            )
+            or _source_matches_config(source, city_source_type)
+        )
         else "MISMATCH"
     )
     station_match_status = (

@@ -1120,6 +1120,106 @@ def test_live_actionable_certificate_semantics_allows_boot_terminal_no_fill_entr
     assert "terminal no-fill recovery" in result.detail
 
 
+def test_live_actionable_certificate_semantics_allows_boot_invalid_open_entry_authority(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    payload = {
+        **_valid_actionable_payload(),
+        "event_id": "event-open",
+        "token_id": "yes-open",
+        "city": "Buenos Aires",
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "bin_label": "Will the highest temperature in Buenos Aires be 11°C on July 2?",
+        "direction": "buy_yes",
+        "q_live": 0.248330938047289,
+        "q_lcb_5pct": 0.099045130891989,
+        "c_fee_adjusted": 0.041,
+        "c_cost_95pct": 0.041,
+        "trade_score": 0.058045130891989,
+        "action_score": 0.058045130891989,
+        "qkernel_execution_economics": {
+            **_valid_actionable_payload()["qkernel_execution_economics"],
+            "side": "YES",
+            "payoff_q_point": 0.248330938047289,
+            "payoff_q_lcb": 0.099045130891989,
+            "cost": 0.041,
+            "edge_lcb": 0.058045130891989,
+            "selection_guard_q_safe": 0.099045130891989,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _init_entry_command_trade_db(
+        trade_db,
+        event_id="event-open",
+        token_id="yes-open",
+        state="REVIEW_REQUIRED",
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, chain_shares
+        ) VALUES ('pos-1', 'active', 69.34, 2.84294, 0.0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            command_id, venue_order_id, state, filled_size, fill_price, observed_at
+        ) VALUES ('cmd-1', 'venue-1', 'CONFIRMED', '69.34', '0.041', ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", tmp_path / "missing-forecasts.db")
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 0
+    assert result.evidence["auto_recoverable_invalid_open_entry_authority_count"] == 1
+    recovered = result.evidence["auto_recoverable_invalid_open_entry_authorities"][0]
+    assert "ADMISSION_WIN_RATE_FLOOR" in recovered["reason"]
+    assert recovered["restart_recovery"] == (
+        "boot_invalid_open_entry_authority_review_before_reactor"
+    )
+    assert (
+        recovered["matched_restart_commands"][0]
+        ["boot_recoverable_invalid_open_entry_authority"]
+        is True
+    )
+
+
 def test_live_money_certificate_parent_modes_blocks_no_submit_parent(
     monkeypatch, tmp_path
 ):
@@ -2525,6 +2625,81 @@ def test_resting_entry_terminal_positive_fact_is_boot_recoverable(monkeypatch, t
     )
 
 
+def test_review_required_entry_with_positive_trade_fact_is_boot_recoverable(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(
+        trade_db,
+        phase="active",
+        intent_kind="ENTRY",
+    )
+    conn = sqlite3.connect(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET state = 'REVIEW_REQUIRED'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE venue_order_facts
+           SET state = 'LIVE',
+               matched_size = '0',
+               remaining_size = '133.16'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            command_id, venue_order_id, state, filled_size, fill_price, observed_at
+        ) VALUES (
+            'cmd-1', '0xabc', 'CONFIRMED', '69.34', '0.041', ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["covered_count"] == 0
+    recoverable = result.evidence["boot_recoverable"][0]
+    assert recoverable["risk"] == "review_required_entry_with_positive_trade_fact"
+    assert recoverable["restart_resolution"] == (
+        "command_recovery.matched_cancel_review_required_entries"
+    )
+    assert recoverable["repair_action"] == (
+        "terminalize_review_required_entry_from_positive_trade_fact"
+    )
+
+
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
@@ -2788,6 +2963,83 @@ def test_venue_point_order_truth_alignment_blocks_unknown_point_status(
 
     assert result.ok is False
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_status_unknown"
+
+
+def test_venue_point_order_truth_alignment_boot_recovers_unknown_status_with_positive_trade(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        command_state="REVIEW_REQUIRED",
+        fact_state="LIVE",
+        matched_size="0",
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, chain_shares
+        ) VALUES ('pos-venue-audit', 'active', 69.34, 2.84294, 0.0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            command_id, venue_order_id, state, filled_size, fill_price, observed_at
+        ) VALUES (
+            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '69.34', '0.041', ?
+        )
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_adapter = _FakeVenuePointAdapter({})
+    fake_adapter.get_order = lambda order_id: {"id": order_id, "status": "UNKNOWN"}
+    monkeypatch.setattr(
+        preflight,
+        "_preflight_venue_adapter",
+        lambda: (_FakeVenueClient(), fake_adapter),
+    )
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    recoverable = result.evidence["boot_recoverable"][0]
+    assert recoverable["risk"] == "venue_point_order_status_unknown"
+    assert recoverable["restart_resolution"] == (
+        "command_recovery.matched_cancel_review_required_entries"
+    )
+    assert recoverable["repair_action"] == (
+        "terminalize_review_required_entry_from_positive_trade_fact"
+    )
 
 
 def test_venue_point_order_truth_alignment_accepts_projected_partial_match(

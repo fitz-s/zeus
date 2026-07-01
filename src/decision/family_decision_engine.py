@@ -209,6 +209,7 @@ from src.decision.selection_calibrator import apply_selection_calibrator
 from src.probability.joint_q import JointQ, build_joint_q
 from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
+from src.strategy.live_inference.live_admission import LIVE_DIRECTION_WIN_RATE_FLOOR
 from src.strategy.utility_ranker import (
     FamilyPayoffMatrix,
     PortfolioExposureVector,
@@ -1800,6 +1801,20 @@ class FamilyDecisionEngine:
                     "q_lcb_guard_abstained": bool(verdict.abstained),
                     "q_lcb_guard_cell_key": verdict.cell_key,
                 }
+                if (
+                    d.route.side == "YES"
+                    and bin_position == "modal"
+                    and verdict.basis == "OOF_WILSON_95_POOLED_TAIL"
+                    and q_lcb_route >= LIVE_DIRECTION_WIN_RATE_FLOOR
+                    and edge_lcb > 0.0
+                ):
+                    # A pooled right-tail cell is same-claim evidence that the sparse
+                    # high bucket is not an unknown family, but it is not the exact
+                    # high-confidence bucket's numerical lower-bound authority. Let it
+                    # license market-superiority while preserving the served qkernel
+                    # qLCB/cost pair. Exact OOF cells still deflate below.
+                    out.append(replace(d, **guard_fields))
+                    continue
                 if verdict.basis == "INERT" and not verdict.abstained:
                     out.append(replace(d, **guard_fields))  # no artifact; pass-through
                     continue

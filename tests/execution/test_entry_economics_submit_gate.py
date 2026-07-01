@@ -198,7 +198,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_allows_center_buy_yes_above_micro_tail_floor():
+def test_entry_economics_blocks_center_buy_micro_tail_yes_below_live_win_rate_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -225,9 +225,78 @@ def test_entry_economics_allows_center_buy_yes_above_micro_tail_floor():
         },
     )
 
+    assert verdict["allowed"] is False
+    assert verdict["reason"].startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.074)
+
+
+def test_entry_economics_blocks_buenos_aires_tail_yes_live_incident():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.041,
+            q_live=0.24833093804728934,
+            q_lcb_5pct=0.0990451308919892,
+            expected_edge=0.041246376484684766,
+            min_entry_price=0.02,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.24833093804728934,
+                payoff_q_lcb=0.0990451308919892,
+                cost=0.057798754407304434,
+                edge_lcb=0.041246376484684766,
+                delta_u_at_min=0.0001,
+                optimal_stake_usd=5.45956,
+                optimal_delta_u=0.001,
+                false_edge_rate=0.05,
+                selection_guard_q_safe=0.0990451308919892,
+            ),
+        ),
+        shares=133.16,
+        actionable_payload={
+            "strategy_key": "center_buy",
+            "direction": "buy_yes",
+        },
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"].startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.0990451308919892)
+
+
+def test_entry_economics_allows_high_confidence_center_buy_yes():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.27,
+            q_live=0.80,
+            q_lcb_5pct=0.65,
+            expected_edge=0.38,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.80,
+                payoff_q_lcb=0.65,
+                cost=0.27,
+                edge_lcb=0.38,
+                delta_u_at_min=0.01,
+                optimal_stake_usd=10.0,
+                optimal_delta_u=0.02,
+                false_edge_rate=0.01,
+                selection_guard_q_safe=0.65,
+            ),
+        ),
+        shares=10.0,
+        actionable_payload={
+            "strategy_key": "center_buy",
+            "direction": "buy_yes",
+        },
+    )
+
     assert verdict["allowed"] is True
-    assert verdict["details"]["live_min_entry_price"] == 0.02
-    assert verdict["details"]["expected_profit_usd"] == pytest.approx(1.5)
+    assert verdict["details"]["expected_profit_usd"] == pytest.approx(3.8)
 
 
 def test_entry_economics_blocks_low_price_yes_below_roi_frontier_floor():

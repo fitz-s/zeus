@@ -19,6 +19,9 @@ from src.decision.family_decision_engine import (
     native_curve_side_for_direction,
     roi_frontier_useful_values,
 )
+from src.strategy.live_inference.live_admission import (
+    live_win_rate_floor_rejection_reason,
+)
 from src.events.day0_authority import (
     Day0AuthorityError,
     assert_live_day0_payload_authority,
@@ -403,6 +406,11 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
             raise CertificateVerificationError(f"actionable {field} must be in [0, 1]")
     if q_lcb > q_live:
         raise CertificateVerificationError("actionable q_lcb_5pct exceeds q_live")
+    _verify_live_entry_win_rate_floor(
+        payload,
+        q_lcb=q_lcb,
+        label="actionable",
+    )
     for field in ("c_fee_adjusted", "c_cost_95pct"):
         value = _finite_float(payload.get(field), field)
         if value <= 0.0 or value >= 1.0:
@@ -813,6 +821,11 @@ def _verify_pre_submit_revalidation_for_command(
     submit_edge = q_lcb - limit_price
     if submit_edge <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
+    _verify_live_entry_win_rate_floor(
+        pre_submit,
+        q_lcb=q_lcb,
+        label="pre-submit revalidation",
+    )
     if expected_edge > submit_edge + 1e-6:
         raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
     floor_decision = _entry_price_floor_decision_for_payload(
@@ -1471,6 +1484,19 @@ def _finite_float(value: object, field_name: str) -> float:
 def _entry_floor_applies(payload: dict) -> bool:
     direction = str(payload.get("direction") or "").strip().lower()
     return direction in {"buy_yes", "buy_no"}
+
+
+def _verify_live_entry_win_rate_floor(
+    payload: dict,
+    *,
+    q_lcb: float,
+    label: str,
+) -> None:
+    if not _entry_floor_applies(payload):
+        return
+    reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    if reason is not None:
+        raise CertificateVerificationError(f"{label} {reason}")
 
 
 def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:

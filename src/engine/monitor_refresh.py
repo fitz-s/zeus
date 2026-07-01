@@ -2012,19 +2012,11 @@ def _fetch_canonical_day0_observation_from_instants(
     *,
     reference_time: datetime,
 ) -> Day0ObservationContext | None:
-    """Build an executable Day0 observation from canonical observation_instants.
-
-    NOAA-settled cities do not have an observation_client live fetcher, but their
-    settlement-station METAR rows are already persisted in the same canonical
-    surface used by hard-fact Day0 triggers. This adapter feeds that source into
-    the normal Day0Router math instead of falling back to stale replacement
-    posteriors.
-    """
+    """Build an executable Day0 observation from canonical observation_instants."""
 
     try:
         from src.data.day0_observation_reader import (
-            COVERAGE_NONE,
-            read_day0_observed_extrema,
+            read_day0_observation_context_from_instants,
         )
         from src.state.db import get_world_connection_read_only
     except Exception:
@@ -2032,17 +2024,15 @@ def _fetch_canonical_day0_observation_from_instants(
 
     city_name = str(getattr(city, "name", "") or "")
     timezone_name = str(getattr(city, "timezone", "") or "")
-    unit = str(getattr(city, "settlement_unit", "C") or "C")
     if not city_name or not timezone_name:
         return None
     conn = None
     try:
         conn = get_world_connection_read_only()
-        result = read_day0_observed_extrema(
+        return read_day0_observation_context_from_instants(
             conn,
-            city=city_name,
+            city=city,
             target_date=target_d.isoformat(),
-            timezone_name=timezone_name,
             decision_time_utc=reference_time,
         )
     except Exception:
@@ -2053,33 +2043,6 @@ def _fetch_canonical_day0_observation_from_instants(
                 conn.close()
             except Exception:
                 pass
-
-    if result.coverage_status == COVERAGE_NONE or result.chosen_source is None:
-        return None
-    if result.high_so_far is None or result.low_so_far is None:
-        return None
-    observation_time = result.last_observation_time_utc
-    if not observation_time:
-        return None
-    current_temp = (
-        float(result.current_temp)
-        if result.current_temp is not None
-        else float("nan")
-    )
-    return Day0ObservationContext(
-        current_temp=current_temp,
-        high_so_far=float(result.high_so_far),
-        low_so_far=float(result.low_so_far),
-        source=str(result.chosen_source),
-        observation_time=observation_time,
-        unit=unit,
-        station_id=str(result.provenance.get("chosen_source") or result.chosen_source),
-        sample_count=int(result.row_count),
-        last_sample_time=observation_time,
-        coverage_status=str(result.coverage_status),
-        observation_available_at=str(result.decision_time_utc),
-        provider_reported_time="canonical_observation_instants",
-    )
 
 
 def _temperature_native_value_to_c(value: float, *, unit: str) -> float:

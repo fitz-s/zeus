@@ -188,7 +188,12 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # not a cross-source fallback: the AWC METAR channel is admitted only as a
     # faster distribution tail for the same station when WU's live distribution
     # is absent/stale/coverage-incomplete.
-    "wu_icao": frozenset({"wu_api", "same_station_fast_tail", "wu_api+same_station_fast_tail"}),
+    "wu_icao": frozenset({
+        "wu_api",
+        "same_station_fast_tail",
+        "wu_api+same_station_fast_tail",
+        "wu_icao_history",
+    }),
     # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
     # HKO native accumulator only.
     "hko": frozenset({"hko_hourly_accumulator"}),
@@ -196,7 +201,7 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # Tel Aviv/LLBG) do not have a WU executable source. The live Day0 monitor
     # consumes the canonical observation_instants surface populated from Ogimet
     # METAR rows for those settlement stations.
-    "noaa": frozenset({"ogimet_metar_uuww", "ogimet_metar_llbg"}),
+    "noaa": frozenset({"ogimet_metar_ltfm", "ogimet_metar_uuww", "ogimet_metar_llbg"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
@@ -930,6 +935,15 @@ def _day0_observation_field(
     return getattr(observation, field, default)
 
 
+def _day0_canonical_extrema_source(source: str) -> bool:
+    normalized = str(source or "").strip().lower()
+    return (
+        normalized == "wu_icao_history"
+        or normalized == "hko_hourly_accumulator"
+        or normalized.startswith("ogimet_metar_")
+    )
+
+
 def _parse_day0_observation_time_utc(value) -> datetime | None:
     if value is None:
         return None
@@ -1205,7 +1219,7 @@ def _day0_observation_quality_rejection_reason(
     # temperature is diagnostic in the Day0 high/low value path, while the
     # observed extreme is the settlement-relevant bound. Do not block held
     # redecision on a missing diagnostic field for this canonical source.
-    current_temp_required = not observation_source.startswith("ogimet_metar_")
+    current_temp_required = not _day0_canonical_extrema_source(observation_source)
     required_fields = ["current_temp"] if current_temp_required else []
     if temperature_metric.is_low():
         required_fields.append("low_so_far")
@@ -3944,6 +3958,14 @@ def evaluate_candidate(
             candidate.observation,
             "current_temp",
         )
+        if current_temp is None and _day0_canonical_extrema_source(
+            str(_day0_observation_field(candidate.observation, "source", ""))
+        ):
+            current_temp = (
+                observed_low_so_far
+                if temperature_metric.is_low()
+                else observed_high_so_far
+            )
         if current_temp is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",

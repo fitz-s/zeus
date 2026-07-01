@@ -5127,6 +5127,154 @@ def test_chain_projection_preserves_fresh_monitor_snapshot(tmp_path):
     conn.close()
 
 
+def test_venue_confirmed_local_only_fill_is_monitored_without_reclassifying_open_set(
+    tmp_path,
+    monkeypatch,
+):
+    """Venue-confirmed fills need monitor/redecision before chain sync catches up."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.portfolio import get_open_positions
+
+    conn = get_connection(tmp_path / "local-only-confirmed-fill-monitor.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="local-only-confirmed-fill-monitor-1",
+        state="holding",
+        city="Buenos Aires",
+        target_date="2026-07-02",
+        order_id="o-local-only-confirmed-fill-monitor",
+        order_status="filled",
+        entered_at="2026-07-01T22:19:06+00:00",
+        order_posted_at="2026-07-01T22:17:03+00:00",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        shares=69.34,
+        shares_filled=69.34,
+        size_usd=2.84294,
+        cost_basis_usd=2.84294,
+        filled_cost_basis_usd=2.84294,
+        entry_price=0.041,
+        chain_state="local_only",
+        chain_shares=0.0,
+        token_id="tok-buenos-11-yes",
+        no_token_id="tok-buenos-11-no",
+        condition_id="condition-buenos-11",
+        p_posterior=0.24833093804728934,
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-local-only-confirmed-fill-monitor-entry",
+        source_module="tests/test_venue_confirmed_local_only_fill_is_monitored",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    portfolio = _make_portfolio(pos)
+
+    assert get_open_positions(portfolio) == []
+    assert cycle_runtime._monitoring_phase_positions(portfolio) == [pos]
+
+    def fake_refresh(conn_arg, clob_arg, position):
+        assert position is pos
+        position.last_monitor_prob = 0.12
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.079
+        position.last_monitor_market_price = 0.041
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_at = "2026-07-01T22:30:00+00:00"
+        return EdgeContext(
+            p_raw=np.array([0.12]),
+            p_cal=np.array([0.12]),
+            p_market=np.array([0.041]),
+            p_posterior=0.12,
+            forward_edge=0.079,
+            alpha=0.0,
+            confidence_band_upper=0.09,
+            confidence_band_lower=0.07,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snapshot-local-only-confirmed-fill-monitor",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+    def fake_evaluate_exit(self, exit_context):
+        assert exit_context.fresh_prob == pytest.approx(0.12)
+        assert exit_context.current_market_price == pytest.approx(0.041)
+        return ExitDecision(
+            False,
+            reason="CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior", "ci_overlap_hold"],
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
+    monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cycle_runtime, "_entry_selection_guard_exit_decision", lambda **kwargs: None)
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("No exit expected")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_venue_confirmed_local_only_fill_is_monitored"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 1, 22, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 0
+    assert monitor_results[0].fresh_prob == pytest.approx(0.12)
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'",
+            (pos.trade_id,),
+        ).fetchone()[0]
+        == 1
+    )
+    current = conn.execute(
+        """
+        SELECT chain_state, chain_shares, last_monitor_prob,
+               last_monitor_prob_is_fresh, last_monitor_market_price
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["chain_state"] == "local_only"
+    assert current["chain_shares"] == pytest.approx(0.0)
+    assert current["last_monitor_prob"] == pytest.approx(0.12)
+    assert current["last_monitor_prob_is_fresh"] == 1
+    assert current["last_monitor_market_price"] == pytest.approx(0.041)
+    conn.close()
+
+
 def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monkeypatch):
     """Monitor refresh canonical evidence must include the final hold/exit decision."""
     from src.contracts import EdgeContext, EntryMethod

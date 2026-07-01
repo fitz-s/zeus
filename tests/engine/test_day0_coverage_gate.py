@@ -32,7 +32,10 @@ from src.data.observation_client import (
     _DAY0_MIN_SAMPLE_COUNT,
     _compute_day0_coverage_status,
 )
-from src.engine.evaluator import _day0_observation_quality_rejection_reason
+from src.engine.evaluator import (
+    _day0_observation_quality_rejection_reason,
+    _day0_observation_source_rejection_reason,
+)
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -136,6 +139,30 @@ class TestCoverageWindowGate:
         )
         if reason is not None:
             assert "incomplete" not in reason.lower()
+
+    def test_canonical_wu_extrema_source_does_not_require_current_temp(self) -> None:
+        obs = Day0ObservationContext(
+            high_so_far=89.0,
+            low_so_far=73.0,
+            current_temp=float("nan"),
+            source="wu_icao_history",
+            observation_time="2026-05-24T14:00:00+00:00",
+            unit="F",
+            station_id="KLGA",
+            sample_count=8,
+            first_sample_time="2026-05-24T05:00:00+00:00",
+            last_sample_time="2026-05-24T14:00:00+00:00",
+            coverage_status="OK",
+            observation_available_at="2026-05-24T14:00:00+00:00",
+        )
+
+        assert _day0_observation_source_rejection_reason(_NYC, obs) is None
+        assert (
+            _day0_observation_quality_rejection_reason(
+                _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
+            )
+            is None
+        )
 
 
 class TestCoverageStatusConstants:

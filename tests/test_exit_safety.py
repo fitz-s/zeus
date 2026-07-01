@@ -510,6 +510,26 @@ def test_cancel_not_canceled_dict_creates_CANCEL_FAILED_or_REVIEW_REQUIRED(conn)
     assert "CANCEL_FAILED" in [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
 
 
+def test_cancel_already_canceled_not_canceled_dict_is_terminal_cancel(conn):
+    from src.execution.exit_safety import parse_cancel_response, request_cancel_for_command
+    from src.state.venue_command_repo import get_command, list_events
+
+    raw = {"canceled": [], "not_canceled": {"ord-1": "the order is already canceled"}}
+    parsed = parse_cancel_response(raw)
+    assert parsed.status == "CANCELED"
+    assert parsed.reason == "already_canceled_terminal"
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+    outcome = request_cancel_for_command(conn, "cmd-exit-1", lambda order_id: raw)
+
+    assert outcome.status == "CANCELED"
+    assert get_command(conn, "cmd-exit-1")["state"] == "CANCELLED"
+    events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
+    assert "CANCEL_ACKED" in events
+    assert "CANCEL_FAILED" not in events
+
+
 def test_cancel_network_timeout_creates_CANCEL_UNKNOWN(conn):
     from src.execution.exit_safety import can_submit_replacement_sell, request_cancel_for_command
     from src.state.venue_command_repo import get_command, list_events

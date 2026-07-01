@@ -603,6 +603,13 @@ def get_current_observation(
     target_day, reference_utc, reference_local, tz = _resolve_observation_context(
         city, target_date=target_date, reference_time=reference_time
     )
+    canonical = _fetch_canonical_observation_from_instants(
+        city,
+        target_day=target_day,
+        reference_utc=reference_utc,
+    )
+    if canonical is not None:
+        return canonical
 
     if city.settlement_source_type == "wu_icao":
         result = _fetch_wu_observation(city, target_day=target_day, reference_local=reference_local, tz=tz)
@@ -673,6 +680,39 @@ def get_current_observation(
         reference_local.isoformat(),
     )
     raise ObservationUnavailableError(f"All observation providers failed for {city.name}/{target_day.isoformat()}")
+
+
+def _fetch_canonical_observation_from_instants(
+    city: City,
+    *,
+    target_day: date,
+    reference_utc: datetime,
+) -> Optional[Day0ObservationContext]:
+    try:
+        from src.data.day0_observation_reader import (
+            read_day0_observation_context_from_instants,
+        )
+        from src.state.db import get_world_connection_read_only
+    except Exception:
+        return None
+
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        return read_day0_observation_context_from_instants(
+            conn,
+            city=city,
+            target_date=target_day.isoformat(),
+            decision_time_utc=reference_utc,
+        )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _require_wu_api_key() -> None:
