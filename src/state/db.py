@@ -8302,6 +8302,18 @@ def _selection_fact_table_ref(
         pass
     if require_attached_world:
         return None
+    # Owner-routed (2026-06-30): selection_*_fact is world-owned. A bare `INSERT INTO <table>` lands in the
+    # connection's MAIN, so returning the bare name is only correct when MAIN IS the owner (world). A conn
+    # rooted at a wrong canonical DB (e.g. the evaluator's trade conn — the 412/3029 stray-ghost inversion)
+    # would silently write a ghost; skip the write instead. Memory/tempfile/ad-hoc test conns keep the legacy
+    # bare behavior so the suite is unaffected.
+    from src.state.owner_routed_write import _KNOWN_DB_FILENAMES, owner_db_filename
+    _main = _main_database_path(conn)
+    _mainname = _main.name if _main is not None else None
+    if _mainname == owner_db_filename(table):
+        return table if _table_exists(conn, table) else None
+    if _mainname is not None and _mainname in _KNOWN_DB_FILENAMES:
+        return None  # known-but-wrong canonical DB -> a bare write would be a ghost
     if _table_exists(conn, table):
         return table
     return None
