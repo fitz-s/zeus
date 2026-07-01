@@ -90,7 +90,7 @@ tables:
 
   - name: settlements
     db: forecasts
-    schema_class: legacy_archived
+    schema_class: forecast_class
     schema_version_owner: null
     created_by: init_schema_forecasts
     pk_col: null
@@ -831,7 +831,7 @@ tables:
 
   - name: model_bias
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1693,7 +1693,7 @@ tables:
 
   - name: trade_decisions
     db: trade
-    schema_class: archive
+    schema_class: trade_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -1988,7 +1988,7 @@ tables:
 
   - name: hko_hourly_accumulator
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: migration_script_k1_archive
     pk_col: null
@@ -2023,7 +2023,7 @@ tables:
 
   - name: historical_forecasts
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
@@ -2033,7 +2033,7 @@ tables:
 
   - name: hourly_observations
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null

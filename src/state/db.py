@@ -1653,6 +1653,36 @@ def init_schema(
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     conn.executescript("""
+        -- Migration-created world-class tables promoted from legacy_archived (2026-07-01, atlas §6C):
+        -- declared world_class in db_table_ownership.yaml + hold live data; created here so init == registry.
+        CREATE TABLE IF NOT EXISTS historical_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            forecast_high REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            lead_days INTEGER,
+            available_at TEXT,
+            UNIQUE(city, target_date, source, lead_days)
+        );
+        CREATE TABLE IF NOT EXISTS hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc    TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (target_date, hour_utc)
+        );
+        CREATE TABLE IF NOT EXISTS hourly_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            obs_date TEXT NOT NULL,
+            obs_hour INTEGER NOT NULL,
+            temp REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            source TEXT NOT NULL,
+            UNIQUE(city, obs_date, obs_hour, source)
+        );
         -- Inherited from legacy predecessor: settlement outcomes (world-class authoritative table)
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

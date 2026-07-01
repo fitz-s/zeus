@@ -32,12 +32,6 @@ class Domain(Enum):
 
 # Tables whose data-grounded owner DIFFERS from the current registry (the in-place migration worklist).
 CORRECTED_FROM_REGISTRY: frozenset[str] = frozenset({
-    'historical_forecasts',
-    'hko_hourly_accumulator',
-    'hourly_observations',
-    'model_bias',
-    'settlements',
-    'trade_decisions',
 })
 
 # CANONICAL owner DB per live (non-legacy) table — the SINGLE source of ownership truth.
