@@ -2027,9 +2027,27 @@ def _replacement_bayes_precision_fusion_override(
         # city/metric affine is served by state/emos_center_calibration.json; the center is then byte-
         # identical to the uncalibrated fused center. The slope b captures the temperature-
         # dependent representativeness bias a constant offset cannot. σ is untouched (center-only).
-        from src.calibration.emos_center_calibration import apply_affine, lookup_affine  # noqa: PLC0415
-        _emos_a, _emos_b = lookup_affine(request.city, metric)
-        _mu_served = apply_affine(_mu_diagonal, _emos_a, _emos_b)
+        # LEAD-GATED + RANGE-GUARDED (consult REQ-20260701-063727): the affine is fit on ONE served
+        # center per date at the day-ahead decision lead, so it is served ONLY at that lead (applying
+        # it at L0/L2/… would extrapolate across the lead-dependent bias regime) and only WITHIN the
+        # observed temperature support (the tilt is held flat outside [x_lo,x_hi], guarding a strong
+        # slope from unearned extrapolation). Lead uncomputable -> identity (fail-closed).
+        from src.calibration.emos_center_calibration import (  # noqa: PLC0415
+            apply_affine_in_support,
+            lookup_affine,
+        )
+        try:
+            _emos_lead = (
+                date.fromisoformat(_date_text(request.target_date))
+                - _to_utc(request.source_cycle_time, field_name="source_cycle_time").date()
+            ).days
+        except Exception:
+            _emos_lead = None
+        if _emos_lead is None:
+            _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
+        else:
+            _emos_a, _emos_b, _emos_xlo, _emos_xhi = lookup_affine(request.city, metric, _emos_lead)
+        _mu_served = apply_affine_in_support(_mu_diagonal, _emos_a, _emos_b, _emos_xlo, _emos_xhi)
         _emos_delta_c = _mu_served - _mu_diagonal
 
         return _BayesPrecisionFusionFusionOverride(

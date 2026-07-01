@@ -32,10 +32,41 @@ import os
 import random
 import sqlite3
 import statistics
+import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 
 DECISION_LEAD = 1  # day-ahead: the primary traded decision lead (target_date − cycle_date, days)
+
+
+def _source_commit():
+    """Best-effort git HEAD for artifact provenance; None if unavailable (never raises)."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip() or None
+    except Exception:
+        return None
+
+
+def _atomic_write_json(path, obj):
+    """Write JSON via temp-file + fsync + os.replace so a concurrent reader never sees a partial
+    file (a partial read fail-softs to identity, which would transiently switch the layer OFF)."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
@@ -147,25 +178,84 @@ def _date_block_lcb(per_date_dmse, *, alpha=0.05, nboot=2000, seed=5):
     return means[int(alpha * nboot)]
 
 
+def _pool_bydate(recs, min_days):
+    """recs {city:[(date,center,obs)]} -> pool {city:{date:(center,settle)}} for cities with
+    >= min_days INDEPENDENT dates (the honest unit)."""
+    return {c: {d: (x, s) for d, x, s in rc} for c, rc in recs.items() if len(rc) >= min_days}
+
+
+def _global_date_lodo(pool):
+    """Leave-one-GLOBAL-date-out: hold out a whole target_date across ALL cities, refit EB on the
+    rest, score each city's held-date cell. Removes the cross-city EB-prior leakage a per-(city,date)
+    fold leaves (the held date still informs the prior via other cities). {city: [per-date ΔMSE]}."""
+    dates = sorted({d for c in pool for d in pool[c]})
+    per_city = {c: [] for c in pool}
+    for D in dates:
+        eb = fit_affine_eb({c: [v for d, v in pool[c].items() if d != D] for c in pool})
+        for c in pool:
+            if D in pool[c]:
+                x, s = pool[c][D]
+                fa, fb = eb.get(c, (0.0, 1.0))
+                per_city[c].append((s - x) ** 2 - (s - apply_affine(x, fa, fb)) ** 2)
+    return per_city
+
+
+def _reselect(pool, train_dates, min_days):
+    """Refit EB + reselect served cities using ONLY train_dates (inner global-date LOO gate).
+    {city:(a,b)} for the cities production WOULD serve on this training set."""
+    sub = {c: {d: pool[c][d] for d in train_dates if d in pool[c]} for c in pool}
+    sub = {c: v for c, v in sub.items() if len(v) >= min_days}
+    if len(sub) < 3:
+        return {}
+    eb = fit_affine_eb({c: list(v.values()) for c, v in sub.items()})
+    inner = _global_date_lodo(sub)
+    selected = {}
+    for c in sub:
+        cells = inner.get(c, [])
+        A, B = eb.get(c, (0.0, 1.0))
+        if len(cells) >= 3 and not (abs(A) < 1e-9 and abs(B - 1.0) < 1e-9) \
+                and statistics.mean(cells) > 0.0 and _date_block_lcb(cells) >= 0.0:
+            selected[c] = (A, B)
+    return selected
+
+
+def _nested_portfolio(pool, min_days):
+    """NESTED selection validation — the honest LAYER-enable gate (consult BLOCKER). Outer
+    leave-one-GLOBAL-date-out; inside each fold RESELECT cities on the training dates only, apply
+    that selected policy to the held date, pool ΔMSE over ALL cities' held cells (equal-weight
+    portfolio). Bootstrap the per-date portfolio ΔMSE. The statistic is 'the policy that would have
+    been selected WITHOUT this held block', not 'mean ΔMSE among cities selected on the full data'.
+    Returns (mean, lcb95, median_reselected)."""
+    dates = sorted({d for c in pool for d in pool[c]})
+    port, counts = [], []
+    for D in dates:
+        selected = _reselect(pool, [x for x in dates if x != D], min_days)
+        counts.append(len(selected))
+        num, den = 0.0, 0
+        for c in pool:
+            if D in pool[c]:
+                x, s = pool[c][D]
+                den += 1
+                if c in selected:
+                    a, b = selected[c]
+                    num += (s - x) ** 2 - (s - apply_affine(x, a, b)) ** 2
+        if den:
+            port.append(num / den)
+    if len(port) < 3:
+        return 0.0, float("-inf"), 0
+    return statistics.mean(port), _date_block_lcb(port), (statistics.median(counts) if counts else 0)
+
+
 def _fit_metric(conn, metric, a):
     recs = _runtime_served_center(conn, metric)          # city -> [(date, center, obs)], one/date
-    # Cities with enough INDEPENDENT dates enter the EB pool; others stay identity.
-    pool = {c: rc for c, rc in recs.items() if len(rc) >= a.min_days}
-    city_pairs = {c: [(x, s) for _, x, s in rc] for c, rc in pool.items()}
-    eb_full = fit_affine_eb(city_pairs)                  # DATA-DERIVED shrink (no κ, no clamp)
+    pool = _pool_bydate(recs, a.min_days)                # {city: {date: (center, settle)}}
+    eb_full = fit_affine_eb({c: list(v.values()) for c, v in pool.items()})
+    per_city = _global_date_lodo(pool)                   # leak-free: leave-one-GLOBAL-date-out
 
-    # Leave-one-DATE-out: for each (city, held date), refit EB on ALL cities minus that one point,
-    # score the held date. EB is cross-city, so the whole pool is refit per fold (honest OOS).
-    per_city_cells = {c: [] for c in pool}
-    for c, rc in pool.items():
-        for hd, xh, sh in rc:
-            fold = {}
-            for cc, rcc in pool.items():
-                pts = [(x, s) for d, x, s in rcc if not (cc == c and d == hd)]
-                if pts:
-                    fold[cc] = pts
-            fa, fb = fit_affine_eb(fold).get(c, (0.0, 1.0))
-            per_city_cells[c].append((sh - xh) ** 2 - (sh - apply_affine(xh, fa, fb)) ** 2)
+    # NESTED selection is the LAYER-enable gate: serve live ONLY if the fit+select+apply policy has a
+    # positive PORTFOLIO lower CI on held-out dates — not the selection-conditional served-set number.
+    port_mean, port_lcb, med_resel = _nested_portfolio(pool, a.min_days)
+    layer_ok = port_lcb > 0.0
 
     cities_out = {}
     served_cells = []
@@ -176,28 +266,35 @@ def _fit_metric(conn, metric, a):
         n_dates_all.append(n_dates)
         bias = round(statistics.mean(s - x for _, x, s in rc), 3) if rc else None
         if city not in pool:
-            cities_out[city] = {"a": 0.0, "b": 1.0, "serve": False, "tier": None,
-                                "n_dates": n_dates, "bias_c": bias,
+            cities_out[city] = {"a": 0.0, "b": 1.0, "serve": False, "tier": None, "n_dates": n_dates,
+                                "bias_c": bias, "x_lo": None, "x_hi": None,
                                 "lodo_dmse": None, "lodo_dmse_lcb95": None}
             continue
         A, B = eb_full.get(city, (0.0, 1.0))
-        cells = per_city_cells.get(city, [])
+        centers = [x for x, _ in pool[city].values()]
+        x_lo, x_hi = (round(min(centers), 3), round(max(centers), 3)) if centers else (None, None)
+        cells = per_city.get(city, [])
         oos = statistics.mean(cells) if cells else 0.0
-        lcb = _date_block_lcb(cells)                     # one cell per date -> bootstrap over dates
+        lcb = _date_block_lcb(cells)
         is_identity = (abs(A) < 1e-9 and abs(B - 1.0) < 1e-9)
-        serve = bool((not is_identity) and oos > 0.0 and lcb >= 0.0)
-        tier = "production" if serve else ("canary" if (not is_identity and oos > 0.0) else None)
+        city_ok = (not is_identity) and oos > 0.0 and lcb >= 0.0
+        serve = bool(layer_ok and city_ok)               # serve ONLY if the layer passed nested selection
+        tier = "production" if serve else ("canary" if city_ok else None)
         cities_out[city] = {
             "a": round(A, 5), "b": round(B, 5), "serve": serve, "tier": tier,
-            "n_dates": n_dates, "bias_c": bias,
+            "n_dates": n_dates, "bias_c": bias, "x_lo": x_lo, "x_hi": x_hi,
             "lodo_dmse": round(oos, 4), "lodo_dmse_lcb95": round(lcb, 4) if math.isfinite(lcb) else None,
         }
         if serve:
             served_cells += cells
-    pooled = statistics.mean(served_cells) if served_cells else 0.0
     validation = {
-        "served_pooled_lodo_dmse": round(pooled, 4),
+        "layer_enabled": layer_ok,
+        "nested_portfolio_dmse": round(port_mean, 4),
+        "nested_portfolio_lcb95": round(port_lcb, 4) if math.isfinite(port_lcb) else None,
+        "nested_median_reselected": med_resel,
+        "served_pooled_global_date_dmse": round(statistics.mean(served_cells), 4) if served_cells else 0.0,
         "n_served": sum(1 for v in cities_out.values() if v["serve"]),
+        "n_canary": sum(1 for v in cities_out.values() if v["tier"] == "canary"),
         "n_cities": len(cities_out),
         "median_dates_per_city": statistics.median(n_dates_all) if n_dates_all else 0,
     }
@@ -219,30 +316,42 @@ def main() -> int:
     metrics_out, validations = {}, {}
     for m in metrics:
         cities_out, validation = _fit_metric(conn, m, a)
-        metrics_out[m] = {"cities": cities_out}
+        metrics_out[m] = {"cities": cities_out, "served_lead": DECISION_LEAD}
         validations[m] = validation
         print(f"=== EMOS affine EB (basis=day-ahead served center, one/date, metric={m}) ===")
-        print(f"served {validation['n_served']}/{validation['n_cities']}  pooled LODO ΔMSE="
-              f"{validation['served_pooled_lodo_dmse']:+.4f}  median_dates/city={validation['median_dates_per_city']:.0f}")
+        print(f"LAYER {'ENABLED' if validation['layer_enabled'] else 'DISABLED'} by nested selection: "
+              f"portfolio ΔMSE={validation['nested_portfolio_dmse']:+.4f} lcb95={validation['nested_portfolio_lcb95']} "
+              f"(median reselected/fold={validation['nested_median_reselected']:.0f})")
+        print(f"served {validation['n_served']}/{validation['n_cities']} (canary {validation['n_canary']})  "
+              f"global-date served-pooled ΔMSE={validation['served_pooled_global_date_dmse']:+.4f}  "
+              f"median_dates/city={validation['median_dates_per_city']:.0f}")
         for city, d in sorted(cities_out.items(), key=lambda kv: -(kv[1]["lodo_dmse"] or -9)):
             if d["serve"]:
                 print(f"  {city:14s} a={d['a']:>+7.2f} b={d['b']:>7.3f} bias={d['bias_c']:>+6.2f} "
-                      f"LODO_ΔMSE={d['lodo_dmse']:>+8.4f} dates={d['n_dates']}")
+                      f"gLODO_ΔMSE={d['lodo_dmse']:>+8.4f} range=[{d['x_lo']},{d['x_hi']}] dates={d['n_dates']}")
 
+    tr = conn.execute(
+        "SELECT MIN(target_date), MAX(target_date) FROM forecast_posteriors"
+    ).fetchone()
     artifact = {
         "authority": ARTIFACT_AUTHORITY,
         "enabled": (not a.disabled),
+        "served_lead": DECISION_LEAD,
         "basis": "runtime_served_center: forecast_posteriors.anchor_value_c, day-ahead lead, one/date (the value that feeds q)",
         "model": "affine_ngr_center: mu' = a + b*mu_served (per-unit, empirical-Bayes shrink-to-identity, DATA-DERIVED, no kappa/clamp)",
-        "validation": "leave-one-DATE-out OOS dMSE, date-block-bootstrap 95% lower-CI >= 0 (~19 independent dates/city)",
+        "validation": "per-city leave-one-GLOBAL-date-out; LAYER served only when NESTED selection portfolio lower-CI > 0",
+        "selection_protocol": "nested global-date: reselect cities inside each outer held-date fold; enable if portfolio lcb95 > 0",
+        "support_guard": "apply_affine_in_support clamps mu to [x_lo,x_hi] (observed range) before the affine",
+        "lead_guard": "served ONLY at served_lead; other leads return identity",
         "min_days": a.min_days,
+        "source_commit": _source_commit(),
+        "training_date_range": [tr[0], tr[1]] if tr else None,
         "metrics": metrics_out, "validation_by_metric": validations,
     }
     if a.dry_run:
         print("\n[dry-run] artifact NOT written.")
     else:
-        with open(a.out, "w", encoding="utf-8") as f:
-            json.dump(artifact, f, indent=2, sort_keys=True)
+        _atomic_write_json(a.out, artifact)
         print(f"\nwrote {a.out}")
     return 0
 

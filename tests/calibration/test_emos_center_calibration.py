@@ -11,6 +11,7 @@ from scripts import fit_emos_center_calibration as fit_script
 
 from src.calibration.emos_center_calibration import (
     apply_affine,
+    apply_affine_in_support,
     fit_affine_eb,
     lookup_affine,
 )
@@ -67,64 +68,88 @@ def test_apply_affine():
     assert apply_affine(20.0, 1.0, 1.05) == pytest.approx(22.0)
 
 
-# ---- artifact lookup (fail-soft) ------------------------------------------------------------
-def _write(tmp_path, monkeypatch, cities):
-    art = {"authority": "emos_center_calibration_v1", "metrics": {"high": {"cities": cities}}}
+def test_apply_affine_in_support_clamps_outside_range():
+    # b=0.6 line; inside [20,30] the affine applies, outside the delta is held flat at the endpoint.
+    a, b, xlo, xhi = 8.0, 0.6, 20.0, 30.0
+    assert apply_affine_in_support(25.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 25.0)  # in-range
+    # above support: input clamped to 30 -> correction frozen at the x_hi value
+    assert apply_affine_in_support(40.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 30.0)
+    # below support: input clamped to 20
+    assert apply_affine_in_support(5.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 20.0)
+    # no range -> plain affine
+    assert apply_affine_in_support(40.0, a, b, None, None) == pytest.approx(8.0 + 0.6 * 40.0)
+
+
+# ---- artifact lookup (fail-soft; returns (a, b, x_lo, x_hi); lead-gated) ---------------------
+IDENT = (0.0, 1.0, None, None)
+
+
+def _write(tmp_path, monkeypatch, cities, **top):
+    art = {"authority": "emos_center_calibration_v1", "served_lead": 1,
+           "metrics": {"high": {"served_lead": 1, "cities": cities}}}
+    art.update(top)
     (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
 
 
 def test_lookup_identity_when_absent(tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
-    assert lookup_affine("Seoul", "high") == (0.0, 1.0)
+    assert lookup_affine("Seoul", "high", 1) == IDENT
 
 
 def test_lookup_serves_gated_city(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch, {
-        "Seoul": {"a": 0.54, "b": 1.062, "serve": True},
+        "Seoul": {"a": 0.54, "b": 1.062, "serve": True, "x_lo": 20.0, "x_hi": 30.0},
         "Madrid": {"a": 0.2, "b": 1.01, "serve": False},
     })
-    assert lookup_affine("Seoul", "high") == (pytest.approx(0.54), pytest.approx(1.062))
-    assert lookup_affine("Madrid", "high") == (0.0, 1.0)   # serve=False -> identity
-    assert lookup_affine("Tokyo", "high") == (0.0, 1.0)    # absent -> identity
-    assert lookup_affine("Seoul", "low") == (0.0, 1.0)     # wrong metric -> identity
+    assert lookup_affine("Seoul", "high", 1) == (pytest.approx(0.54), pytest.approx(1.062), 20.0, 30.0)
+    assert lookup_affine("Madrid", "high", 1) == IDENT    # serve=False -> identity
+    assert lookup_affine("Tokyo", "high", 1) == IDENT     # absent -> identity
+    assert lookup_affine("Seoul", "low", 1) == IDENT      # wrong metric -> identity
+
+
+def test_lookup_lead_gate(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}})
+    assert lookup_affine("Seoul", "high", 1)[:2] == (pytest.approx(0.5), pytest.approx(1.06))  # served lead
+    assert lookup_affine("Seoul", "high", 2) == IDENT     # wrong lead -> identity (no extrapolation)
+    assert lookup_affine("Seoul", "high", 0) == IDENT
 
 
 def test_lookup_does_not_serve_canary_tier(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch, {
         "Shanghai": {"a": 0.8, "b": 1.04, "serve": False, "tier": "canary"},
     })
-    assert lookup_affine("Shanghai", "high") == (0.0, 1.0)
+    assert lookup_affine("Shanghai", "high", 1) == IDENT
 
 
 def test_lookup_failsoft_on_malformed(tmp_path, monkeypatch):
     (tmp_path / "emos_center_calibration.json").write_text("{ bad json", encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
-    assert lookup_affine("Seoul", "high") == (0.0, 1.0)   # never raises
+    assert lookup_affine("Seoul", "high", 1) == IDENT     # never raises
 
 
 def test_kill_switch_disables_whole_layer(tmp_path, monkeypatch):
-    art = {"enabled": False, "metrics": {"high": {"cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}}}}
+    art = {"enabled": False, "served_lead": 1,
+           "metrics": {"high": {"served_lead": 1, "cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}}}}
     (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
-    assert lookup_affine("Seoul", "high") == (0.0, 1.0)   # enabled=false -> identity even for a served city
+    assert lookup_affine("Seoul", "high", 1) == IDENT     # enabled=false -> identity even for a served city
 
 
 def test_lookup_reads_both_metrics(tmp_path, monkeypatch):
-    art = {"metrics": {"high": {"cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}},
-                       "low": {"cities": {"Seoul": {"a": -0.2, "b": 0.98, "serve": True}}}}}
+    art = {"served_lead": 1, "metrics": {
+        "high": {"served_lead": 1, "cities": {"Seoul": {"a": 0.5, "b": 1.06, "serve": True}}},
+        "low": {"served_lead": 1, "cities": {"Seoul": {"a": -0.2, "b": 0.98, "serve": True}}}}}
     (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
     monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
-    assert lookup_affine("Seoul", "high") == (pytest.approx(0.5), pytest.approx(1.06))
-    assert lookup_affine("Seoul", "low") == (pytest.approx(-0.2), pytest.approx(0.98))
+    assert lookup_affine("Seoul", "high", 1)[:2] == (pytest.approx(0.5), pytest.approx(1.06))
+    assert lookup_affine("Seoul", "low", 1)[:2] == (pytest.approx(-0.2), pytest.approx(0.98))
 
 
 def test_lookup_round_trips_served_coeffs(tmp_path, monkeypatch):
-    art = {"metrics": {"high": {"cities": {"Taipei": {"a": -1.31, "b": 1.085, "serve": True}}}}}
-    (tmp_path / "emos_center_calibration.json").write_text(json.dumps(art), encoding="utf-8")
-    monkeypatch.setattr("src.config.runtime_state_path", lambda name: tmp_path / name)
-    a, b = lookup_affine("Taipei", "high")
-    assert b == pytest.approx(1.085) and a == pytest.approx(-1.31)
+    _write(tmp_path, monkeypatch, {"Taipei": {"a": -1.31, "b": 1.085, "serve": True, "x_lo": 25.7, "x_hi": 35.0}})
+    a, b, xlo, xhi = lookup_affine("Taipei", "high", 1)
+    assert (a, b, xlo, xhi) == (pytest.approx(-1.31), pytest.approx(1.085), 25.7, 35.0)
 
 
 # ---- fitter ground truth --------------------------------------------------------------------

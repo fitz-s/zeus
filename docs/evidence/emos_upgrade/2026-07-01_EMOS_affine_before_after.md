@@ -1,6 +1,26 @@
 # EMOS affine center calibration — before/after (2026-07-01)
 
-## ★ AUTHORITATIVE (2026-07-01, EB rewrite): no hard-coded shrink, day-ahead one-per-date basis
+## ★★ AUTHORITATIVE (2026-07-01, production-hardened after consult REQ-20260701-063727)
+Supersedes everything below. The frontier consult reviewed the WHOLE surface (PR #421) and found the
+EB direction right but the layer not production-sound as shipped. All flagged defects fixed + verified:
+
+| consult finding | fix (shipped) | verified |
+|---|---|---|
+| **BLOCKER** selection optimism (select cities + report selected-set ΔMSE from same evidence) | LAYER enabled ONLY if a NESTED global-date selection has portfolio lower-CI>0 (reselect cities inside each held-date fold; score the policy that would've been selected without the block) | HIGH portfolio ΔMSE **+0.192, lcb95 +0.118**; LOW +0.048, lcb95 **+0.001 (marginal)** |
+| **HIGH** lead mismatch (L1 fit applied at all leads) | materializer computes lead & serves ONLY at `served_lead` (day-ahead); other leads → identity | lead=1 serves; lead=0/2 → identity |
+| **HIGH** strong-slope extrapolation | `apply_affine_in_support` clamps μ to observed [x_lo,x_hi] before the affine (tilt held flat outside) — data-derived, no clamp constant | above-range μ frozen at x_hi endpoint, not extrapolated |
+| **HIGH** cross-city EB prior leaks the held date | per-city gate uses leave-one-GLOBAL-date-out (whole date removed from ALL cities) | — |
+| **MED** non-atomic write / defaults-on | temp+fsync+os.replace; artifact carries `source_commit`, `training_date_range`, `served_lead`, `selection_protocol` | — |
+
+**Served now (enabled, live seam lead-gated + range-guarded):**
+- **HIGH: 13 cities** (nested portfolio lcb95 +0.118, robust). Per-city global-date gLODO all positive.
+- **LOW: 1 city (Paris, b=1.0 pure level)** — nested lcb95 +0.001, MARGINAL (bootstrap-noise boundary);
+  lowest-risk correction (no slope, range+lead guarded). Treat as canary-grade.
+- Honest headline is the NESTED portfolio number (+0.118 lcb), NOT the selection-conditional served-set
+  "+26%" / "+1.15" (those are upward-biased by selection — kept only as the per-city diagnostic).
+- Tests: 21 calibration + 6 materializer-center pass. Kill switch: `enabled:false` / delete → identity.
+
+## (earlier, superseded) EB rewrite: no hard-coded shrink, day-ahead one-per-date basis
 Supersedes every number below it. Three corrections to what shipped:
 
 1. **NO hard-coded numbers.** The prior fit hard-coded a shrink strength κ=40 AND a slope clamp

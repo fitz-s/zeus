@@ -105,28 +105,59 @@ def apply_affine(center: float, a: float, b: float) -> float:
     return float(a) + float(b) * float(center)
 
 
-def lookup_affine(city: str, metric: str) -> tuple[float, float]:
-    """Fail-soft materializer seam: the fitted (a, b) for (city, metric), or IDENTITY (0.0, 1.0)
-    when absent / not-served / malformed. μ' = a + b·μ; identity => byte-identical center. Reads
-    ``state/emos_center_calibration.json`` (SOLE writer: scripts/fit_emos_center_calibration.py) via
-    the RUNTIME state dir, exactly like the sigma-scale artifact. NEVER raises."""
+def apply_affine_in_support(
+    center: float, a: float, b: float, x_lo: float | None, x_hi: float | None
+) -> float:
+    """μ' = a + b·μ, but the temperature TILT is applied only WITHIN the training support: the input
+    is clamped to [x_lo, x_hi] before the affine, so the correction δ(μ)=a+(b−1)μ is held FLAT at its
+    endpoint value outside the observed range. Guards a strong slope (b far from 1) against unearned
+    extrapolation to temperatures the fit never saw — a DATA-DERIVED bound (the observed range), not a
+    hand-set clamp. x_lo/x_hi None (or identity a=0,b=1) => plain μ (byte-identical)."""
+    c = float(center)
+    if x_lo is not None and x_hi is not None and x_lo <= x_hi:
+        c = min(float(x_hi), max(float(x_lo), c))
+    return float(a) + float(b) * c
+
+
+def lookup_affine(
+    city: str, metric: str, lead: int | None = None
+) -> tuple[float, float, float | None, float | None]:
+    """Fail-soft materializer seam. Returns (a, b, x_lo, x_hi) for (city, metric) — or IDENTITY
+    (0.0, 1.0, None, None) when the layer is disabled, the city is absent / not-served / malformed,
+    OR the requested ``lead`` is not the served decision lead. The affine was fit on ONE served
+    center per date at a single day-ahead lead; applying it at another lead would extrapolate across
+    the (lead-dependent) bias regime, so serving is gated to that lead. ``lead=None`` skips the lead
+    gate (diagnostic use only — the live materializer always passes the real lead). Reads
+    ``state/emos_center_calibration.json`` (SOLE writer: scripts/fit_emos_center_calibration.py).
+    NEVER raises. (x_lo, x_hi) feed ``apply_affine_in_support`` for the range guard."""
+    ident = (0.0, 1.0, None, None)
     try:
         from src.config import runtime_state_path  # noqa: PLC0415
 
         path = str(runtime_state_path(_ARTIFACT_FILENAME))
         if not os.path.exists(path):
-            return 0.0, 1.0
+            return ident
         with open(path, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
         if artifact.get("enabled") is False:  # kill switch: disable the whole layer without deleting it
-            return 0.0, 1.0
-        entry = (((artifact.get("metrics") or {}).get(str(metric)) or {}).get("cities") or {}).get(str(city))
+            return ident
+        metric_block = (artifact.get("metrics") or {}).get(str(metric)) or {}
+        entry = (metric_block.get("cities") or {}).get(str(city))
         if not isinstance(entry, dict) or not entry.get("serve"):
-            return 0.0, 1.0
+            return ident
+        # Lead gate: serve ONLY at the decision lead the coefficients were fit on.
+        if lead is not None:
+            served_lead = metric_block.get("served_lead", artifact.get("served_lead"))
+            if served_lead is not None and int(lead) != int(served_lead):
+                return ident
         a = float(entry.get("a", 0.0))
         b = float(entry.get("b", 1.0))
         if not (math.isfinite(a) and math.isfinite(b)):
-            return 0.0, 1.0
-        return a, b
+            return ident
+        x_lo = entry.get("x_lo")
+        x_hi = entry.get("x_hi")
+        x_lo = float(x_lo) if isinstance(x_lo, (int, float)) and math.isfinite(float(x_lo)) else None
+        x_hi = float(x_hi) if isinstance(x_hi, (int, float)) and math.isfinite(float(x_hi)) else None
+        return a, b, x_lo, x_hi
     except Exception:
-        return 0.0, 1.0
+        return ident
