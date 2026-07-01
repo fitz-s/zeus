@@ -917,6 +917,71 @@ def test_bridge_allows_day0_buy_no_settlement_capture(conn):
     assert row["direction"] == "buy_no"
 
 
+def test_bridge_allows_day0_buy_yes_settlement_capture(conn):
+    aggregate_id = "agg-edli-day0-buyyes-1"
+    pre_submit = {
+        "event_id": EVENT_ID,
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "final_intent_id": FINAL_INTENT_ID,
+        "condition_id": CONDITION_ID,
+        "token_id": ELECTED_YES_TOKEN,
+        "side": "BUY",
+        "direction": "buy_yes",
+        "native_token_side": "YES",
+        "outcome_label": "YES",
+        "city": "Wellington",
+        "target_date": "2026-07-01",
+        "bin_label": "Will the highest temperature in Wellington be 12°C on July 1?",
+        "metric": "high",
+        "unit": "C",
+        "q_live": 0.9592408185,
+        "executable_snapshot_id": "exec-snap-day0-yes",
+        "qkernel_execution_economics": None,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "live_authority_status": "live",
+        "source_authorized_status": "AUTHORIZED",
+    }
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID},
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": VENUE_ORDER_ID,
+            "filled_size": 5.0,
+            "avg_fill_price": 0.7,
+        },
+        source_authority="user_channel",
+    )
+
+    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    assert result is not None
+    row = _position_current_rows(conn)[0]
+    assert row["strategy_key"] == "settlement_capture"
+    assert row["direction"] == "buy_yes"
+    assert row["token_id"] == ELECTED_YES_TOKEN
+    assert row["no_token_id"] in (None, "")
+    assert row["p_posterior"] == pytest.approx(0.9592408185)
+
+
 # --------------------------------------------------------------------------- #
 # 3. Idempotency: replayed fill → still one row, UPDATEd not duplicated
 # --------------------------------------------------------------------------- #

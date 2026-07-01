@@ -44,6 +44,93 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def _valid_day0_pre_submit_payload(**overrides):
+    payload = {
+        "event_id": "evt-day0-presubmit",
+        "final_intent_id": "intent-day0-presubmit",
+        "condition_id": "cond-day0-presubmit",
+        "token_id": "tok-day0-presubmit",
+        "side": "BUY",
+        "direction": "buy_yes",
+        "order_type": "GTC",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": "2026-06-30T17:18:36+00:00",
+        "quote_seen_at": "2026-06-30T17:18:34+00:00",
+        "quote_age_ms": 2000,
+        "max_quote_age_ms": 5000,
+        "book_hash": "book-hash",
+        "current_best_bid": 0.68,
+        "current_best_ask": 0.72,
+        "limit_price": 0.70,
+        "size": 10.0,
+        "q_live": 0.96,
+        "q_lcb_5pct": 0.95,
+        "expected_edge": 0.25,
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.02,
+        "expected_edge_source_certificate_hash": "edge-cert",
+        "cost_basis_source_certificate_hash": "cost-cert",
+        "would_cross_book": False,
+        "tick_size": "0.01",
+        "tick_aligned": True,
+        "min_order_size": 1.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "book_authority_id": "book-auth",
+        "book_captured_at": "2026-06-30T17:18:34+00:00",
+        "heartbeat_authority_id": "heartbeat-auth",
+        "heartbeat_checked_at": "2026-06-30T17:18:35+00:00",
+        "user_ws_authority_id": "user-ws-auth",
+        "user_ws_checked_at": "2026-06-30T17:18:35+00:00",
+        "venue_connectivity_authority_id": "venue-auth",
+        "venue_connectivity_checked_at": "2026-06-30T17:18:35+00:00",
+        "balance_allowance_authority_id": "balance-auth",
+        "balance_allowance_checked_at": "2026-06-30T17:18:35+00:00",
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "qkernel_execution_economics": None,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "live_authority_status": "live",
+        "source_authorized_status": "AUTHORIZED",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_day0_presubmit_revalidation_uses_observation_authority_without_qkernel():
+    from src.events.live_order_aggregate import _validate_pre_submit_revalidation_payload
+
+    _validate_pre_submit_revalidation_payload(_valid_day0_pre_submit_payload())
+
+
+def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():
+    from src.events.live_order_aggregate import (
+        LiveOrderAggregateError,
+        _validate_pre_submit_revalidation_payload,
+    )
+
+    payload = _valid_day0_pre_submit_payload(
+        event_type="FORECAST_SNAPSHOT_READY",
+        qkernel_execution_economics=None,
+    )
+
+    with pytest.raises(
+        LiveOrderAggregateError,
+        match="PreSubmitRevalidated requires qkernel_execution_economics",
+    ):
+        _validate_pre_submit_revalidation_payload(payload)
+
+
 def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatch):
     """Boot-fast recovery must not block scheduler startup on CLOB reads."""
     from src.execution import command_recovery
