@@ -238,11 +238,19 @@ source + ratchet → P1 per-domain init (delete the copy-loop → no NEW ghosts)
 place (move CREATE+registry, drop shells) → P3 drop the 144 ghosts + delete the legacy-exclusion (gate fails loud)
 → P4 wiring: ATTACH→factories + `writer()` binding + retire the YAML as runtime authority (generated-audit only).
 
-**Status:** ✅ **P0 LANDED** — `src/state/domains.py` (120 tables, single source over the existing 3 DBs; 19
-data-grounded corrections = the worklist) + `tests/test_domains_reproduces_registry.py` ratchet, commit
-`05cb6a375` (zero runtime effect). **Open item:** `settlements`/`settlement_outcomes` true row-holding copy
-row-probed before its domain is finalized (settlements=1.25M@forecasts, settlement_outcomes=832k@forecasts —
-both forecast_class, confirmed).
+**Status — the ROOT MECHANISM "Owner-Routed Writes" is LANDED (single-source + converge + enforce + apply 8/8 + self-enforcing):**
+- **derive** — `src/state/domains.py` single ownership source over the existing 3 DBs (120 tables) + reproduction ratchet (`05cb6a375`).
+- **converge** — 13/19 registry inversions flipped to the DB their data already occupies, IN PLACE, boot-gate + coherence green (`3621e03d4`).
+- **enforce** — `src/state/owner_routed_write.py`: `require_owner_main` (bare-write contract), `owner_write_target` (route-or-SKIP, never write a ghost), `owner_qualified_name`, `assert_owner_conn` — generalize `_is_verified_trade_connection` (db.py:7832) to every domain; **fail-OPEN for `:memory:`/tempfile/ad-hoc conns** (suite-safe), raise/skip only for a conn rooted at a known WRONG canonical DB (`ba9ee6892`,`02dd5fecb`).
+- **apply — 8/8 formerly-unbound write sites owner-routed:** no_trade_events · execution_fact · outcome_fact · position_events/position_current · selection_family_fact + selection_hypothesis_fact (fixed the evaluator ghost) · execution_feasibility_evidence (stopped the 12.9M world ghost) · market_price_history (both disjoint-domain writers) — commits `6f549b8ec`,`02dd5fecb`,`471295ee7`,`6d5aa178a`,`22d3a6cd2`.
+- **self-enforcing** — `INV-OWNER-WRITE-1` (`tests/test_owner_routed_sites_wired.py`) fails CI if any site regresses to a bare write (`13deb16ca`).
+
+**Remaining (lower-value / boot-path / operator-scheduled, NOT rushed):** P4 init derives its CREATE lists from
+`tables_for(Domain)` (a boot-path rewrite; low value now that writes are owner-routed so no new ghost data
+accretes — existing DBs are idempotent) · P6 drop the empty ghost shells (the scheduled 2026-08-09 operator
+retention drop) · the 6 missing-canonical mis-labels (`hourly_observations` 26M, `settlements` 1.25M@forecasts,
+`settlement_outcomes` 832k@forecasts — all hold live data but are registered `legacy_archived`; need a
+coordinated init CREATE to promote them, same class as P4).
 
 **Footnote — the 2-DB collapse is a SEPARATE, optional concurrency optimization, not this cleanup.** A design panel
 (`wf_e2c56a31`) found that IF one later wants to also cut cross-DB hot-path reads, the concurrency-correct shape is
