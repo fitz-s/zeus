@@ -1163,6 +1163,13 @@ class _BayesPrecisionFusionFusionOverride:
     # Source-clock vNext fixed city basket (2026-06-25): present when the per-city one-scheme
     # artifact supplied the served center. This is the live replacement upgrade surface.
     source_clock_one_scheme: Mapping[str, object] | None = None
+    # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to anchor_value_c.
+    # (a,b)=(0.0,1.0) is IDENTITY (no city/metric served → byte-identical center). ``emos_center_delta_c``
+    # is the applied shift (a + (b−1)·μ) recorded for reconstructibility; RAW center = anchor_value_c −
+    # emos_center_delta_c. Temperature-dependent (slope b) — NOT a constant offset. σ untouched.
+    emos_center_a: float = 0.0
+    emos_center_b: float = 1.0
+    emos_center_delta_c: float = 0.0
 
 
 def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
@@ -2012,8 +2019,24 @@ def _replacement_bayes_precision_fusion_override(
             }
         ) or None
 
+        # EMOS/NGR affine CENTER calibration (2026-07-01, consult REQ-20260701-010328): apply the
+        # fitted, walk-forward, shrunk-to-identity affine μ'=a+b·μ to the SERVED runtime center. Applied
+        # HERE — the single authoritative _mu_diagonal feeding the q point, the q_lcb/q_ucb bounds,
+        # provenance.anchor_value_c (the reactor's ENTRY belief read), and the bpf sub-dict — so entry
+        # and exit stay unified (no #135 two-center re-split). Identity (0.0,1.0) is used only when no
+        # city/metric affine is served by state/emos_center_calibration.json; the center is then byte-
+        # identical to the uncalibrated fused center. The slope b captures the temperature-
+        # dependent representativeness bias a constant offset cannot. σ is untouched (center-only).
+        from src.calibration.emos_center_calibration import apply_affine, lookup_affine  # noqa: PLC0415
+        _emos_a, _emos_b = lookup_affine(request.city, metric)
+        _mu_served = apply_affine(_mu_diagonal, _emos_a, _emos_b)
+        _emos_delta_c = _mu_served - _mu_diagonal
+
         return _BayesPrecisionFusionFusionOverride(
-            anchor_value_c=_mu_diagonal,
+            anchor_value_c=_mu_served,
+            emos_center_a=_emos_a,
+            emos_center_b=_emos_b,
+            emos_center_delta_c=_emos_delta_c,
             anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
             method="SOURCE_CLOCK_FIXED_WEIGHT" if _source_clock_payload is not None else fused.method,
             used_models=used_models,
@@ -3345,6 +3368,12 @@ def _compute_posterior_payload(
             "lead_bucket": bayes_precision_fusion_override.lead_bucket,
             "anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
             "anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
+            # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to
+            # anchor_value_c above; RAW served center = anchor_value_c − emos_center_delta_c.
+            # (a,b)=(0,1) identity for cities/metrics not gated to serve (byte-identical center).
+            "emos_center_a": float(bayes_precision_fusion_override.emos_center_a),
+            "emos_center_b": float(bayes_precision_fusion_override.emos_center_b),
+            "emos_center_delta_c": float(bayes_precision_fusion_override.emos_center_delta_c),
             "predictive_sigma_c": (
                 None if bayes_precision_fusion_override.predictive_sigma_c is None
                 else float(bayes_precision_fusion_override.predictive_sigma_c)
