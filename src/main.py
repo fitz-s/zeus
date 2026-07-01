@@ -3204,7 +3204,7 @@ def _boot_deployment_freshness_auto_resume() -> None:
     """
     import subprocess
 
-    from src.config import PROJECT_ROOT
+    from src.config import PROJECT_ROOT, state_path
     from src.control.control_plane import (
         get_entries_pause_reason,
         is_entries_paused,
@@ -3251,6 +3251,33 @@ def _boot_deployment_freshness_auto_resume() -> None:
             "deployment_freshness_resumed_on_sha_match",
             issued_by="control_plane",
         )
+        try:
+            df_path = state_path("deployment_freshness.json")
+            detected_at = datetime.now(timezone.utc)
+            boot_ts = _BOOT_STATE.get("ts")
+            uptime_hours = 0.0
+            if isinstance(boot_ts, datetime):
+                uptime_hours = max(
+                    0.0,
+                    (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                )
+            payload = {
+                "boot_sha": boot_sha,
+                "current_sha": current_sha,
+                "uptime_hours": round(uptime_hours, 2),
+                "detected_at": detected_at.isoformat(),
+                "pause_reason": None,
+                "status": "fresh",
+            }
+            tmp_path = str(df_path) + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, str(df_path))
+        except Exception as exc:
+            logger.warning(
+                "deployment_freshness_auto_resume: failed to refresh deployment_freshness.json (%s)",
+                exc,
+            )
         logger.info(
             "deployment_freshness_auto_resume: cleared deployment freshness pause "
             "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",

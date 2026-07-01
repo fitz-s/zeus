@@ -27,6 +27,7 @@ Meta-verify (sed-flip):
 
 import sqlite3
 import logging
+import json
 import os
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -93,6 +94,7 @@ def _run_auto_resume(
     boot_sha: str = BOOT_SHA,
     current_sha: str = BOOT_SHA,
     git_raises: Exception | None = None,
+    state_dir: Path | None = None,
 ) -> None:
     """Run _boot_deployment_freshness_auto_resume with controlled git output."""
     def _fake_git(cmd, **kw):
@@ -102,7 +104,11 @@ def _run_auto_resume(
 
     with patch.object(main_module, "_BOOT_STATE", {"sha": boot_sha, "ts": datetime.now(_UTC)}):
         with patch("subprocess.check_output", side_effect=_fake_git):
-            _boot_deployment_freshness_auto_resume()
+            if state_dir is None:
+                _boot_deployment_freshness_auto_resume()
+            else:
+                with patch("src.config.state_path", side_effect=lambda name: state_dir / name):
+                    _boot_deployment_freshness_auto_resume()
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +139,7 @@ class TestAutoResumeOnShaMatch:
         with patch("src.state.db.get_world_connection", side_effect=factory):
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
-                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
 
         # Reconnect to verify the DB row was expired
         fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
@@ -156,7 +162,7 @@ class TestAutoResumeOnShaMatch:
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 with caplog.at_level(logging.INFO, logger="zeus"):
-                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
 
         assert "deployment_freshness_auto_resume" in caplog.text
         assert BOOT_SHA[:8] in caplog.text
@@ -172,11 +178,42 @@ class TestAutoResumeOnShaMatch:
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 assert cp.is_entries_paused(), "pre-condition: in-memory must show paused"
-                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
                 # resume_entries calls refresh_control_state() at the end
                 assert not cp.is_entries_paused(), (
                     "in-memory entries_paused must be False after auto-resume"
                 )
+
+    def test_r1_sha_match_updates_freshness_state_file(self, tmp_path):
+        """SHA match: stale mismatch file is replaced with a fresh state proof."""
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+        df_path = tmp_path / "deployment_freshness.json"
+        df_path.write_text(
+            json.dumps(
+                {
+                    "boot_sha": DIFF_SHA,
+                    "current_sha": BOOT_SHA,
+                    "status": "mismatch",
+                    "pause_reason": "deployment_freshness_mismatch",
+                    "detected_at": (datetime.now(_UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
+
+        payload = json.loads(df_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "fresh"
+        assert payload["pause_reason"] is None
+        assert payload["boot_sha"] == BOOT_SHA
+        assert payload["current_sha"] == BOOT_SHA
 
 
 # ---------------------------------------------------------------------------
