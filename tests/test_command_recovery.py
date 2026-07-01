@@ -9245,6 +9245,97 @@ class TestRecoveryResolutionTable:
         ]
         assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
 
+    def test_edli_gate_runtime_unknown_reconcile_releases_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-gate:intent-gate:token-gate:token-gate:buy_no"
+        aggregate_id = "event-gate:intent-gate:token-gate"
+        reason_code = (
+            "EXECUTOR_SUBMIT_UNKNOWN:[gate_runtime] BLOCKED cap='live_venue_submit': "
+            "condition 'deployment_freshness_mismatch' is active"
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": "event-gate",
+                "final_intent_id": "intent-gate",
+                "execution_command_id": execution_command_id,
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+            occurred_at="2026-04-26T00:02:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-gate",
+                "final_intent_id": "intent-gate",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-gate",
+                "reason_code": reason_code,
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-gate', 'intent-gate', 'PENDING_RECONCILE',
+                      2, 'SubmitUnknown', 'hash-gate', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-gate', 'event-gate', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 10.0, 1, 'RESERVED',
+                      'intent-gate', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-gate'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        reconciled_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                FROM edli_live_order_events
+                WHERE aggregate_id = ? AND event_type = 'Reconciled'
+                ORDER BY event_sequence DESC LIMIT 1
+                """,
+                (aggregate_id,),
+            ).fetchone()["payload_json"]
+        )
+        assert reconciled_payload["proof_class"] == "pre_venue_gate_runtime_block_no_command_no_venue_order"
+        assert reconciled_payload["required_predicates"]["reason_code"] == reason_code
+
     def test_edli_post_submit_unknown_without_command_releases_on_authenticated_absence(
         self,
         conn,
@@ -11441,6 +11532,7 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
     execution_command_id="edli-exec-ack-stalled",
     token_id="tok-ack-stalled",
     usage_id="cap-ack-stalled",
+    include_venue_attempt=True,
 ):
     plan_payload = {
         "schema_version": 1,
@@ -11467,14 +11559,23 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
         payload=plan_payload,
         occurred_at="2026-04-26T00:00:01Z",
     )
-    _insert_edli_live_order_event(
-        conn,
-        aggregate_id=aggregate_id,
-        sequence=3,
-        event_type="VenueSubmitAttempted",
-        payload=plan_payload,
-        occurred_at="2026-04-26T00:00:02Z",
-    )
+    projection_sequence = 2
+    projection_event_type = "ExecutionCommandCreated"
+    projection_state = "EXECUTION_COMMAND_CREATED"
+    projection_updated_at = "2026-04-26T00:00:01Z"
+    if include_venue_attempt:
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="VenueSubmitAttempted",
+            payload=plan_payload,
+            occurred_at="2026-04-26T00:00:02Z",
+        )
+        projection_sequence = 3
+        projection_event_type = "VenueSubmitAttempted"
+        projection_state = "VENUE_SUBMIT_ATTEMPTED"
+        projection_updated_at = "2026-04-26T00:00:02Z"
     conn.execute(
         """
         INSERT INTO edli_live_order_projection (
@@ -11482,13 +11583,23 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
             last_sequence, last_event_type, last_event_hash,
             pending_reconcile, venue_order_id, updated_at, schema_version
         )
-        SELECT ?, ?, ?, 'VENUE_SUBMIT_ATTEMPTED',
-               3, 'VenueSubmitAttempted', event_hash,
-               0, NULL, '2026-04-26T00:00:02Z', 1
+        SELECT ?, ?, ?, ?,
+               ?, ?, event_hash,
+               0, NULL, ?, 1
         FROM edli_live_order_events
-        WHERE aggregate_id = ? AND event_sequence = 3
+        WHERE aggregate_id = ? AND event_sequence = ?
         """,
-        (aggregate_id, event_id, final_intent_id, aggregate_id),
+        (
+            aggregate_id,
+            event_id,
+            final_intent_id,
+            projection_state,
+            projection_sequence,
+            projection_event_type,
+            projection_updated_at,
+            aggregate_id,
+            projection_sequence,
+        ),
     )
     conn.execute(
         """
@@ -11761,6 +11872,113 @@ class TestEdliAbsenceVenueCommandSync:
             ).fetchall()
         ]
         assert event_types[-2:] == ["VenueSubmitAcknowledged", "CapTransitioned"]
+
+    def test_rejected_command_sync_releases_stalled_edli_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.state.venue_command_repo import append_event
+
+        seeded = _seed_edli_stalled_attempt_with_reserved_cap(
+            conn,
+            aggregate_id="agg-rejected-stalled",
+            event_id="edli-event-rejected-stalled",
+            final_intent_id="edli-intent-rejected-stalled",
+            execution_command_id="edli-exec-rejected-stalled",
+            token_id="tok-rejected-stalled",
+            usage_id="cap-rejected-stalled",
+            include_venue_attempt=False,
+        )
+        _insert(
+            conn,
+            command_id="cmd-rejected-edli-stall",
+            decision_id=seeded["execution_command_id"],
+            token_id=seeded["token_id"],
+            side="BUY",
+            price=0.01,
+            size=569.08,
+        )
+        _advance_to_submitting(conn, command_id="cmd-rejected-edli-stall")
+        append_event(
+            conn,
+            command_id="cmd-rejected-edli-stall",
+            event_type="SUBMIT_REJECTED",
+            occurred_at="2026-04-26T00:00:03Z",
+            payload={
+                "reason": "safe_replay_permitted_no_order_found",
+                "safe_replay_permitted": True,
+                "lookup_method": "idempotency_key",
+                "recovered_from_state": "SUBMITTING",
+                "venue_absence_proof": {
+                    "schema_version": 1,
+                    "token_id": seeded["token_id"],
+                    "matching_open_order_count": 0,
+                    "matching_trade_count": 0,
+                    "matching_open_orders": [],
+                    "matching_trades": [],
+                },
+            },
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_rejected_venue_command_sync"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        cap = conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, venue_order_id, pending_reconcile
+            FROM edli_live_order_projection
+            WHERE aggregate_id = ?
+            """,
+            (seeded["aggregate_id"],),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "CAP_TRANSITIONED",
+            "last_event_type": "CapTransitioned",
+            "venue_order_id": None,
+            "pending_reconcile": 0,
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                FROM edli_live_order_events
+                WHERE aggregate_id = ?
+                ORDER BY event_sequence
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchall()
+        ]
+        assert event_types == [
+            "SubmitPlanBuilt",
+            "ExecutionCommandCreated",
+            "VenueSubmitAttempted",
+            "SubmitRejected",
+            "CapTransitioned",
+        ]
+        rejected_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                FROM edli_live_order_events
+                WHERE aggregate_id = ? AND event_type = 'SubmitRejected'
+                ORDER BY event_sequence DESC
+                LIMIT 1
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchone()["payload_json"]
+        )
+        assert rejected_payload["proof_class"] == "venue_command_authenticated_absence_rejected"
+        assert rejected_payload["safe_replay_permitted"] is True
 
 
 # ---------------------------------------------------------------------------

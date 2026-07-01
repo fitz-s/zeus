@@ -12064,6 +12064,226 @@ def reconcile_edli_acknowledged_venue_command_sync(conn: sqlite3.Connection) -> 
     return summary
 
 
+def reconcile_edli_rejected_venue_command_sync(conn: sqlite3.Connection) -> dict:
+    """Mirror terminal no-fill venue command rejection back into EDLI.
+
+    A command can be authenticated-absence-rejected by the trade-side recovery
+    lane after the EDLI aggregate has only reached ExecutionCommandCreated. The
+    command/collateral state is terminal, but the EDLI live-cap reservation stays
+    RESERVED and the family remains locked unless this pass appends the missing
+    aggregate events and releases the cap.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    day_slots_ref = _edli_live_cap_ref(conn, "edli_live_cap_day_slots")
+    rate_window_ref = _edli_live_cap_ref(conn, "edli_live_cap_rate_window")
+    if not events_ref or not projection_ref or not cap_usage_ref or not _table_exists(conn, "venue_commands"):
+        return summary
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id,
+               proj.event_id,
+               proj.final_intent_id,
+               proj.current_state,
+               proj.last_event_type,
+               plan.payload_json AS plan_payload_json,
+               usage.usage_id,
+               usage.execution_command_id,
+               cmd.command_id,
+               cmd.decision_id,
+               cmd.idempotency_key,
+               cmd.token_id,
+               cmd.state,
+               cmd.venue_order_id,
+               cmd.updated_at AS command_updated_at,
+               rejected.payload_json AS rejected_payload_json
+        FROM {projection_ref} proj
+        JOIN {events_ref} plan
+          ON plan.aggregate_id = proj.aggregate_id
+         AND plan.event_type = 'SubmitPlanBuilt'
+        JOIN {cap_usage_ref} usage
+          ON usage.event_id = proj.event_id
+         AND usage.final_intent_id = proj.final_intent_id
+         AND usage.reservation_status = 'RESERVED'
+        JOIN venue_commands cmd
+          ON cmd.decision_id = usage.execution_command_id
+        JOIN venue_command_events rejected
+          ON rejected.command_id = cmd.command_id
+         AND rejected.event_type = 'SUBMIT_REJECTED'
+        WHERE proj.current_state IN ('EXECUTION_COMMAND_CREATED', 'VENUE_SUBMIT_ATTEMPTED')
+          AND proj.last_event_type IN ('ExecutionCommandCreated', 'VenueSubmitAttempted')
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND COALESCE(proj.pending_reconcile, 0) = 0
+          AND cmd.intent_kind = 'ENTRY'
+          AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
+          AND COALESCE(cmd.venue_order_id, '') = ''
+          AND NOT EXISTS (
+              SELECT 1 FROM {events_ref} terminal
+              WHERE terminal.aggregate_id = proj.aggregate_id
+                AND terminal.event_type IN (
+                    'VenueSubmitAcknowledged', 'SubmitRejected', 'SubmitUnknown',
+                    'Reconciled', 'CapTransitioned', 'UserOrderObserved',
+                    'UserTradeObserved'
+                )
+          )
+        ORDER BY cmd.updated_at, proj.aggregate_id
+        """
+    ).fetchall()
+    summary["scanned"] = len(rows)
+    occurred_at = _now_iso()
+    for row in rows:
+        record = _dict_row(row)
+        aggregate_id = str(record.get("aggregate_id") or "")
+        command_id = str(record.get("command_id") or "")
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id) or "unknown"
+        sp_name = f"sp_edli_rejected_sync_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            plan_payload = _json_dict(record.get("plan_payload_json"))
+            rejected_payload = _json_dict(record.get("rejected_payload_json"))
+            event_id = str(record.get("event_id") or plan_payload.get("event_id") or "")
+            final_intent_id = str(record.get("final_intent_id") or plan_payload.get("final_intent_id") or "")
+            execution_command_id = str(record.get("execution_command_id") or "")
+            command_decision_id = str(record.get("decision_id") or "")
+            plan_token = str(plan_payload.get("token_id") or "")
+            command_token = str(record.get("token_id") or "")
+            if (
+                not aggregate_id
+                or not event_id
+                or not final_intent_id
+                or not execution_command_id
+                or execution_command_id != command_decision_id
+                or not plan_token
+                or plan_token != command_token
+                or str(record.get("venue_order_id") or "").strip()
+            ):
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                summary["stayed"] += 1
+                continue
+            proof = rejected_payload.get("venue_absence_proof")
+            proof = proof if isinstance(proof, dict) else {}
+            try:
+                matching_open = int(proof.get("matching_open_order_count", -1))
+                matching_trade = int(proof.get("matching_trade_count", -1))
+            except (TypeError, ValueError):
+                matching_open = matching_trade = -1
+            if (
+                rejected_payload.get("safe_replay_permitted") is not True
+                or matching_open != 0
+                or matching_trade != 0
+                or str(proof.get("token_id") or command_token) != command_token
+            ):
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                summary["stayed"] += 1
+                continue
+
+            receipt_hash = stable_hash(
+                {
+                    "source": "command_recovery_edli_rejected_sync",
+                    "command_id": command_id,
+                    "decision_id": execution_command_id,
+                    "command_updated_at": record.get("command_updated_at"),
+                    "reason": rejected_payload.get("reason"),
+                }
+            )
+            if str(record.get("last_event_type") or "") == "ExecutionCommandCreated":
+                _append_edli_event_qualified(
+                    conn,
+                    events_ref=events_ref,
+                    aggregate_id=aggregate_id,
+                    event_type="VenueSubmitAttempted",
+                    payload={
+                        "schema_version": 1,
+                        "event_id": event_id,
+                        "final_intent_id": final_intent_id,
+                        "execution_command_id": execution_command_id,
+                        "idempotency_key": record.get("idempotency_key"),
+                        "recovered_from_venue_command_id": command_id,
+                        "recovery_reason": "terminal_venue_command_rejected_sync",
+                    },
+                    occurred_at=occurred_at,
+                    source_authority="existing_executor",
+                )
+            _append_edli_event_qualified(
+                conn,
+                events_ref=events_ref,
+                aggregate_id=aggregate_id,
+                event_type="SubmitRejected",
+                payload={
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "final_intent_id": final_intent_id,
+                    "execution_command_id": execution_command_id,
+                    "execution_receipt_hash": receipt_hash,
+                    "reason_code": "VENUE_COMMAND_REJECTED_NO_VENUE_EXPOSURE",
+                    "submit_status": "REJECTED",
+                    "venue_call_started": True,
+                    "venue_ack_received": False,
+                    "pre_submit_rejection": False,
+                    "venue_order_id": None,
+                    "command_id": command_id,
+                    "proof_class": "venue_command_authenticated_absence_rejected",
+                    "safe_replay_permitted": True,
+                    "venue_absence_proof": proof,
+                    "source_rejected_payload": {
+                        "reason": rejected_payload.get("reason"),
+                        "lookup_method": rejected_payload.get("lookup_method"),
+                        "recovered_from_state": rejected_payload.get("recovered_from_state"),
+                    },
+                },
+                occurred_at=occurred_at,
+                source_authority="existing_executor",
+            )
+            conn.execute(
+                f"UPDATE {cap_usage_ref} SET reservation_status = 'RELEASED' WHERE usage_id = ?",
+                (str(record.get("usage_id") or ""),),
+            )
+            if day_slots_ref:
+                conn.execute(f"DELETE FROM {day_slots_ref} WHERE usage_id = ?", (str(record.get("usage_id") or ""),))
+            if rate_window_ref:
+                conn.execute(f"DELETE FROM {rate_window_ref} WHERE usage_id = ?", (str(record.get("usage_id") or ""),))
+            _append_edli_event_qualified(
+                conn,
+                events_ref=events_ref,
+                aggregate_id=aggregate_id,
+                event_type="CapTransitioned",
+                payload={
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "final_intent_id": final_intent_id,
+                    "execution_command_id": execution_command_id,
+                    "execution_receipt_hash": receipt_hash,
+                    "to_status": "RELEASED",
+                    "projection_status": "RELEASED",
+                    "transition_reason": "VENUE_COMMAND_REJECTED_NO_VENUE_EXPOSURE",
+                    "command_id": command_id,
+                },
+                occurred_at=occurred_at,
+                source_authority="live_cap_ledger",
+            )
+            _rebuild_edli_projection_qualified(
+                conn,
+                events_ref=events_ref,
+                projection_ref=projection_ref,
+                aggregate_id=aggregate_id,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: command %s EDLI rejected-command sync failed: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> dict:
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     events_ref = _edli_live_order_events_ref(conn)
@@ -12071,10 +12291,13 @@ def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> di
     cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
     if not events_ref or not projection_ref or not cap_usage_ref:
         return summary
+    threshold_reason = "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold"
+    gate_runtime_prefix = "EXECUTOR_SUBMIT_UNKNOWN:[gate_runtime] BLOCKED"
     rows = conn.execute(
         f"""
         SELECT proj.aggregate_id,
                json_extract(unknown.payload_json, '$.execution_command_id') AS execution_command_id,
+               json_extract(unknown.payload_json, '$.reason_code') AS reason_code,
                unknown.payload_json AS unknown_payload_json
         FROM {projection_ref} proj
         JOIN {events_ref} unknown
@@ -12082,32 +12305,44 @@ def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> di
          AND unknown.event_type = 'SubmitUnknown'
         WHERE proj.pending_reconcile = 1
           AND COALESCE(proj.venue_order_id, '') = ''
-          AND json_extract(unknown.payload_json, '$.reason_code') = 'EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold'
+          AND (
+              json_extract(unknown.payload_json, '$.reason_code') = ?
+              OR json_extract(unknown.payload_json, '$.reason_code') LIKE ?
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM venue_commands cmd
               WHERE cmd.decision_id = json_extract(unknown.payload_json, '$.execution_command_id')
           )
         ORDER BY unknown.occurred_at
-        """
+        """,
+        (threshold_reason, f"{gate_runtime_prefix}%"),
     ).fetchall()
     for row in rows:
         summary["scanned"] += 1
         execution_command_id = str(row["execution_command_id"] or "")
+        reason_code = str(row["reason_code"] or "")
+        if reason_code == threshold_reason:
+            reason = "pre_venue_risk_allocator_block_misclassified_unknown"
+            proof_class = "pre_venue_no_command_no_venue_order"
+        else:
+            reason = "pre_venue_gate_runtime_block_misclassified_unknown"
+            proof_class = "pre_venue_gate_runtime_block_no_command_no_venue_order"
         conn.execute("SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
         try:
             advanced = _reconcile_edli_pending_no_order_if_proven(
                 conn,
                 execution_command_id=execution_command_id,
                 occurred_at=_now_iso(),
-                reason="pre_venue_risk_allocator_block_misclassified_unknown",
-                proof_class="pre_venue_no_command_no_venue_order",
+                reason=reason,
+                proof_class=proof_class,
                 command_id=None,
                 required_predicates={
-                    "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold",
+                    "reason_code": reason_code,
                     "no_venue_command": True,
                     "no_projection_venue_order_id": True,
                     "pending_reconcile": True,
+                    "pre_venue_reason_whitelisted": True,
                 },
             )
             conn.execute("RELEASE SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
@@ -14089,6 +14324,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_ack_sync_summary["stayed"]
         summary["errors"] += edli_ack_sync_summary["errors"]
 
+        edli_rejected_sync_summary = reconcile_edli_rejected_venue_command_sync(conn)
+        summary["edli_rejected_venue_command_sync"] = edli_rejected_sync_summary
+        summary["advanced"] += edli_rejected_sync_summary["advanced"]
+        summary["stayed"] += edli_rejected_sync_summary["stayed"]
+        summary["errors"] += edli_rejected_sync_summary["errors"]
+
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
         summary["advanced"] += live_entry_repair_summary["advanced"]
@@ -14838,6 +15079,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "edli_acknowledged_venue_command_sync",
         )
         _boot_db_pass(
+            "edli_rejected_venue_command_sync",
+            reconcile_edli_rejected_venue_command_sync,
+            "edli_rejected_venue_command_sync",
+        )
+        _boot_db_pass(
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
@@ -15097,6 +15343,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
+        _db_pass("edli_rejected_venue_command_sync",
+                 reconcile_edli_rejected_venue_command_sync,
+                 "edli_rejected_venue_command_sync")
         _db_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs,
                  "live_entry_projection_repair")
@@ -15154,6 +15403,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _db_pass("edli_acknowledged_venue_command_sync",
              reconcile_edli_acknowledged_venue_command_sync,
              "edli_acknowledged_venue_command_sync")
+    _db_pass("edli_rejected_venue_command_sync",
+             reconcile_edli_rejected_venue_command_sync,
+             "edli_rejected_venue_command_sync")
     _client_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
     _db_pass("filled_entry_position_link_repair",

@@ -153,6 +153,18 @@ def submit_event_bound_final_intent_via_existing_executor(
             side_effect_known=True,
         )
     except Exception as exc:
+        if _exception_is_pre_venue_runtime_block(exc):
+            return EventBoundExecutorSubmitResult(
+                status="PRE_SUBMIT_ERROR",
+                reason_code=f"EXECUTOR_PRE_VENUE_REJECTED:{exc}",
+                submit_started_at=started_at,
+                submit_finished_at=datetime.now(timezone.utc).isoformat(),
+                raw_response={"error": str(exc), "stage": "existing_executor_pre_venue_runtime_gate"},
+                reconciliation_followup_required=False,
+                venue_call_started=False,
+                venue_ack_received=False,
+                side_effect_known=True,
+            )
         return EventBoundExecutorSubmitResult(
             status="POST_SUBMIT_UNKNOWN",
             reason_code=f"EXECUTOR_SUBMIT_UNKNOWN:{exc}",
@@ -165,6 +177,19 @@ def submit_event_bound_final_intent_via_existing_executor(
             side_effect_known=False,
         )
     return _executor_order_result_to_submit_result(result, started_at=started_at)
+
+
+def _exception_is_pre_venue_runtime_block(exc: Exception) -> bool:
+    """True for runtime gates that fire before the venue boundary.
+
+    ``execute_final_intent`` checks ``gate_runtime`` before constructing or
+    persisting a venue command. If that non-bypassable gate blocks, the order
+    provably did not reach CLOB and must not be represented as a post-submit
+    unknown side effect.
+    """
+
+    text = str(exc or "")
+    return text.startswith("[gate_runtime] BLOCKED")
 
 
 def validate_final_intent_cert_for_existing_executor(final_intent_cert: DecisionCertificate) -> str:
