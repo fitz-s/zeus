@@ -1683,6 +1683,14 @@ def init_schema(
             source TEXT NOT NULL,
             UNIQUE(city, obs_date, obs_hour, source)
         );
+        CREATE TABLE IF NOT EXISTS day0_oracle_anomaly_flags (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            flagged_at TEXT NOT NULL,
+            ttl_hours REAL NOT NULL,
+            detail TEXT NOT NULL,
+            PRIMARY KEY (city, target_date)
+        );
         -- Inherited from legacy predecessor: settlement outcomes (world-class authoritative table)
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
