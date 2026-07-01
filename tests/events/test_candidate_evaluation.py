@@ -63,6 +63,30 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
     assert evaluation.capital_weighted_growth_score == pytest.approx(0.04)
 
 
+def test_candidate_evaluation_expected_dollars_uses_actual_sized_capital_not_depth():
+    evaluation = CandidateEvaluation(
+        candidate_id="cand-depth",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_yes",
+        bin_label="tail",
+        execution_price=0.04,
+        q_posterior=0.12,
+        q_lcb_5pct=0.06,
+        c_cost_95pct=0.041,
+        p_fill_lcb=0.9,
+        trade_score=0.02,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        max_executable_shares=100_000.0,
+    )
+
+    assert evaluation.expected_robust_dollars == 0.0
+    assert evaluation.capital_weighted_growth_score == 0.0
+
+
 def test_candidate_evaluation_low_volume_is_not_an_admission_reject():
     evaluation = CandidateEvaluation(
         candidate_id="cand-1",

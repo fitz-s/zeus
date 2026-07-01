@@ -1612,6 +1612,60 @@ def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_cand
     assert annotated.q_lcb_5pct == pytest.approx(0.77877)
 
 
+def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_safe_q():
+    """Receipt overlay must mirror the live ROI frontier low-price YES floor."""
+
+    row = _row(
+        condition_id="cond-qk-kl-tail-yes",
+        yes_token="yes-qk-kl-tail-yes",
+        no_token="no-qk-kl-tail-yes",
+        yes_ask=0.031,
+        no_ask=0.970,
+        snapshot_id="snap-qk-kl-tail-yes",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-kl-tail-yes",
+        q_posterior=0.12180248510788458,
+        q_lcb_5pct=0.06052567908958011,
+        bin_obj=Bin(low=34.0, high=34.0, unit="C", label="34C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-kl-tail-yes",
+        "receipt_hash": "receipt-qk-kl-tail-yes",
+        "candidate_id": "YES:b34:DIRECT_YES:b34@proof",
+        "route_id": "DIRECT_YES:b34@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.12180248510788458,
+        "payoff_q_lcb": 0.06052567908958011,
+        "edge_lcb": 0.020510409830349664,
+        "point_ev": 0.08178721584865413,
+        "delta_u_at_min": 0.00009152233738979263,
+        "optimal_stake_usd": "1.4412832709285736083984375",
+        "optimal_delta_u": 0.0006333828915951036,
+        "q_dot_payoff": 0.12180248510788458,
+        "cost": 0.04001526925923045,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb1|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason.startswith("QKERNEL_ROI_FRONTIER_NOT_USEFUL:")
+    assert "payoff_q_lcb=0.060526" in annotated.missing_reason
+
+
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
     """A non-native YES cannot become live through qkernel overlay without direction law."""
 

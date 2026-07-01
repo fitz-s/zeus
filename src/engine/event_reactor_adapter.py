@@ -12159,10 +12159,19 @@ def _proofs_with_qkernel_candidate_economics(
         from src.decision import family_decision_engine as _fde_thresholds
 
         min_profit_lcb_usd = float(_fde_thresholds._ROI_FRONTIER_MIN_PROFIT_LCB_USD)
-        min_payoff_q_lcb = float(_fde_thresholds._ROI_FRONTIER_MIN_PAYOFF_Q_LCB)
+        min_payoff_q_lcb_fn = _fde_thresholds.roi_frontier_min_payoff_q_lcb
     except Exception:  # noqa: BLE001
         min_profit_lcb_usd = 0.25
-        min_payoff_q_lcb = 0.02
+
+        def min_payoff_q_lcb_fn(*, side: str | None, cost: float) -> float:
+            floor = 0.02
+            if (
+                str(side or "").strip().upper() == "YES"
+                and math.isfinite(cost)
+                and 0.0 < cost < 0.05
+            ):
+                floor = max(floor, 0.07, cost + 0.04)
+            return floor
 
     def _qkernel_growth_density(*, cost: float, edge_lcb: float, payoff_q_lcb: float) -> float:
         if not (
@@ -12224,6 +12233,7 @@ def _proofs_with_qkernel_candidate_economics(
             edge_lcb=edge_lcb,
             payoff_q_lcb=payoff_q_lcb,
         )
+        min_payoff_q_lcb = float(min_payoff_q_lcb_fn(side=side, cost=cost))
         profit_lcb_usd = _qkernel_profit_lcb_usd(
             stake=optimal_stake_usd,
             cost=cost,

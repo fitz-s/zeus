@@ -52,7 +52,7 @@ import plistlib
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LIVE_TRADING_PLIST = (
@@ -123,6 +123,9 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS", "90")
 )
 LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
+LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
+)
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
@@ -329,6 +332,9 @@ def _wait_for_live_runtime_fresh(
     freshness_path = live_repo / "state" / "deployment_freshness.json"
     expected = str(expected_sha or "").strip()
     launched_floor = launched_after.astimezone(timezone.utc)
+    launched_floor_with_tolerance = launched_floor - timedelta(
+        seconds=max(0.0, LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS)
+    )
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     last_detail = "not checked"
 
@@ -345,7 +351,7 @@ def _wait_for_live_runtime_fresh(
             expected
             and loaded == expected
             and loaded_at is not None
-            and loaded_at >= launched_floor
+            and loaded_at >= launched_floor_with_tolerance
         )
 
         freshness_payload = _load_json(freshness_path)
@@ -361,7 +367,7 @@ def _wait_for_live_runtime_fresh(
                 and freshness_boot == expected
                 and freshness_current == expected
                 and freshness_at is not None
-                and freshness_at >= launched_floor
+                and freshness_at >= launched_floor_with_tolerance
             )
         else:
             # No stale mismatch file exists; loaded_sha is the process-level proof.

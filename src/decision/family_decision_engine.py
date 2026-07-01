@@ -243,6 +243,34 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
 )
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
+_ROI_FRONTIER_LOW_PRICE_YES_COST_CEILING = 0.05
+_ROI_FRONTIER_LOW_PRICE_YES_MIN_PAYOFF_Q_LCB = 0.07
+_ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB = 0.04
+
+
+def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
+    """Conservative live floor for low-priced YES routes.
+
+    Cheap YES routes are valid when the forecast genuinely prices a tail too low,
+    but raw edge/cost over-rewards lottery-like tails whose lower-bound probability
+    barely clears the book. Require an absolute and edge-over-cost conservative q
+    floor for sub-5c YES while leaving normal-priced and NO routes on the global
+    frontier floor.
+    """
+
+    floor = float(_ROI_FRONTIER_MIN_PAYOFF_Q_LCB)
+    side_text = str(side or "").strip().upper()
+    if (
+        side_text == "YES"
+        and np.isfinite(cost)
+        and 0.0 < float(cost) < _ROI_FRONTIER_LOW_PRICE_YES_COST_CEILING
+    ):
+        floor = max(
+            floor,
+            float(_ROI_FRONTIER_LOW_PRICE_YES_MIN_PAYOFF_Q_LCB),
+            float(cost) + float(_ROI_FRONTIER_LOW_PRICE_YES_MIN_EDGE_LCB),
+        )
+    return floor
 
 
 class FamilyDecisionError(ValueError):
@@ -1168,6 +1196,11 @@ class FamilyDecisionEngine:
             stake = 0.0
             delta_u_at_min = 0.0
         q_lcb = self._payoff_q_lcb(d)
+        cost = self._selection_cost(d)
+        min_payoff_q_lcb = roi_frontier_min_payoff_q_lcb(
+            side=getattr(d.route, "side", None),
+            cost=cost,
+        )
         growth_density = self._robust_kelly_growth_density(d)
         base_useful = (
             np.isfinite(stake)
@@ -1175,7 +1208,7 @@ class FamilyDecisionEngine:
             and np.isfinite(delta_u_at_min)
             and delta_u_at_min > 0.0
             and np.isfinite(q_lcb)
-            and q_lcb >= _ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+            and q_lcb >= min_payoff_q_lcb
             and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
         )
         return bool(base_useful and np.isfinite(growth_density))

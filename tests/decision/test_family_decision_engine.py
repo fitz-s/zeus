@@ -988,6 +988,35 @@ def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
     assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 
 
+def test_select_roi_frontier_rejects_low_price_yes_tail_without_strong_safe_q(monkeypatch):
+    """Kuala Lumpur live shape: a 3-4c tail YES needs more than thin positive edge."""
+    case = _case()
+    space = _outcome_space(case)
+    kl_tail = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.04001526925923045),
+        edge_lcb=0.020510409830349664,
+        optimal_delta_u=0.0006333828915951036,
+        delta_u_at_min=0.00009152233738979263,
+        robust_trade_score=0.08180248510788457,
+        optimal_stake_usd=Decimal("1.4412832709285736083984375"),
+        payoff_q_lcb=0.06052567908958011,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([kl_tail])
+
+    assert engine._payoff_q_lcb(kl_tail) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.04001526925923045,
+    )
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
 def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):
     """A route that is cheap only at scalar admission cannot survive live selection."""
 

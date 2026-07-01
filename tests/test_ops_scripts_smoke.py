@@ -651,6 +651,45 @@ def test_deploy_live_runtime_fresh_wait_rejects_stale_loaded_sha(monkeypatch, tm
     assert "did not verify" in detail
 
 
+def test_deploy_live_runtime_fresh_wait_allows_boot_timestamp_boundary(monkeypatch, tmp_path):
+    dl = _load("deploy_live_runtime_fresh_wait_boundary", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "f" * 40
+    launched = datetime.now(timezone.utc)
+    (state / "loaded_sha.json").write_text(
+        json.dumps(
+            {
+                "loaded_sha": expected,
+                "generated_at": (launched - timedelta(seconds=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state / "deployment_freshness.json").write_text(
+        json.dumps(
+            {
+                "boot_sha": expected,
+                "current_sha": expected,
+                "status": "fresh",
+                "pause_reason": None,
+                "detected_at": (launched - timedelta(seconds=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_live_runtime_fresh(
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "verified" in detail
+
+
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []

@@ -108,9 +108,7 @@ class CandidateEvaluation:
             return 0.0
         if self.kelly_size_usd > 0.0:
             return self.robust_ev_per_dollar * float(self.kelly_size_usd)
-        if self.max_executable_shares is not None and self.max_executable_shares > 0.0:
-            return float(self.trade_score) * float(self.max_executable_shares)
-        return float(self.trade_score)
+        return 0.0
 
     @property
     def live_win_rate_floor_reason(self) -> str | None:
