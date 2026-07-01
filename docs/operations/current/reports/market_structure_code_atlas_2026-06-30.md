@@ -113,12 +113,67 @@ cheap enforcement defined.
 | **INV-INGRESS-2** | an unknown venue status silently defaulting instead of fail-loud; missing `delayed` support | golden fixtures from captured payloads → canonical member or typed `UnmappedVenueStatus` | proposed (normalizers already fail-loud; add `delayed` model) |
 | **INV-CYCLE-1** | hot-cycle modules each doing their own full scan for the same mechanism | query-count instrument; assert cycle consumes `CycleMarketStateSnapshot` | proposed |
 
-## 6. Physical placement (K1 three-DB split)
+## 6. Physical placement (K1 three-DB split) — the db种类 map (VERIFIED 2026-06-30 by row-probe + registry)
 
-All six core vocab tables (`venue_commands`, `venue_order_facts`, `venue_trade_facts`, `position_lots`,
-`position_current`, `settlement_commands`) + `settlement_outcomes` are **trade-class in `zeus_trades.db`**
-— CHECK-constraint migrations are single-DB (one SAVEPOINT per table). Cross-DB writes touching
-forecasts/world/trades together remain INV-37 (ATTACH + SAVEPOINT, never independent connections).
+**Partition principle: split by WRITE-TRANSACTION class, not by domain noun.** A table lives in the DB whose
+writer owns its atomic transaction — so `settlement_outcomes`/`settlements` are FORECAST-class (harvester
+co-transaction), `settlement_commands` is TRADE-class (redeem/wrap accounting), `observations` is
+forecast-class but `hourly_observations` is world-class. Canonical authority = `architecture/db_table_ownership.yaml`
+(PK `(name, db)`, INV-05 fail-closed set-equality; loader `state/table_registry.py`; K1 split commit `eba80d2b9d`).
+
+| DB file (separator) | Size | Class (live tables) | Owns (verified max-rowid) |
+|---|---|---|---|
+| `state/zeus-world.db` (hyphen) | 73 GB | world_class (71) | hourly_observations (26.3M), decision_certificates (1.3M), settlement_attribution (177), model_bias, forecast_skill, calibration/learning history |
+| `state/zeus-forecasts.db` (hyphen) | 39 GB | forecast_class (21) | raw_model_forecasts (634k), ensemble_snapshots (1.19M), forecast_posteriors (16k), **settlement_outcomes (832k)**, settlements (1.25M), observations (118k), platt_models |
+| `state/zeus_trades.db` (**underscore**) | 76 GB | trade_class (22) | position_current/lots/events (713/201/95k), venue_commands/order_facts/trade_facts (845/17992/534), settlement_commands (83), executable_market_snapshots (9.1M), execution_fact, trade_decisions (4643) |
+| `state/risk_state.db` | 242 MB | risk_class | risk_actions/state (live-only) |
+| `state/zeus_backtest.db` | 58 MB | backtest_class | derived audit — NEVER runtime authority |
+
+**§6 CORRECTION (2026-06-30):** an earlier draft claimed `settlement_outcomes` is "trade-class in `zeus_trades.db`".
+That is **WRONG** — `settlement_outcomes` is **forecast-class** (832k rows in `zeus-forecasts.db`; ABSENT in
+`zeus_trades.db`; every cross-DB read is `FROM forecasts.settlement_outcomes`; the registry `cutover_evidence`
+trade-class list names `settlement_commands`, not `settlement_outcomes`). Only the six core vocab tables +
+`settlement_commands` are trade-class. CHECK-constraint migrations stay single-DB (one SAVEPOINT per table).
+
+**Redundancy on this axis (verified):**
+- **Shadow ghosts — 144 of 259 registered (name,db) pairs (56%) are `schema_class: legacy_archived`**: a
+  non-owner DB physically carries the table as a 0-row (or straggler) shell. MANAGED: excluded from set-equality,
+  **scheduled DROP 2026-08-09** (K1 2026-05-11 + 90-day retention) via `scripts/drop_world_ghost_tables.py`.
+- **Straggler rows** in a few ghost copies (world.venue_commands=4, world.venue_order_facts=8,
+  world.trade_decisions=4, world.observations=164) — pre-cutover residue; reading the ghost = silent split-brain
+  (partial data instead of the owner's full set).
+- **Naming schism (UNMANAGED footgun):** world/forecasts use a HYPHEN, trades uses an UNDERSCORE. Wrong-separator
+  opens created zero-byte DECOY files (`zeus_world.db`, `zeus_forecasts.db`, `zeus-trades.db`; inert since
+  2026-06-18). A wrong-separator open silently makes a NEW empty DB instead of failing.
+- **Ghost-masks-a-bug (concrete):** `execution/settlement_commands.py` `submit_redeem` (~:869) reads
+  `FROM world.executable_market_snapshots` — the empty world shadow — instead of the 9.1M-row trades owner, so it
+  always misses and falls back to the Gamma network API. Had the ghost not existed, K1 cutover would have raised
+  "no such table" and forced the fix. (Sibling `_lookup_market_neg_risk_authoritative` :1252 already has the
+  trades fallback; submit_redeem was missed. Flagged for TDD fix.)
+
+### 6A. Cross-DB wiring (接线) — VERIFIED
+- **Canonical factories in `state/db.py` are correct:** `get_world_connection_with_trades_required`,
+  `get_trade_connection_with_world_{required,optional}`, `get_forecasts_connection_with_world`,
+  `forecasts_connection_with_trades_flocked` — each ATTACHes the second DB + takes `fcntl.flock` writer locks in
+  ALPHABETICAL order (**forecasts < world < trades**) for deadlock-freedom. This IS INV-37 done right.
+- **But the ATTACH surface is sprawling: 37 `ATTACH DATABASE` sites across 27 files**, many ad-hoc leaf ATTACHes
+  OUTSIDE the factories (settlement_commands.py:756/1275, command_recovery.py:687/707, executor.py:424,
+  portfolio.py:2598, cycle_runner.py:83/87, chain_reconciliation.py:1387, substrate_observer.py:2399/2531,
+  main.py:4279…). Each bypasses the factory's lock-order discipline → deadlock + INV-37 drift surface.
+- **The hot money-path crosses a DB boundary nearly every tick:** exit/monitor reads
+  `forecasts.settlement_outcomes` + `forecasts.forecast_posteriors`; skill-attribution JOINs
+  `trades.position_current ⋈ forecasts.settlement_outcomes`; portfolio reads `world.decision_certificates`.
+
+### 6B. First-principles ideal (this axis) — proposed, pending consult validation
+1. **One separator.** Converge on a single convention + a CI antibody that the only `*.db` paths opened are the
+   5 canonical ones — kills the decoy footgun class.
+2. **Ghosts drop on schedule (2026-08-09).** Then every DB carries ONLY its owned tables; a wrong-DB read becomes
+   a loud "no such table", not a silent empty read that masks bugs.
+3. **One ATTACH surface.** Route ALL cross-DB access through the `state/db.py` factories; antibody forbidding
+   ad-hoc `ATTACH DATABASE` outside them (analogous to INV-CL-1's ingress-only rule). 37→~6.
+4. **Question the hot-path crossing.** A 60s/2min job reading `forecasts.settlement_outcomes` every tick is the
+   efficiency + coupling cost of the split. Either the per-cycle `CycleMarketStateSnapshot` (§7B) reads the
+   cross-DB tables ONCE per tick, or redraw the boundary so the execution hot-path never crosses.
 
 ## 7. Three-goal weak-point audit (地基稳固 / 运行效率高 / 符合真实运行逻辑)
 
