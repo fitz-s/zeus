@@ -118,6 +118,7 @@ FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
+MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS = 300.0
 LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
 LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
 PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT = 12
@@ -4668,6 +4669,106 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     )
 
 
+def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Surface stale held-position monitor cadence without deadlocking restart.
+
+    ``position_current.updated_at`` may move because chain reconciliation refreshed a
+    projection.  The continuous monitor/redecision proof is the latest canonical
+    ``MONITOR_REFRESHED`` event.  During a restart preflight ``src.main`` is
+    expected to be absent, so a stale cadence is a recovery obligation rather than
+    a reason to keep the daemon stopped forever.  If a main process is already
+    running and the cadence is stale, fail closed.
+    """
+
+    open_count = len(rows)
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "open_position_count": open_count,
+        "max_age_seconds": MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
+        "source": "position_events.MONITOR_REFRESHED",
+        "position_current_updated_at_is_not_monitor_cadence": True,
+    }
+    if open_count == 0:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "no open positions require monitor cadence recovery evidence",
+            evidence,
+        )
+
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "position_events"):
+                return CheckResult(
+                    "monitor_cadence_restart_evidence",
+                    False,
+                    "position_events table is missing; monitor cadence cannot be proven",
+                    evidence,
+                )
+            row = conn.execute(
+                """
+                SELECT occurred_at
+                  FROM position_events
+                 WHERE event_type = 'MONITOR_REFRESHED'
+                 ORDER BY datetime(occurred_at) DESC, sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "could not inspect monitor cadence evidence",
+            evidence,
+        )
+
+    if row is None:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "open positions exist but no MONITOR_REFRESHED event was found",
+            evidence,
+        )
+    occurred_at = str(row["occurred_at"] or "")
+    occurred_dt = _parse_dt(occurred_at)
+    evidence["last_monitor_refreshed_at"] = occurred_at
+    if occurred_dt is None:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            False,
+            "latest MONITOR_REFRESHED timestamp is invalid",
+            evidence,
+        )
+    age_seconds = (datetime.now(timezone.utc) - occurred_dt.astimezone(timezone.utc)).total_seconds()
+    evidence["age_seconds"] = age_seconds
+    main_processes = _live_main_processes()
+    evidence["live_main_processes"] = main_processes
+    if 0.0 <= age_seconds <= MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "held-position monitor cadence is fresh",
+            evidence,
+        )
+    evidence["restart_recovery_obligation"] = (
+        "post-start health must observe a fresh MONITOR_REFRESHED before live is considered recovered"
+    )
+    if not main_processes:
+        return CheckResult(
+            "monitor_cadence_restart_evidence",
+            True,
+            "held-position monitor cadence is stale; restart is expected to recover it and post-start health must verify",
+            evidence,
+        )
+    return CheckResult(
+        "monitor_cadence_restart_evidence",
+        False,
+        "src.main is running but held-position monitor cadence is stale",
+        evidence,
+    )
+
+
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
@@ -4728,6 +4829,7 @@ def evaluate() -> dict[str, Any]:
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),
+        _monitor_cadence_restart_evidence_check(rows),
     ]
     blockers = [asdict(check) for check in checks if not check.ok]
     return {

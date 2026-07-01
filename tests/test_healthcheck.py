@@ -18,6 +18,7 @@ _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
+_ORIGINAL_MONITOR_CADENCE_STATUS = healthcheck._monitor_cadence_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
     healthcheck._forecast_posteriors_runtime_layer_schema_status
 )
@@ -108,6 +109,15 @@ def _mock_position_current_schema_status(monkeypatch):
         healthcheck,
         "_position_current_schema_status",
         lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_monitor_cadence_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_monitor_cadence_status",
+        lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "issue": None},
     )
 
 
@@ -1175,6 +1185,107 @@ def test_position_current_schema_status_accepts_monitor_freshness_cols(
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["missing_columns"] == []
+
+
+def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at
+        ) VALUES ('pos-1', 'active', 10.0, 10.0, ?)
+        """,
+        (now.isoformat(),),
+    )
+    if monitor_at is not None:
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at
+            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?)
+            """,
+            (monitor_at.isoformat(),),
+        )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at
+        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?)
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_monitor_cadence_status_rejects_chain_sync_without_fresh_monitor(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    stale_monitor = datetime.now(timezone.utc) - timedelta(minutes=20)
+    _init_monitor_cadence_db(db_path, monitor_at=stale_monitor)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["open_position_count"] == 1
+    assert result["position_current_updated_at_is_not_monitor_cadence"] is True
+
+
+def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus_trades.db"
+    fresh_monitor = datetime.now(timezone.utc) - timedelta(seconds=30)
+    _init_monitor_cadence_db(db_path, monitor_at=fresh_monitor)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["open_position_count"] == 1
+
+
+def test_healthcheck_is_not_healthy_when_monitor_cadence_stale(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_monitor_cadence_status",
+        lambda: {
+            "ok": False,
+            "path": "/tmp/zeus_trades.db",
+            "issue": "MONITOR_CADENCE_STALE",
+        },
+    )
+
+    result = healthcheck.check()
+
+    assert result["monitor_cadence_ok"] is False
+    assert result["monitor_cadence_issue"] == "MONITOR_CADENCE_STALE"
+    assert result["healthy"] is False
 
 
 def test_forecast_posteriors_schema_status_rejects_missing_runtime_layer(

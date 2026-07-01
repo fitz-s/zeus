@@ -34,6 +34,9 @@ SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
+MONITOR_CADENCE_STALE_SECONDS = int(
+    os.environ.get("ZEUS_MONITOR_CADENCE_STALE_SECONDS", str(5 * 60))
+)
 POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
     {
         "last_monitor_prob_is_fresh",
@@ -610,6 +613,118 @@ def _position_current_schema_status() -> dict:
             "issue": f"POSITION_CURRENT_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
             "missing_columns": sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS),
         }
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _monitor_cadence_status() -> dict:
+    """Prove held-position monitoring is actually cycling.
+
+    ``position_current.updated_at`` can change from chain reconciliation, so it
+    is not monitor/redecision cadence evidence.  The runtime proof is the latest
+    canonical ``position_events.MONITOR_REFRESHED`` timestamp while open
+    positions exist.
+    """
+
+    db_path = _trade_db_path()
+    evidence = {
+        "ok": False,
+        "path": str(db_path),
+        "issue": None,
+        "max_age_seconds": MONITOR_CADENCE_STALE_SECONDS,
+        "source": "position_events.MONITOR_REFRESHED",
+        "position_current_updated_at_is_not_monitor_cadence": True,
+        "open_position_count": 0,
+    }
+    if not db_path.exists():
+        evidence["issue"] = "MONITOR_CADENCE_DB_MISSING"
+        return evidence
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "position_current" not in tables:
+            evidence["issue"] = "MONITOR_CADENCE_POSITION_CURRENT_MISSING"
+            return evidence
+        if "position_events" not in tables:
+            evidence["issue"] = "MONITOR_CADENCE_POSITION_EVENTS_MISSING"
+            return evidence
+        position_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        exposure_terms = []
+        if "shares" in position_columns:
+            exposure_terms.append("COALESCE(shares, 0) > 0.01")
+        if "chain_shares" in position_columns:
+            exposure_terms.append("COALESCE(chain_shares, 0) > 0.01")
+        exposure_sql = " OR ".join(exposure_terms) if exposure_terms else "1=1"
+        phase_sql = (
+            "LOWER(COALESCE(phase, '')) NOT IN "
+            "('settled','voided','economically_closed','admin_closed','quarantined')"
+            if "phase" in position_columns
+            else "1=1"
+        )
+        open_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                  FROM position_current
+                 WHERE ({phase_sql})
+                   AND ({exposure_sql})
+                """
+            ).fetchone()[0]
+            or 0
+        )
+        evidence["open_position_count"] = open_count
+        if open_count == 0:
+            evidence["ok"] = True
+            return evidence
+        row = conn.execute(
+            """
+            SELECT occurred_at
+              FROM position_events
+             WHERE event_type = 'MONITOR_REFRESHED'
+             ORDER BY datetime(occurred_at) DESC, sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            evidence["issue"] = "MONITOR_CADENCE_NO_REFRESH_EVENT"
+            return evidence
+        occurred_at = str(row["occurred_at"] or "")
+        evidence["last_monitor_refreshed_at"] = occurred_at
+        try:
+            occurred_dt = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            evidence["issue"] = "MONITOR_CADENCE_TIMESTAMP_UNPARSEABLE"
+            return evidence
+        if occurred_dt.tzinfo is None:
+            occurred_dt = occurred_dt.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - occurred_dt.astimezone(timezone.utc)).total_seconds()
+        evidence["age_seconds"] = round(age_seconds, 1)
+        if age_seconds < 0.0:
+            evidence["issue"] = "MONITOR_CADENCE_FUTURE_TIMESTAMP"
+            return evidence
+        if age_seconds > MONITOR_CADENCE_STALE_SECONDS:
+            evidence["issue"] = "MONITOR_CADENCE_STALE"
+            return evidence
+        evidence["ok"] = True
+        return evidence
+    except Exception as exc:
+        evidence["issue"] = f"MONITOR_CADENCE_UNAVAILABLE:{type(exc).__name__}"
+        evidence["error"] = str(exc)
+        return evidence
     finally:
         try:
             if conn is not None:
@@ -1558,6 +1673,13 @@ def check() -> dict:
             result["position_current_schema"].get("issue")
             or "POSITION_CURRENT_SCHEMA_DRIFT"
         )
+    result["monitor_cadence"] = _monitor_cadence_status()
+    result["monitor_cadence_ok"] = bool(result["monitor_cadence"].get("ok", True))
+    if not result["monitor_cadence_ok"]:
+        result["monitor_cadence_issue"] = (
+            result["monitor_cadence"].get("issue")
+            or "MONITOR_CADENCE_UNHEALTHY"
+        )
     result["forecast_posteriors_schema"] = _forecast_posteriors_runtime_layer_schema_status()
     result["forecast_posteriors_schema_ok"] = bool(
         result["forecast_posteriors_schema"].get("ok", True)
@@ -1851,6 +1973,7 @@ def check() -> dict:
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
+        and bool(result.get("monitor_cadence_ok", True))
         and bool(result.get("forecast_posteriors_schema_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"

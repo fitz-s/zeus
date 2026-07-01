@@ -60,6 +60,73 @@ def _init_trade_db(path):
     return conn
 
 
+def _insert_monitor_events(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str = "pos-1",
+    monitor_at: datetime,
+    chain_at: datetime | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at, payload_json
+        ) VALUES (?, ?, 1, 'MONITOR_REFRESHED', ?, '{}')
+        """,
+        (f"evt-monitor-{position_id}", position_id, monitor_at.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at, payload_json
+        ) VALUES (?, ?, 2, 'CHAIN_SIZE_CORRECTED', ?, '{}')
+        """,
+        (f"evt-chain-{position_id}", position_id, (chain_at or now).isoformat()),
+    )
+    conn.commit()
+
+
+def _insert_open_position_with_monitor_events(
+    conn: sqlite3.Connection,
+    *,
+    monitor_at: datetime,
+    chain_at: datetime | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'pos-1', 'active', 'Kuala Lumpur', '2026-07-02', 'high',
+            'Will the highest temperature in Kuala Lumpur be 34°C on July 2?',
+            'buy_yes', 10.0, 10.0, 'partial', NULL, 0, NULL,
+            0.12, 1, 0.03, 1, ?
+        )
+        """,
+        (now.isoformat(),),
+    )
+    _insert_monitor_events(conn, monitor_at=monitor_at, chain_at=chain_at)
+
+
 def _init_forecast_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -334,6 +401,8 @@ def _valid_actionable_payload() -> dict:
             "cost": 0.4,
             "edge_lcb": 0.2,
             "optimal_delta_u": 0.01,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 3.0,
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "selection_guard_basis": "SELECTION_BETA_95",
@@ -679,6 +748,8 @@ def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_misma
             "cost": 0.01,
             "edge_lcb": 0.04049776073684555,
             "optimal_delta_u": 0.013993788651471595,
+            "delta_u_at_min": 0.013993788651471595,
+            "optimal_stake_usd": 4.0,
             "false_edge_rate": 0.02599350162459385,
             "direction_law_ok": False,
             "selection_guard_basis": "SELECTION_BETA_95",
@@ -723,6 +794,8 @@ def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatc
             "cost": 0.4,
             "edge_lcb": 0.2,
             "optimal_delta_u": 0.01,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 3.0,
             "false_edge_rate": 0.01,
             "direction_law_ok": False,
             "selection_guard_basis": "SELECTION_BETA_95",
@@ -1202,6 +1275,8 @@ def test_live_actionable_certificate_semantics_excludes_quarantined_invalid_rows
             "cost": 0.01,
             "edge_lcb": 0.04,
             "optimal_delta_u": 0.01,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 4.0,
             "false_edge_rate": 0.01,
             "direction_law_ok": False,
             "coherence_allows": True,
@@ -4444,6 +4519,7 @@ def test_preflight_allows_stale_belief_repairable_by_restart_reseed(
         """,
         (label,),
     )
+    _insert_monitor_events(trade, position_id="karachi-pos", monitor_at=fresh, chain_at=fresh)
     stale = datetime.now(timezone.utc) - timedelta(hours=72)
     forecasts.execute(
         """
@@ -4534,6 +4610,7 @@ def test_preflight_allows_missing_belief_repairable_by_restart_reseed(
         """,
         (label,),
     )
+    _insert_monitor_events(trade, position_id="sh-pos", monitor_at=fresh, chain_at=fresh)
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -4632,6 +4709,7 @@ def test_preflight_treats_settled_active_position_as_harvester_recovery(monkeypa
         """,
         (label,),
     )
+    _insert_monitor_events(trade, position_id="la-pos", monitor_at=fresh, chain_at=fresh)
     stale = datetime.now(timezone.utc) - timedelta(hours=190)
     forecasts.execute(
         """
@@ -5182,6 +5260,58 @@ def test_preflight_blocks_sidecar_heartbeat_on_stale_code_identity(monkeypatch, 
     heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
     assert heartbeat["ok"] is False
     assert heartbeat["detail"] == "sidecar heartbeat git head does not match current code"
+
+
+def test_monitor_cadence_restart_evidence_records_recovery_obligation_when_main_absent(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["restart_recovery_obligation"].startswith("post-start health")
+    assert result.evidence["position_current_updated_at_is_not_monitor_cadence"] is True
+
+
+def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is False
+    assert result.detail == "src.main is running but held-position monitor cadence is stale"
+    assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
 
 
 # --- B1: submit_authority_config fail-closed tests ---
