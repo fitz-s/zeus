@@ -331,6 +331,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         min_entry_price=final_payload.get("min_entry_price"),
         min_expected_profit_usd=final_payload.get("min_expected_profit_usd"),
         min_submit_edge_density=final_payload.get("min_submit_edge_density"),
+        selection_authority_applied=final_payload.get("selection_authority_applied"),
         qkernel_execution_economics=final_payload.get("qkernel_execution_economics"),
         actionable_certificate_hash=final_payload.get("actionable_certificate_hash"),
     )

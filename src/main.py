@@ -5814,8 +5814,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
-        held_condition_scope = _edli_current_held_position_condition_scope()
         held_families = _edli_current_held_position_family_keys()
+        held_condition_scope = _edli_current_held_position_family_condition_scope(held_families)
         family_keys = _edli_entry_redecision_family_keys(
             raw_entry_family_keys,
             held_families,
@@ -5838,6 +5838,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             entry_condition_scope=entry_condition_scope,
             entry_refresh_condition_scope=entry_refresh_condition_scope,
             open_rest_condition_scope=open_rest_condition_scope,
+            full_family_refresh_families=held_reemit_families,
         )
         confirm_refresh_summary: dict = {}
         if confirm_families:
@@ -6026,7 +6027,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             held_reemit_families &= confirmed_held_scope
             if held_reemit_families:
                 held_reemit_families &= _edli_families_with_fresh_scoped_executable_substrate(
-                    _edli_current_held_position_condition_scope(),
+                    _edli_current_held_position_family_condition_scope(held_reemit_families),
                     now_utc=now,
                 )
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
@@ -6813,6 +6814,71 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
     return out
 
 
+def _edli_current_held_position_family_condition_scope(
+    families: set[tuple[str, str, str]] | None = None,
+) -> dict[tuple[str, str, str], set[str]]:
+    """Full family condition scope for held-position redecision.
+
+    Held-position redecision is a family optimization problem, not an old-token
+    refresh.  A stale or unrefreshed sibling can be the best fill-up/shift target,
+    so the confirmation producer must refresh the complete executable family.
+    """
+
+    held_families = set(families or set()) or set(_edli_current_held_position_condition_scope())
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in held_families
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return {}
+
+    from src.data.market_topology_rows import _event_family_market_topology_rows
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+    forecasts_ro = get_forecasts_connection_read_only()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        out: dict[tuple[str, str, str], set[str]] = {}
+        for family in sorted(clean_families):
+            city, target_date, metric = family
+            try:
+                topology_rows = _event_family_market_topology_rows(
+                    forecasts_ro,
+                    {"city": city, "target_date": target_date, "metric": metric},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "edli_redecision_screen: held-family topology read failed; "
+                    "family not admitted for full redecision this tick: city=%r "
+                    "target_date=%r metric=%r error=%r",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            for row in topology_rows or ():
+                condition_id = str(row.get("condition_id") or "").strip()
+                if not condition_id:
+                    continue
+                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
+                    continue
+                out.setdefault(family, set()).add(condition_id)
+        return out
+    finally:
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _edli_families_with_fresh_scoped_executable_substrate(
     condition_scope: dict[tuple[str, str, str], set[str]],
     *,
@@ -6906,11 +6972,10 @@ def _edli_refresh_continuous_money_path_families(
         try:
             from src.data.substrate_priority import mark_money_path_substrate_priority
 
-            marker_families = () if priority_conditions else clean_families
             mark_money_path_substrate_priority(
                 reason="continuous_redecision_confirm_refresh",
                 ttl_seconds=35.0,
-                families=marker_families,
+                families=clean_families,
                 condition_ids=priority_conditions,
             )
         except Exception as exc:  # noqa: BLE001
@@ -6956,16 +7021,30 @@ def _edli_confirm_priority_condition_ids(
     entry_condition_scope: dict[tuple[str, str, str], set[str]],
     entry_refresh_condition_scope: dict[tuple[str, str, str], set[str]],
     open_rest_condition_scope: dict[tuple[str, str, str], set[str]],
+    full_family_refresh_families: set[tuple[str, str, str]] | None = None,
     limit: int | None = None,
 ) -> list[str]:
     """Return a bounded, ordered money-path condition frontier for sidecar capture."""
 
     condition_limit = _edli_redecision_priority_condition_limit() if limit is None else max(1, int(limit))
+    full_family_refresh = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in (full_family_refresh_families or set())
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
     ordered: list[str] = []
     seen: set[str] = set()
 
     def _add_scope(scope: dict[tuple[str, str, str], set[str]]) -> None:
         for family_key in sorted(scope or {}):
+            try:
+                normalized_family = tuple(str(part or "").strip() for part in family_key)
+            except TypeError:
+                normalized_family = ("", "", "")
+            if normalized_family in full_family_refresh:
+                continue
             for condition_id in sorted(scope.get(family_key) or set()):
                 clean = str(condition_id or "").strip()
                 if not clean or clean in seen:

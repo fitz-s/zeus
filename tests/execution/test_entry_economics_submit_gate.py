@@ -42,6 +42,7 @@ def _intent(**overrides) -> ExecutionIntent:
         "min_entry_price": 0.10,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
+        "selection_authority_applied": "qkernel_spine",
         "qkernel_execution_economics": _econ(),
     }
     payload.update(overrides)
@@ -72,7 +73,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_blocks_low_price_below_strategy_entry_floor():
+def test_entry_economics_accepts_low_price_when_qkernel_authority_and_profit_clear():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -93,30 +94,30 @@ def test_entry_economics_blocks_low_price_below_strategy_entry_floor():
         shares=1497.78,
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["min_entry_price"] == 0.10
+    assert verdict["allowed"] is True
+    assert verdict["details"]["expected_profit_usd"] > 1.0
 
 
-def test_entry_economics_blocks_price_at_strategy_entry_floor():
+def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.10,
+            limit_price=0.006,
             q_live=0.82,
             q_lcb_5pct=0.72,
-            expected_edge=0.62,
+            expected_edge=0.714,
             min_entry_price=0.10,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
+            selection_authority_applied=None,
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
-                cost=0.10,
-                edge_lcb=0.62,
+                cost=0.006,
+                edge_lcb=0.714,
                 selection_guard_q_safe=0.72,
             ),
         ),
-        shares=50.0,
+        shares=1497.78,
     )
 
     assert verdict["allowed"] is False
@@ -133,6 +134,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
             min_entry_price=0.005,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
+            selection_authority_applied=None,
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
@@ -202,6 +204,37 @@ def test_entry_economics_blocks_missing_receipt_fields():
     assert verdict["allowed"] is False
     assert verdict["reason"] == "missing_entry_economics"
     assert "qkernel_execution_economics" in verdict["details"]["missing"]
+
+
+def test_entry_economics_accepts_day0_observation_authority_without_qkernel():
+    verdict = _entry_economics_component(
+        _intent(
+            q_live=0.96,
+            q_lcb_5pct=0.954,
+            limit_price=0.70,
+            expected_edge=0.238,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            qkernel_execution_economics=None,
+        ),
+        shares=10.0,
+        actionable_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        },
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["probability_authority"] == "day0_observation_authority"
+    assert abs(verdict["details"]["submit_edge"] - 0.254) < 1e-9
 
 
 def test_entry_economics_allows_positive_side_matched_edge():

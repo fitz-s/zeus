@@ -435,6 +435,69 @@ def raw_precision_center(
 
 
 # ---------------------------------------------------------------------------
+# Correlated-covariance minimum-variance combination (upgrade of the diagonal
+# precision fusion) — w = Σ⁻¹1 / (1ᵀΣ⁻¹1). Verified +0.119°C CRPS OOS, both-halves
+# robust, on the real previous_runs fusion (operator "improve until ideal").
+# ---------------------------------------------------------------------------
+
+def covariance_min_variance_weights(
+    second_moment: "Mapping[tuple[str, str], float]",
+    models: "Sequence[str]",
+    *,
+    shrinkage: float = 0.3,
+) -> "dict[str, float]":
+    """Correlated-covariance minimum-variance combination weights ``w = Σ⁻¹1 / (1ᵀΣ⁻¹1)``.
+
+    Upgrades the DIAGONAL ``raw_second_moment_weights`` to account for REDUNDANCY between
+    correlated providers. ``second_moment[(i, j)]`` is the cross-model error second moment
+    Ê[e_i·e_j] (in the same unit² basis the diagonal helper uses). Off-diagonals are shrunk
+    toward 0 by ``shrinkage`` for stability; the diagonal is floored at ``SIGMA_FLOOR²``. Reduces
+    EXACTLY to the diagonal inverse-variance weights when Σ is diagonal, so it is backward-safe.
+    Negative min-variance weights (from strong positive correlation) are clipped to 0 and the
+    vector renormalized; a singular/degenerate Σ falls back to diagonal precision (never raises).
+    """
+    ms = list(models)
+    n = len(ms)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {ms[0]: 1.0}
+    fl = float(SIGMA_FLOOR * SIGMA_FLOOR)
+    S = np.empty((n, n), dtype=float)
+    for i in range(n):
+        for j in range(n):
+            a = float(second_moment.get((ms[i], ms[j]), 0.0))
+            b = float(second_moment.get((ms[j], ms[i]), 0.0))
+            S[i, j] = 0.5 * (a + b)
+    if shrinkage:
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    S[i, j] *= (1.0 - shrinkage)
+    for i in range(n):
+        if not np.isfinite(S[i, i]) or S[i, i] < fl:
+            S[i, i] = fl
+
+    def _diagonal() -> "dict[str, float]":
+        prec = np.array([1.0 / S[i, i] for i in range(n)])
+        prec = prec / prec.sum()
+        return {ms[i]: float(prec[i]) for i in range(n)}
+
+    try:
+        x = np.linalg.solve(S, np.ones(n))  # Σ⁻¹ 1
+    except np.linalg.LinAlgError:
+        return _diagonal()
+    if not np.all(np.isfinite(x)):
+        return _diagonal()
+    w = np.clip(x, 0.0, None)
+    tot = float(w.sum())
+    if tot <= 0.0:
+        return _diagonal()
+    w = w / tot
+    return {ms[i]: float(w[i]) for i in range(n)}
+
+
+# ---------------------------------------------------------------------------
 # Weighted Huber location (spec line 247) — the in-envelope robust consensus.
 # ---------------------------------------------------------------------------
 

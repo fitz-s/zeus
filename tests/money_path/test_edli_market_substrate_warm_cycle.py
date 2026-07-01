@@ -490,12 +490,12 @@ def test_active_risk_conditions_are_hot_even_with_priority_marker():
     src = inspect.getsource(substrate_observer._edli_money_path_substrate_priority_cycle)
     open_read = src.index("open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh")
     held_read = src.index("held_position_priority_condition_ids = _edli_current_held_position_condition_ids()")
-    extend_marker = src.index("exact_priority_condition_ids = list(priority_marker_condition_ids)")
+    marker_copy = src.index("marker_exact_condition_ids = list(priority_marker_condition_ids)")
+    extend_marker = src.index("exact_priority_condition_ids = list(marker_exact_condition_ids)")
     extend_open = src.index("exact_priority_condition_ids.extend(open_rest_priority_condition_ids)")
     extend_held = src.index("exact_priority_condition_ids.extend(held_position_priority_condition_ids)")
 
-    assert open_read < extend_marker < extend_open < extend_held
-    assert held_read < extend_open
+    assert marker_copy < open_read < held_read < extend_marker < extend_open < extend_held
     assert "if not priority_marker_active:\n                exact_priority_condition_ids.extend" not in src
 
 
@@ -925,7 +925,7 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
         {
             "reason": "continuous_redecision_confirm_refresh",
             "ttl_seconds": 35.0,
-            "families": (),
+            "families": {("Paris", "2026-06-20", "low")},
             "condition_ids": {"cond-1", "cond-2"},
         }
     ]
@@ -942,9 +942,10 @@ def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypa
         entry_condition_scope={family_a: {"entry-1"}},
         entry_refresh_condition_scope={family_a: {"refresh-1", "refresh-2"}},
         open_rest_condition_scope={family_a: {"open-rest-1"}},
+        full_family_refresh_families={family_a},
     )
 
-    assert condition_ids == ["rest-1", "rest-2", "held-1", "entry-1"]
+    assert condition_ids == ["rest-1", "rest-2"]
 
 
 def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_process_lock():
@@ -2134,7 +2135,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert "merge_existing=True" in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
-    assert "families=marker_families" in confirm_src
+    assert "families=clean_families" in confirm_src
     assert "condition_ids=priority_conditions" in confirm_src
 
 

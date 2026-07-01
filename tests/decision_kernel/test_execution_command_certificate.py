@@ -129,6 +129,7 @@ def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
             "size": 384.79,
             "min_entry_price": 0.05,
             "notional_usd": 1.15437,
+            "selection_authority_applied": None,
         },
         command_payload={
             "limit_price": 0.003,
@@ -139,6 +140,7 @@ def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
             "min_entry_price": 0.05,
             "min_expected_profit_usd": 1.0,
             "min_submit_edge_density": 0.05,
+            "selection_authority_applied": None,
             "qkernel_execution_economics": {
                 "source": "qkernel_spine",
                 "side": "YES",
@@ -159,6 +161,44 @@ def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
 
     with pytest.raises(CertificateVerificationError, match="below strategy entry floor"):
         verify_execution_command(command, parents)
+
+
+def test_execution_command_accepts_low_price_with_qkernel_authority_and_profit_floor():
+    parents, command = execution_graph(
+        final_payload={
+            "limit_price": 0.01,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "notional_usd": 3.8479,
+        },
+        command_payload={
+            "limit_price": 0.01,
+            "q_live": 0.13122880112330723,
+            "q_lcb_5pct": 0.058653389021689366,
+            "expected_edge": 0.048653389021689364,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "min_expected_profit_usd": 1.0,
+            "min_submit_edge_density": 0.05,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.13122880112330723,
+                "payoff_q_lcb": 0.058653389021689366,
+                "cost": 0.01,
+                "edge_lcb": 0.048653389021689364,
+                "optimal_delta_u": 0.005,
+                "false_edge_rate": 0.001,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.058653389021689366,
+            },
+        },
+    )
+
+    verify_execution_command(command, parents)
 
 
 def test_execution_command_has_no_max_notional_ceiling():
@@ -253,6 +293,28 @@ def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
 
     with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
         verify_execution_command(command, parents)
+
+
+def test_execution_command_accepts_day0_observation_authority_without_qkernel():
+    day0_authority = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "selection_authority_applied": None,
+        "qkernel_execution_economics": None,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    parents, command = execution_graph(
+        actionable_payload=day0_authority,
+        command_payload=day0_authority,
+    )
+
+    verify_execution_command(command, parents)
 
 
 def test_execution_command_rejects_missing_qkernel_selection_guard():
@@ -375,6 +437,7 @@ def test_final_intent_rejects_price_below_current_live_entry_floor():
             "limit_price": 0.07,
             "min_entry_price": 0.05,
             "notional_usd": 0.70,
+            "selection_authority_applied": None,
         }
     )
 
@@ -518,6 +581,7 @@ def test_executor_expressibility_rejects_price_below_final_intent_live_floor():
             "limit_price": 0.07,
             "min_entry_price": 0.05,
             "notional_usd": 0.70,
+            "selection_authority_applied": None,
         }
     )
 
@@ -598,6 +662,7 @@ def test_final_intent_builder_rejects_entry_price_below_current_live_floor():
                 "trade_score": 0.23,
                 "action_score": 0.23,
                 "min_entry_price": 0.05,
+                "selection_authority_applied": None,
                 "qkernel_execution_economics": {
                     **_actionable_payload()["qkernel_execution_economics"],
                     "cost": 0.07,
@@ -1193,6 +1258,10 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
             "min_submit_edge_density",
             final_intent.payload.get("min_submit_edge_density", 0.02),
         ),
+        "selection_authority_applied": command_payload.get(
+            "selection_authority_applied",
+            final_intent.payload.get("selection_authority_applied"),
+        ),
         "qkernel_execution_economics": command_payload.get(
             "qkernel_execution_economics",
             final_intent.payload.get(
@@ -1241,6 +1310,20 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
         "final_intent_certificate_hash": final_intent.certificate_hash,
         "live_cap_usage_id": live_cap.payload["usage_id"],
     }
+    for key in (
+        "source_match_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+        "source_authorized_status",
+        "live_authority_status",
+    ):
+        if key in command_payload:
+            payload[key] = command_payload[key]
+        elif key in final_intent.payload:
+            payload[key] = final_intent.payload[key]
     return _cert(
         claims.PRE_SUBMIT_REVALIDATION,
         "pre-submit:event-1:intent-1",
@@ -1251,7 +1334,7 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
 
 def _final_intent_payload(actionable) -> dict:
     payload = actionable.payload
-    return {
+    result = {
         "event_id": payload["event_id"],
         "event_type": payload.get("event_type", "FORECAST_SNAPSHOT_READY"),
         "actionable_certificate_hash": actionable.certificate_hash,
@@ -1275,6 +1358,7 @@ def _final_intent_payload(actionable) -> dict:
         "min_entry_price": payload.get("min_entry_price"),
         "min_expected_profit_usd": payload.get("min_expected_profit_usd"),
         "min_submit_edge_density": payload.get("min_submit_edge_density"),
+        "selection_authority_applied": payload.get("selection_authority_applied"),
         "qkernel_execution_economics": payload.get("qkernel_execution_economics"),
         "size": 10.0,
         "notional_usd": 4.0,
@@ -1321,6 +1405,19 @@ def _final_intent_payload(actionable) -> dict:
         "submitted": False,
         "venue_order_id": None,
     }
+    for key in (
+        "source_match_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+        "source_authorized_status",
+        "live_authority_status",
+    ):
+        if key in payload:
+            result[key] = payload[key]
+    return result
 
 
 def _expressibility_payload(final_intent) -> dict:

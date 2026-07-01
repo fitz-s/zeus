@@ -3463,7 +3463,7 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
 
 def _regret_bucket_for(reason: str) -> str:
     reason_text = str(reason or "")
-    if reason_text in {"FDR_REJECTED"}:
+    if reason_text == "FDR_REJECTED" or reason_text.startswith("FDR_REJECTED:"):
         return "FDR_REJECTED"
     if reason_text in {"KELLY_TOO_SMALL"}:
         return "KELLY_TOO_SMALL"

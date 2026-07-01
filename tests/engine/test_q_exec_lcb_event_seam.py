@@ -110,3 +110,57 @@ def test_center_buy_taker_quality_uses_current_registry_floor_over_legacy_payloa
     assert proof["passed"] is False
     assert proof["reason"] == "strategy_live_quality_floor_not_met"
     assert proof["min_entry_price"] == "0.1"
+    assert proof["entry_price_floor_applies"] == "True"
+
+
+def test_qkernel_center_buy_taker_allows_low_price_when_profit_and_edge_clear(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.30",
+        q_lcb_5pct="0.30",
+        kelly_size_usd="10.0",
+        min_entry_price="0.05",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+        selection_authority_applied="qkernel_spine",
+        candidate_id="family-1:condition-1",
+        candidate_bin_id="bin-yes-30c",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "YES:bin-yes-30c:DIRECT_YES:bin-yes-30c@proof",
+            "bin_id": "bin-yes-30c",
+            "route_id": "DIRECT_YES:bin-yes-30c@proof",
+            "side": "YES",
+            "payoff_q_point": 0.30,
+            "payoff_q_lcb": 0.30,
+            "edge_lcb": 0.23,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.02,
+            "cost": 0.07,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.30,
+        },
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.06,
+        fresh_best_ask=0.07,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is True
+    assert proof["entry_price_floor_applies"] == "False"
+    assert proof["entry_price_floor_pass"] == "True"
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+    assert proof["min_entry_price"] == "0.1"

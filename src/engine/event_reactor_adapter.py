@@ -313,6 +313,28 @@ def _event_allows_same_family_monitor_owned(event_type: object) -> bool:
     )
 
 
+def _selection_allows_same_family_monitor_owned(
+    *,
+    event_allows_same_family_monitor_owned: bool,
+    selection_exposure_by_outcome: Mapping[str, float] | None,
+) -> bool:
+    """Return whether selection may rank same-family management candidates.
+
+    ``_event_allows_same_family_monitor_owned`` stays the trigger-level authority:
+    a fresh forecast event cannot create duplicate family exposure just because a
+    sibling looks attractive.  But once current position truth proves this family
+    is already exposed, the next forecast update is no longer a pure fresh-entry
+    decision; it is a position-management decision over fresh belief and fresh
+    prices.  In that case the qkernel/legacy selector must be allowed to see the
+    same-family sibling/same-token proofs so the downstream D1/D2 lanes can choose
+    residual fill-up, hold-by-no-submit, close-before-open shift, or no-trade.
+    """
+
+    if event_allows_same_family_monitor_owned:
+        return True
+    return bool(selection_exposure_by_outcome)
+
+
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
 #
 # The substrate warm job refreshes executable_market_snapshots on a fair rotating
@@ -3704,33 +3726,110 @@ def _day0_selected_route_fdr_proof(
     Day0 absorption is a single settlement-family route conditioned on observed
     same-day facts, not 22 independent sibling wagers.  Applying legacy BH across
     every YES/NO sibling denominator can reject a selected route whose own
-    false-edge evidence clears the live FDR budget, exactly the same route-vs-
-    sibling mismatch the qkernel spine already avoids.
+    hard-fact lower-bound evidence clears the live FDR budget, exactly the same
+    route-vs-sibling mismatch the qkernel spine already avoids.
     """
 
     if str(event_type or "") not in _DAY0_LANE_EVENT_TYPES:
         return None
-    try:
-        p_value = float(selected_proof.p_value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(p_value):
-        return None
     from src.events.money_path_adapters import FdrProof
     from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+    def _proof(passed: bool) -> FdrProof:
+        return FdrProof(
+            fdr_family_id=family_id,
+            attempted_hypotheses=len(all_hypothesis_ids),
+            selected_hypotheses=(selected_hypothesis_id,),
+            selected_post_fdr=(selected_hypothesis_id,) if passed else tuple(),
+            passed=passed,
+        )
+
+    if str(getattr(selected_proof, "probability_authority", "") or "").strip() != (
+        "day0_absorbing_hard_fact"
+    ):
+        return _proof(False)
+    try:
+        q_lcb = float(selected_proof.q_lcb_5pct)
+        price = float(selected_proof.execution_price.value)  # type: ignore[union-attr]
+        trade_score = float(selected_proof.trade_score)
+    except (TypeError, ValueError):
+        return _proof(False)
+    if not (math.isfinite(q_lcb) and math.isfinite(price) and math.isfinite(trade_score)):
+        return _proof(False)
+    false_edge_rate = max(0.0, 1.0 - q_lcb)
 
     passed = (
         bool(getattr(selected_proof, "passed_prefilter", False))
         and getattr(selected_proof, "missing_reason", None) is None
-        and p_value <= float(DEFAULT_FDR_ALPHA)
+        and 0.0 <= q_lcb <= 1.0
+        and 0.0 < price < 1.0
+        and q_lcb > price
+        and trade_score > 0.0
+        and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
     )
-    return FdrProof(
-        fdr_family_id=family_id,
-        attempted_hypotheses=len(all_hypothesis_ids),
-        selected_hypotheses=(selected_hypothesis_id,),
-        selected_post_fdr=(selected_hypothesis_id,) if passed else tuple(),
-        passed=passed,
+    return _proof(passed)
+
+
+def _fdr_rejection_reason(
+    *,
+    event_type: object,
+    fdr: object,
+    selected_proof: "_CandidateProof",
+) -> str:
+    """Typed FDR reject reason with enough live evidence to diagnose the gate.
+
+    The reactor buckets by the ``FDR_REJECTED`` prefix.  The suffix is evidence
+    only: it lets Day0/qkernel live receipts answer why an otherwise selected
+    route did not pass FDR without changing the pass/fail decision.
+    """
+
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        alpha = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        alpha = float("nan")
+    selected_post = getattr(fdr, "selected_post_fdr", ()) or ()
+    attempted = getattr(fdr, "attempted_hypotheses", None)
+    pieces = [
+        "FDR_REJECTED",
+        f"event_type={str(event_type or 'unknown')}",
+        f"attempted={attempted}",
+        f"selected_post_fdr={len(tuple(selected_post))}",
+        f"alpha={alpha:.6f}" if math.isfinite(alpha) else "alpha=unknown",
+        f"passed_prefilter={bool(getattr(selected_proof, 'passed_prefilter', False))}",
+    ]
+    q_lcb = _optional_float(getattr(selected_proof, "q_lcb_5pct", None))
+    q_live = _optional_float(getattr(selected_proof, "q_posterior", None))
+    price = _optional_float(
+        getattr(getattr(selected_proof, "execution_price", None), "value", None)
     )
+    trade_score = _optional_float(getattr(selected_proof, "trade_score", None))
+    if q_live is not None:
+        pieces.append(f"q_live={q_live:.6f}")
+    if q_lcb is not None:
+        pieces.append(f"q_lcb={q_lcb:.6f}")
+    if price is not None:
+        pieces.append(f"price={price:.6f}")
+    if trade_score is not None:
+        pieces.append(f"trade_score={trade_score:.6f}")
+    if str(event_type or "") in _DAY0_LANE_EVENT_TYPES:
+        false_edge_rate = None if q_lcb is None else max(0.0, 1.0 - q_lcb)
+        if false_edge_rate is not None:
+            pieces.append(f"day0_false_edge_rate={false_edge_rate:.6f}")
+        pieces.append(
+            "probability_authority="
+            f"{str(getattr(selected_proof, 'probability_authority', '') or 'missing')}"
+        )
+        pieces.append(
+            "missing_reason="
+            f"{str(getattr(selected_proof, 'missing_reason', None) or 'none')}"
+        )
+    else:
+        p_value = _optional_float(getattr(selected_proof, "p_value", None))
+        if p_value is not None:
+            pieces.append(f"p_value={p_value:.6f}")
+    return ":".join(pieces)
 
 
 def _qkernel_selection_fact_family_id(
@@ -3833,15 +3932,29 @@ def _record_qkernel_selection_family_facts(
         )
         selected_post_fdr = bool(candidate_id and candidate_id == selected_candidate_id)
         rejection_stage = None
+        rejection_detail = None
         if not selected_post_fdr:
             if payload.get("direction_law_ok") is not True:
                 rejection_stage = "DIRECTION_LAW_REJECTED"
+                rejection_detail = "direction_law_ok_not_true"
             elif payload.get("coherence_allows") is not True:
                 rejection_stage = "MARKET_COHERENCE_REJECTED"
+                rejection_detail = "coherence_allows_not_true"
             elif not passed_prefilter:
+                if edge_lcb is None:
+                    rejection_detail = "edge_lcb_missing"
+                elif edge_lcb <= 0.0:
+                    rejection_detail = "edge_lcb_nonpositive"
+                elif optimal_delta_u is None:
+                    rejection_detail = "optimal_delta_u_missing"
+                elif optimal_delta_u <= 0.0:
+                    rejection_detail = "optimal_delta_u_nonpositive"
+                else:
+                    rejection_detail = "prefilter_unknown"
                 rejection_stage = "QKERNEL_PREFILTER_REJECTED"
             else:
                 rejection_stage = "QKERNEL_NOT_SELECTED"
+                rejection_detail = "positive_edge_not_rank_winner"
         rows.append(
             {
                 "hypothesis_id": _qkernel_selection_hypothesis_id(
@@ -3867,6 +3980,7 @@ def _record_qkernel_selection_family_facts(
                     "event_type": event.event_type,
                     "decision_id": decision_id,
                     "receipt_hash": receipt_hash,
+                    "rejection_detail": rejection_detail,
                     "route_id": str(payload.get("route_id") or getattr(economics, "route_id", "") or ""),
                     "side": side,
                     "bin_id": bin_id,
@@ -4308,6 +4422,12 @@ def _build_event_bound_no_submit_receipt_core(
         held_position_conn=trade_conn,
         family=family,
     )
+    _selection_scope_allows_same_family_monitor_owned = (
+        _selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=allow_same_family_monitor_owned,
+            selection_exposure_by_outcome=_selection_exposure,
+        )
+    )
     if _spine_eligible_event and not _is_day0_event and not _spine_flag_on:
         proof = None
         _spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"
@@ -4319,10 +4439,9 @@ def _build_event_bound_no_submit_receipt_core(
             strategy_policy_conn=trade_conn,
             strategy_policy_event_type=event.event_type,
             decision_time=decision_time,
-            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
             enforce_win_rate_floor=False,
-            enforce_strategy_entry_floors=True,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:
@@ -4332,29 +4451,74 @@ def _build_event_bound_no_submit_receipt_core(
             proof = None
             _spine_no_trade_reason = None
         else:
-            _spine_result = decide_family_via_spine(
-                family=family,
-                payload=payload,
-                proofs=proofs,
-                selection_proofs=_spine_entry_proofs,
-                decision_time=decision_time,
-                native_side_candidate_from_proof=_native_side_candidate_from_proof,
-                candidate_bin_id=_candidate_bin_id,
-                payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
-                exposure_builder=_robust_marginal_utility_exposure,
-                baseline_usd_provider=_robust_marginal_utility_baseline_usd,
-                per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
-                extra_exposure_by_bin_id=(_selection_exposure or None),
-            )
-            proof = _spine_result.selected_proof
-            _spine_no_trade_reason = _spine_result.no_trade_reason
-            _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
-                _spine_result.decision
-            )
+            _active_spine_entry_proofs = tuple(_spine_entry_proofs)
+            _actionability_exclusions: list[str] = []
+            _spine_result = None
+            _spine_fact_decision = None
+            while True:
+                _spine_result = decide_family_via_spine(
+                    family=family,
+                    payload=payload,
+                    proofs=proofs,
+                    selection_proofs=_active_spine_entry_proofs,
+                    decision_time=decision_time,
+                    native_side_candidate_from_proof=_native_side_candidate_from_proof,
+                    candidate_bin_id=_candidate_bin_id,
+                    payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+                    exposure_builder=_robust_marginal_utility_exposure,
+                    baseline_usd_provider=_robust_marginal_utility_baseline_usd,
+                    per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
+                    extra_exposure_by_bin_id=(_selection_exposure or None),
+                )
+                proof = _spine_result.selected_proof
+                _spine_no_trade_reason = _spine_result.no_trade_reason
+                _spine_fact_decision = _spine_result.decision
+                _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
+                    _spine_result.decision
+                )
+                _fill_up_unactionable_reason = None
+                if proof is not None and _selection_scope_allows_same_family_monitor_owned:
+                    _fill_up_unactionable_reason = (
+                        _qkernel_same_token_fill_up_selection_rejection_reason(
+                            proof=proof,
+                            held_position_conn=trade_conn,
+                            locked_opportunity_conn=locked_opportunity_conn,
+                        )
+                    )
+                if _fill_up_unactionable_reason is None:
+                    break
+                _excluded_candidate_id = _candidate_evaluation_id(proof)
+                _actionability_exclusions.append(
+                    f"{_excluded_candidate_id}:{_fill_up_unactionable_reason}"
+                )
+                _next_spine_entry_proofs = tuple(
+                    candidate_proof
+                    for candidate_proof in _active_spine_entry_proofs
+                    if _candidate_evaluation_id(candidate_proof) != _excluded_candidate_id
+                )
+                if len(_next_spine_entry_proofs) == len(_active_spine_entry_proofs):
+                    proof = None
+                    _spine_fact_decision = None
+                    _spine_candidate_economics_by_key = {}
+                    _spine_no_trade_reason = (
+                        "FILL_UP_SELECTION_NOT_ACTIONABLE:"
+                        f"{_fill_up_unactionable_reason}"
+                    )
+                    break
+                if not _next_spine_entry_proofs:
+                    proof = None
+                    _spine_fact_decision = None
+                    _spine_candidate_economics_by_key = {}
+                    _spine_no_trade_reason = (
+                        "FILL_UP_SELECTION_NOT_ACTIONABLE:"
+                        + ";".join(_actionability_exclusions)
+                    )
+                    break
+                _active_spine_entry_proofs = _next_spine_entry_proofs
             _selection_fact_result = _record_qkernel_selection_family_facts(
                 trade_conn,
                 family=family,
-                decision=_spine_result.decision,
+                decision=_spine_fact_decision,
                 event=event,
                 decision_time=decision_time,
                 decision_snapshot_id=event.causal_snapshot_id,
@@ -4375,7 +4539,7 @@ def _build_event_bound_no_submit_receipt_core(
             strategy_policy_conn=trade_conn,
             strategy_policy_event_type=event.event_type,
             decision_time=decision_time,
-            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             extra_exposure_by_bin_id=(_selection_exposure or None),
         )
     opportunity_book = _opportunity_book_from_proofs(
@@ -4388,7 +4552,7 @@ def _build_event_bound_no_submit_receipt_core(
         strategy_policy_conn=trade_conn,
         strategy_policy_event_type=event.event_type,
         decision_time=decision_time,
-        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
         selection_exposure_by_outcome=_selection_exposure,
     )
@@ -4617,7 +4781,7 @@ def _build_event_bound_no_submit_receipt_core(
                     strategy_policy_conn=trade_conn,
                     strategy_policy_event_type=event.event_type,
                     decision_time=decision_time,
-                    allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+                    allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
                     qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
                     selection_exposure_by_outcome=_selection_exposure,
                 )
@@ -4810,7 +4974,11 @@ def _build_event_bound_no_submit_receipt_core(
     # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13).
     # Selection-shrinkage telemetry is stamped on the receipt regardless.
     _gate_passed = fdr.passed
-    _gate_reject_reason = "FDR_REJECTED"
+    _gate_reject_reason = _fdr_rejection_reason(
+        event_type=event.event_type,
+        fdr=fdr,
+        selected_proof=proof,
+    )
     if not _gate_passed:
         return EventSubmissionReceipt(
             False,
@@ -5054,7 +5222,7 @@ def _build_event_bound_no_submit_receipt_core(
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
                 held_position_conn=trade_conn,
-                allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+                allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
                 stake_floor_out=_stake_floor_provenance,
                 free_cash_usd=free_cash_usd,
             )
@@ -6661,6 +6829,7 @@ def _build_event_bound_taker_quality_proof(
     direction = str(actionable_payload.get("direction") or "")
     touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
     q_lcb_source = "q_lcb_5pct"
+    qkernel_authoritative_forecast_entry = False
     if actionable_payload.get("qkernel_execution_economics") is not None:
         # B3 (PR415, 2026-06-20) — MANDATORY authority stamp + STRICT selected-candidate
         # identity match BEFORE the qkernel payoff_q_lcb may drive the money-path taker
@@ -6805,6 +6974,12 @@ def _build_event_bound_taker_quality_proof(
                 "incremental_expected_profit_usd": "0",
             }
         q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
+        qkernel_authoritative_forecast_entry = (
+            str(actionable_payload.get("event_type") or "").strip()
+            in _FORECAST_DECISION_EVENT_TYPES
+            and str(actionable_payload.get("selection_authority_applied") or "").strip()
+            == "qkernel_spine"
+        )
     else:
         q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
@@ -6877,8 +7052,9 @@ def _build_event_bound_taker_quality_proof(
         and taker_expected_profit_usd >= required_profit
         and model_confidence >= min_model_confidence
     )
+    entry_price_floor_pass = bool(qkernel_authoritative_forecast_entry or touch_dec > min_entry_price)
     strategy_quality_floor_pass = bool(
-        touch_dec > min_entry_price
+        entry_price_floor_pass
         and taker_expected_profit_usd >= min_expected_profit
         and taker_edge_density >= min_submit_edge_density
     )
@@ -6914,6 +7090,8 @@ def _build_event_bound_taker_quality_proof(
         "min_taker_model_confidence": str(min_model_confidence),
         "min_taker_profit_ratio": str(min_profit_ratio),
         "min_entry_price": str(min_entry_price),
+        "entry_price_floor_applies": str(not qkernel_authoritative_forecast_entry),
+        "entry_price_floor_pass": str(entry_price_floor_pass),
         "min_expected_profit_usd": str(min_expected_profit),
         "min_submit_edge_density": str(min_submit_edge_density),
         "fresh_touch_price": str(touch_dec),
@@ -7679,48 +7857,24 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
-    min_entry_price = _event_bound_effective_live_quality_floors(actionable_payload)[
-        "min_entry_price"
-    ]
-    cert_cost = _optional_float(cert.get("cost"))
-    if (
-        min_entry_price is not None
-        and cert_cost is not None
-        and cert_cost <= min_entry_price + 1e-12
-    ):
-        raise ValueError(
-            "LIVE_ENTRY_QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
-            f"cost={cert_cost:.9f}:min_entry_price={min_entry_price:.9f}"
-        )
+    # Qkernel-selected entries are governed by the family optimizer's executable
+    # cert: selected-side q_lcb, selection calibrator, ROI frontier, profit floor,
+    # and edge-density floor. A fixed raw price floor is not probability evidence
+    # and was hiding high-quality cheap YES before/after selection.
 
 
 def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mapping[str, object]) -> None:
     """Day0 live ENTRY submit is licensed by observation truth, not forecast qkernel."""
 
-    required_matches = {
-        "source_match_status": "MATCH",
-        "local_date_status": "MATCH",
-        "station_match_status": "MATCH",
-        "dst_status": "UNAMBIGUOUS",
-        "metric_match_status": "MATCH",
-        "rounding_status": "MATCH",
-        "live_authority_status": "live",
-    }
-    for key, expected in required_matches.items():
-        observed = str(actionable_payload.get(key) or "").strip()
-        if observed != expected:
-            raise ValueError(
-                "LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:"
-                f"{key}={observed or 'missing'}"
-            )
-    source_authorized = str(
-        actionable_payload.get("source_authorized_status") or "AUTHORIZED"
-    ).strip()
-    if source_authorized != "AUTHORIZED":
-        raise ValueError(
-            "LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:"
-            f"source_authorized_status={source_authorized or 'missing'}"
-        )
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_payload_authority,
+    )
+
+    try:
+        assert_live_day0_payload_authority(actionable_payload)
+    except Day0AuthorityError as exc:
+        raise ValueError(f"LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:{exc}") from None
 
 
 def _actionable_payload_from_receipt(
@@ -11623,6 +11777,79 @@ def _candidate_evaluation_from_proof(
 # q_lcb (not q_point), no parallel pre-selection scalar Kelly.
 
 
+def _qkernel_same_token_fill_up_selection_rejection_reason(
+    *,
+    proof: _CandidateProof,
+    held_position_conn: sqlite3.Connection | None,
+    locked_opportunity_conn: sqlite3.Connection | None,
+) -> str | None:
+    """Return why a qkernel-selected same-token fill-up is not an executable action.
+
+    Redecision ranks over actions, not just instruments. If the top qkernel leg is
+    the already-held token but the committed fill-up predicate would immediately
+    abort, keeping that leg selected starves sibling shift candidates. This pure
+    pre-lease probe uses the same ``decide_fill_up`` predicate as the submit path
+    and only removes the same-token action when it is provably unactionable.
+    """
+
+    selected_token_id = str(getattr(proof, "token_id", "") or "").strip()
+    if not selected_token_id:
+        return None
+    held = _fill_up_wiring.read_held_same_token_exposure(
+        held_position_conn,
+        token_id=selected_token_id,
+    )
+    if held is None:
+        return None
+    cert = _valid_qkernel_execution_economics_payload(
+        getattr(proof, "qkernel_execution_economics", None),
+        direction=str(getattr(proof, "direction", "") or ""),
+    )
+    if cert is None:
+        return "QKERNEL_EXECUTION_ECONOMICS_UNAVAILABLE"
+    q_current_lcb = _optional_float(cert.get("payoff_q_lcb"))
+    target_total_exposure = _optional_float(cert.get("optimal_stake_usd"))
+    if q_current_lcb is None or target_total_exposure is None:
+        return "QKERNEL_FILL_UP_TARGET_UNAVAILABLE"
+    row = getattr(proof, "row", {}) or {}
+    min_order_shares = (
+        _float_or_default(row.get("min_order_size"), 1.0)
+        if isinstance(row, Mapping) else 1.0
+    )
+    cost = _optional_float(cert.get("cost"))
+    if cost is None:
+        cost = _optional_float(getattr(getattr(proof, "execution_price", None), "value", None))
+    venue_min_increment_usd = (
+        float(min_order_shares) * float(cost)
+        if cost is not None and cost > 0.0
+        else float(min_order_shares)
+    )
+    pending_same_token_usd = _same_token_pending_entry_usd(
+        locked_opportunity_conn,
+        token_id=selected_token_id,
+        trade_conn=held_position_conn,
+    )
+    decision = _fill_up_wiring.decide_fill_up(
+        is_redecision_event=True,
+        selected_token_id=selected_token_id,
+        selected_bin_id=_candidate_bin_id(proof),
+        selected_direction=str(getattr(proof, "direction", "") or ""),
+        held_token_id=selected_token_id,
+        held_bin_id=_candidate_bin_id(proof),
+        held_direction=str(getattr(proof, "direction", "") or ""),
+        q_current_lcb=float(q_current_lcb),
+        q_entry_lcb=held.entry_q_lcb,
+        target_total_exposure_usd=float(target_total_exposure),
+        current_live_exposure_usd=float(held.current_live_usd),
+        same_token_pending_entry_usd=float(pending_same_token_usd),
+        venue_min_increment_usd=float(venue_min_increment_usd),
+        has_unowned_pending_or_unknown_entry=False,
+    )
+    if decision.allow:
+        return None
+    return str(decision.reason or "FILL_UP_NOT_ACTIONABLE")
+
+
 def _selection_scoped_proofs(
     *,
     proofs: tuple[_CandidateProof, ...],
@@ -11634,7 +11861,6 @@ def _selection_scoped_proofs(
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
     enforce_win_rate_floor: bool = True,
-    enforce_strategy_entry_floors: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     executable = [
@@ -11646,7 +11872,6 @@ def _selection_scoped_proofs(
             strategy_policy_event_type=strategy_policy_event_type,
             decision_time=decision_time,
             enforce_win_rate_floor=enforce_win_rate_floor,
-            enforce_strategy_entry_floors=enforce_strategy_entry_floors,
         )
         is None
     ]
@@ -11796,7 +12021,6 @@ def _live_selection_rejection_reason(
     strategy_policy_event_type: str | None = None,
     decision_time: datetime | None = None,
     enforce_win_rate_floor: bool = True,
-    enforce_strategy_entry_floors: bool = False,
 ) -> str | None:
     """Return the live admission reason that prevents a proof from being ranked.
 
@@ -11815,30 +12039,6 @@ def _live_selection_rejection_reason(
         )
         if win_rate_reason is not None:
             return win_rate_reason
-
-    if (
-        enforce_strategy_entry_floors
-        and str(getattr(proof, "direction", "") or "").strip().lower() == "buy_yes"
-    ):
-        try:
-            min_entry_price = float(
-                _event_bound_strategy_live_quality_floors("center_buy")[
-                    "min_entry_price"
-                ]
-            )
-            cost = float(getattr(proof.execution_price, "value"))
-        except Exception:  # noqa: BLE001
-            return "QKERNEL_COST_BELOW_STRATEGY_FLOOR:cost_unavailable"
-        if (
-            math.isfinite(min_entry_price)
-            and min_entry_price > 0.0
-            and math.isfinite(cost)
-            and cost <= min_entry_price + 1e-12
-        ):
-            return (
-                "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
-                f"side=YES:cost={cost:.9f}:min_entry_price={min_entry_price:.9f}"
-            )
 
     strategy_policy_reason = _strategy_policy_selection_rejection_reason(
         proof,
@@ -11989,8 +12189,6 @@ def _proofs_with_qkernel_candidate_economics(
 
     def _qkernel_receipt_rejection_reason(
         cert: Mapping[str, Any],
-        *,
-        min_entry_price: float | None = None,
     ) -> str | None:
         try:
             side = str(cert.get("side") or "").strip().upper()
@@ -12001,16 +12199,6 @@ def _proofs_with_qkernel_candidate_economics(
             optimal_stake_usd = float(cert.get("optimal_stake_usd") or 0.0)
         except (TypeError, ValueError):
             return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
-        if (
-            min_entry_price is not None
-            and math.isfinite(min_entry_price)
-            and min_entry_price > 0.0
-            and cost <= min_entry_price + 1e-12
-        ):
-            return (
-                "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
-                f"side={side or 'UNKNOWN'}:cost={cost:.9f}:min_entry_price={min_entry_price:.9f}"
-            )
         if cert.get("direction_law_ok") is not True:
             return f"QKERNEL_DIRECTION_LAW_REJECTED:side={side or 'UNKNOWN'}"
         if cert.get("coherence_allows") is not True:
@@ -12068,18 +12256,7 @@ def _proofs_with_qkernel_candidate_economics(
         if cert is None:
             annotated.append(proof)
             continue
-        min_entry_price = None
-        if str(getattr(proof, "direction", "") or "").strip().lower() == "buy_yes":
-            try:
-                min_entry_price = _event_bound_strategy_live_quality_floors("center_buy")[
-                    "min_entry_price"
-                ]
-            except Exception:  # noqa: BLE001
-                min_entry_price = 0.05
-        qkernel_reason = _qkernel_receipt_rejection_reason(
-            cert,
-            min_entry_price=min_entry_price,
-        )
+        qkernel_reason = _qkernel_receipt_rejection_reason(cert)
         q_point = _optional_float(cert.get("payoff_q_point"))
         q_lcb = _optional_float(cert.get("payoff_q_lcb"))
         trade_score = _optional_float(cert.get("edge_lcb"))

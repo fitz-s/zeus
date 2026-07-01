@@ -557,29 +557,65 @@ def _select_kappa_cv(cells, kg: float, wg: float, kappas=(20, 30, 50, 100, 200))
     return best_kappa
 
 
-def _fit_cities_shrunk(cells, kg: float, wg: float, kappa: int) -> dict:
-    """Per-city EB-shrunk (k,w) with earned OOS score capital — the artifact cities section.
+_CAPITAL_LCB_Z = 1.645  # 5% one-sided lower bound — the SAME convention as the q_lcb 5% serving bound.
 
-    Writes ONLY cities with POSITIVE prequential score capital (the materializer serves them
-    ρ=1−exp(−C/W); an absent city ⇒ ρ=0 ⇒ pure global fallback). The served (k,w) is the full-corpus EB
-    estimate (best point estimate), licensed by the OOS-earned capital. There is NO manual min-n gate: a
-    city too thin to beat global out-of-sample simply has C≤0 and is omitted by the capital math, not by a
-    hand-set count (operator law 2026-06-12; frontier consult both rounds). The serving decision is
-    statistical, not a threshold."""
+
+def _city_capital_day_se(cells, kappa) -> dict:
+    """Leave-one-DAY-out jackknife SE of each city's prequential capital C_ℓ.
+
+    The point capital C_ℓ (=_fit_city_capital) is a HIGH-VARIANCE estimate on a short window: the
+    newest day's cells dominate every rolling split's small test set, so one day can swing C by
+    several units (verified 2026-06-30: Milan Δρ+0.08, Chicago ΔC−5.8, membership flips from a single
+    settled day). The day-jackknife SE quantifies that day-sensitivity so the serving layer can gate
+    on the LOWER BOUND C_lcb = C − z·SE (only robustly-earned capital serves; noisy cities collapse
+    to ρ≈0). Deterministic (no RNG — the fitter forbids it). Returns {city: se}; <2 distinct dates ⇒
+    {} (SE undefined ⇒ caller omits every city)."""
+    dates = sorted({c["target_date"] for c in cells})
+    n = len(dates)
+    if n < 2:
+        return {}
+    per_day = {d: _fit_city_capital([c for c in cells if c["target_date"] != d], kappa) for d in dates}
+    se: dict = {}
+    for cty in {c["city"] for c in cells}:
+        vals = [per_day[d].get(cty, 0.0) for d in dates]
+        m = sum(vals) / n
+        se[cty] = math.sqrt((n - 1) / n * sum((v - m) ** 2 for v in vals))
+    return se
+
+
+def _fit_cities_shrunk(cells, kg: float, wg: float, kappa: int) -> dict:
+    """Per-city EB-shrunk (k,w) with ROBUSTLY-earned OOS score capital — the artifact cities section.
+
+    Writes ONLY cities whose earned capital survives one-day resampling: the served ``score_capital``
+    is the day-jackknife LOWER BOUND C_lcb = C_point − z·SE_day (z=1.645, 5% one-sided — the q_lcb
+    convention), NOT the point estimate. On a short window the point C is high-variance (one settled
+    day can swing it several units, verified 2026-06-30), so gating on the point estimate serves
+    cities whose "capital" is noise and lurches the served ρ daily. Gating on C_lcb serves only
+    ROBUSTLY-earned capital (noisy city ⇒ C_lcb≤0 ⇒ omitted ⇒ ρ=0 ⇒ pure global) and STRENGTHENS
+    non-inferiority (the materializer spends ρ=1−exp(−C_lcb/W) ⇒ worst-case loss −C_lcb < −C_point).
+    The served (k,w) is the full-corpus EB point estimate (best location), licensed by the robust
+    capital. NO hand-set min-n gate — the robust capital math decides (operator law 2026-06-12)."""
     capital = _fit_city_capital(cells, kappa)
+    se_day = _city_capital_day_se(cells, kappa)
     by_city: dict = defaultdict(list)
     for c in cells:
         by_city[c["city"]].append(c)
     out: dict = {}
     for cty, cc in by_city.items():
-        cap = capital.get(cty, 0.0)
-        if cap <= 0.0:
-            continue  # no earned capital ⇒ ρ=0 ⇒ served as global; omit to keep the artifact lean
+        c_point = capital.get(cty, 0.0)
+        c_se = se_day.get(cty)
+        if c_se is None:
+            continue  # SE undefined (too few days) ⇒ not robustly served
+        c_lcb = c_point - _CAPITAL_LCB_Z * c_se
+        if c_lcb <= 0.0:
+            continue  # not ROBUSTLY earned ⇒ ρ=0 ⇒ pure global (cannot harm, cannot lurch)
         kj, wj, _ = _fit_mle(cc)
         ks, ws = _eb_shrink(kj, wj, len(cc), kg, wg, kappa)
         out[cty] = {"k": round(ks, 4), "w": round(ws, 4), "n_cells": len(cc),
                     "k_raw": round(kj, 4), "w_raw": round(wj, 4),
-                    "score_capital": round(cap, 6)}
+                    "score_capital": round(c_lcb, 6),          # SERVE the robust lower bound
+                    "score_capital_point": round(c_point, 6),  # point estimate (provenance)
+                    "score_capital_day_se": round(c_se, 6)}
     return out
 
 

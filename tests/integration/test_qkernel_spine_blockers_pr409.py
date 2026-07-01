@@ -2138,13 +2138,13 @@ def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
     assert qkernel_fdr.selected_post_fdr == ()
 
 
-def test_day0_selected_route_fdr_is_not_legacy_bh_denominator():
-    """Day0 observation routes must not be rejected by sibling binary BH denominator.
+def test_day0_selected_route_fdr_uses_hard_fact_q_lcb_not_legacy_p_value():
+    """Day0 observation routes must not be rejected by legacy p-value machinery.
 
     A same-day observed-fact route is one family decision conditioned on the running
     extreme. Legacy BH over every sibling YES/NO hypothesis can reject a selected
-    Day0 route even when the selected proof's own false-edge p-value clears the FDR
-    budget.
+    Day0 route even when the selected hard-fact q_lcb implies the selected route's
+    false-edge probability is inside the FDR budget.
     """
 
     from dataclasses import replace
@@ -2170,7 +2170,7 @@ def test_day0_selected_route_fdr_is_not_legacy_bh_denominator():
     )
     selected = replace(
         selected,
-        p_value=0.02,
+        p_value=0.50,
         passed_prefilter=True,
         trade_score=0.238,
         qkernel_execution_economics=None,
@@ -2182,7 +2182,7 @@ def test_day0_selected_route_fdr_is_not_legacy_bh_denominator():
         f"{family_id}:sibling-{idx}" for idx in range(21)
     )
     p_values = {hypothesis_id: 1.0 for hypothesis_id in all_hypothesis_ids}
-    p_values[selected_hypothesis_id] = 0.02
+    p_values[selected_hypothesis_id] = 0.50
     prefilter = {hypothesis_id: True for hypothesis_id in all_hypothesis_ids}
 
     legacy_bh = evaluate_fdr_full_family(
@@ -2395,7 +2395,6 @@ def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
         proofs=(center_yes,),
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
-        enforce_strategy_entry_floors=True,
     )
 
     assert legacy_scoped == ()
@@ -2403,8 +2402,8 @@ def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
     assert family.family_id
 
 
-def test_qkernel_scope_blocks_center_yes_below_strategy_floor():
-    """Sub-floor 0.0x YES must not occupy qkernel selection before submit."""
+def test_qkernel_scope_allows_center_yes_below_static_price_floor_for_optimizer():
+    """Qkernel selection must see low-price YES; evidence gates decide quality."""
 
     _family, bins = _three_bin_family()
     row = _row(
@@ -2429,10 +2428,9 @@ def test_qkernel_scope_blocks_center_yes_below_strategy_floor():
         proofs=(cheap_yes,),
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
-        enforce_strategy_entry_floors=True,
     )
 
-    assert qkernel_scoped == ()
+    assert qkernel_scoped == (cheap_yes,)
 
 
 def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence():
@@ -2563,6 +2561,78 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         )
         assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
+
+
+def test_qkernel_modal_guards_follow_served_joint_q_not_predictive_mu(monkeypatch):
+    """Modal/nonmodal guard cells must use the same served q surface as selection.
+
+    Regression: the bridge rehydrated qkernel point probabilities from proof posterior
+    but ``FamilyDecisionEngine`` still keyed modal YES guard cells from
+    ``predictive.mu_native``. When those disagreed, a high-quality center YES could be
+    treated as nonmodal/sparse while adjacent NO substitutes stayed licensed.
+    """
+
+    from src.decision import family_decision_engine as fde
+    from src.decision import qlcb_reliability_guard as guard_mod
+    from src.decision.selection_calibrator import CalibratorVerdict
+
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    def _selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+        cell = f"{str(side).upper()}|L2_3|{bin_class}|test"
+        if str(side).upper() == "YES" and bin_class != "modal":
+            return CalibratorVerdict(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key=cell,
+                L_g=0.0,
+                n_g=0,
+                basis="SIDE_NOT_ARMED",
+            )
+        return CalibratorVerdict(
+            q_safe=float(raw_side_prob),
+            trade=True,
+            abstained=False,
+            cell_key=cell,
+            L_g=float(raw_side_prob),
+            n_g=1000,
+            basis="SELECTION_BETA_95",
+        )
+
+    monkeypatch.setattr(fde, "apply_selection_calibrator", _selection_guard)
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    # Predictive center points at 21C, but the served posterior's modal bin is 20C.
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=21.0, sigma=0.05, members=[21.0, 21.0, 21.0, 21.0, 21.0]),
+    )
+
+    assert res.no_trade_reason is None
+    assert res.selected_proof is not None
+    assert res.selected_proof.direction == "buy_yes"
+    assert res.selected_proof.candidate.bin.label == "20C"
+    selected_decision = next(
+        d for d in res.decision.candidate_decisions
+        if d.economics.candidate_id == res.decision.selected.candidate_id
+    )
+    assert selected_decision.selection_guard_cell_key == "YES|L2_3|modal|test"
 
 
 def test_qkernel_belief_rehydration_uses_full_family_not_selection_scoped_subset():

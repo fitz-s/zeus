@@ -2615,9 +2615,8 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                         pass
             held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
             exact_priority_condition_ids = list(marker_exact_condition_ids)
-            if not marker_exact_condition_ids:
-                exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
-                exact_priority_condition_ids.extend(held_position_priority_condition_ids)
+            exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
+            exact_priority_condition_ids.extend(held_position_priority_condition_ids)
             condition_priority_families = _condition_priority_families_for_refresh(
                 forecasts_conn,
                 exact_priority_condition_ids,

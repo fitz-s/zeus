@@ -734,10 +734,11 @@ class FamilyDecisionEngine:
             enable_negrisk_routes=self._enable_negrisk_routes,
         )
 
-        # The forecast settlement bin remains receipt/provenance context. It is not a
-        # live admission gate; vector payoff economics decide which native side/bin can
-        # carry alpha.
-        forecast_bin = forecast_settlement_bin_id(predictive, omega)
+        # The forecast/modal bin must be derived from the same q surface the decision
+        # is about to score.  When the reactor injects ``served_joint_q`` the predictive
+        # center is still receipt context, but modal/nonmodal empirical guard cells and
+        # center-YES dominance must follow the served posterior, not a second center.
+        forecast_bin = forecast_bin_id(joint_q)
 
         # --- (6) enumerate + score every candidate route -------------------------
         enumerated = self._enumerate_candidates(

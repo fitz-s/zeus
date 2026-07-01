@@ -1848,7 +1848,6 @@ def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
     assert main._edli_current_held_position_condition_scope() == {
         ("Hong Kong", "2026-06-26", "low"): {"live-cond"},
         ("Singapore", "2026-06-26", "high"): {"exit-cond"},
-        ("Munich", "2026-06-30", "high"): {"chain-absent-cond"},
         ("Lucknow", "2026-06-28", "high"): {"entry-authority-cond"},
         ("Seoul", "2026-06-28", "high"): {"quarantine-ghost"},
     }
@@ -1900,6 +1899,59 @@ def test_held_condition_scope_excludes_latest_non_executable_snapshot(monkeypatc
 
     assert main._edli_current_held_position_condition_scope() == {
         ("Manila", "2026-06-29", "high"): {"open-cond"},
+    }
+
+
+def test_held_family_condition_scope_refreshes_siblings_for_shift_selection(monkeypatch):
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            range_label TEXT,
+            token_id TEXT
+        )
+        """
+    )
+    forecasts.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("Munich", "2026-06-30", "high", "cond-28", "28C", "yes-28"),
+            ("Munich", "2026-06-30", "high", "cond-29", "29C", "yes-29"),
+            ("Munich", "2026-06-30", "high", "cond-30", "30C", "yes-30"),
+        ],
+    )
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            captured_at TEXT,
+            closed INTEGER,
+            enable_orderbook INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("snap-28", "cond-28", "2026-06-30T00:00:00+00:00", 0, 1, 1),
+            ("snap-29", "cond-29", "2026-06-30T00:00:00+00:00", 0, 1, 1),
+            ("snap-30", "cond-30", "2026-06-30T00:00:00+00:00", 1, 0, 0),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade)
+
+    assert main._edli_current_held_position_family_condition_scope(
+        {("Munich", "2026-06-30", "high")}
+    ) == {
+        ("Munich", "2026-06-30", "high"): {"cond-28", "cond-29"},
     }
 
 

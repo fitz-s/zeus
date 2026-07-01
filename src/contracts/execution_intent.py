@@ -1071,6 +1071,7 @@ class ExecutionIntent:
     min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
+    selection_authority_applied: str | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
     actionable_certificate_hash: str | None = None
 
@@ -1786,6 +1787,7 @@ class FinalExecutionIntent:
     min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
+    selection_authority_applied: str | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
     actionable_certificate_hash: str | None = None
     pricing_semantics_id: CorrectedPricingSemanticsVersion = (
@@ -1814,6 +1816,7 @@ class FinalExecutionIntent:
         min_entry_price: float | None = None,
         min_expected_profit_usd: float | None = None,
         min_submit_edge_density: float | None = None,
+        selection_authority_applied: str | None = None,
         qkernel_execution_economics: Mapping[str, Any] | None = None,
         actionable_certificate_hash: str | None = None,
     ) -> "FinalExecutionIntent":
@@ -1863,6 +1866,7 @@ class FinalExecutionIntent:
             min_entry_price=min_entry_price,
             min_expected_profit_usd=min_expected_profit_usd,
             min_submit_edge_density=min_submit_edge_density,
+            selection_authority_applied=selection_authority_applied,
             qkernel_execution_economics=qkernel_execution_economics,
             actionable_certificate_hash=actionable_certificate_hash,
         )

@@ -648,7 +648,21 @@ def _bool_field(value: Any) -> bool | None:
     return None
 
 
-def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dict:
+def _uses_qkernel_spine_entry_authority(intent: ExecutionIntent) -> bool:
+    economics = getattr(intent, "qkernel_execution_economics", None)
+    if not isinstance(economics, Mapping):
+        return False
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return False
+    return str(getattr(intent, "selection_authority_applied", "") or "").strip() == "qkernel_spine"
+
+
+def _entry_economics_component(
+    intent: ExecutionIntent,
+    *,
+    shares: float,
+    actionable_payload: Mapping[str, Any] | None = None,
+) -> dict:
     """Executor-side live ENTRY submit proof.
 
     Upstream qkernel/family selection owns probability math. The executor's job
@@ -680,7 +694,15 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         if value is None
     ]
     economics = getattr(intent, "qkernel_execution_economics", None)
-    if not isinstance(economics, Mapping):
+    day0_authority_errors: tuple[str, ...] | None = None
+    if isinstance(actionable_payload, Mapping) and str(
+        actionable_payload.get("event_type") or ""
+    ).strip() == "DAY0_EXTREME_UPDATED":
+        from src.events.day0_authority import day0_live_payload_authority_errors
+
+        day0_authority_errors = day0_live_payload_authority_errors(actionable_payload)
+    day0_authorized = day0_authority_errors == ()
+    if not isinstance(economics, Mapping) and not day0_authorized:
         missing.append("qkernel_execution_economics")
     if missing:
         return _capability_component(
@@ -724,13 +746,15 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
-    effective_min_entry_price = max(
-        min_entry_price,
-        _LIVE_ENTRY_MIN_ENTRY_PRICE,
+    qkernel_spine_entry = _uses_qkernel_spine_entry_authority(intent)
+    effective_min_entry_price = (
+        float("-inf")
+        if qkernel_spine_entry
+        else max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE)
     )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+    elif not qkernel_spine_entry and min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
         reason = "min_entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
@@ -742,7 +766,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif limit_price <= effective_min_entry_price + 1e-12:
+    elif not qkernel_spine_entry and limit_price <= effective_min_entry_price + 1e-12:
         reason = "limit_price_below_strategy_entry_floor"
     elif expected_profit + 1e-9 < effective_min_expected_profit:
         reason = "expected_profit_below_floor"
@@ -770,10 +794,45 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
             shares=submitted_shares,
         )
+    if day0_authority_errors is not None:
+        if day0_authority_errors:
+            return _capability_component(
+                "entry_economics",
+                allowed=False,
+                reason="day0_observation_authority_missing",
+                missing=",".join(day0_authority_errors),
+            )
+        if isinstance(economics, Mapping):
+            return _capability_component(
+                "entry_economics",
+                allowed=False,
+                reason="day0_qkernel_authority_mix",
+            )
+        return _capability_component(
+            "entry_economics",
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            limit_price=limit_price,
+            submit_edge=submit_edge,
+            expected_profit_usd=expected_profit,
+            min_entry_price=min_entry_price,
+            live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
+            min_expected_profit_usd=min_expected_profit,
+            live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+            submit_edge_density=edge_density,
+            min_submit_edge_density=min_edge_density,
+            live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+            shares=submitted_shares,
+            probability_authority="day0_observation_authority",
+        )
     direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
     econ_source = str(economics.get("source") or "").strip()
+    selection_authority = str(
+        getattr(intent, "selection_authority_applied", "") or ""
+    ).strip()
     econ_cost = _float_field(economics.get("cost"))
     econ_edge_lcb = _float_field(economics.get("edge_lcb"))
     econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
@@ -791,6 +850,8 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         max_false_edge_rate = 0.05
     if econ_source != "qkernel_spine":
         reason = "qkernel_source_missing"
+    elif selection_authority != "qkernel_spine":
+        reason = "qkernel_selection_authority_missing"
     elif not selection_guard_basis:
         reason = "qkernel_selection_guard_missing"
     elif selection_guard_abstained is not False:
@@ -885,12 +946,12 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     )
 
 
-def _entry_actionable_certificate_component(
+def _entry_actionable_certificate_payload_and_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
     *,
     decision_id: str = "",
-) -> dict:
+) -> tuple[dict, Mapping[str, Any] | None]:
     """Require the live actionable certificate to be persisted and currently valid."""
 
     certificate_hash = str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
@@ -899,14 +960,14 @@ def _entry_actionable_certificate_component(
             "entry_actionable_certificate",
             allowed=False,
             reason="missing_actionable_certificate_hash",
-        )
+        ), None
     if _decision_certificate_is_quarantined(conn, certificate_hash):
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,
             reason="actionable_certificate_quarantined",
             certificate_hash=certificate_hash,
-        )
+        ), None
     attach_error = _attach_world_for_trade_certificate_read(conn)
     matching_schema = ""
     payload_json: str | None = None
@@ -936,7 +997,7 @@ def _entry_actionable_certificate_component(
                 reason="decision_certificate_read_failed",
                 certificate_hash=certificate_hash,
                 error=str(exc),
-            )
+            ), None
         if row is not None:
             matching_schema = schema
             try:
@@ -952,13 +1013,13 @@ def _entry_actionable_certificate_component(
                 reason="decision_certificate_world_attach_failed",
                 certificate_hash=certificate_hash,
                 error=attach_error,
-            )
+            ), None
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,
             reason="decision_certificates_table_unavailable",
             certificate_hash=certificate_hash,
-        )
+        ), None
     if not matching_schema:
         if attach_error:
             return _capability_component(
@@ -967,13 +1028,13 @@ def _entry_actionable_certificate_component(
                 reason="decision_certificate_world_attach_failed",
                 certificate_hash=certificate_hash,
                 error=attach_error,
-            )
+            ), None
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,
             reason="actionable_certificate_not_persisted_live_verified",
             certificate_hash=certificate_hash,
-        )
+        ), None
     if not payload_json:
         return _capability_component(
             "entry_actionable_certificate",
@@ -981,7 +1042,7 @@ def _entry_actionable_certificate_component(
             reason="actionable_certificate_payload_missing",
             certificate_hash=certificate_hash,
             certificate_schema=matching_schema,
-        )
+        ), None
     try:
         from src.decision_kernel.verifier import _verify_actionable_payload
 
@@ -1004,12 +1065,26 @@ def _entry_actionable_certificate_component(
             certificate_hash=certificate_hash,
             certificate_schema=matching_schema,
             verification_error=str(exc),
-        )
+        ), None
     return _capability_component(
         "entry_actionable_certificate",
         certificate_hash=certificate_hash,
         certificate_schema=matching_schema,
+    ), payload
+
+
+def _entry_actionable_certificate_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
+) -> dict:
+    component, _payload = _entry_actionable_certificate_payload_and_component(
+        conn,
+        intent,
+        decision_id=decision_id,
     )
+    return component
 
 
 def _direction_value(value: object) -> str:
@@ -3556,6 +3631,7 @@ def _legacy_entry_intent_from_final(
         min_entry_price=intent.min_entry_price,
         min_expected_profit_usd=intent.min_expected_profit_usd,
         min_submit_edge_density=intent.min_submit_edge_density,
+        selection_authority_applied=intent.selection_authority_applied,
         qkernel_execution_economics=intent.qkernel_execution_economics,
         actionable_certificate_hash=intent.actionable_certificate_hash,
     )
@@ -5147,28 +5223,10 @@ def _live_order(
                 idempotency_key=idem.value,
                 command_state="REJECTED",
             )
-        entry_economics_component = _entry_economics_component(intent, shares=shares)
-        if not entry_economics_component.get("allowed"):
-            reason = str(entry_economics_component.get("reason") or "entry_economics")
-            logger.warning(
-                "_live_order: entry economics blocked before command persistence "
-                "for trade_id=%s token=%s reason=%s details=%s",
-                trade_id,
-                intent.token_id,
-                reason,
-                entry_economics_component,
-            )
-            return OrderResult(
-                trade_id=trade_id,
-                status="rejected",
-                reason=f"entry_economics:{reason}",
-                submitted_price=intent.limit_price,
-                shares=shares,
-                order_role="entry",
-                idempotency_key=idem.value,
-                command_state="REJECTED",
-            )
-        actionable_certificate_component = _entry_actionable_certificate_component(
+        (
+            actionable_certificate_component,
+            actionable_payload,
+        ) = _entry_actionable_certificate_payload_and_component(
             conn,
             intent,
             decision_id=effective_decision_id,
@@ -5190,6 +5248,31 @@ def _live_order(
                 trade_id=trade_id,
                 status="rejected",
                 reason=f"entry_actionable_certificate:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+        entry_economics_component = _entry_economics_component(
+            intent,
+            shares=shares,
+            actionable_payload=actionable_payload,
+        )
+        if not entry_economics_component.get("allowed"):
+            reason = str(entry_economics_component.get("reason") or "entry_economics")
+            logger.warning(
+                "_live_order: entry economics blocked before command persistence "
+                "for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                entry_economics_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_economics:{reason}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",

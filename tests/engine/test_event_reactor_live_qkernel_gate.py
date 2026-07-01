@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,6 +15,7 @@ import pytest
 from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
+    _fdr_rejection_reason,
     _pre_submit_revalidation_payload_from_final_intent,
     _record_qkernel_selection_family_facts,
 )
@@ -85,6 +87,80 @@ def _fake_qkernel_decision() -> SimpleNamespace:
     )
 
 
+def _fake_qkernel_decision_with_prefilter_reject() -> SimpleNamespace:
+    selected_cost = SimpleNamespace(value=0.40)
+    selected = SimpleNamespace(
+        candidate_id="YES:bin-1:DIRECT_YES:bin-1@proof",
+        route_id="DIRECT_YES:bin-1@proof",
+        cost=selected_cost,
+        chosen_stake_cost=None,
+        edge_lcb=0.20,
+        point_ev=0.25,
+        delta_u_at_min=0.01,
+        optimal_delta_u=0.02,
+        optimal_stake_usd=Decimal("1.00"),
+        q_dot_payoff=0.70,
+        payoff_q_lcb=0.60,
+    )
+    rejected_cost = SimpleNamespace(value=0.40)
+    rejected = SimpleNamespace(
+        candidate_id="NO:bin-2:DIRECT_NO:bin-2@proof",
+        route_id="DIRECT_NO:bin-2@proof",
+        cost=rejected_cost,
+        chosen_stake_cost=None,
+        edge_lcb=-0.01,
+        point_ev=0.01,
+        delta_u_at_min=0.01,
+        optimal_delta_u=0.02,
+        optimal_stake_usd=Decimal("1.00"),
+        q_dot_payoff=0.70,
+        payoff_q_lcb=0.39,
+    )
+    selected_decision = SimpleNamespace(
+        route=SimpleNamespace(side="YES", bin_id="bin-1"),
+        economics=selected,
+        q_lcb_guard_basis="QLCB_IDENTITY",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="",
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="YES|L1|modal|pb6",
+        selection_guard_n=100,
+        selection_guard_q_safe=0.60,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.20,
+    )
+    rejected_decision = SimpleNamespace(
+        route=SimpleNamespace(side="NO", bin_id="bin-2"),
+        economics=rejected,
+        q_lcb_guard_basis="QLCB_IDENTITY",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="",
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L1|modal|pb6",
+        selection_guard_n=100,
+        selection_guard_q_safe=0.39,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=-0.01,
+    )
+    return SimpleNamespace(
+        decision_id="qkernel-decision-1",
+        receipt_hash="receipt-1",
+        selected=selected,
+        no_trade_reason=None,
+        omega=SimpleNamespace(
+            bins=(
+                SimpleNamespace(bin_id="bin-1", label="30C"),
+                SimpleNamespace(bin_id="bin-2", label="31C"),
+            )
+        ),
+        candidate_decisions=(rejected_decision, selected_decision),
+    )
+
+
 def _fake_family() -> SimpleNamespace:
     return SimpleNamespace(
         family_id="weather-family-1",
@@ -131,6 +207,45 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
     assert conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM world.selection_family_fact").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM world.selection_hypothesis_fact").fetchone()[0] == 1
+    conn.close()
+
+
+def test_qkernel_prefilter_rejection_uses_stable_stage_and_meta_detail(tmp_path):
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    world.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    result = _record_qkernel_selection_family_facts(
+        conn,
+        family=_fake_family(),
+        decision=_fake_qkernel_decision_with_prefilter_reject(),
+        event=_fake_event(),
+        decision_time=datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
+        decision_snapshot_id="snapshot-qkernel-selection",
+    )
+
+    assert result["status"] == "written"
+    assert result["hypotheses"] == 2
+    row = conn.execute(
+        """
+        SELECT rejection_stage, meta_json
+        FROM world.selection_hypothesis_fact
+        WHERE candidate_id = ?
+        """,
+        ("NO:bin-2:DIRECT_NO:bin-2@proof",),
+    ).fetchone()
+    assert row is not None
+    assert row["rejection_stage"] == "QKERNEL_PREFILTER_REJECTED"
+    assert json.loads(row["meta_json"])["rejection_detail"] == "edge_lcb_nonpositive"
     conn.close()
 
 
@@ -198,46 +313,42 @@ def test_live_entry_qkernel_gate_rejects_bin_mismatch():
         )
 
 
-def test_live_entry_qkernel_gate_rejects_cost_below_strategy_entry_floor():
+def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_authoritative():
     cert = _qkernel_cert()
     cert.update(cost=0.07, payoff_q_lcb=0.18, payoff_q_point=0.24, edge_lcb=0.11)
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_COST_BELOW_STRATEGY_FLOOR"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "center_buy",
-                "candidate_bin_id": "bin-1",
-                "q_live": 0.24,
-                "q_lcb_5pct": 0.18,
-                "min_entry_price": 0.10,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.24,
+            "q_lcb_5pct": 0.18,
+            "min_entry_price": 0.10,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
-def test_live_entry_qkernel_gate_uses_current_registry_floor_over_legacy_payload():
+def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():
     cert = _qkernel_cert()
     cert.update(cost=0.07, payoff_q_lcb=0.18, payoff_q_point=0.24, edge_lcb=0.11)
 
-    with pytest.raises(ValueError, match="min_entry_price=0.100000000"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "center_buy",
-                "candidate_bin_id": "bin-1",
-                "q_live": 0.24,
-                "q_lcb_5pct": 0.18,
-                # Durable receipts from older live code can carry the old 5c floor;
-                # current live registry must still reject this 7c center-buy YES.
-                "min_entry_price": 0.05,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.24,
+            "q_lcb_5pct": 0.18,
+            "min_entry_price": 0.05,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
 def _day0_payload(**overrides) -> dict:
@@ -266,6 +377,32 @@ def test_live_entry_day0_gate_rejects_missing_live_observation_authority():
         match="LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:live_authority_status=missing",
     ):
         _assert_live_entry_submit_authority(_day0_payload(live_authority_status=None))
+
+
+def test_day0_fdr_rejection_reason_carries_route_evidence():
+    reason = _fdr_rejection_reason(
+        event_type="DAY0_EXTREME_UPDATED",
+        fdr=SimpleNamespace(
+            attempted_hypotheses=22,
+            selected_post_fdr=(),
+        ),
+        selected_proof=SimpleNamespace(
+            passed_prefilter=True,
+            q_posterior=0.94,
+            q_lcb_5pct=0.91,
+            execution_price=SimpleNamespace(value=0.62),
+            trade_score=0.29,
+            probability_authority="day0_absorbing_hard_fact",
+            missing_reason=None,
+        ),
+    )
+
+    assert reason.startswith("FDR_REJECTED:")
+    assert "event_type=DAY0_EXTREME_UPDATED" in reason
+    assert "q_lcb=0.910000" in reason
+    assert "price=0.620000" in reason
+    assert "day0_false_edge_rate=0.090000" in reason
+    assert "probability_authority=day0_absorbing_hard_fact" in reason
 
 
 def test_day0_pre_submit_payload_preserves_observation_authority():

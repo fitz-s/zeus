@@ -44,6 +44,7 @@ import json as _json
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -967,6 +968,27 @@ def test_same_family_monitor_owned_scope_is_management_lane_only():
     assert era._event_allows_same_family_monitor_owned("FORECAST_SNAPSHOT_READY") is False
     assert era._event_allows_same_family_monitor_owned("EDLI_REDECISION_PENDING") is True
     assert era._event_allows_same_family_monitor_owned("DAY0_EXTREME_UPDATED") is True
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=False,
+            selection_exposure_by_outcome={},
+        )
+        is False
+    )
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=True,
+            selection_exposure_by_outcome={},
+        )
+        is True
+    )
+    assert (
+        era._selection_allows_same_family_monitor_owned(
+            event_allows_same_family_monitor_owned=False,
+            selection_exposure_by_outcome={"bin-A": 5.53},
+        )
+        is True
+    )
 
     import sqlite3
 
@@ -1048,6 +1070,107 @@ def test_same_family_monitor_owned_scope_is_management_lane_only():
     # family-rebalance lease (one active rebalance per family) — NOT by excluding the
     # proof from selection. Both same-family (`a`) and same-token (`b`) are selectable.
     assert scoped_after_same_token == (a, b)
+
+
+def test_forecast_with_proven_family_exposure_ranks_management_scope():
+    """A fresh forecast trigger stays fresh-entry unless current position truth proves
+    this family is already held; then selection must expose the family-management
+    candidates so D1/D2 can decide fill-up, hold, shift, or no-trade."""
+
+    import sqlite3
+
+    row_a = _snapshot_row(
+        yes_asks=(("0.50", "1000000"),),
+        condition_id="cond-A",
+        yes_token_id="yes-A",
+        no_token_id="no-A",
+        snapshot_id="snapA",
+    )
+    row_b = _snapshot_row(
+        yes_asks=(("0.20", "1000000"),),
+        condition_id="cond-B",
+        yes_token_id="yes-B",
+        no_token_id="no-B",
+        snapshot_id="snapB",
+    )
+    a = _proof_from_row(
+        direction="buy_yes",
+        row=row_a,
+        token_id="yes-A",
+        q_posterior=0.62,
+        q_lcb_5pct=0.58,
+        bin_obj=_BIN_X,
+    )
+    b = _proof_from_row(
+        direction="buy_yes",
+        row=row_b,
+        token_id="yes-B",
+        q_posterior=0.62,
+        q_lcb_5pct=0.58,
+        bin_obj=_BIN_Y,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            bin_label TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            shares REAL,
+            cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            condition_id, bin_label, token_id, no_token_id, shares, cost_basis_usd
+        ) VALUES (
+            'pos-held-family', 'active', 'paris', '2026-06-10', 'high',
+            'cond-A', '60-61F', 'yes-A', '', 7.0, 5.53
+        )
+        """
+    )
+
+    direct_event_allow = era._event_allows_same_family_monitor_owned(
+        "FORECAST_SNAPSHOT_READY"
+    )
+    assert direct_event_allow is False
+    assert (
+        era._selection_scoped_proofs(
+            proofs=(a, b),
+            held_position_conn=conn,
+            allow_same_family_monitor_owned=direct_event_allow,
+        )
+        == ()
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=(a, b),
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=SimpleNamespace(city="paris", target_date="2026-06-10", metric="high"),
+    )
+    effective_scope = era._selection_allows_same_family_monitor_owned(
+        event_allows_same_family_monitor_owned=direct_event_allow,
+        selection_exposure_by_outcome=exposure,
+    )
+
+    assert exposure
+    assert effective_scope is True
+    assert era._selection_scoped_proofs(
+        proofs=(a, b),
+        held_position_conn=conn,
+        allow_same_family_monitor_owned=effective_scope,
+    ) == (a, b)
 
 
 def test_all_open_position_tokens_no_trade_with_honest_monitor_owned_reason():

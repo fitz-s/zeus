@@ -211,6 +211,41 @@ def test_fit_cities_shrunk_writes_only_positive_capital_with_score() -> None:
     assert cities["Distinct"]["k"] > 0.0 and 0.0 <= cities["Distinct"]["w"] <= 1.0
 
 
+def test_city_capital_day_se_nonnegative_and_empty_when_too_few_days() -> None:
+    """The leave-one-DAY-out jackknife SE of each city's capital is nonnegative; with <2 distinct
+    dates the SE is undefined and the map is empty (⇒ the shrink gate treats SE as +inf ⇒ nothing
+    is robustly served). Quantifies the day-sensitivity the 2026-06-30 instability exposed."""
+    cells = _relabelled_corpus([("A", 0.9, 0.15, 160), ("B", 1.6, 0.28, 160)], _DATES8, seed=5)
+    se = fs._city_capital_day_se(cells, 30)
+    assert se and all(v >= 0.0 for v in se.values()), se
+    one_day = _relabelled_corpus([("A", 0.9, 0.15, 160)], _DATES8[:1], seed=5)
+    assert fs._city_capital_day_se(one_day, 30) == {}, "SE undefined with <2 days"
+
+
+def test_fit_cities_shrunk_serves_robust_lower_bound_capital() -> None:
+    """FIX (2026-06-30): the served score_capital is the ROBUST day-jackknife lower bound
+    C_lcb = C_point - z*SE_day (z=5% one-sided, the q_lcb convention), NOT the point estimate. Only
+    cities whose earned capital survives one-day resampling are written; the materializer spends the
+    conservative bound (ρ=1-exp(-C_lcb/W)). A global-matching city (no robust signal) is omitted."""
+    import math as _m
+    cells = _relabelled_corpus(
+        [("Global1", 0.9, 0.15, 150), ("Global2", 0.9, 0.15, 150), ("Distinct", 1.9, 0.32, 320)],
+        _DATES8, seed=21,
+    )
+    gk, gw, _ = fs._fit_mle(cells)
+    cities = fs._fit_cities_shrunk(cells, gk, gw, 30)
+    assert "Distinct" in cities, "a robustly-earned city must be written"
+    d = cities["Distinct"]
+    assert 0.0 < d["score_capital"] < d["score_capital_point"], (d["score_capital"], d["score_capital_point"])
+    assert d["score_capital_day_se"] > 0.0
+    assert _m.isclose(
+        d["score_capital"],
+        round(d["score_capital_point"] - fs._CAPITAL_LCB_Z * d["score_capital_day_se"], 6),
+        abs_tol=1e-6,
+    )
+    assert "Global1" not in cities and "Global2" not in cities, "non-robust global-match cities omitted"
+
+
 # ---------------------------------------------------------------------------
 # 2. Refusal on insufficient n (via the same path main() uses)
 # ---------------------------------------------------------------------------

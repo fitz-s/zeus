@@ -9,21 +9,24 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
+from src.events.day0_authority import (
+    Day0AuthorityError,
+    assert_live_day0_payload_authority,
+)
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
 
 
 _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 _DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
-_DAY0_AUTHORITY_MATCHES = {
-    "source_match_status": "MATCH",
-    "local_date_status": "MATCH",
-    "station_match_status": "MATCH",
-    "dst_status": "UNAMBIGUOUS",
-    "metric_match_status": "MATCH",
-    "rounding_status": "MATCH",
-    "live_authority_status": "live",
-    "source_authorized_status": "AUTHORIZED",
-}
+
+
+def _uses_qkernel_spine_entry_authority(payload: dict[str, Any]) -> bool:
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return False
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return False
+    return str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
 
 
 PRE_SUBMIT_REQUIRED_FIELDS = (
@@ -812,10 +815,12 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
-    if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
-        raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-    if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
-        raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
+    qkernel_spine_entry = _uses_qkernel_spine_entry_authority(payload)
+    if not qkernel_spine_entry:
+        if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+            raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
+        if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
+            raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
@@ -877,16 +882,13 @@ def _validate_pre_submit_probability_authority(
 
 
 def _validate_day0_submit_observation_authority(payload: dict[str, Any]) -> None:
-    missing_or_bad: list[str] = []
-    for field, expected in _DAY0_AUTHORITY_MATCHES.items():
-        observed = str(payload.get(field) or "").strip()
-        if observed != expected:
-            missing_or_bad.append(f"{field}={observed or 'missing'}")
-    if missing_or_bad:
+    try:
+        assert_live_day0_payload_authority(payload)
+    except Day0AuthorityError as exc:
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated day0 observation authority required:"
-            + ",".join(missing_or_bad)
-        )
+            + str(exc)
+        ) from None
 
 
 def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:
@@ -895,6 +897,8 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel_execution_economics")
     if not isinstance(economics, dict):
         raise LiveOrderAggregateError("PreSubmitRevalidated requires object qkernel_execution_economics")
+    if str(payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel selection authority")
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel source must be qkernel_spine")
     route_id = str(economics.get("route_id") or "").upper()

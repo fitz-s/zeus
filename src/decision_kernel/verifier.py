@@ -12,8 +12,13 @@ from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
+from src.events.day0_authority import (
+    Day0AuthorityError,
+    assert_live_day0_payload_authority,
+)
 
 FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+DAY0_ACTIONABLE_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 FORECAST_ACTIONABLE_EVENT_TYPES = frozenset(
     {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}
 )
@@ -173,7 +178,7 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     event_type = cert.payload.get("event_type")
     if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
-    elif event_type == "DAY0_EXTREME_UPDATED":
+    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
     else:
         raise CertificateVerificationError(f"unsupported actionable event_type: {event_type!r}")
@@ -417,7 +422,33 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
     for field in required:
         if payload.get(field) in (None, ""):
             raise CertificateVerificationError(f"actionable {field} missing")
+    _verify_actionable_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_actionable_probability_authority(
+    payload: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+        _verify_day0_observation_payload_authority(payload, label="actionable")
+        if payload.get("qkernel_execution_economics") not in (None, ""):
+            raise CertificateVerificationError(
+                "actionable day0 must not carry qkernel_execution_economics"
+            )
+        return
     _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_day0_observation_payload_authority(payload: dict, *, label: str) -> None:
+    try:
+        assert_live_day0_payload_authority(payload)
+    except Day0AuthorityError as exc:
+        raise CertificateVerificationError(
+            f"{label} day0 observation authority required:{exc}"
+        ) from None
 
 
 def _verify_actionable_qkernel_economics(
@@ -774,6 +805,23 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
     if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
         raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
+    _verify_pre_submit_probability_authority(pre_submit, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_pre_submit_probability_authority(
+    pre_submit: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(pre_submit.get("event_type") or "").strip()
+    if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+        _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
+        if pre_submit.get("qkernel_execution_economics") not in (None, ""):
+            raise CertificateVerificationError(
+                "pre-submit day0 must not carry qkernel_execution_economics"
+            )
+        return
     _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
 
 
@@ -1382,9 +1430,24 @@ def _finite_float(value: object, field_name: str) -> float:
     return parsed
 
 
+def _uses_qkernel_spine_entry_authority(payload: dict) -> bool:
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return False
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return False
+    return str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
+
+
 def _entry_floor_applies(payload: dict) -> bool:
     direction = str(payload.get("direction") or "").strip().lower()
-    return direction in {"buy_yes", "buy_no"}
+    if direction not in {"buy_yes", "buy_no"}:
+        return False
+    # Qkernel-spine entries carry their own executable economics certificate and
+    # are still checked for positive conservative edge, profit floor, edge density,
+    # selection guard, and qkernel authority. A fixed raw price floor is not a
+    # probability or alpha proof and suppresses valid low-price YES opportunities.
+    return not _uses_qkernel_spine_entry_authority(payload)
 
 
 def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
@@ -1476,6 +1539,8 @@ def _verify_pre_submit_qkernel_economics(
         raise CertificateVerificationError("pre-submit qkernel_execution_economics missing")
     if not isinstance(economics, dict):
         raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
+    if str(pre_submit.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError("pre-submit qkernel selection authority missing")
     route_id = str(economics.get("route_id") or "").upper()
     route_type = str(economics.get("route_type") or "").lower()
     explicit_non_direct = (
