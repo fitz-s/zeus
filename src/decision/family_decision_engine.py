@@ -229,9 +229,6 @@ NO_TRADE_NO_ROI_FRONTIER_CANDIDATE = "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 # q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
-NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE = (
-    "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE"
-)
 NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING = (
     "MODAL_YES_EMPIRICAL_AUTHORITY_MISSING_FOR_NO_SUBSTITUTE"
 )
@@ -653,9 +650,9 @@ class PortfolioCandidateDecision:
     """Non-executable portfolio comparator over already-scored direct routes.
 
     This is not an execution route. It records whether a multi-leg family portfolio
-    would dominate the selected single direct route, so the engine can refuse the
-    inferior executable leg instead of pretending the current one-leg executor can
-    submit an aggregate position.
+    would dominate the selected single direct route. The live executor can only submit
+    the selected direct route; this evidence is receipt telemetry until an atomic
+    multi-leg executor exists.
     """
 
     portfolio_type: str
@@ -1151,12 +1148,6 @@ class FamilyDecisionEngine:
                 band=band,
                 forecast_bin=forecast_bin,
             )
-            # A superior family portfolio is a decision fact, not telemetry. Until
-            # the executor can submit the multi-leg route atomically, live must not
-            # submit a weaker single leg and call it optimal.
-            if any(c.dominates_selected for c in portfolio_comparisons):
-                selected_decision = None
-                no_trade_reason = NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE
 
         candidates_economics = tuple(d.economics for d in scored)
         selected_economics = (
@@ -1763,9 +1754,8 @@ class FamilyDecisionEngine:
         still present a capital-efficiency question that lives above a single leg: the
         two adjacent NO legs around the modal bin can approximate a center YES but with
         very different cost/payoff geometry. Until portfolio execution has parent/child
-        command semantics, the correct live action when such a portfolio is superior is
-        not to submit a weaker direct leg. This comparator therefore produces evidence
-        and a typed no-trade only; it never creates an executable route.
+        command semantics, this comparator produces evidence only; it must not veto the
+        selected executable route or create a synthetic route.
         """
         if selected_decision.route.side != "YES" or selected_decision.route.bin_id != forecast_bin:
             return ()

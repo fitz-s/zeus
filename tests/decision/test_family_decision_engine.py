@@ -66,10 +66,10 @@ from src.decision.family_decision_engine import (
     NO_TRADE_NO_POSITIVE_UTILITY,
     NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
-    NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
     FamilyDecision,
     FamilyDecisionEngine,
+    PortfolioCandidateDecision,
     direction_law_ok,
     forecast_bin_id,
 )
@@ -1630,14 +1630,101 @@ def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(
     assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
 
 
-def test_adjacent_no_pair_dominance_vetoes_until_portfolio_executor_exists():
-    """Shanghai correction: do not submit an inferior single leg as optimal."""
+def test_adjacent_no_pair_dominance_is_telemetry_until_portfolio_executor_exists():
+    """A hypothetical better multi-leg route must not veto an executable live leg."""
 
     source = inspect.getsource(FamilyDecisionEngine.decide)
 
     assert "portfolio_comparisons = self._portfolio_comparisons" in source
-    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" in source
-    assert "selected_decision = None" in source
+    assert "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
+    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
+
+
+def test_portfolio_dominance_receipt_does_not_no_trade_selected_live_leg(monkeypatch):
+    """Even a dominating non-executable portfolio is telemetry, not submit authority."""
+
+    case = _case()
+    space = _outcome_space(case)
+    model_set = _model_set([24.6, 25.0, 25.4], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+
+    def factory(bin_id: str) -> MarketBook:
+        fair = min(max(jq.q_by_bin_id.get(bin_id, 0.0), 0.02), 0.98)
+        ya = _tick(max(fair * 0.5, 0.002))
+        yb = _tick(max(ya - 0.01, 0.001))
+        return _market_book(
+            bin_id,
+            yes_bid=yb,
+            yes_ask=ya,
+            no_bid=_tick(1 - ya),
+            no_ask=_tick(1 - yb),
+            size=5000.0,
+        )
+
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    route_set = build_negrisk_route_set(fb, shares=Decimal("100"), enable_negrisk_routes=False)
+    sizing: dict[tuple[str, str], NativeSideCandidate] = {}
+    for b in space.bins:
+        if not b.executable:
+            continue
+        t = b.bin_id
+        yr = route_set.direct_yes.get(t)
+        if yr is not None and yr.executable:
+            qb = jq.q_by_bin_id[t]
+            sizing[(t, "YES")] = _yes_sizing(
+                space,
+                t,
+                q_point=float(qb),
+                q_lcb=max(float(qb) - 0.03, 0.0),
+                price=str(round(float(yr.avg_cost.value), 3)),
+            )
+
+    forced_comparison = PortfolioCandidateDecision(
+        portfolio_type="ADJACENT_NO_PAIR",
+        reference_bin_id="b25",
+        leg_candidate_ids=("left", "right"),
+        leg_route_ids=("left-route", "right-route"),
+        payoff_vector_hash="forced",
+        point_ev=1.0,
+        edge_lcb=1.0,
+        q_dot_payoff=1.5,
+        cost_sum=0.1,
+        edge_lcb_density=10.0,
+        point_ev_density=10.0,
+        selected_candidate_id="selected",
+        selected_edge_lcb_density=0.1,
+        selected_point_ev_density=0.1,
+        dominates_selected=True,
+    )
+
+    monkeypatch.setattr(
+        FamilyDecisionEngine,
+        "_portfolio_comparisons",
+        lambda self, **kwargs: (forced_comparison,),
+    )
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=_no_obs(), family_book=fb)
+
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=exposure,
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.no_trade_reason is None
+    assert decision.selected is not None
+    assert decision.portfolio_comparisons == (forced_comparison,)
+    assert decision.portfolio_comparisons[0].dominates_selected is True
 
 
 # ===========================================================================
