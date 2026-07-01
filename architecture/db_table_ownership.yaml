@@ -2033,13 +2033,15 @@ tables:
 
   - name: hourly_observations
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
+    created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: >
       Legacy hourly observation store. No INSERT matches in src/ as of
-      PR-S4b audit 2026-05-18. Excluded. Drop after 2026-08-09.
+      PR-S4b audit 2026-05-18; not created by init_schema. Physical legacy
+      copies may remain until audited retention cleanup. Excluded from
+      set-equality. Drop after 2026-08-09.
 
   - name: day0_residual_fact
     db: world

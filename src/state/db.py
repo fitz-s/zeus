@@ -1673,16 +1673,6 @@ def init_schema(
             fetched_at  TEXT NOT NULL,
             PRIMARY KEY (target_date, hour_utc)
         );
-        CREATE TABLE IF NOT EXISTS hourly_observations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            obs_date TEXT NOT NULL,
-            obs_hour INTEGER NOT NULL,
-            temp REAL NOT NULL,
-            temp_unit TEXT NOT NULL,
-            source TEXT NOT NULL,
-            UNIQUE(city, obs_date, obs_hour, source)
-        );
         CREATE TABLE IF NOT EXISTS day0_oracle_anomaly_flags (
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,

@@ -92,7 +92,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'fusion_upgrade_enqueues': Domain.FORECASTS,
     'historical_forecasts': Domain.WORLD,
     'hko_hourly_accumulator': Domain.WORLD,
-    'hourly_observations': Domain.WORLD,
     'job_run': Domain.FORECASTS,
     'market_events': Domain.FORECASTS,
     'market_microstructure_snapshots': Domain.FORECASTS,
@@ -168,4 +167,3 @@ def tables_for(domain: Domain) -> frozenset[str]:
 
 def live_tables() -> frozenset[str]:
     return frozenset(CANONICAL_OWNER)
-
