@@ -58,8 +58,7 @@ _LIFTED_PRODUCERS = (
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
     from src.ingest import price_channel_ingest as pci
 
-    assert 10.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
-    assert pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS == 10.0
+    assert 30.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
     assert pci.MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT <= 4
     assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
     assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
@@ -687,7 +686,7 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
 
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
-    from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
+    from src.ingest import price_channel_ingest as lane
     from src.state import db as state_db
     from src.state.db import init_schema, init_schema_trade_only
 
@@ -771,7 +770,12 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
 
-    result = _edli_refresh_held_position_quote_evidence()
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "candidate quote refresh must not own the held quote lane"
+    try:
+        result = lane._edli_refresh_held_position_quote_evidence()
+    finally:
+        lane._candidate_quote_seed_refresh_lock.release()
 
     assert result["held_priority_token_ids"] == 2
     assert result["held_token_metadata"] == 2
@@ -832,15 +836,15 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
         lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
     )
 
-    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
-    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    acquired = lane._held_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local held quote lock to be initially free"
     try:
         result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
     finally:
-        lane._rest_quote_seed_refresh_lock.release()
+        lane._held_quote_seed_refresh_lock.release()
 
     assert result["backpressure"] is True
-    assert result["skipped"] == "price_channel_rest_quote_refresh_in_progress"
+    assert result["skipped"] == "price_channel_held_quote_refresh_in_progress"
     assert result["held_priority_token_ids"] == 2
     assert result["held_token_metadata"] == 2
     assert result["held_quote_refresh_events"] == 0
@@ -1001,15 +1005,15 @@ def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob
         lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
     )
 
-    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
-    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local candidate quote lock to be initially free"
     try:
         result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=10.0)
     finally:
-        lane._rest_quote_seed_refresh_lock.release()
+        lane._candidate_quote_seed_refresh_lock.release()
 
     assert result["backpressure"] is True
-    assert result["skipped"] == "price_channel_rest_quote_refresh_in_progress"
+    assert result["skipped"] == "price_channel_candidate_quote_refresh_in_progress"
     assert result["candidate_priority_token_ids"] == 1
     assert result["open_rest_priority_token_ids"] == 1
     assert result["quote_priority_token_ids"] == 2
@@ -1019,7 +1023,7 @@ def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob
     assert result["budget_skipped_tokens"] == 2
 
 
-def test_candidate_priority_quote_refresh_budget_is_capped_when_held_positions_exist(monkeypatch):
+def test_candidate_priority_quote_refresh_budget_is_not_capped_when_held_positions_exist(monkeypatch):
     from src.data import polymarket_client
     from src.events.triggers import market_channel_ingestor as market_ingestor
     from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
@@ -1068,16 +1072,17 @@ def test_candidate_priority_quote_refresh_budget_is_capped_when_held_positions_e
         lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
     )
 
-    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
-    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local candidate quote lock to be initially free"
     try:
         result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=45.0)
     finally:
-        lane._rest_quote_seed_refresh_lock.release()
+        lane._candidate_quote_seed_refresh_lock.release()
 
     assert result["backpressure"] is True
     assert result["held_priority_token_ids"] == 1
-    assert result["budget_seconds"] == lane.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS
+    assert result["budget_seconds"] == 45.0
+    assert "held_active_budget_cap_seconds" not in result
     assert result["candidate_quote_refresh_events"] == 0
 
 

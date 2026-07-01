@@ -87,7 +87,8 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 # process — the two processes write the snapshot table via the same single-writer
 # discipline, and the lock is per-process by construction.)
 _market_substrate_refresh_lock = threading.Lock()
-_rest_quote_seed_refresh_lock = threading.Lock()
+_held_quote_seed_refresh_lock = threading.Lock()
+_candidate_quote_seed_refresh_lock = threading.Lock()
 
 # Live-execution-mode constants (kept aligned with src/main.py) — needed by the
 # reconcile-runtime gate. Kept LOCAL here so the lane module never imports src.main.
@@ -102,7 +103,6 @@ EDLI_EVENT_DRIVEN_MODES = {
 
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
-MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS = 10.0
 MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
@@ -233,7 +233,7 @@ def _rest_quote_refresh_backpressure_result(
         "elapsed_seconds": elapsed_seconds,
         "budget_exhausted": False,
         "budget_skipped_tokens": max(0, int(attempted_tokens)),
-        "skipped": "price_channel_rest_quote_refresh_in_progress",
+        "skipped": f"price_channel_{kind}_quote_refresh_in_progress",
         "backpressure": True,
     }
     if kind == "held":
@@ -2320,7 +2320,7 @@ def _edli_refresh_held_position_quote_evidence(
         token_id for token_id in ordered_held_token_ids if token_id in token_metadata
     ]
 
-    rest_seed_acquired = _rest_quote_seed_refresh_lock.acquire(blocking=False)
+    rest_seed_acquired = _held_quote_seed_refresh_lock.acquire(blocking=False)
     if not rest_seed_acquired:
         return _rest_quote_refresh_backpressure_result(
             kind="held",
@@ -2392,7 +2392,7 @@ def _edli_refresh_held_position_quote_evidence(
             if conn is not None:
                 conn.close()
         finally:
-            _rest_quote_seed_refresh_lock.release()
+            _held_quote_seed_refresh_lock.release()
 
 
 def _edli_refresh_candidate_priority_quote_evidence(
@@ -2455,13 +2455,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
     finally:
         trade_read.close()
     held_priority_count = len(held_token_ids)
-    if held_priority_count:
-        budget = min(
-            requested_budget,
-            MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS,
-        )
-    else:
-        budget = requested_budget
+    # Held exposure has its own independent edli_held_quote_refresh job. Do not
+    # steal candidate/redecision refresh budget just because a position exists;
+    # that starves entry and repricing quote evidence whenever the book is wide.
+    budget = requested_budget
     deadline = started_monotonic + budget
 
     if not token_metadata:
@@ -2484,7 +2481,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
     ordered_metadata_tokens = [
         token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
     ]
-    rest_seed_acquired = _rest_quote_seed_refresh_lock.acquire(blocking=False)
+    rest_seed_acquired = _candidate_quote_seed_refresh_lock.acquire(blocking=False)
     if not rest_seed_acquired:
         return _rest_quote_refresh_backpressure_result(
             kind="candidate",
@@ -2552,10 +2549,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
-        if held_priority_count:
-            result["held_active_budget_cap_seconds"] = (
-                MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS
-            )
         if service.rest_seed_backpressure_count:
             result["backpressure"] = True
             result["write_backpressure_count"] = service.rest_seed_backpressure_count
@@ -2566,7 +2559,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
             if conn is not None:
                 conn.close()
         finally:
-            _rest_quote_seed_refresh_lock.release()
+            _candidate_quote_seed_refresh_lock.release()
 
 
 def _edli_held_quote_refresh_cycle() -> dict:

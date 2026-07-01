@@ -15439,13 +15439,18 @@ def _live_yes_probabilities(
             allow_latest_snapshot=True,
             decision_time=decision_time,
         )
-        q_by_condition, lcb_by_condition, p_values, prefilter, evidence = generated
+        q_by_condition, lcb_by_condition, _p_values, _prefilter, evidence = generated
         masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
             payload=payload,
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
             decision_time=decision_time,
+        )
+        p_values, prefilter = _day0_hard_fact_fdr_maps(
+            family=family,
+            native_costs=native_costs,
+            masked_lcb_by_condition=masked_lcb,
         )
         # LCB AUDIT IDENTITY (PR#404 P1): the staleness guard can revoke submit
         # licenses (q_lcb -> 0) WITHOUT moving q, so p_live_vector_hash alone
@@ -16384,10 +16389,77 @@ def _native_no_edge_positivity(
     still gets p=1.0, and the leg is still gated downstream by its OWN execution data
     (a missing native NO ask -> rejected). Never a YES-complement price.
     """
-    no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
-    no_cost = float(no_price.value) if no_price is not None else 1.0
-    no_edge_lcb_positive = no_price is not None and float(q_lcb_no) > no_cost
-    return (0.0 if no_edge_lcb_positive else 1.0), bool(no_edge_lcb_positive)
+    return _native_side_edge_positivity(
+        native_costs=native_costs,
+        condition_id=condition_id,
+        direction="buy_no",
+        q_lcb=float(q_lcb_no),
+    )
+
+
+def _native_side_edge_positivity(
+    *,
+    native_costs: dict,
+    condition_id: str,
+    direction: str,
+    q_lcb: float,
+) -> tuple[float, bool]:
+    """Degenerate FDR p-value/prefilter from a side's own native price.
+
+    This is the side-general form of :func:`_native_no_edge_positivity`. It is
+    used by Day0 hard-fact admission after the observed-extreme mask has changed
+    submit-authoritative LCBs. The p-value and prefilter must be recomputed from
+    the same hard-fact side LCB that the selected route will trade; otherwise a
+    deterministic Day0 route can inherit a stale forecast-side prefilter and die
+    at FDR while its receipt says q_lcb=1.
+    """
+
+    side = str(direction or "")
+    if side not in {"buy_yes", "buy_no"}:
+        return 1.0, False
+    try:
+        q_lcb_f = float(q_lcb)
+    except (TypeError, ValueError):
+        return 1.0, False
+    if not math.isfinite(q_lcb_f):
+        return 1.0, False
+    price = native_costs.get((str(condition_id), side), (None, None, 0.0, None, None))[1]
+    if price is None:
+        return 1.0, False
+    try:
+        cost = float(price.value)
+    except (TypeError, ValueError):
+        return 1.0, False
+    edge_lcb_positive = math.isfinite(cost) and 0.0 < cost < 1.0 and q_lcb_f > cost
+    return (0.0 if edge_lcb_positive else 1.0), bool(edge_lcb_positive)
+
+
+def _day0_hard_fact_fdr_maps(
+    *,
+    family,
+    native_costs: dict,
+    masked_lcb_by_condition: dict[tuple[str, str], float],
+) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
+    """Build FDR inputs from Day0 hard-fact LCBs, not stale forecast maps."""
+
+    from src.calibration.qlcb_provenance import _qlcb_float
+
+    p_values: dict[tuple[str, str], float] = {}
+    prefilter: dict[tuple[str, str], bool] = {}
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        for direction in ("buy_yes", "buy_no"):
+            key = (condition_id, direction)
+            q_lcb = _qlcb_float(masked_lcb_by_condition.get(key, 0.0))
+            p_value, passed = _native_side_edge_positivity(
+                native_costs=native_costs,
+                condition_id=condition_id,
+                direction=direction,
+                q_lcb=q_lcb,
+            )
+            p_values[key] = p_value
+            prefilter[key] = passed
+    return p_values, prefilter
 
 
 def _canonical_probability_and_fdr_proof(
@@ -19568,24 +19640,34 @@ def _apply_day0_mask_to_generated_probabilities(
         raise ValueError("Day0 event missing rounded_value")
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
     mask: list[float] = []
+    absorbing_yes: list[bool] = []
+    absorbing_no: list[bool] = []
     for candidate in family.candidates:
         bin_value = candidate.bin
+        is_absorbing_yes = False
+        is_absorbing_no = False
         if metric == "high":
             if bin_value.high is not None and rounded > float(bin_value.high):
+                is_absorbing_no = True
                 mask.append(0.0)
             elif bin_value.high is None and bin_value.low is not None and rounded >= float(bin_value.low):
+                is_absorbing_yes = True
                 mask.append(1.0)
             else:
                 mask.append(1.0)
         elif metric == "low":
             if bin_value.low is not None and rounded < float(bin_value.low):
+                is_absorbing_no = True
                 mask.append(0.0)
             elif bin_value.low is None and bin_value.high is not None and rounded <= float(bin_value.high):
+                is_absorbing_yes = True
                 mask.append(1.0)
             else:
                 mask.append(1.0)
         else:
             raise ValueError(f"unsupported Day0 metric: {metric}")
+        absorbing_yes.append(is_absorbing_yes)
+        absorbing_no.append(is_absorbing_no)
     # STALE-OBS BOUNDARY GUARD (day0 first-principles review 2026-06-10, charge #1).
     # The running extreme is a monotone bound: KILLING bins with a stale extreme is
     # always safe (the true extreme can only be further along). But a bin the stale
@@ -19678,13 +19760,19 @@ def _apply_day0_mask_to_generated_probabilities(
             (condition_id, "buy_yes"),
             # STALE-OBS BOUNDARY GUARD: a bin whose dead/alive state is unknowable
             # under the current obs staleness gets NO buy_yes submit license.
-            0.0 if (mask[index] <= 0.0 or staleness_uncertain[index]) else min(yes_lcb, q_value),
+            (
+                1.0
+                if absorbing_yes[index]
+                else 0.0
+                if (absorbing_no[index] or staleness_uncertain[index])
+                else min(yes_lcb, q_value)
+            ),
             source="FORECAST_BOOTSTRAP",
         )
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_no"),
-            1.0 if mask[index] <= 0.0 else 0.0,
+            1.0 if absorbing_no[index] else 0.0,
             source="FORECAST_BOOTSTRAP",
         )
     # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
@@ -19702,11 +19790,21 @@ def _apply_day0_mask_to_generated_probabilities(
         },
         "no_lcb_by_condition": {
             str(candidate.condition_id or ""): (
-                1.0 if float(mask[index]) <= 0.0 else 0.0
+                1.0 if absorbing_no[index] else 0.0
             )
             for index, candidate in enumerate(family.candidates)
         },
         "mask": [float(value) for value in mask],
+        "absorbing_yes_conditions": [
+            str(candidate.condition_id or "")
+            for index, candidate in enumerate(family.candidates)
+            if absorbing_yes[index]
+        ],
+        "absorbing_no_conditions": [
+            str(candidate.condition_id or "")
+            for index, candidate in enumerate(family.candidates)
+            if absorbing_no[index]
+        ],
         "staleness_suppressed_conditions": [
             str(candidate.condition_id or "")
             for index, candidate in enumerate(family.candidates)

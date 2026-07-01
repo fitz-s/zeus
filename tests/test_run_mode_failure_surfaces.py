@@ -474,6 +474,36 @@ def test_business_plane_candidates_without_final_intent_need_no_trade_reasons(tm
     )
 
 
+def test_business_plane_all_no_trade_reasons_still_degrades_without_capital_flow(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "edli_event_reactor",
+                "completed_at": _now_iso(-30),
+                "candidates": 12,
+                "final_intents_built": 0,
+                "submit_attempts": 0,
+                "no_trades": 12,
+                "top_no_trade_reasons": {"QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE": 12},
+            },
+            "execution_capability": _healthy_execution_capability(),
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW"
+    )
+    assert result["surfaces"]["business_plane"]["progress"]["no_trade_reason_proof"] is True
+
+
 def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp_path: Path) -> None:
     sd = tmp_path / "state"
     sd.mkdir()

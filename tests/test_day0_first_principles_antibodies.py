@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-01
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:
 #   zeus_trades.db position_events b5d966a9-990 (Seoul 2026-06-07T15:08Z,
@@ -42,10 +42,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.calibration.qlcb_provenance import _qlcb_float
+from src.contracts.execution_price import ExecutionPrice
 from src.engine.event_reactor_adapter import (
     _apply_day0_mask_to_generated_probabilities,
     _apply_day0_mask_to_probability_vector,
     _day0_absorbing_mask,
+    _day0_hard_fact_fdr_maps,
     _day0_observation_age_minutes,
 )
 from src.signal.day0_obs_latency import (
@@ -112,6 +114,21 @@ def _full_lcb(family, value=0.2):
         out[(f"cond{i}", "buy_yes")] = value
         out[(f"cond{i}", "buy_no")] = value
     return out
+
+
+def _native_cost(price: float):
+    return (
+        None,
+        ExecutionPrice(
+            value=price,
+            price_type="ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        1.0,
+        None,
+        None,
+    )
 
 
 # ===========================================================================
@@ -181,6 +198,63 @@ class TestAbsorbingBoundary:
         assert _qlcb_float(lcb[("cond1", "buy_no")]) == pytest.approx(1.0)
         for i in range(2, 5):
             assert _qlcb_float(lcb[(f"cond{i}", "buy_no")]) == 0.0
+
+    def test_crossed_high_open_shoulder_gets_structural_buy_yes_license(self):
+        fam = _seoul_high_family()
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("high", 27.0, obs_age_minutes=500.0),
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond4"] == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond4", "buy_yes")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond4", "buy_no")]) == 0.0
+
+    def test_crossed_low_open_shoulder_gets_structural_buy_yes_license(self):
+        fam = _family(
+            "Seoul",
+            [_bin(None, 21.0), _bin(22.0, 22.0), _bin(23.0, 23.0), _bin(24.0, None)],
+            metric="low",
+        )
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("low", 21.0, obs_age_minutes=500.0),
+            family=fam,
+            q_by_condition={f"cond{i}": 0.25 for i in range(4)},
+            lcb_by_condition={(f"cond{i}", d): 0.2 for i in range(4) for d in ("buy_yes", "buy_no")},
+            decision_time=NOW,
+        )
+
+        assert q["cond0"] == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond0", "buy_yes")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond0", "buy_no")]) == 0.0
+
+    def test_day0_fdr_prefilter_uses_masked_hard_fact_lcb_not_forecast_prefilter(self):
+        fam = _seoul_high_family()
+        _q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("high", 27.0, obs_age_minutes=10.0),
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+        p_values, prefilter = _day0_hard_fact_fdr_maps(
+            family=fam,
+            native_costs={
+                ("cond0", "buy_no"): _native_cost(0.75),
+                ("cond4", "buy_yes"): _native_cost(0.60),
+            },
+            masked_lcb_by_condition=lcb,
+        )
+
+        assert p_values[("cond0", "buy_no")] == 0.0
+        assert prefilter[("cond0", "buy_no")] is True
+        assert p_values[("cond4", "buy_yes")] == 0.0
+        assert prefilter[("cond4", "buy_yes")] is True
+        assert p_values[("cond2", "buy_yes")] == 1.0
+        assert prefilter[("cond2", "buy_yes")] is False
 
 
 # ===========================================================================

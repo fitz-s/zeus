@@ -401,6 +401,19 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
             "progress": progress,
         }
+    if (
+        candidates > 0
+        and final_intents <= 0
+        and submit_attempts <= 0
+        and no_trades > 0
+        and no_trade_reason_proof
+        and not entry_unavailable_proof
+    ):
+        return {
+            "ok": False,
+            "issue": "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW",
+            "progress": progress,
+        }
     if final_intents > 0 and submit_attempts <= 0:
         return {
             "ok": False,
