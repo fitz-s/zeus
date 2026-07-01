@@ -202,6 +202,45 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
    efficiency + coupling cost of the split. Either the per-cycle `CycleMarketStateSnapshot` (§7B) reads the
    cross-DB tables ONCE per tick, or redraw the boundary so the execution hot-path never crosses.
 
+### 6C. VERIFIED target architecture (first-principles design panel `wf_e2c56a31`, 2026-06-30)
+A 4-way judge panel (single-DB / clean-3-domain / fact-log-CQRS / re-partition-by-seam) — all scored FLAWED
+(23–28) — synthesized into **"Hybrid 2-DB with typed ownership"**, whose load-bearing claims were repo-verified.
+
+**Root reframe:** the ghosts/inversions/duals/schism are ONE flaw — ownership is set by THREE unbound, drifting
+sources (init-code CREATE-lists · the 3092-line `db_table_ownership.yaml` · runtime writers that write "whatever
+conn they got"). The target makes drift structurally impossible, it does not patch it.
+
+**Two WAL DBs, split on the VERIFIED write-contention axis (not subject-noun):**
+- `zeus_bulk.db` — the forecast-live PROCESS's BULK ingest (verified: 8 live `com.zeus.*` PIDs; `.writer-lock.bulk`
+  exists on forecasts.db, `.live` only on trades.db → SQLite WAL one-writer-per-file means merging to 1 DB
+  re-creates K1 cross-process flock starvation → **1-DB & CQRS correctly rejected**). Holds raw_model_forecasts,
+  ensemble_snapshots, hourly_observations, observations, high-volume telemetry.
+- `zeus_money.db` — the whole live causal chain that must be crash-atomic with a position/settlement mutation:
+  position/venue/settlement/execution + the forecast HOT slice (forecast_posteriors, settlement_outcomes) + the
+  LEARNING surface (platt_models, model_bias, forecast_skill) — because `harvester.py:1059 maybe_refit_bucket`
+  welds the platt write INTO the settlement SAVEPOINT (learning is not a cold third DB).
+
+**Single ownership source** `src/state/domains.py` (`Domain{BULK,MONEY}` + `TABLES`) derives init-schema (per-domain
+CREATE only → the `db.py:4676-4692` copy-loop that mints the 144 ghosts is DELETED), `owner()` (yaml → generated
+audit export), and the boot gate. **Writer-binding** `writer(table)->DomainWriter` asserts domain before I/O
+(`WrongDomainWrite`). **One bridge** (bulk→money `forecast_posteriors` projection, idempotent, re-derivable)
+replaces 29 ATTACH sites. **Why unrepresentable:** ghost needs a foreign-table CREATE path (none); inversion needs
+two sources to disagree (one dict); dual needs a table in two files (per-domain exclusive CREATE forbids);
+schism dies (`Domain.MONEY.db_path` constant).
+
+**6-phase online-safe migration** (each phase independently shippable + reversible + boot-gate-green; the daemon's
+~20-min auto-restart is the deploy unit): P0 domains.py + reproduction ratchet → P1 per-table inversion converge
+(15/19 need zero row movement) → P2 ghost-drop + init-hardening + delete the legacy-exclusion so the gate fails
+loud → P3 bridge + move forecast HOT slice into money.db → P4 collapse world learning into money.db (settlement
+SAVEPOINT becomes single-file crash-atomic) → P5 DomainWriter cutover + retire the yaml as runtime authority.
+
+**Status:** ✅ **P0 LANDED** — `src/state/domains.py` (114 live tables, single-source) + `tests/test_domains_reproduces_registry.py`
+ratchet, commit `0da50ced8` (zero runtime effect). **Open risks (from the panel, must clear before data moves):**
+BULK set is PROVISIONAL pending a per-daemon write-set audit (which of the 8 daemons write which MONEY tables on
+contending schedules — if a heavy independent writer lands in money.db, a measured 3rd domain may be needed);
+`settlements`/`settlement_outcomes` true row-holding copy must be row-probed before assigning its domain; the one
+bridge write is an audited allowlisted crack in "unrepresentable", not assumed away.
+
 ## 7. Three-goal weak-point audit (地基稳固 / 运行效率高 / 符合真实运行逻辑)
 
 Consult round-3 (thread `6a42bc3d`, web-grounded in Polymarket/UMA docs) — third independent convergence.
