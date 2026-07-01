@@ -159,7 +159,14 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
   `(name,db)`, not data LOCATION; `legacy_archived` is excluded entirely). This drift inflated a 24-agent
   wrong-DB sweep to **24 "confirmed" of which only ONE (`settlement_commands:872`) was real** — the verify
   agents trusted the stale registry over actual data/code. **Lesson: ownership verdicts must be DATA-grounded
-  (row-probe + live writer), never registry-grounded.** Registry reconciliation flagged as a task.
+  (row-probe + live writer), never registry-grounded.** A deterministic full-table audit (row-probe every
+  registered `(name,db)` vs data-location, 150 tables) shows the drift is SYSTEMIC — **NOT 2 tables**:
+  **19 INVERSIONS** (canonical owner empty, data in a `legacy_archived` copy — incl. `market_price_history`
+  622k, `token_suppression_history` 84k, `collateral_ledger_snapshots` 72k, `provenance_envelope_events` 23k,
+  all → trade) + **6 tables with NO canonical entry** (all-legacy yet holding data: `hourly_observations`
+  26M@world, `settlements` 1.25M@forecasts, `historical_forecasts`, `model_bias`…) + **26 dual/straggler**
+  (data in >1 DB; e.g. `execution_feasibility_evidence` 20.7M@trade vs 12.9M@world; `venue_commands` 845@trade
+  + 4@world). The reconciliation task must cover ALL of these, not just the 2 originally named.
 
 ### 6A. Cross-DB wiring (接线) — VERIFIED
 - **Canonical factories in `state/db.py` are correct:** `get_world_connection_with_trades_required`,
