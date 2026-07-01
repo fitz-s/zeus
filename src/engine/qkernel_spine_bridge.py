@@ -1685,7 +1685,12 @@ def _overlay_spine_economics_onto_proof_with_reason(
 
 
 def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool:
-    """Allow qkernel to rescore only legacy scalar blockers, not live policy gates."""
+    """Allow qkernel to rescore obsolete pre-spine blockers.
+
+    The low-price YES authority moved into the qkernel ROI/submit proof chain:
+    qkernel may clear the old center-buy ultra-low scalar veto, while true live
+    policy gates remain non-recoverable by overlay.
+    """
 
     text = str(missing_reason or "").strip()
     if not text:
@@ -1694,6 +1699,7 @@ def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool
         (
             "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
             "ADMISSION_CAPITAL_EFFICIENCY",
+            "CENTER_BUY_ULTRA_LOW_PRICE",
             "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
         )
     )

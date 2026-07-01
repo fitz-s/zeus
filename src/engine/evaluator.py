@@ -1269,7 +1269,14 @@ def _default_strategy_policy(strategy_key: str) -> StrategyPolicy:
     )
 
 
-def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -> str | None:
+def _center_buy_ultra_low_price_telemetry_reason(strategy_key: str, edge: BinEdge) -> str | None:
+    """Legacy scalar low-price marker, not a live rejection authority.
+
+    Cheap center-buy YES is admitted or rejected by qkernel ROI/submit proof.
+    The legacy evaluator may still record this marker for audit, but it must
+    not independently veto a candidate.
+    """
+
     if strategy_key != "center_buy":
         return None
     if edge.direction != "buy_yes":
@@ -1317,17 +1324,6 @@ def _strategy_entry_price_floor_block_reason(strategy_key: str, edge: BinEdge) -
     if entry_price > policy.min_entry_price:
         return None
     is_tail_topology = bool(getattr(getattr(edge, "bin", None), "is_shoulder", False))
-    center_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
-    if center_reason:
-        return LowPriceRejection(
-            strategy_key=strategy_key,
-            direction=str(getattr(edge, "direction", "")),
-            entry_price=entry_price,
-            floor=CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY,
-            reason_code="CENTER_BUY_ULTRA_LOW_PRICE",
-            specialized_reason=center_reason,
-            is_tail_topology=is_tail_topology,
-        ).detail()
     if entry_price <= policy.min_entry_price:
         if policy.allow_ultra_low_tail and is_tail_topology:
             return None
@@ -5837,23 +5833,11 @@ def evaluate_candidate(
         )
         decision_validations.append("strategy_policy")
 
-        ultra_low_price_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
+        ultra_low_price_reason = _center_buy_ultra_low_price_telemetry_reason(
+            strategy_key, edge
+        )
         if ultra_low_price_reason:
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="MARKET_FILTER",
-                rejection_reasons=[NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "center_buy_ultra_low_price_guard"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE,
-                rejection_reason_detail=ultra_low_price_reason,
-            ))
-            continue
+            decision_validations.append("center_buy_ultra_low_price_telemetry")
 
         # Anti-churn Layer 7 only. Layers 5 (is_reentry_blocked, 20-min reversal
         # time-ban) + 6 (is_token_on_cooldown, 1-hr post-fail time-ban) DELETED

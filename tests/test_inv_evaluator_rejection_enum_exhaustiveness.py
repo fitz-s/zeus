@@ -36,7 +36,7 @@ from typing import FrozenSet
 import pytest
 
 # ---------------------------------------------------------------------------
-# Migration plan: 77 callsites -> canonical NoTradeReason member value
+# Migration plan: 76 callsites -> canonical NoTradeReason member value
 # Source: T2_NO_TRADE_EVENTS_SCAFFOLD.md §3 (original 70) + 2026-06-14
 #   gate-mass-collapse reconciliation (+10 live evaluator emitters that were
 #   false orphans once the shadow-candidate exempt set shrank).
@@ -99,7 +99,6 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (3413, "strategy_key_unclassified", "strategy_key_unclassified"),
     (3427, "[ci_rejection_reason]", "confidence_band_insufficient"),
     (3447, "[period_extrema_day0_guard]", "day0_no_forecast_hours_remain"),
-    (3463, "[ultra_low_price_reason]", "center_buy_ultra_low_price"),
     (3479, "REENTRY_BLOCKED", "reentry_blocked"),
     (3494, "TOKEN_COOLDOWN", "token_cooldown"),
     (3511, "ALREADY_HELD_SAME_TOKEN", "already_held_same_token"),
@@ -129,7 +128,7 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (1419, "ULTRA_LOW_PRICE_NOT_AUTHORIZED (ultra-low-price helper)", "ultra_low_price_not_authorized"),
 ]
 
-assert len(MIGRATION_TABLE) == 77, f"Migration table must have 77 rows, got {len(MIGRATION_TABLE)}"
+assert len(MIGRATION_TABLE) == 76, f"Migration table must have 76 rows, got {len(MIGRATION_TABLE)}"
 
 
 def _get_evaluator_path() -> pathlib.Path:
@@ -236,6 +235,13 @@ def test_inv_evaluator_callsite_count() -> None:
 # (src/strategy/candidates/* + shadow_candidate_dispatch.py removed), so they no
 # longer exist as enum members and are gone from this exempt set.
 _SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset()
+_RETIRED_SCHEMA_PIN_REASONS: FrozenSet[str] = frozenset(
+    {
+        # Retained for historical rows/schema compatibility; no live evaluator
+        # rejection callsite may emit this after qkernel owns cheap YES authority.
+        "center_buy_ultra_low_price",
+    }
+)
 
 
 def test_inv_no_orphan_enum_members() -> None:
@@ -243,9 +249,9 @@ def test_inv_no_orphan_enum_members() -> None:
 
     Orphan members = enum values with no callsite plan = incomplete migration.
     UNCATEGORIZED is exempt (it is the section 13 fallback, not a migration target).
-    _SHADOW_CANDIDATE_REASONS are exempt: written by candidate.evaluate() in the
-    shadow-dispatch pipeline, not by evaluator.py callsites, so MIGRATION_TABLE
-    coverage would be category-wrong for them.
+    _SHADOW_CANDIDATE_REASONS and _RETIRED_SCHEMA_PIN_REASONS are exempt:
+    they are not evaluator.py callsite reasons, so MIGRATION_TABLE coverage
+    would be category-wrong for them.
     xfail until T2 production pass verifies full coverage.
     """
     from src.contracts.no_trade_reason import NoTradeReason
@@ -254,12 +260,12 @@ def test_inv_no_orphan_enum_members() -> None:
         row[2] for row in MIGRATION_TABLE
     )
     # UNCATEGORIZED is intentionally exempt (section 13 fallback).
-    # _SHADOW_CANDIDATE_REASONS are exempt: shadow-dispatch pipeline reasons,
-    # not evaluator.py callsite reasons (wave/stochastic-datagated-20260522).
+    # Exemptions are not evaluator.py callsite reasons.
     all_members: FrozenSet[str] = frozenset(
         r.value for r in NoTradeReason
         if r != NoTradeReason.UNCATEGORIZED
         and r.value not in _SHADOW_CANDIDATE_REASONS
+        and r.value not in _RETIRED_SCHEMA_PIN_REASONS
     )
 
     orphan_members = all_members - planned_members

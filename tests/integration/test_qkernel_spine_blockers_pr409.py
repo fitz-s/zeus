@@ -1949,8 +1949,8 @@ def test_overlay_clears_scalar_admission_missing_reason_for_qkernel_selected_can
     assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
-def test_overlay_refuses_to_clear_center_buy_ultra_low_live_blocker():
-    """qkernel may rescore stale scalar vetoes, not live strategy policy blockers."""
+def test_overlay_clears_center_buy_ultra_low_legacy_blocker():
+    """Qkernel ROI/submit proof supersedes the old center-buy low-price scalar veto."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
     )
@@ -1962,7 +1962,9 @@ def test_overlay_refuses_to_clear_center_buy_ultra_low_live_blocker():
         missing_reason="CENTER_BUY_ULTRA_LOW_PRICE(0.0150<=0.02)",
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
 def test_overlay_allows_center_buy_yes_below_strategy_floor_without_legacy_blocker():
