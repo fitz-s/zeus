@@ -485,6 +485,46 @@ def test_open_rest_tokens_are_market_channel_seed_priority():
     }
 
 
+def test_candidate_priority_uses_bounded_recent_row_window():
+    from src.ingest.price_channel_ingest import _edli_candidate_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            regret_event_id TEXT PRIMARY KEY,
+            token_id TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    recent = datetime.now(timezone.utc).isoformat()
+    rows = [(f"old-{idx}", f"stale-{idx}", "2026-01-01T00:00:00+00:00") for idx in range(250)]
+    rows.extend(
+        [
+            ("recent-1", "tok-a", recent),
+            ("recent-2", "tok-b", recent),
+            ("recent-3", "tok-a", recent),
+            ("recent-4", "tok-c", recent),
+        ]
+    )
+    conn.executemany("INSERT INTO no_trade_regret_events VALUES (?,?,?)", rows)
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    tokens = _edli_candidate_priority_token_ids(conn, lookback_hours=24.0, limit=3)
+
+    assert tokens == ["tok-c", "tok-a", "tok-b"]
+    regret_reads = [
+        sql
+        for sql in traces
+        if "FROM no_trade_regret_events" in sql and "sqlite_master" not in sql
+    ]
+    assert regret_reads
+    assert all("GROUP BY" not in sql.upper() for sql in regret_reads)
+    assert all("ORDER BY ROWID DESC" in sql.upper() for sql in regret_reads)
+
+
 def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
@@ -852,6 +892,89 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
     assert result["budget_skipped_tokens"] == 2
 
 
+def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = [f"token-{idx}" for idx in range(10)]
+    seen: dict[str, list[str]] = {}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_held_quote_refresh_max_tokens_per_cycle": 3,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        selected = list(token_ids)
+        seen["metadata"] = selected
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in selected
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            selected = list(token_ids)
+            seen["rest_seed"] = selected
+            return len(selected)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+
+    assert seen["metadata"] == ordered[:3]
+    assert seen["rest_seed"] == ordered[:3]
+    assert result["held_quote_refresh_selected_tokens"] == 3
+    assert result["held_quote_refresh_deferred_tokens"] == 7
+    assert result["held_quote_refresh_attempted_tokens"] == 3
+    assert result["budget_skipped_tokens"] == 0
+
+
 def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
     from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
@@ -1021,6 +1144,92 @@ def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob
     assert result["candidate_quote_refresh_events"] == 0
     assert result["candidate_quote_refresh_attempted_tokens"] == 0
     assert result["budget_skipped_tokens"] == 2
+
+
+def test_candidate_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = [f"candidate-{idx}" for idx in range(6)]
+    seen: dict[str, list[str]] = {}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_candidate_quote_refresh_max_tokens_per_cycle": 2,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: ordered)
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        selected = list(token_ids)
+        seen["metadata"] = selected
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in selected
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            selected = list(token_ids)
+            seen["rest_seed"] = selected
+            return len(selected)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_candidate_priority_quote_evidence(limit=32, budget_seconds=10.0)
+
+    assert seen["metadata"] == ordered[:2]
+    assert seen["rest_seed"] == ordered[:2]
+    assert result["candidate_quote_refresh_selected_tokens"] == 2
+    assert result["candidate_quote_refresh_deferred_tokens"] == 4
+    assert result["candidate_quote_refresh_attempted_tokens"] == 2
+    assert result["budget_skipped_tokens"] == 0
 
 
 def test_candidate_priority_quote_refresh_budget_is_not_capped_when_held_positions_exist(monkeypatch):

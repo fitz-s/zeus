@@ -104,6 +104,10 @@ EDLI_EVENT_DRIVEN_MODES = {
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
 MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
+MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MIN = 128
+MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX = 2048
+MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
@@ -352,6 +356,16 @@ def _edli_bounded_positive_float(
     if value <= 0:
         value = default
     return max(0.001, min(value, maximum))
+
+
+def _edli_quote_refresh_max_tokens(
+    config: dict,
+    key: str,
+    *,
+    default: int,
+    maximum: int = 128,
+) -> int:
+    return _edli_bounded_positive_int(config, key, default=default, maximum=maximum)
 
 
 def _row_get(row, key: str):
@@ -1576,22 +1590,34 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     if not has_table:
         return []
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    requested_limit = max(1, int(limit or 1))
+    scan_rows = min(
+        max(
+            MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MIN,
+            requested_limit * 16,
+        ),
+        MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX,
+    )
     try:
         rows = world_conn.execute(
             """
-            SELECT token_id, MAX(created_at) AS latest_created_at
-            FROM no_trade_regret_events
-            WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
-              AND created_at >= ?
-            GROUP BY token_id
-            ORDER BY latest_created_at DESC
-            LIMIT ?
+            SELECT token_id, created_at
+              FROM no_trade_regret_events
+             WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
+               AND created_at >= ?
+             ORDER BY rowid DESC
+             LIMIT ?
             """,
-            (cutoff, int(limit)),
+            (cutoff, scan_rows),
         ).fetchall()
     except Exception:
         return []
-    return list(dict.fromkeys(str(r[0]) for r in rows if r and r[0]))
+    ordered_rows = sorted(
+        enumerate(rows),
+        key=lambda item: (str(item[1][1] or ""), -int(item[0])),
+        reverse=True,
+    )
+    return list(dict.fromkeys(str(row[0]) for _, row in ordered_rows if row and row[0]))[:requested_limit]
 
 
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
@@ -2294,9 +2320,15 @@ def _edli_refresh_held_position_quote_evidence(
             trade_read,
             held_token_ids,
         )
+        max_tokens = _edli_quote_refresh_max_tokens(
+            edli_cfg,
+            "market_channel_held_quote_refresh_max_tokens_per_cycle",
+            default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
+        )
+        selected_held_token_ids = ordered_held_token_ids[:max_tokens]
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=ordered_held_token_ids,
+            token_ids=selected_held_token_ids,
         )
     finally:
         trade_read.close()
@@ -2304,6 +2336,11 @@ def _edli_refresh_held_position_quote_evidence(
     if not token_metadata:
         return {
             "held_priority_token_ids": len(held_token_ids),
+            "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_held_token_ids) - len(selected_held_token_ids),
+            ),
             "held_quote_refresh_events": 0,
             "skipped": "no_held_token_metadata",
         }
@@ -2317,7 +2354,7 @@ def _edli_refresh_held_position_quote_evidence(
     from src.state.db import get_world_connection_with_trades_required
 
     ordered_metadata_tokens = [
-        token_id for token_id in ordered_held_token_ids if token_id in token_metadata
+        token_id for token_id in selected_held_token_ids if token_id in token_metadata
     ]
 
     rest_seed_acquired = _held_quote_seed_refresh_lock.acquire(blocking=False)
@@ -2329,6 +2366,13 @@ def _edli_refresh_held_position_quote_evidence(
             token_ids=len(held_token_ids),
             token_metadata=len(token_metadata),
             attempted_tokens=len(ordered_metadata_tokens),
+            extra={
+                "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+                "held_quote_refresh_deferred_tokens": max(
+                    0,
+                    len(ordered_held_token_ids) - len(selected_held_token_ids),
+                ),
+            },
         )
 
     # Do not use the flocked context here: REST book fetches happen inside
@@ -2376,6 +2420,11 @@ def _edli_refresh_held_position_quote_evidence(
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
+            "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_held_token_ids) - len(selected_held_token_ids),
+            ),
             "held_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
             "elapsed_seconds": elapsed_seconds,
@@ -2448,9 +2497,15 @@ def _edli_refresh_candidate_priority_quote_evidence(
             trade_read,
             priority_token_ids,
         )
+        max_tokens = _edli_quote_refresh_max_tokens(
+            _settings_section("edli_v1", {}),
+            "market_channel_candidate_quote_refresh_max_tokens_per_cycle",
+            default=MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
+        )
+        selected_candidate_token_ids = ordered_candidate_token_ids[:max_tokens]
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=ordered_candidate_token_ids,
+            token_ids=selected_candidate_token_ids,
         )
     finally:
         trade_read.close()
@@ -2466,6 +2521,12 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "candidate_priority_token_ids": len(candidate_token_ids),
             "open_rest_priority_token_ids": len(open_rest_token_ids),
             "held_priority_token_ids": held_priority_count,
+            "quote_priority_token_ids": len(priority_token_ids),
+            "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+            "candidate_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+            ),
             "candidate_quote_refresh_events": 0,
             "skipped": "no_candidate_token_metadata",
         }
@@ -2479,7 +2540,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
     # with trades attached, but no cross-process writer flock held across REST
     # fetches. Each seed chunk still commits on this single attached connection.
     ordered_metadata_tokens = [
-        token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
+        token_id for token_id in selected_candidate_token_ids if token_id in token_metadata
     ]
     rest_seed_acquired = _candidate_quote_seed_refresh_lock.acquire(blocking=False)
     if not rest_seed_acquired:
@@ -2494,6 +2555,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 "open_rest_priority_token_ids": len(open_rest_token_ids),
                 "quote_priority_token_ids": len(priority_token_ids),
                 "held_priority_token_ids": held_priority_count,
+                "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+                "candidate_quote_refresh_deferred_tokens": max(
+                    0,
+                    len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+                ),
                 "budget_seconds": budget,
             },
         )
@@ -2542,6 +2608,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "quote_priority_token_ids": len(priority_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
+            "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
+            "candidate_quote_refresh_deferred_tokens": max(
+                0,
+                len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
+            ),
             "candidate_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
             "requested_budget_seconds": requested_budget,
