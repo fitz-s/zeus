@@ -167,6 +167,16 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
   26M@world, `settlements` 1.25M@forecasts, `historical_forecasts`, `model_bias`…) + **26 dual/straggler**
   (data in >1 DB; e.g. `execution_feasibility_evidence` 20.7M@trade vs 12.9M@world; `venue_commands` 845@trade
   + 4@world). The reconciliation task must cover ALL of these, not just the 2 originally named.
+  **BUT it is NOT a registry-only edit (verified 2026-06-30 by attempting the full flip):** the boot gate
+  `assert_db_matches_registry` (registry vs live disk) PASSES a flip, but `check_table_registry_coherence.py`
+  (registry vs `init_schema_world_only`/`_trade_only` CREATE-lists) FAILS it — the 13 trade-drifted tables are
+  still `CREATE`-d in WORLD by `init_schema_world_only` (so the registry matches INIT = coherent), while runtime
+  writes their data to TRADE where NO init function creates them. i.e. the registry is coherent with
+  INIT-ownership, not DATA-location; the K1 migration is INCOMPLETE for these 13 (init still makes empty world
+  ghosts). Completing it is a COORDINATED migration — move `CREATE TABLE` world→trade in `db.py` init + flip the
+  registry + drop the world ghost — coupled to the 2026-08-09 ghost drop, NOT a one-shot yaml edit. (One clean
+  registry defect WAS fixed standalone: a duplicate `notes` key on `source_run_archived_2026_05_11`, commit
+  `008e367ee`.)
 
 ### 6A. Cross-DB wiring (接线) — VERIFIED
 - **Canonical factories in `state/db.py` are correct:** `get_world_connection_with_trades_required`,
