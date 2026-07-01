@@ -182,3 +182,41 @@ def test_fitter_ground_truth_does_not_require_settlement_outcomes_table():
     assert fit_script._observed_ground_truth(conn, "low")[("Tokyo", "2026-06-20")] == pytest.approx(
         21.1111111111
     )
+
+
+def test_fitter_ground_truth_prefers_verified_venue_settlement_when_present():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT, target_date TEXT, high_temp REAL, low_temp REAL, unit TEXT, source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE settlement_outcomes (
+            city TEXT, target_date TEXT, settlement_value REAL, settlement_unit TEXT,
+            temperature_metric TEXT, authority TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO observations (city, target_date, high_temp, low_temp, unit, source)
+        VALUES ('Paris', '2026-06-20', 25.0, 15.0, 'C', 'wu_icao_history')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO settlement_outcomes (
+            city, target_date, settlement_value, settlement_unit, temperature_metric, authority
+        ) VALUES ('Paris', '2026-06-20', 24.0, 'C', 'high', 'VERIFIED')
+        """
+    )
+
+    high = fit_script._observed_ground_truth(conn, "high")
+    low = fit_script._observed_ground_truth(conn, "low")
+
+    assert high[("Paris", "2026-06-20")] == pytest.approx(24.0)
+    assert low[("Paris", "2026-06-20")] == pytest.approx(15.0)

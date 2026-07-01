@@ -55,14 +55,33 @@ def _settle_c(v, u):
 _OBS_COL = {"high": "high_temp", "low": "low_temp"}
 
 
-def _observed_ground_truth(conn, metric):
-    """(city, target_date) -> observed daily extreme in degC from `observations` (high_temp/low_temp).
+def _table_exists(conn, name):
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (name,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
 
-    THE ground truth for EMOS. `settlement_outcomes` only records VENUE-traded markets — the venue
-    has low markets for just 9 cities, so joining low against it silently drops 45 cities (that was
-    the bug). `observations` carries BOTH extremes for ALL 54 cities and matches the venue settlement
-    exactly where a market exists (obs vs settle: median |Δ|=0.000, 100% within 0.6C, both metrics).
-    Deduped preferring wu_icao_history (the wunderground source the venue settles from)."""
+
+def _observed_ground_truth(conn, metric):
+    """(city, target_date) -> daily extreme in degC. VENUE settlement where it exists (authoritative
+    traded truth, keeps the validated HIGH byte-stable), else the OBSERVED extreme from `observations`.
+
+    Fixes the low-data bug: `settlement_outcomes` only records VENUE-traded markets — the venue has
+    low markets for just 9 cities, so joining low against it silently dropped 45 cities. `observations`
+    carries BOTH extremes for ALL 54 cities and matches venue settlement exactly where a market exists
+    (median |Δ|=0.000, 100% within 0.6C, both metrics). Observations deduped preferring wu_icao_history
+    (the wunderground source the venue settles from)."""
+    truth = {}
+    if _table_exists(conn, "settlement_outcomes"):
+        for r in conn.execute(
+            "SELECT city,target_date,settlement_value,settlement_unit FROM settlement_outcomes "
+            "WHERE temperature_metric=? AND authority='VERIFIED' AND settlement_value IS NOT NULL", (metric,)
+        ):
+            truth[(r[0], r[1])] = _settle_c(r[2], r[3])
     col = _OBS_COL[metric]
     best = {}  # (city, td) -> (value_c, is_wu)
     for r in conn.execute(
@@ -74,7 +93,9 @@ def _observed_ground_truth(conn, metric):
         is_wu = 1 if r[4] == "wu_icao_history" else 0
         if k not in best or is_wu > best[k][1]:
             best[k] = (_settle_c(r[2], r[3]), is_wu)
-    return {k: val for k, (val, _) in best.items()}
+    for k, (val, _) in best.items():
+        truth.setdefault(k, val)  # fallback only where no venue settlement
+    return truth
 
 
 def _replay_runtime_center(conn, metric, lead):
