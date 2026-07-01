@@ -9875,11 +9875,22 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
     fill_price = getattr(pos, "entry_price", None) if status in {"entered", "day0_window"} else None
     entry_order_id = getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "")
     order_id = getattr(pos, "order_id", "") or entry_order_id
+    bridge_economics = _trade_decisions_bridge_entry_economics(pos)
+    bridge_cost_basis_usd = bridge_economics["cost_basis_usd"]
+    bridge_entry_price = bridge_economics["entry_price"]
     conn.execute(
         """
         UPDATE trade_decisions
         SET status = ?,
             timestamp = COALESCE(NULLIF(?, ''), timestamp),
+            size_usd = CASE
+                WHEN COALESCE(size_usd, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                ELSE size_usd
+            END,
+            price = CASE
+                WHEN COALESCE(price, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                ELSE price
+            END,
             filled_at = COALESCE(?, filled_at),
             fill_price = COALESCE(?, fill_price),
             fill_quality = COALESCE(?, fill_quality),
@@ -9893,6 +9904,10 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         (
             status,
             timestamp,
+            bridge_cost_basis_usd,
+            bridge_cost_basis_usd,
+            bridge_entry_price,
+            bridge_entry_price,
             filled_at,
             fill_price,
             getattr(pos, "fill_quality", None),
@@ -9904,6 +9919,48 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
             row["trade_id"],
         ),
     )
+
+
+def _trade_decisions_bridge_entry_economics(pos) -> dict[str, float]:
+    """Best-effort audit bridge economics from canonical position state.
+
+    `trade_decisions` is a legacy/audit bridge, not a money-path authority.
+    When an existing bridge row was synthesized or rescued with size_usd=0,
+    lifecycle sync may repair the display/audit cost from the canonical
+    position/chain fields without fabricating edge, Kelly, or probability.
+    """
+
+    def _attr(name: str) -> object:
+        try:
+            return getattr(pos, name)
+        except Exception:  # noqa: BLE001 - defensive against computed runtime props
+            return None
+
+    cost_basis_usd = _finite_float_or_zero(_attr("effective_cost_basis_usd"))
+    if cost_basis_usd <= 0.0:
+        for attr in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd"):
+            cost_basis_usd = _finite_float_or_zero(_attr(attr))
+            if cost_basis_usd > 0.0:
+                break
+
+    shares = _finite_float_or_zero(_attr("effective_shares"))
+    if shares <= 0.0:
+        for attr in ("chain_shares", "shares"):
+            shares = _finite_float_or_zero(_attr(attr))
+            if shares > 0.0:
+                break
+
+    entry_price = _finite_float_or_zero(_attr("chain_avg_price"))
+    if entry_price <= 0.0:
+        entry_price = _finite_float_or_zero(_attr("entry_price"))
+    if entry_price <= 0.0 and cost_basis_usd > 0.0 and shares > 0.0:
+        entry_price = cost_basis_usd / shares
+
+    return {
+        "cost_basis_usd": cost_basis_usd,
+        "entry_price": entry_price,
+        "shares": shares,
+    }
 
 
 
@@ -11537,7 +11594,10 @@ def _query_entry_execution_fill_hints(
 
 
 def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
-    from src.state.portfolio import fill_authority_effective_open_cost_basis
+    from src.state.portfolio import (
+        fill_authority_effective_open_cost_basis,
+        has_verified_trade_fill,
+    )
 
     def _row_optional(key: str, default: object = None) -> object:
         try:
@@ -11553,12 +11613,12 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     chain_cost_basis_usd = _finite_float_or_zero(_row_optional("chain_cost_basis_usd"))
     chain_avg_price = _finite_float_or_zero(_row_optional("chain_avg_price"))
     phase = str(row["phase"] or "")
+    row_fill_authority = str(_row_optional("fill_authority") or "").strip()
 
     if fill_hint:
         filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
         filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
         avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
-        row_fill_authority = str(_row_optional("fill_authority") or "").strip()
         if (
             projection_shares > filled_shares + 1e-9
             and projection_cost_basis_usd > filled_cost_basis_usd + 1e-9
@@ -11621,6 +11681,34 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
             "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
         }
 
+    if (
+        chain_shares > 0.0
+        and chain_cost_basis_usd > 0.0
+        and row_fill_authority
+        and row_fill_authority != FILL_AUTHORITY_NONE
+    ):
+        effective_entry_price = chain_avg_price
+        if effective_entry_price <= 0.0:
+            effective_entry_price = chain_cost_basis_usd / chain_shares
+        return {
+            "submitted_size_usd": submitted_size_usd,
+            "projection_cost_basis_usd": projection_cost_basis_usd,
+            "effective_cost_basis_usd": chain_cost_basis_usd,
+            "effective_shares": chain_shares,
+            "pnl_cost_basis_usd": chain_cost_basis_usd,
+            "effective_entry_price": effective_entry_price,
+            "entry_price_avg_fill": effective_entry_price,
+            "shares_filled": chain_shares,
+            "filled_cost_basis_usd": chain_cost_basis_usd,
+            "entry_economics_authority": ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+            "fill_authority": row_fill_authority,
+            "entry_economics_source": "position_current_chain_observed",
+            "entry_fill_verified": has_verified_trade_fill({"fill_authority": row_fill_authority}),
+            "execution_fact_intent_id": "",
+            "execution_fact_filled_at": "",
+            "execution_fact_venue_status": "",
+        }
+
     if phase == "pending_entry":
         return {
             "submitted_size_usd": submitted_size_usd,
@@ -11648,7 +11736,6 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
     # effective_cost_basis_usd, effective_exposure) already route correctly via
     # has_chain_observed_authority when fill_authority is preserved here.
-    row_fill_authority = str(row["fill_authority"] or "").strip()
     effective_fill_authority = (
         row_fill_authority
         if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE

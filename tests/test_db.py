@@ -2066,6 +2066,63 @@ def test_position_current_views_prefer_chain_corrected_projection_over_stale_fil
     conn.close()
 
 
+def test_position_current_views_use_chain_cost_when_bridge_was_zero_sized(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "chain-observed-zero-bridge-size.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="chain-observed-zero-size-pos",
+        submitted_size_usd=0.0,
+        projected_cost_basis_usd=0.0,
+        shares=0.0,
+        entry_price=0.0,
+        mark_price=0.5989832190544929,
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET fill_authority = 'venue_confirmed_full',
+               chain_state = 'synced',
+               chain_shares = 3.57,
+               chain_avg_price = 0.65,
+               chain_cost_basis_usd = 2.3205,
+               chain_seen_at = '2026-07-01T13:06:16+00:00'
+         WHERE position_id = ?
+        """,
+        ("chain-observed-zero-size-pos",),
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+
+    assert status_view["total_exposure_usd"] == pytest.approx(2.32)
+    assert status_position["size_usd"] == pytest.approx(2.3205)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(2.3205)
+    assert status_position["submitted_size_usd"] == pytest.approx(0.0)
+    assert status_position["shares"] == pytest.approx(3.57)
+    assert status_position["entry_price"] == pytest.approx(0.65)
+    assert status_position["entry_economics_authority"] == "corrected_executable_cost_basis"
+    assert status_position["entry_economics_source"] == "position_current_chain_observed"
+    assert status_position["fill_authority"] == "venue_confirmed_full"
+    assert status_position["entry_fill_verified"] is True
+    assert status_position["unrealized_pnl"] == pytest.approx(-0.18)
+
+    assert loader_position["size_usd"] == pytest.approx(2.3205)
+    assert loader_position["cost_basis_usd"] == pytest.approx(2.3205)
+    assert loader_position["effective_cost_basis_usd"] == pytest.approx(2.3205)
+    assert loader_position["projection_cost_basis_usd"] == pytest.approx(0.0)
+    assert loader_position["shares"] == pytest.approx(3.57)
+    assert loader_position["entry_price"] == pytest.approx(0.65)
+    assert loader_position["entry_economics_source"] == "position_current_chain_observed"
+
+
 def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact(tmp_path):
     from src.state.db import query_portfolio_loader_view, query_position_current_status_view
 
