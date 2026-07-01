@@ -248,6 +248,12 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "day0 hard-fact authority (observed extreme) contradicts the candidate.",
     )
+    DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE = (
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        RejectionCategory.HONEST_DATA,
+        "Day0 remaining-day probability cannot be computed because the hourly "
+        "remaining-window member substrate is unavailable or insufficient.",
+    )
     ENTRY_COOLDOWN = (
         "entry_cooldown",
         RejectionCategory.DESIGNED_GATE,
