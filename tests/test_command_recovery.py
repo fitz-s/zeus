@@ -44,6 +44,93 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def test_filled_projection_repair_voids_absorbed_chain_only_stub(conn):
+    from src.execution.command_recovery import _void_absorbed_chain_only_projection
+
+    token = "tok-canonical-fill"
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, updated_at, temperature_metric,
+            token_id, condition_id, chain_state, shares, cost_basis_usd,
+            chain_shares, chain_cost_basis_usd
+        ) VALUES (
+            'chain-only-fill', 'quarantined', 'chain_only_reconciliation',
+            '2026-07-02T02:23:43+00:00', 'high',
+            ?, 'cond-fill', 'entry_authority_quarantined', 40.25, 17.71,
+            40.25, 17.71
+        )
+        """,
+        (token,),
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, 'cond-fill', 'chain_only_quarantined', 'test',
+                  '2026-07-02T02:23:43+00:00',
+                  '2026-07-02T02:23:43+00:00', '{}')
+        """,
+        (token,),
+    )
+
+    cleared = _void_absorbed_chain_only_projection(
+        conn,
+        position=SimpleNamespace(
+            trade_id="canonical-fill",
+            direction="buy_yes",
+            token_id=token,
+            no_token_id="",
+            condition_id="cond-fill",
+            decision_id="decision-fill",
+            decision_snapshot_id="snapshot-fill",
+            order_id="order-fill",
+            command_id="command-fill",
+        ),
+    )
+
+    row = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_cost_basis_usd,
+               exit_reason
+          FROM position_current
+         WHERE position_id = 'chain-only-fill'
+        """
+    ).fetchone()
+    suppression = conn.execute(
+        """
+        SELECT suppression_reason, source_module, evidence_json
+          FROM token_suppression
+         WHERE token_id = ?
+        """,
+        (token,),
+    ).fetchone()
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, command_id
+          FROM position_events
+         WHERE position_id = 'chain-only-fill'
+        """
+    ).fetchone()
+
+    assert cleared == 1
+    assert dict(row) == {
+        "phase": "voided",
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "chain_shares": 0.0,
+        "chain_cost_basis_usd": 0.0,
+        "exit_reason": "chain_only_absorbed_by_canonical_filled_entry",
+    }
+    assert suppression["suppression_reason"] == "operator_quarantine_clear"
+    assert suppression["source_module"] == "src.execution.command_recovery"
+    assert json.loads(suppression["evidence_json"])["canonical_position_id"] == "canonical-fill"
+    assert event["event_type"] == "ADMIN_VOIDED"
+    assert event["phase_after"] == "voided"
+    assert event["command_id"] == "command-fill"
+
+
 def _valid_day0_pre_submit_payload(**overrides):
     payload = {
         "event_id": "evt-day0-presubmit",

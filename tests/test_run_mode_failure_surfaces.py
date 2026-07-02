@@ -1195,6 +1195,20 @@ def test_main_orders_boot_command_recovery_before_reactor_registration() -> None
     assert boot_idx < reactor_idx < start_idx
 
 
+def test_boot_fast_command_recovery_includes_filled_entry_projection_repair() -> None:
+    """Boot recovery must heal matched ENTRY fills before chain-sync sees them as chain-only."""
+    import inspect
+    import src.execution.command_recovery as command_recovery
+
+    source = inspect.getsource(command_recovery._reconcile_passes_short_conn)
+    boot_idx = source.index('if scope == "boot_fast":')
+    live_idx = source.index('"live_entry_projection_repair"', boot_idx)
+    filled_idx = source.index('"filled_entry_projection_repair"', boot_idx)
+    hard_terminal_idx = source.index('"hard_terminal_position_projection_repair"', boot_idx)
+
+    assert live_idx < filled_idx < hard_terminal_idx
+
+
 def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) -> None:
     """A no-fill terminal order recovery must continue the redecision chain."""
     import src.execution.command_recovery as command_recovery

@@ -3910,6 +3910,170 @@ def _log_filled_entry_execution_fact(
     )
 
 
+def _void_absorbed_chain_only_projection(
+    conn: sqlite3.Connection,
+    *,
+    position: SimpleNamespace,
+) -> int:
+    """Deactivate chain-only stubs represented by the repaired canonical fill."""
+
+    if not _table_exists(conn, "position_current"):
+        return 0
+    direction = str(getattr(position, "direction", "") or "").strip().lower()
+    selected_token = (
+        str(getattr(position, "no_token_id", "") or "").strip()
+        if direction == "buy_no"
+        else str(getattr(position, "token_id", "") or "").strip()
+    )
+    condition_id = str(getattr(position, "condition_id", "") or "").strip()
+    canonical_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not selected_token or not canonical_id:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT position_id, phase, strategy_key
+          FROM position_current
+         WHERE position_id != ?
+           AND position_id LIKE 'chain-only-%'
+           AND phase = 'quarantined'
+           AND chain_state = 'entry_authority_quarantined'
+           AND (
+                token_id = ?
+             OR no_token_id = ?
+             OR (
+                  ? != ''
+              AND condition_id = ?
+              AND (token_id = ? OR no_token_id = ?)
+             )
+           )
+        """,
+        (
+            canonical_id,
+            selected_token,
+            selected_token,
+            condition_id,
+            condition_id,
+            selected_token,
+            selected_token,
+        ),
+    ).fetchall()
+    if not rows:
+        return 0
+    now = _now_iso()
+    cleared = 0
+    for row in rows:
+        row_map = _dict_row(row)
+        chain_only_id = str(row_map.get("position_id") or "").strip()
+        if not chain_only_id:
+            continue
+        sequence_no = _latest_position_sequence(conn, chain_only_id) + 1
+        payload = {
+            "schema_version": 1,
+            "reason": "chain_only_absorbed_by_canonical_filled_entry",
+            "canonical_position_id": canonical_id,
+            "token_id": selected_token,
+            "condition_id": condition_id,
+            "source_function": "command_recovery._void_absorbed_chain_only_projection",
+        }
+        if _table_exists(conn, "position_events"):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    decision_id, snapshot_id, order_id, command_id, caused_by,
+                    idempotency_key, venue_status, source_module, env, payload_json
+                ) VALUES (?, ?, 1, ?, 'ADMIN_VOIDED', ?, ?, 'voided', ?,
+                          ?, ?, ?, ?, ?, ?, 'voided',
+                          'src.execution.command_recovery', 'live', ?)
+                """,
+                (
+                    f"{chain_only_id}:absorbed_chain_only:{canonical_id}",
+                    chain_only_id,
+                    sequence_no,
+                    now,
+                    str(row_map.get("phase") or "quarantined"),
+                    str(row_map.get("strategy_key") or "chain_only_reconciliation"),
+                    str(getattr(position, "decision_id", "") or ""),
+                    str(getattr(position, "decision_snapshot_id", "") or ""),
+                    str(getattr(position, "order_id", "") or ""),
+                    str(getattr(position, "command_id", "") or ""),
+                    "canonical_filled_entry_projection_repair",
+                    f"{chain_only_id}:absorbed_chain_only:{canonical_id}",
+                    json.dumps(payload, sort_keys=True, default=str),
+                ),
+            )
+        cur = conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'voided',
+                   shares = 0.0,
+                   cost_basis_usd = 0.0,
+                   chain_shares = 0.0,
+                   chain_cost_basis_usd = 0.0,
+                   exit_reason = 'chain_only_absorbed_by_canonical_filled_entry',
+                   updated_at = ?
+             WHERE position_id = ?
+               AND phase = 'quarantined'
+        """,
+            (now, chain_only_id),
+        )
+        cleared += max(0, int(cur.rowcount or 0))
+    if cleared > 0:
+        evidence_json = json.dumps(
+            {
+                "reason": "chain_only_absorbed_by_canonical_filled_entry",
+                "canonical_position_id": canonical_id,
+                "absorbed_count": cleared,
+            },
+            sort_keys=True,
+            default=str,
+        )
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        if _table_exists(conn, "token_suppression_history"):
+            conn.execute(
+                """
+                INSERT INTO token_suppression_history (
+                    token_id, condition_id, suppression_reason, source_module,
+                    created_at, updated_at, evidence_json, operation, recorded_at
+                ) VALUES (?, ?, 'operator_quarantine_clear',
+                          'src.execution.command_recovery', ?, ?, ?, 'record', ?)
+                """,
+                (
+                    selected_token,
+                    condition_id,
+                    now,
+                    now,
+                    evidence_json,
+                    recorded_at,
+                ),
+            )
+        if _table_exists(conn, "token_suppression"):
+            conn.execute(
+                """
+                INSERT INTO token_suppression (
+                    token_id, condition_id, suppression_reason, source_module,
+                    created_at, updated_at, evidence_json
+                ) VALUES (?, ?, 'operator_quarantine_clear',
+                          'src.execution.command_recovery', ?, ?, ?)
+                ON CONFLICT(token_id) DO UPDATE SET
+                    condition_id = excluded.condition_id,
+                    suppression_reason = excluded.suppression_reason,
+                    source_module = excluded.source_module,
+                    updated_at = excluded.updated_at,
+                    evidence_json = excluded.evidence_json
+                """,
+                (
+                    selected_token,
+                    condition_id,
+                    now,
+                    now,
+                    evidence_json,
+                ),
+            )
+    return cleared
+
+
 def _append_filled_entry_projection_repair(
     conn: sqlite3.Connection,
     *,
@@ -3960,6 +4124,7 @@ def _append_filled_entry_projection_repair(
     if existing_fill is not None:
         upsert_position_current(conn, projection)
         _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
+        _void_absorbed_chain_only_projection(conn, position=position)
         return True
     latest_sequence = _latest_position_sequence(conn, position_id)
     filled_at = str(candidate.get("fill_observed_at") or _now_iso())
@@ -4023,6 +4188,7 @@ def _append_filled_entry_projection_repair(
         ]
     append_many_and_project(conn, events, projection)
     _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
+    _void_absorbed_chain_only_projection(conn, position=position)
     return True
 
 
@@ -15738,6 +15904,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
+        )
+        _boot_db_pass(
+            "filled_entry_projection_repair",
+            reconcile_filled_entry_projection_repairs,
+            "filled_entry_projection_repair",
         )
         _boot_db_pass(
             "hard_terminal_position_projection_repair",
