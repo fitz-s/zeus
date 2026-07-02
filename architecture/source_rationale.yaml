@@ -1137,12 +1137,14 @@ files:
   src/data/source_clock_update_probe.py:
     zone: K2_runtime
     authority_role: replacement_forecast_source_clock_trigger
-    why: Production fail-soft probe for Open-Meteo model update clocks. Records cached metadata and advances the source-update cursor only after a changed run is publicly usable, then reports affected cities for replacement materialization/download work. It never places orders.
+    why: Production fail-soft probe for Open-Meteo model update clocks. Records cached metadata and advances the source-update cursor only after a changed run is publicly usable, then reports affected cities for replacement materialization/download work. It never places orders. Order-engine rebuild W0.3 (2026-07-02) added an optional event_writer kwarg (default None, no behavior change for existing callers) that emits SOURCE_RUN_ARRIVED opportunity events per newly-usable run; emit-only, no consumer reads the event yet (W4 wires the staleness path).
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - src/data/replacement_forecast_production.py
     - scripts/source_clock_live_replacement_cycle.py
+    - src/events/event_writer.py
+    - src/events/opportunity_event.py
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
