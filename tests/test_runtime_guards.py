@@ -12229,11 +12229,72 @@ def test_main_registers_only_policy_owned_ecmwf_open_data_jobs(monkeypatch, tmp_
     monkeypatch.setattr(main_module, "_startup_wallet_check", lambda: None)
     monkeypatch.setattr(main_module, "_startup_data_health_check", lambda conn: None)
     monkeypatch.setattr(main_module, "_assert_live_safe_strategies_or_exit", lambda: None)
+    monkeypatch.setattr(main_module, "_startup_required_sidecar_head_check", lambda **kwargs: None)
     monkeypatch.setattr(main_module.sys, "argv", ["zeus"])
 
     main_module.main()
 
     assert any(job.id.startswith("ecmwf_open_data_") for job in fake_scheduler.get_jobs())
+
+
+def _write_live_sidecar_heartbeats(root: Path, *, sha: str, at: datetime) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "forecast-live-heartbeat.json").write_text(json.dumps({
+        "daemon": "forecast-live",
+        "git_head": sha,
+        "written_at": at.isoformat(),
+    }))
+    for daemon, filename in (
+        ("substrate-observer", "daemon-heartbeat-substrate-observer.json"),
+        ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json"),
+        ("post-trade-capital", "daemon-heartbeat-post-trade-capital.json"),
+    ):
+        (root / filename).write_text(json.dumps({
+            "daemon": daemon,
+            "git_head": sha,
+            "alive_at": at.isoformat(),
+        }))
+
+
+def test_live_boot_sidecar_head_check_accepts_fresh_same_head(monkeypatch, tmp_path):
+    import importlib
+
+    main_module = importlib.import_module("src.main")
+    boot_sha = "abcdef1234567890abcdef1234567890abcdef12"
+    now = datetime(2026, 7, 2, 6, 45, tzinfo=timezone.utc)
+    _write_live_sidecar_heartbeats(tmp_path, sha=boot_sha[:8], at=now)
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+
+    main_module._startup_required_sidecar_head_check(
+        boot_sha=boot_sha,
+        state_dir=tmp_path,
+        now=now + timedelta(seconds=30),
+    )
+
+
+def test_live_boot_sidecar_head_check_blocks_stale_code_sidecar(monkeypatch, tmp_path):
+    import importlib
+
+    main_module = importlib.import_module("src.main")
+    boot_sha = "abcdef1234567890abcdef1234567890abcdef12"
+    now = datetime(2026, 7, 2, 6, 45, tzinfo=timezone.utc)
+    _write_live_sidecar_heartbeats(tmp_path, sha=boot_sha[:8], at=now)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(json.dumps({
+        "daemon": "price-channel-ingest",
+        "git_head": "12345678",
+        "alive_at": now.isoformat(),
+    }))
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+
+    with pytest.raises(
+        SystemExit,
+        match="LIVE_SIDECAR_BOOT_BLOCKED: .*price-channel-ingest:git_head_mismatch",
+    ):
+        main_module._startup_required_sidecar_head_check(
+            boot_sha=boot_sha,
+            state_dir=tmp_path,
+            now=now + timedelta(seconds=30),
+        )
 
 
 def test_openmeteo_quota_warns_blocks_and_resets(caplog):
@@ -13372,6 +13433,156 @@ def test_exit_dual_write_backfills_missing_entry_history_after_day0_only_canonic
     assert events[2]["source_module"] == "src.execution.exit_lifecycle:backfill"
     assert events[3]["source_module"] == "src.execution.exit_lifecycle:backfill"
     assert events[4]["source_module"] == "src.execution.exit_lifecycle"
+
+
+def test_day0_existing_canonical_event_repairs_position_current_projection(tmp_path):
+    """Existing Day0 event is enough canonical truth to repair stale projection."""
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.state.db import append_many_and_project
+
+    position_id = "legacy-day0-stale-projection"
+    day0_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-legacy-day0-projection",
+    )
+    day0_events, day0_projection = build_day0_window_entered_canonical_write(
+        day0_position,
+        day0_entered_at=day0_position.day0_entered_at,
+        sequence_no=1,
+        previous_phase="active",
+        source_module="tests/test_runtime_guards:seed_day0_projection",
+    )
+    append_many_and_project(conn, day0_events, day0_projection)
+    before_events = _raw_position_event_rows(conn, position_id)
+
+    conn.execute(
+        "UPDATE position_current SET phase = ? WHERE position_id = ?",
+        ("active", position_id),
+    )
+    conn.commit()
+    stale_phase = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert stale_phase == "active"
+
+    replay_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-legacy-day0-projection",
+    )
+
+    assert cycle_runtime._emit_day0_window_entered_canonical_if_available(
+        conn,
+        replay_position,
+        day0_entered_at=replay_position.day0_entered_at,
+        previous_phase="active",
+        deps=types.SimpleNamespace(logger=logging.getLogger(__name__)),
+    ) is True
+
+    after_events = _raw_position_event_rows(conn, position_id)
+    assert after_events == before_events
+    repaired_phase = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert repaired_phase == "day0_window"
+
+
+def test_day0_existing_canonical_event_does_not_repair_when_later_absorbing_event_exists(tmp_path):
+    """Older Day0 history must not overwrite newer economic-close truth."""
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.state.db import append_many_and_project
+
+    position_id = "legacy-day0-superseded-projection"
+    day0_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-legacy-day0-superseded",
+    )
+    day0_events, day0_projection = build_day0_window_entered_canonical_write(
+        day0_position,
+        day0_entered_at=day0_position.day0_entered_at,
+        sequence_no=1,
+        previous_phase="active",
+        source_module="tests/test_runtime_guards:seed_day0_superseded",
+    )
+    append_many_and_project(conn, day0_events, day0_projection)
+    closed = _position(
+        trade_id=position_id,
+        state="economically_closed",
+        exit_state="sell_filled",
+        pre_exit_state="day0_window",
+        order_id="entry-order-1",
+        last_exit_order_id="sell-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        last_exit_at="2026-04-01T01:00:00Z",
+        exit_price=0.46,
+        exit_reason="forward edge failed",
+        decision_snapshot_id="snap-legacy-day0-superseded",
+    )
+    assert exit_lifecycle_module._dual_write_canonical_economic_close_if_available(
+        conn,
+        closed,
+        phase_before="pending_exit",
+    ) is True
+    before_events = _raw_position_event_rows(conn, position_id)
+
+    conn.execute(
+        "UPDATE position_current SET phase = ? WHERE position_id = ?",
+        ("active", position_id),
+    )
+    conn.commit()
+    replay_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-legacy-day0-superseded",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="superseded by latest canonical event EXIT_ORDER_FILLED/economically_closed",
+    ):
+        cycle_runtime._emit_day0_window_entered_canonical_if_available(
+            conn,
+            replay_position,
+            day0_entered_at=replay_position.day0_entered_at,
+            previous_phase="active",
+            deps=types.SimpleNamespace(logger=logging.getLogger(__name__)),
+        )
+
+    after_events = _raw_position_event_rows(conn, position_id)
+    assert after_events == before_events
+    torn_phase = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert torn_phase == "active"
 
 
 def test_exit_dual_write_backfills_only_missing_entry_events_for_partial_history(tmp_path):

@@ -2723,15 +2723,22 @@ def _emit_day0_window_entered_canonical_if_available(
     _write + append_many_and_project. Clears T1.c-followup L875 OBSOLETE_
     PENDING_FEATURE (test_day0_transition_emits_durable_lifecycle_event).
 
-    Returns True on successful write, False on non-fatal skip (conn None
-    or RuntimeError from canonical transaction schema absence — matches
-    the pattern from _dual_write_canonical_entry_if_available).
+    Returns True when canonical Day0 truth is represented durably, including
+    the idempotent repair case where the DAY0_WINDOW_ENTERED event already
+    exists and only position_current projection needs to be refreshed. Returns
+    False on non-fatal skip (conn None or RuntimeError from canonical
+    transaction schema absence — matches the pattern from
+    _dual_write_canonical_entry_if_available).
     """
     if conn is None:
         return False
 
-    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.engine.lifecycle_events import (
+        build_day0_window_entered_canonical_write,
+        build_position_current_projection,
+    )
     from src.state.db import append_many_and_project
+    from src.state.projection import upsert_position_current
 
     try:
         existing_day0 = conn.execute(
@@ -2745,7 +2752,31 @@ def _emit_day0_window_entered_canonical_if_available(
             (getattr(pos, "trade_id", ""),),
         ).fetchone()
         if existing_day0 is not None:
-            return False
+            latest = conn.execute(
+                """
+                SELECT event_type, phase_after
+                  FROM position_events
+                 WHERE position_id = ?
+                 ORDER BY sequence_no DESC, rowid DESC
+                 LIMIT 1
+                """,
+                (getattr(pos, "trade_id", ""),),
+            ).fetchone()
+            latest_type = str(latest[0] if latest else "")
+            latest_phase_after = str((latest[1] if latest and len(latest) > 1 else "") or "")
+            if (
+                latest_type != "DAY0_WINDOW_ENTERED"
+                or latest_phase_after != LifecyclePhase.DAY0_WINDOW.value
+            ):
+                raise ValueError(
+                    "existing DAY0_WINDOW_ENTERED is superseded by latest "
+                    f"canonical event {latest_type or '<missing>'}/{latest_phase_after or '<missing>'}; "
+                    "refusing to project day0_window over newer lifecycle truth"
+                )
+            projection = build_position_current_projection(pos)
+            projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
+            upsert_position_current(conn, projection)
+            return True
         # Query next sequence_no for this position (same pattern as
         # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
         # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /

@@ -3200,6 +3200,13 @@ _DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_mismatch"
 _DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
     {"deployment_freshness_4h_divergence"}
 )
+_LIVE_SIDECAR_BOOT_HEARTBEATS = (
+    ("forecast-live", "forecast-live-heartbeat.json", 120.0),
+    ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
+    ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
+    ("post-trade-capital", "daemon-heartbeat-post-trade-capital.json", 180.0),
+)
+_LIVE_SIDECAR_BOOT_CLOCK_SKEW_SECONDS = 5.0
 
 
 def _boot_deployment_freshness_auto_resume() -> None:
@@ -3309,6 +3316,104 @@ def _boot_deployment_freshness_auto_resume() -> None:
             exc,
             exc_info=True,
         )
+
+
+def _parse_sidecar_heartbeat_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _git_head_matches_boot(boot_sha: str, heartbeat_sha: str) -> bool:
+    boot = str(boot_sha or "").strip()
+    heartbeat = str(heartbeat_sha or "").strip()
+    if not boot or not heartbeat:
+        return False
+    if boot == heartbeat:
+        return True
+    return len(heartbeat) >= 7 and boot.startswith(heartbeat)
+
+
+def _startup_required_sidecar_head_check(
+    *,
+    boot_sha: str | None = None,
+    state_dir: Path | str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Fail live boot if required sidecars are stale, missing, or old-code.
+
+    The operator preflight already checks this, but launchd can still be loaded
+    directly. The live order daemon consumes substrate, price-channel, forecast,
+    and capital surfaces produced by these sidecars, so startup must prove they
+    are fresh and running the same code before any entry path can arm.
+    """
+
+    if get_mode() != "live":
+        return
+
+    expected_sha = str(boot_sha or _BOOT_STATE.get("sha") or "").strip()
+    if not expected_sha:
+        raise SystemExit(
+            "LIVE_SIDECAR_BOOT_BLOCKED: missing boot SHA; cannot prove sidecar code identity"
+        )
+
+    from src.config import STATE_DIR
+
+    state_root = (
+        Path(state_dir).expanduser().resolve()
+        if state_dir is not None
+        else Path(STATE_DIR)
+    )
+    checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    failures: list[str] = []
+    ok: list[str] = []
+    for daemon, filename, max_age_seconds in _LIVE_SIDECAR_BOOT_HEARTBEATS:
+        path = state_root / filename
+        if not path.exists():
+            failures.append(f"{daemon}:missing:{path}")
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            failures.append(f"{daemon}:unreadable:{exc.__class__.__name__}")
+            continue
+        heartbeat_sha = str(payload.get("git_head") or "").strip()
+        if not _git_head_matches_boot(expected_sha, heartbeat_sha):
+            failures.append(
+                f"{daemon}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
+                f"boot={expected_sha[:8]}"
+            )
+            continue
+        heartbeat_at = _parse_sidecar_heartbeat_time(
+            payload.get("alive_at") or payload.get("written_at") or payload.get("timestamp")
+        )
+        if heartbeat_at is None:
+            failures.append(f"{daemon}:timestamp_invalid")
+            continue
+        age_seconds = (checked_at - heartbeat_at).total_seconds()
+        if (
+            age_seconds < -_LIVE_SIDECAR_BOOT_CLOCK_SKEW_SECONDS
+            or age_seconds > max_age_seconds
+        ):
+            failures.append(
+                f"{daemon}:stale age_seconds={age_seconds:.1f} max={max_age_seconds:.1f}"
+            )
+            continue
+        ok.append(f"{daemon}@{heartbeat_sha[:8]} age={age_seconds:.1f}s")
+
+    if failures:
+        detail = "; ".join(failures)
+        logger.critical("LIVE_SIDECAR_BOOT_BLOCKED: %s", detail)
+        raise SystemExit(f"LIVE_SIDECAR_BOOT_BLOCKED: {detail}")
+
+    logger.info("live sidecar boot identity/freshness: OK (%s)", ", ".join(ok))
 
 
 def _startup_freshness_check() -> None:
@@ -10572,6 +10677,8 @@ def main():
     # the boot SHA captured above; written once (not refreshed) so a post-boot
     # filesystem divergence is still caught by the gate.
     _write_loaded_sha_state(_boot.get("sha"))
+
+    _startup_required_sidecar_head_check(boot_sha=_boot.get("sha"))
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).

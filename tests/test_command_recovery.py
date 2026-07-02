@@ -5286,6 +5286,213 @@ class TestRecoveryResolutionTable:
         assert _get_state(conn, "cmd-001") == "FILLED"
 
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_projects_filled_exit_trade_fact_to_closed(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-filled-exit-projection.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(
+            seed,
+            command_id="cmd-entry",
+            position_id="pos-exit",
+            size=10.01,
+            price=0.12,
+            token_id="tok-exit",
+        )
+        _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(
+            seed,
+            position_id="pos-exit",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 10.0102,
+                   chain_shares = 10.0102,
+                   cost_basis_usd = 1.2012,
+                   entry_price = 0.12,
+                   order_status = 'sell_placed',
+                   exit_reason = 'DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-exit'
+            """
+        )
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.01,
+            price=0.01,
+            token_id="tok-exit",
+        )
+        _advance_to_acked(seed, command_id="cmd-exit", venue_order_id="ord-exit")
+        append_event(
+            seed,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "place_exit_order_matched_submit",
+                "venue_order_id": "ord-exit",
+                "trade_id": "trade-exit",
+                "filled_size": "10.01",
+                "fill_price": "0.01",
+                "tx_hash": "0xexit",
+            },
+        )
+        _append_trade_fact(
+            seed,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit",
+            state="MATCHED",
+            filled_size="10.01",
+            fill_price="0.01",
+            tx_hash="0xexit",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT phase, order_status, exit_price, chain_shares
+                  FROM position_current
+                 WHERE position_id = 'pos-exit'
+                """
+            ).fetchone()
+            lifecycle_event = check.execute(
+                """
+                SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "exit_price": 0.01,
+            "chain_shares": 0.0,
+        }
+        assert dict(lifecycle_event) == {
+            "event_type": "EXIT_ORDER_FILLED",
+            "phase_before": "pending_exit",
+            "phase_after": "economically_closed",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "sell_filled",
+        }
+
+        retear = _conn_factory()
+        try:
+            first_count = retear.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                   AND order_id = 'ord-exit'
+                """
+            ).fetchone()["n"]
+            retear.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'pending_exit',
+                       chain_shares = 10.0102,
+                       order_status = 'retry_pending',
+                       updated_at = '2026-04-26T00:09:00Z'
+                 WHERE position_id = 'pos-exit'
+                """
+            )
+            retear.commit()
+        finally:
+            retear.close()
+
+        second_summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+        second_check = _conn_factory()
+        try:
+            second_count = second_check.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                   AND order_id = 'ord-exit'
+                """
+            ).fetchone()["n"]
+            repaired = second_check.execute(
+                """
+                SELECT phase, order_status, chain_shares
+                  FROM position_current
+                 WHERE position_id = 'pos-exit'
+                """
+            ).fetchone()
+        finally:
+            second_check.close()
+
+        assert second_summary["exit_pending_projections"]["errors"] == 0
+        assert second_count == first_count == 1
+        assert dict(repaired) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "chain_shares": 0.0,
+        }
+
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
     def test_scoped_recovery_clears_matched_cancel_entry_review(
         self,
         tmp_path,
@@ -10713,6 +10920,91 @@ class TestRecoveryResolutionTable:
         assert dict(lifecycle_events[-1]) == {
             "event_type": "EXIT_ORDER_POSTED",
             "phase_before": "active",
+            "phase_after": "pending_exit",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "MATCHED",
+        }
+        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
+
+    def test_exit_matched_trade_fact_over_dust_tolerance_stays_pending_exit_without_economic_close(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 10.03,
+                   chain_shares = 10.03,
+                   cost_basis_usd = 1.2036,
+                   entry_price = 0.12,
+                   order_id = 'ord-entry',
+                   order_status = 'retry_pending',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.03,
+            price=0.04,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="10.018",
+            fill_price="0.04",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 10.03,
+            "chain_shares": 10.03,
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        lifecycle_events = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert dict(lifecycle_events[-1]) == {
+            "event_type": "EXIT_ORDER_POSTED",
+            "phase_before": "pending_exit",
             "phase_after": "pending_exit",
             "order_id": "ord-exit",
             "command_id": "cmd-exit",

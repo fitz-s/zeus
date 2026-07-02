@@ -155,6 +155,7 @@ _EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
     "MATCHED",
     "MINED",
 })
+_EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 _EXIT_LIFECYCLE_REPAIR_COMMAND_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
@@ -5391,6 +5392,26 @@ def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], lis
                 "CHAIN_CONFIRMED_ZERO",
             ]
         )
+    economic_close_exit_fill = (
+        terminal_phase == "economically_closed"
+        and str(candidate.get("event_type") or "") == "EXIT_ORDER_FILLED"
+    )
+    if economic_close_exit_fill:
+        updates.extend(
+            [
+                "order_status = ?",
+                "exit_retry_count = ?",
+                "next_exit_retry_at = ?",
+                "chain_shares = ?",
+                "chain_avg_price = ?",
+                "chain_cost_basis_usd = ?",
+            ]
+        )
+        params.extend(["sell_filled", 0, None, 0.0, 0.0, 0.0])
+        exit_price = _float_or_none(payload.get("fill_price") or payload.get("exit_price"))
+        if exit_price is not None:
+            updates.append("exit_price = COALESCE(exit_price, ?)")
+            params.append(exit_price)
     return updates, params
 
 
@@ -5957,7 +5978,7 @@ def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
         filled_size is not None
         and fill_price is not None
         and target_size is not None
-        and filled_size >= target_size
+        and filled_size + _EXIT_FULL_CLOSE_DUST_TOLERANCE >= target_size
     )
 
 
@@ -6004,6 +6025,9 @@ def _append_exit_filled_projection(
             "exit_price": _decimal_text(fill_price),
             "exit_reason": current.get("exit_reason") or "COMMAND_RECOVERY_EXIT_FILL",
             "shares": current.get("shares") or _decimal_text(filled_size),
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
             "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
             "unit": current.get("unit") or "F",
         }
@@ -15936,6 +15960,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
         _boot_db_pass(
+            "exit_pending_projections",
+            reconcile_exit_pending_projections,
+            "exit_pending_projections",
+        )
+        _boot_db_pass(
             "matched_cancel_review_required_entries",
             reconcile_matched_cancel_review_required_entries,
             "matched_cancel_review_required_entries",
@@ -16110,6 +16139,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
         _db_pass(
+            "exit_pending_projections",
+            reconcile_exit_pending_projections,
+            "exit_pending_projections",
+        )
+        _db_pass(
             "matched_cancel_review_required_entries",
             reconcile_matched_cancel_review_required_entries,
             "matched_cancel_review_required_entries",
@@ -16180,6 +16214,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
+        )
+        _db_pass(
+            "exit_pending_projections",
+            reconcile_exit_pending_projections,
+            "exit_pending_projections",
         )
         _client_pass(
             "edli_post_submit_unknown_absence",
