@@ -313,6 +313,183 @@ def test_live_tick_scope_projects_acked_entry_order_before_full_sweep(monkeypatc
         verify.close()
 
 
+def test_live_tick_scope_projects_filled_entry_order_before_full_sweep(monkeypatch, tmp_path):
+    """FILLED live entry orders must enter active monitoring on the high-cadence lane."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "recovery-live-filled-entry-projection.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    event_id = "edli_evt_live_tick_filled_entry"
+    final_intent_id = f"edli_intent:{event_id}:tok-yes"
+    decision_id = (
+        f"edli_exec_cmd:{event_id}:{final_intent_id}:"
+        "tok-yes:tok-yes:buy_yes"
+    )
+    aggregate_id = f"{event_id}:{final_intent_id}"
+    h._insert(
+        seed_conn,
+        command_id="cmd-live-filled",
+        position_id="pos-live-filled",
+        decision_id=decision_id,
+        token_id="tok-yes",
+        no_token_id="tok-no",
+        selected_token_id="tok-yes",
+        outcome_label="YES",
+        size=40.25,
+        price=0.44,
+    )
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-live-filled",
+        venue_order_id="vord-live-filled",
+    )
+    append_event(
+        seed_conn,
+        command_id="cmd-live-filled",
+        event_type="FILL_CONFIRMED",
+        occurred_at="2026-07-02T02:18:17+00:00",
+        payload={"venue_order_id": "vord-live-filled", "venue_status": "MATCHED"},
+    )
+    h._append_trade_fact(
+        seed_conn,
+        command_id="cmd-live-filled",
+        order_id="vord-live-filled",
+        trade_id="trade-live-filled",
+        state="MATCHED",
+        filled_size="40.25",
+        fill_price="0.44",
+    )
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "decision_audit": {
+                "event_id": event_id,
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "final_intent_id": final_intent_id,
+                "actual_bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+                "actual_condition_id": "condition-test",
+                "actual_direction": "buy_yes",
+                "actual_token_id": "tok-yes",
+                "city": "Manila",
+                "target_date": "2026-07-02",
+                "metric": "high",
+                "strategy_key": "day0_nowcast_entry",
+                "q_live": 0.9614944294185659,
+                "q_lcb_5pct": 0.96,
+                "opportunity_book": {
+                    "cache_summary": {
+                        "selected_qkernel_execution_economics": {
+                            "source": "qkernel_spine",
+                            "side": "YES",
+                            "candidate_id": "YES:bin-32:DIRECT_YES:bin-32@proof",
+                            "route_id": "DIRECT_YES:bin-32@proof",
+                            "bin_id": "bin-32",
+                            "payoff_q_point": 0.9614944294185659,
+                            "payoff_q_lcb": 0.96,
+                            "cost": 0.44,
+                            "edge_lcb": 0.52,
+                            "optimal_delta_u": 0.52,
+                            "false_edge_rate": 0.01,
+                            "direction_law_ok": True,
+                            "coherence_allows": True,
+                        },
+                    },
+                },
+            },
+        },
+        occurred_at="2026-07-02T02:17:51+00:00",
+    )
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="PreSubmitRevalidated",
+        payload={
+            "event_id": event_id,
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "final_intent_id": final_intent_id,
+            "condition_id": "condition-test",
+            "token_id": "tok-yes",
+            "direction": "buy_yes",
+            "city": "Manila",
+            "target_date": "2026-07-02",
+            "metric": "high",
+            "unit": "C",
+            "strategy_key": "day0_nowcast_entry",
+            "bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+            "q_live": 0.9614944294185659,
+            "q_lcb_5pct": 0.96,
+            "limit_price": 0.44,
+            "size": 40.25,
+        },
+        occurred_at="2026-07-02T02:18:08+00:00",
+    )
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": decision_id,
+        },
+        occurred_at="2026-07-02T02:18:09+00:00",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-live-filled": {"orderID": "vord-live-filled", "status": "MATCHED"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["filled_entry_projection_repair"]["advanced"] == 1
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        current = verify.execute(
+            """
+            SELECT phase, direction, shares, entry_price, order_id, order_status,
+                   entry_method, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-live-filled'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "direction": "buy_yes",
+            "shares": pytest.approx(40.25),
+            "entry_price": pytest.approx(0.44),
+            "order_id": "vord-live-filled",
+            "order_status": "filled",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "day0_nowcast_entry",
+        }
+    finally:
+        verify.close()
+
+
 def test_restart_preflight_scope_projects_acked_entry_order_before_preflight(monkeypatch, tmp_path):
     """Restart recovery must clear ACKED/LIVE entry projection gaps before preflight."""
     import tests.test_command_recovery as h

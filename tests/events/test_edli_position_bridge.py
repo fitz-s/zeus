@@ -234,6 +234,126 @@ def _position_current_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM position_current").fetchall()
 
 
+def test_bridge_uses_nested_decision_audit_qkernel_when_certificates_unavailable(conn):
+    aggregate_id = "agg-edli-day0-nested-qkernel"
+    event_id = "evt-edli-day0-nested-qkernel"
+    final_intent_id = f"intent:{event_id}:{ELECTED_YES_TOKEN}"
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "decision_audit": {
+                "event_id": event_id,
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "final_intent_id": final_intent_id,
+                "actual_bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+                "actual_condition_id": CONDITION_ID,
+                "actual_direction": "buy_yes",
+                "actual_token_id": ELECTED_YES_TOKEN,
+                "city": "Manila",
+                "target_date": "2026-07-02",
+                "metric": "high",
+                "strategy_key": "day0_nowcast_entry",
+                "opportunity_book": {
+                    "cache_summary": {
+                        "selected_qkernel_execution_economics": {
+                            "source": "qkernel_spine",
+                            "side": "YES",
+                            "candidate_id": "YES:bin-32:DIRECT_YES:bin-32@proof",
+                            "route_id": "DIRECT_YES:bin-32@proof",
+                            "bin_id": "bin-32",
+                            "payoff_q_point": 0.9614944294185659,
+                            "payoff_q_lcb": 0.96,
+                            "cost": 0.44,
+                            "edge_lcb": 0.52,
+                            "optimal_delta_u": 0.52,
+                            "false_edge_rate": 0.01,
+                            "direction_law_ok": True,
+                            "coherence_allows": True,
+                        },
+                    },
+                },
+            },
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="PreSubmitRevalidated",
+        payload={
+            "event_id": event_id,
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "final_intent_id": final_intent_id,
+            "strategy_key": "day0_nowcast_entry",
+            "condition_id": CONDITION_ID,
+            "token_id": ELECTED_YES_TOKEN,
+            "side": "BUY",
+            "direction": "buy_yes",
+            "native_token_side": "YES",
+            "outcome_label": "YES",
+            "city": "Manila",
+            "target_date": "2026-07-02",
+            "bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+            "metric": "high",
+            "unit": "C",
+            "market_id": CONDITION_ID,
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": EXECUTION_COMMAND_ID,
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=4,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": VENUE_ORDER_ID,
+            "filled_size": 40.25,
+            "avg_fill_price": 0.44,
+            "fees": 0.0,
+        },
+        source_authority="user_channel",
+    )
+
+    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    assert result is not None
+    current = conn.execute(
+        """
+        SELECT phase, direction, p_posterior, entry_ci_width, entry_method, strategy_key
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (edli_bridge_position_id(aggregate_id),),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "active",
+        "direction": "buy_yes",
+        "p_posterior": pytest.approx(0.9614944294185659),
+        "entry_ci_width": pytest.approx(0.002988858837131723),
+        "entry_method": EntryMethod.QKERNEL_SPINE.value,
+        "strategy_key": "day0_nowcast_entry",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 1. RED: confirmed fill, no bridge → no position_current row
 # --------------------------------------------------------------------------- #

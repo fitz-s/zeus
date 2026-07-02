@@ -150,6 +150,23 @@ def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():
         _validate_pre_submit_revalidation_payload(payload)
 
 
+def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
+    from src.execution.command_recovery import _event_bound_strategy_key_from_payload
+
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_yes"}
+        )
+        == "day0_nowcast_entry"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+        )
+        == "settlement_capture"
+    )
+
+
 def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatch):
     """Boot-fast recovery must not block scheduler startup on CLOB reads."""
     from src.execution import command_recovery
@@ -7036,7 +7053,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.37,
+            q_live=0.62,
             direction="buy_yes",
         )
 
@@ -7051,7 +7068,7 @@ class TestRecoveryResolutionTable:
         assert dict(current) == {
             "phase": "pending_entry",
             "direction": "buy_yes",
-            "p_posterior": pytest.approx(0.37),
+            "p_posterior": pytest.approx(0.62),
         }
 
     def test_live_edli_entry_projection_refuses_missing_actionable_certificate(
@@ -7107,7 +7124,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.37,
+            q_live=0.62,
             direction="buy_yes",
             quarantine=True,
         )
@@ -7266,7 +7283,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.42,
+            q_live=0.62,
             direction="buy_yes",
         )
         conn.execute(
@@ -7299,7 +7316,7 @@ class TestRecoveryResolutionTable:
         current = conn.execute(
             "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
-        assert current["p_posterior"] == pytest.approx(0.42)
+        assert current["p_posterior"] == pytest.approx(0.62)
         assert current["entry_method"] == "qkernel_spine"
 
     def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
@@ -7315,7 +7332,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.42,
+            q_live=0.62,
             direction="buy_yes",
             quarantine=True,
         )
@@ -7365,7 +7382,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.37,
+            q_live=0.62,
             direction="buy_yes",
             quarantine=True,
         )
@@ -7382,7 +7399,7 @@ class TestRecoveryResolutionTable:
                 'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
                 '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
                 'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
-                0.37, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                0.62, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
                 'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
                 'condition-test', 'ord-edli-active-invalid-authority', 'partial',
                 '2026-04-26T00:05:00Z', 'high', 5.0
@@ -8195,6 +8212,180 @@ class TestRecoveryResolutionTable:
             "entry_method": "qkernel_spine",
             "strategy_key": "opening_inertia",
         }
+
+    def test_filled_day0_edli_entry_projects_from_nested_receipt_qkernel(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Live Day0 FOK fills must become active positions from real receipt shape."""
+
+        event_id = "edli_evt_day0_nested_qkernel"
+        yes_token_id = "tok-yes-day0"
+        no_token_id = "tok-no-day0"
+        final_intent_id = f"edli_intent:{event_id}:{yes_token_id}"
+        decision_id = (
+            f"edli_exec_cmd:{event_id}:{final_intent_id}:"
+            f"{yes_token_id}:{yes_token_id}:buy_yes"
+        )
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=yes_token_id,
+            outcome_label="YES",
+            decision_id=decision_id,
+            size=40.25,
+            price=0.44,
+            created_at="2026-07-02T02:18:11+00:00",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-day0-fok")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-07-02T02:18:17+00:00",
+            payload={
+                "source": "REST",
+                "venue_order_id": "ord-day0-fok",
+                "trade_id": "trade-day0-fok",
+                "filled_size": "40.25",
+                "fill_price": "0.44",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-day0-fok",
+            trade_id="trade-day0-fok",
+            state="MATCHED",
+            filled_size="40.25",
+            fill_price="0.44",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-day0-fok",
+            state="MATCHED",
+            matched_size="40.25",
+            remaining_size="0",
+            source="REST",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="DecisionProofAccepted",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "decision_audit": {
+                    "event_id": event_id,
+                    "event_type": "DAY0_EXTREME_UPDATED",
+                    "final_intent_id": final_intent_id,
+                    "actual_bin_label": (
+                        "Will the highest temperature in Manila be 32°C on July 2?"
+                    ),
+                    "actual_condition_id": "condition-test",
+                    "actual_direction": "buy_yes",
+                    "actual_token_id": yes_token_id,
+                    "city": "Manila",
+                    "target_date": "2026-07-02",
+                    "metric": "high",
+                    "strategy_key": "day0_nowcast_entry",
+                    "opportunity_book": {
+                        "cache_summary": {
+                            "selected_qkernel_execution_economics": {
+                                "source": "qkernel_spine",
+                                "side": "YES",
+                                "candidate_id": "YES:bin-32:DIRECT_YES:bin-32",
+                                "route_id": "DIRECT_YES:bin-32",
+                                "bin_id": "bin-32",
+                                "payoff_q_point": 0.9614944294185659,
+                                "payoff_q_lcb": 0.96,
+                                "cost": 0.44,
+                                "edge_lcb": 0.52,
+                                "optimal_delta_u": 0.52,
+                                "false_edge_rate": 0.01,
+                                "direction_law_ok": True,
+                                "coherence_allows": True,
+                            }
+                        }
+                    },
+                },
+            },
+            occurred_at="2026-07-02T02:17:51+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": yes_token_id,
+                "direction": "buy_yes",
+                "city": "Manila",
+                "target_date": "2026-07-02",
+                "metric": "high",
+                "strategy_key": "day0_nowcast_entry",
+                "bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+                "q_live": 0.9614944294185659,
+                "limit_price": 0.44,
+                "size": 40.25,
+            },
+            occurred_at="2026-07-02T02:18:08+00:00",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, shares, entry_price,
+                   order_status, entry_method, strategy_key, p_posterior
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Manila",
+            "target_date": "2026-07-02",
+            "direction": "buy_yes",
+            "shares": pytest.approx(40.25),
+            "entry_price": pytest.approx(0.44),
+            "order_status": "filled",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "day0_nowcast_entry",
+            "p_posterior": pytest.approx(0.9614944294185659),
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert event_types == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+            "ENTRY_ORDER_FILLED",
+        ]
 
     def test_partial_edli_entry_without_projection_recovers_active_partial_position_from_events(
         self,

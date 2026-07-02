@@ -352,8 +352,8 @@ def _entry_authority_from_decision_audit(
     q_live = _float_or_none(audit.get("q_live"))
     q_lcb = _float_or_none(audit.get("q_lcb_5pct"))
     entry_method: str | None = None
-    qkernel_payload = audit.get("qkernel_execution_economics")
-    if isinstance(qkernel_payload, dict):
+    qkernel_payload = _selected_qkernel_execution_economics(audit)
+    if qkernel_payload:
         qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
         qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
         if (
@@ -368,6 +368,25 @@ def _entry_authority_from_decision_audit(
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
     return q_live, ci_width, entry_method
+
+
+def _selected_qkernel_execution_economics(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract selected qkernel economics from current live receipt shapes."""
+
+    direct = payload.get("qkernel_execution_economics")
+    if isinstance(direct, dict) and direct:
+        return direct
+    selected = payload.get("selected_qkernel_execution_economics")
+    if isinstance(selected, dict) and selected:
+        return selected
+    opportunity_book = payload.get("opportunity_book")
+    if isinstance(opportunity_book, dict):
+        cache_summary = opportunity_book.get("cache_summary")
+        if isinstance(cache_summary, dict):
+            selected = cache_summary.get("selected_qkernel_execution_economics")
+            if isinstance(selected, dict) and selected:
+                return selected
+    return {}
 
 
 def _latest_payload(events: list[tuple[str, dict[str, Any]]], event_type: str) -> dict[str, Any] | None:

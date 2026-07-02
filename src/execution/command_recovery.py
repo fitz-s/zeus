@@ -117,6 +117,7 @@ _LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
 })
 _CANONICAL_STRATEGY_KEYS = frozenset({
     "settlement_capture",
+    "day0_nowcast_entry",
     "shoulder_sell",
     "center_buy",
     "opening_inertia",
@@ -3095,6 +3096,26 @@ def _edli_payload_matches_token(payload: dict, *, semantic_key: str = "", token_
     return token_id in str(semantic_key or "") or token_id in final_intent_id
 
 
+def _selected_qkernel_execution_economics(payload: dict) -> dict:
+    """Extract the selected qkernel economics from live EDLI receipt shapes."""
+
+    direct = _json_mapping(payload.get("qkernel_execution_economics"))
+    if direct:
+        return direct
+    for container in (payload, _json_mapping(payload.get("decision_audit"))):
+        if not container:
+            continue
+        selected = _json_mapping(container.get("selected_qkernel_execution_economics"))
+        if selected:
+            return selected
+        opportunity_book = _json_mapping(container.get("opportunity_book"))
+        cache_summary = _json_mapping(opportunity_book.get("cache_summary"))
+        selected = _json_mapping(cache_summary.get("selected_qkernel_execution_economics"))
+        if selected:
+            return selected
+    return {}
+
+
 def _unit_from_bin_label(bin_label: str) -> str:
     label = str(bin_label or "").strip().upper()
     if "°C" in label or label.endswith(" C") or label.endswith("C"):
@@ -3179,14 +3200,30 @@ def _edli_live_order_event_context(
     bin_label = str(first("bin_label", "actual_bin_label") or "").strip()
     metric = str(first("metric", "temperature_metric") or "").strip().lower()
     event_type = str(first("event_type") or "").strip()
-    qkernel_payload = first("qkernel_execution_economics")
+    qkernel_payload: dict = {}
+    for payload in payloads:
+        qkernel_payload = _selected_qkernel_execution_economics(payload)
+        if qkernel_payload:
+            break
     q_live = first("q_live", "q_lcb_5pct")
+    if q_live in (None, "") and qkernel_payload:
+        q_live = (
+            qkernel_payload.get("payoff_q_point")
+            or qkernel_payload.get("q_dot_payoff")
+            or qkernel_payload.get("payoff_q_lcb")
+        )
+    q_lcb = first("q_lcb_5pct")
+    if q_lcb in (None, "") and qkernel_payload:
+        q_lcb = (
+            qkernel_payload.get("payoff_q_lcb")
+            or qkernel_payload.get("pre_qkernel_q_lcb_5pct")
+        )
     if not (
         condition_id
         and direction in {"buy_yes", "buy_no"}
         and bin_label
         and metric in {"high", "low"}
-        and isinstance(qkernel_payload, dict)
+        and qkernel_payload
         and q_live not in (None, "")
     ):
         return {}
@@ -3204,7 +3241,7 @@ def _edli_live_order_event_context(
         "unit": str(first("unit", "settlement_unit") or _unit_from_bin_label(bin_label)).strip().upper(),
         "strategy_key": str(first("strategy_key") or "").strip(),
         "q_live": q_live,
-        "q_lcb_5pct": first("q_lcb_5pct"),
+        "q_lcb_5pct": q_lcb,
         "qkernel_execution_economics": qkernel_payload,
         "selection_authority_applied": "qkernel_spine",
         "causal_snapshot_id": str(first("causal_snapshot_id", "snapshot_id") or "").strip(),
@@ -3340,7 +3377,10 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
     if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
         return "opening_inertia" if direction == "buy_no" else "center_buy"
     if event_type == "DAY0_EXTREME_UPDATED":
-        return "settlement_capture"
+        if direction == "buy_no":
+            return "settlement_capture"
+        if direction == "buy_yes":
+            return "day0_nowcast_entry"
     return ""
 
 
@@ -15063,7 +15103,25 @@ def _accumulate(
     EXCEPT the final ``reconcile_recorded_maker_fill_economics`` pass, which only
     contributed ``corrected`` -> advanced and ``errors``.
     """
-    summary[key] = pass_summary
+    existing = summary.get(key)
+    if isinstance(existing, dict):
+        merged = dict(existing)
+        for count_key in ("scanned", "advanced", "stayed", "errors"):
+            if count_key in pass_summary or count_key in merged:
+                merged[count_key] = int(merged.get(count_key, 0) or 0) + int(
+                    pass_summary.get(count_key, 0) or 0
+                )
+        if advanced_key not in {"advanced", "stayed", "errors", "scanned"}:
+            merged[advanced_key] = int(merged.get(advanced_key, 0) or 0) + int(
+                pass_summary.get(advanced_key, 0) or 0
+            )
+        continuations = list(existing.get("continuations") or [])
+        continuations.extend(pass_summary.get("continuations") or [])
+        if continuations:
+            merged["continuations"] = continuations
+        summary[key] = merged
+    else:
+        summary[key] = pass_summary
     summary["advanced"] += pass_summary[advanced_key]
     if fold_stayed:
         summary["stayed"] += pass_summary.get("stayed", 0)
@@ -15153,6 +15211,7 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             _local_orphan_no_fill_candidates,
             _terminal_point_order_candidates,
             _latest_matched_order_fact_candidates,
+            _latest_unprojected_filled_entry_candidates,
         ):
             try:
                 _harvest(candidate_fn(conn))
@@ -15853,6 +15912,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
         )
+        _client_pass(
+            "filled_entry_projection_repair",
+            reconcile_filled_entry_projection_repairs,
+            "filled_entry_projection_repair",
+            client_kw=True,
+        )
         _db_pass(
             "restart_no_venue_exit_retry_projection",
             reconcile_restart_no_venue_exit_retry_projections,
@@ -15931,6 +15996,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _client_pass("terminal_point_orders",
                      reconcile_terminal_point_orders,
                      "terminal_point_orders")
+        _db_pass(
+            "terminal_order_facts_after_point_orders",
+            reconcile_terminal_order_facts,
+            "terminal_order_facts",
+            collect_continuations=True,
+        )
         _client_pass("matched_order_facts",
                      reconcile_matched_order_facts,
                      "matched_order_facts")
@@ -15969,6 +16040,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs,
                  "live_entry_projection_repair")
+        if scope == "live_tick":
+            _client_pass(
+                "filled_entry_projection_repair",
+                reconcile_filled_entry_projection_repairs,
+                "filled_entry_projection_repair",
+                client_kw=True,
+            )
         _db_pass(
             "confirmed_chain_absence_projection_repair",
             repair_confirmed_chain_absence_positive_projections,
