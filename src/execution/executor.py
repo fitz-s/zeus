@@ -196,6 +196,7 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
+_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -1489,6 +1490,47 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
+    if terminal_no_fill:
+        existing_price = _decimal_or_none(prior_price)
+        candidate_price = _decimal_or_none(limit_price)
+        if existing_price is None or candidate_price is None:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_reprice_evidence_missing",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+            }
+        reprice_delta = abs(candidate_price - existing_price)
+        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_requires_reprice",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "reprice_delta": str(reprice_delta),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+            }
     return {
         "component": "entry_same_token_cooldown",
         "allowed": True,

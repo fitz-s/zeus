@@ -687,6 +687,49 @@ def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
     assert result["existing_command_id"] == "cmd-cancelled"
 
 
+def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["existing_price"] == "0.73"
+    assert result["candidate_price"] == "0.73"
+
+
 def test_cancelled_entry_without_zero_fill_fact_still_blocks_redecision(mem_db):
     mem_db.execute(
         """INSERT INTO venue_commands

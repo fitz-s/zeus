@@ -2363,6 +2363,92 @@ def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch
     assert state == "ACKED"
 
 
+def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "same-price-terminal-no-fill-repost.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.570",
+        top_ask="0.580",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(
+        conn,
+        command_id="cmd-old",
+        position_id="pos-old",
+        venue_order_id="order-old",
+        command_state="CANCELLED",
+        order_status="canceled",
+        order_price=0.57,
+    )
+    _seed_order_fact(
+        conn,
+        command_id="cmd-old",
+        venue_order_id="order-old",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+    )
+    recent_iso = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE venue_commands SET updated_at = ?, created_at = ? WHERE command_id = 'cmd-old'",
+        (recent_iso, recent_iso),
+    )
+    _seed_pending_entry_command(
+        conn,
+        command_id="cmd-entry",
+        position_id="pos-entry",
+        venue_order_id="order-entry",
+        command_state="ACKED",
+        order_status="live",
+        order_price=0.57,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET updated_at = ?, created_at = ? WHERE command_id = 'cmd-entry'",
+        (recent_iso, recent_iso),
+    )
+    conn.execute(
+        "UPDATE position_current SET updated_at = ? WHERE position_id IN ('pos-old', 'pos-entry')",
+        (recent_iso,),
+    )
+    conn.commit()
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    monkeypatch.setattr(
+        "src.execution.exit_safety.gate_for_intent",
+        lambda intent: types.SimpleNamespace(
+            allow_cancel=True,
+            block_reason=None,
+            state=types.SimpleNamespace(value="READY"),
+        ),
+    )
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_terminal_no_fill_repost_cancel")),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 1
+    assert cancelled == ["order-entry"]
+    assert state == "CANCELLED"
+
+
 def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-book-reverted.db")
     init_schema(conn)

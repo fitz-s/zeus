@@ -105,6 +105,8 @@ _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
 )
 _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS = 6 * 60 * 60
 _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES = frozenset({"economically_closed"})
+_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
+_ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS = 6 * 60 * 60
 _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
@@ -2149,6 +2151,94 @@ def _entry_command_has_positive_order_fact(conn, command_id: str) -> bool:
     return row is not None
 
 
+def _entry_command_has_zero_fill_terminal_order_fact(conn, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND UPPER(COALESCE(state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+           AND CAST(COALESCE(matched_size, '0') AS REAL) <= 0
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _same_token_terminal_no_fill_reprice_block_detail(
+    conn,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+    candidate_price: Decimal,
+    now: datetime | None = None,
+) -> dict[str, object] | None:
+    token = str(token_id or "").strip()
+    position_id = str(candidate_position_id or "").strip()
+    if (
+        not token
+        or not position_id
+        or candidate_price is None
+        or not _table_exists_in_schema(conn, "main", "venue_commands")
+        or not _table_exists_in_schema(conn, "main", "venue_order_facts")
+    ):
+        return None
+    try:
+        rows = conn.execute(
+            """
+            SELECT command_id, position_id, state, price, created_at, updated_at
+              FROM venue_commands
+             WHERE UPPER(intent_kind) = 'ENTRY'
+               AND UPPER(side) = 'BUY'
+               AND token_id = ?
+               AND position_id != ?
+               AND UPPER(state) IN ('CANCELLED', 'EXPIRED')
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 16
+            """,
+            (token, position_id),
+        ).fetchall()
+    except Exception:
+        return None
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    for row in rows:
+        command_id = str(row["command_id"] if hasattr(row, "keys") else row[0] or "")
+        if not command_id or not _entry_command_has_zero_fill_terminal_order_fact(conn, command_id):
+            continue
+        prior_price = _decimal_or_none(row["price"] if hasattr(row, "keys") else row[3])
+        if prior_price is None:
+            continue
+        updated_raw = row["updated_at"] if hasattr(row, "keys") else row[5]
+        created_raw = row["created_at"] if hasattr(row, "keys") else row[4]
+        last_seen = _parse_utc_timestamp(updated_raw) or _parse_utc_timestamp(created_raw)
+        if last_seen is None:
+            continue
+        age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
+        if age_seconds < 0:
+            age_seconds = 0.0
+        if age_seconds > _ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS:
+            continue
+        reprice_delta = abs(candidate_price - prior_price)
+        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+            return {
+                "existing_command_id": command_id,
+                "existing_position_id": str(row["position_id"] if hasattr(row, "keys") else row[1] or ""),
+                "existing_command_state": str(row["state"] if hasattr(row, "keys") else row[2] or ""),
+                "existing_updated_at": str(updated_raw or ""),
+                "existing_created_at": str(created_raw or ""),
+                "existing_price": str(prior_price),
+                "candidate_price": str(candidate_price),
+                "reprice_delta": str(reprice_delta),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+                "age_seconds": int(age_seconds),
+                "lookback_seconds": _ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS,
+            }
+    return None
+
+
 def _recent_same_token_exit_cooldown_detail(
     conn,
     *,
@@ -2289,6 +2379,36 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
         if _entry_command_has_positive_trade_fact(conn, command_id):
             continue
         if _entry_command_has_positive_order_fact(conn, command_id):
+            continue
+        no_fill_reprice_detail = _same_token_terminal_no_fill_reprice_block_detail(
+            conn,
+            token_id=token_id,
+            candidate_position_id=str(row["position_id"] if hasattr(row, "keys") else row[1] or ""),
+            candidate_price=order_price,
+        )
+        if no_fill_reprice_detail is not None:
+            try:
+                from src.execution.exit_safety import request_cancel_for_command
+
+                outcome = request_cancel_for_command(
+                    conn,
+                    command_id,
+                    lambda venue_order_id: clob.cancel_order(venue_order_id),
+                )
+            except Exception as exc:
+                deps.logger.warning(
+                    "Terminal no-fill same-price reprice cancel failed for %s: %s",
+                    command_id,
+                    exc,
+                )
+                continue
+            if is_cancel_confirmed_status(outcome.status):
+                cancelled += 1
+                deps.logger.info(
+                    "Entry order %s canceled: terminal no-fill requires reprice %s",
+                    command_id,
+                    no_fill_reprice_detail,
+                )
             continue
         recent_exit_detail = _recent_same_token_exit_cooldown_detail(
             conn,
