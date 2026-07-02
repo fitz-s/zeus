@@ -475,6 +475,8 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert ok is True
     assert "restart recovery passed" in detail
     assert calls
+    assert "init_schema_trade_only" in calls[0][2]
+    assert "get_trade_connection(write_class='live')" in calls[0][2]
 
 
 def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):

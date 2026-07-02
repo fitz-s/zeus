@@ -691,6 +691,11 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         py = sys.executable
     code = (
         "import json; "
+        "from src.state.db import get_trade_connection, init_schema_trade_only; "
+        "conn = get_trade_connection(write_class='live'); "
+        "init_schema_trade_only(conn); "
+        "conn.commit(); "
+        "conn.close(); "
         "from src.execution.command_recovery import reconcile_unresolved_commands; "
         "summary = reconcile_unresolved_commands(scope='restart_preflight'); "
         "print(json.dumps(summary, sort_keys=True, default=str)); "
