@@ -6259,6 +6259,35 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.ok is False
     assert result.detail == "src.main is running but held-position monitor cadence is stale"
     assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
+    assert result.evidence["restart_in_progress"] is False
+
+
+def test_monitor_cadence_restart_evidence_allows_stale_main_during_deploy_restart(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+    monkeypatch.setenv("ZEUS_LIVE_RESTART_IN_PROGRESS", "1")
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["restart_in_progress"] is True
+    assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
+    assert result.evidence["restart_recovery_obligation"].startswith("post-start health")
 
 
 def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recovery(

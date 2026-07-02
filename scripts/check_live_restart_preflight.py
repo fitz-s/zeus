@@ -256,6 +256,15 @@ def _live_main_processes() -> list[str]:
     return rows
 
 
+def _live_restart_in_progress() -> bool:
+    return str(os.environ.get("ZEUS_LIVE_RESTART_IN_PROGRESS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _live_trading_launchagent_installed_check() -> CheckResult:
     evidence: dict[str, Any] = {
         "plist_path": str(LIVE_TRADING_PLIST_PATH),
@@ -5498,7 +5507,9 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
             evidence,
         )
     main_processes = _live_main_processes()
+    restart_in_progress = _live_restart_in_progress()
     evidence["live_main_processes"] = main_processes
+    evidence["restart_in_progress"] = restart_in_progress
     if cadence["future_monitor_event_count"]:
         return CheckResult(
             "monitor_cadence_restart_evidence",
@@ -5519,7 +5530,7 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
     evidence["restart_recovery_obligation"] = (
         "post-start health must observe fresh per-position MONITOR_REFRESHED events before live is considered recovered"
     )
-    if not main_processes:
+    if not main_processes or restart_in_progress:
         return CheckResult(
             "monitor_cadence_restart_evidence",
             True,

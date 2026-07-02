@@ -433,6 +433,7 @@ def test_deploy_live_trading_restart_requires_preflight(monkeypatch, tmp_path):
         import subprocess
 
         calls.append(cmd)
+        assert (kwargs.get("env") or {}).get("ZEUS_LIVE_RESTART_IN_PROGRESS") == "1"
         if cmd[:2] == ["python", "scripts/check_live_restart_preflight.py"] or (
             len(cmd) >= 2 and cmd[1] == "scripts/check_live_restart_preflight.py"
         ):

@@ -662,11 +662,13 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     if not os.path.exists(py):
         py = sys.executable
     cmd = [py, "scripts/check_live_restart_preflight.py", "--json"]
+    env = _live_trading_subprocess_env()
+    env["ZEUS_LIVE_RESTART_IN_PROGRESS"] = "1"
     try:
         res = subprocess.run(
             cmd,
             cwd=live_repo,
-            env=_live_trading_subprocess_env(),
+            env=env,
             capture_output=True,
             text=True,
             timeout=120.0,
