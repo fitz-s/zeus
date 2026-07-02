@@ -159,6 +159,10 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000abc",
+    )
     monkeypatch.setattr("src.architecture.gate_runtime.check", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "src.execution.executor._entry_control_pause_component",
