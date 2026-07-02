@@ -2090,7 +2090,7 @@ LEAKAGE AUDIT: sigma_scale_fit.json
 
 ARTIFACT STATE
 
-The live `state/sigma_scale_fit.json` is byte-identical to `state/sigma_scale_fit.candidate.json` (same md5: `77a5d8f9eaed0095be54fa014478795e`). The artifact carries `candidate: true` and `"OPERATOR_GATED"` promotion note but was renamed to the live path, presumably by operator action on Jun 13 at 14:36 CDT (19:36 UTC). It uses authority `sigma_shape_kernel_mixture_v1_mle` (the new kernel form replacing the uniform-pedestal live form).
+The live `state/sigma_scale_fit.json` is byte-identical to `state/sigma_scale_fit.candidate.json` (same md5: `77a5d8f9eaed0095be54fa014478795e`). The artifact carries `candidate: true` and `"candidate"` promotion note but was renamed to the live path, presumably by operator action on Jun 13 at 14:36 CDT (19:36 UTC). It uses authority `sigma_shape_kernel_mixture_v1_mle` (the new kernel form replacing the uniform-pedestal live form).
 
 FIT QUERY: NO DATE FILTER — STRUCTURAL LEAKAGE RISK
 

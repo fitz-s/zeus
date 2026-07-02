@@ -765,8 +765,7 @@ Manual evidence to inspect:
 - heartbeats advance under `/Users/leofitz/zeus/state`
 - logs write under `/Users/leofitz/zeus/logs`
 - DB writes, if expected, occur in `/Users/leofitz/zeus/state`
-- `real_order_submit_enabled` remains false unless a separate live-arm plan is
-  explicitly approved
+- `real_order_submit_enabled` remains false until live-arm plan is complete
 - no duplicate writers
 - riskguard healthy
 - source freshness not assumed from stale docs
@@ -877,7 +876,7 @@ Post-rollback evidence:
 - old checkout logs advance
 - old checkout heartbeats advance
 - no new checkout writers remain
-- `real_order_submit_enabled` still false unless separately authorized
+- `real_order_submit_enabled` still false until live-arm plan complete
 
 ## Risks And Mitigations
 

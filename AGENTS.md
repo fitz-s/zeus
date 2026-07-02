@@ -1,6 +1,34 @@
 # Zeus AGENTS
 
-Root operating contract for `/Users/leofitz/zeus`. Keep durable Zeus law, money-path mental models, evidence gates, and routing rules here. Do not store branch names, current SHAs, live PIDs, bankrolls, one-off receipts, generated tool dumps, model catalogs, or active packet diary content. Nested `AGENTS.md` files govern their subtrees; system/developer/user instructions override all AGENTS files.
+Root operating contract for `/Users/leofitz/zeus`: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
+
+## Boot Digest (SessionStart injection slice — NOT a reading surface)
+
+SessionStart injects only a prefix of this file; this digest keeps the whole law in outline under truncation. **Reading contract: the digest licenses orientation only.** Before touching any surface a digest line names, Read that section (§N) plus the scoped `AGENTS.md` of the subtree — the digest omits the tables and gates that make the law executable. Citing "Boot Digest" as authority is itself a misread. Reading this file directly? Skip the digest; read §0–§6.
+
+**Mission [full law: §0].** Zeus trades Polymarket weather derivatives: `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`. Every non-trivial change states where it sits on that chain and how it behaves on re-decision. The chain is CYCLIC; no decision final until settlement; §0 carries the re-decision lanes this omits.
+
+**Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
+
+**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record: walk-forward de-bias -> T2 Bayesian precision fusion -> mu*, sigma_pred (floor 1.0C) -> sigma-shape floor -> bin integration -> q_lcb -> Edge -> Fractional Kelly. Never reintroduce market-anchor caps, shadow gates, or bankroll snapshots into root law. Legacy ENS/Platt is diagnostics-only.
+
+**Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
+
+**DBs [§2].** `zeus-world.db` (world/markets), `zeus-forecasts.db` (observations/settlements/calibration), `zeus_trades.db` (positions/orders/execution). Ownership machine-checked; no write transaction spans DBs on independent connections — only the two sanctioned helpers (INV-37).
+
+**Settlement [§2 — read before ANY settlement/bin/source work].** Integer temps from Weather Underground; every settlement write passes `SettlementSemantics.assert_settlement_value()`. Bin types point / finite_range / open_shoulder — never infer semantics from label punctuation. HIGH and LOW tracks share calendar geometry, nothing else.
+
+**Risk & lifecycle [§2].** GREEN/YELLOW/ORANGE/RED = max(individual); advisory-only risk forbidden (INV-05); only RED sweeps. Lifecycle enum-governed `pending_entry -> ... -> settled`; exit intent ≠ closure; settlement ≠ exit. Reconciliation: Chain > Chronicler > Portfolio.
+
+**Routing [§3 — has the per-task supplemental-read table this omits].** Root AGENTS -> scoped AGENTS for touched subtrees -> CodeGraph for structure (don't grep-first for symbols) -> targeted reference per §3 table. STOP AND PLAN before `architecture/**`, `docs/authority/**`, workflows, `src/state/**` truth paths, `src/control/**`, `src/supervisor_api/**`, cross-zone, >4 files, or anything canonical/lifecycle/schema/live-execution/settlement.
+
+**Docs & registries [§4 — registry-route table].** Unregistered files are invisible; every added/renamed/deleted file updates its owning registry. Current-fact docs are summary-only, evidence-backed, expiry-bound. No root coordination/scratch files unless asked.
+
+**Change control [§5].** Commits `type(scope): subject`; no destructive git; preserve unrelated dirty work; PRs only at milestone level (paid review once — batch).
+
+**Review [§6 + REVIEW.md first].** Runtime-risk order (Tier 0 live-money before all); empty findings + partial coverage ≠ clean pass.
+
+**END OF DIGEST.** Law starts at §0. Context ends here = boot slice truncated: Read this file in full before acting on any named surface.
 
 ## 0. Mission And Money Path
 

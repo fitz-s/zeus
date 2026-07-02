@@ -18,7 +18,6 @@
     "metric": "high",
     "min_cells": 60,
     "model": "sigma_core=max(sigma_impl*k, floor_steps*step); q_adj(bin)=(1-w)*Normal(sigma_core)+w*Normal(sigma_core*m)",
-    "promotion": "OPERATOR_GATED \u2014 rename to sigma_scale_fit.json only after operator sign-off AND forward-fill validation; the consumer must also be wired for the floor_steps + m fields (see report). Holdout shows the magnitude is non-stationary on 5 days.",
     "provenance_hash": "07973b49a2ab2b52",
     "scipy_available": true,
     "sigma_back_out": "q_mode = 2*Phi(half/sigma_impl)-1 ; sigma_impl = half/Phi^-1((q_mode+1)/2)",

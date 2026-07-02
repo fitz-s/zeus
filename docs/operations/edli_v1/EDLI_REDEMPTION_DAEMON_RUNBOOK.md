@@ -24,7 +24,7 @@ proof-kernel contracts.
 2. Run the event-bound proof tests.
 3. Run the money-path semantic classifier and required selected tests.
 4. Add a separate runtime PR that wires the reactor to daemon startup.
-5. Only after that PR, perform operator-approved daemon restart smoke:
+5. Only after that PR, perform daemon restart smoke:
    - event writer starts
    - market channel connects only active weather tokens
    - user channel or explicit reconcile is available before submit

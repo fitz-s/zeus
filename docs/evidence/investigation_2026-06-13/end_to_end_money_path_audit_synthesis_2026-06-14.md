@@ -79,7 +79,7 @@ This is the live alpha leak, and it is upstream-of-gates: the gates (S9) correct
 ### D1 — S5 live σ is the over-confident flat-pedestal, not the center-faithful refit  [HIGH, #1 lever]
 - **file:line**: live form `state/sigma_scale_fit.json` `_meta.supersedes_form` (`w=0`, flat
   `1/n_bins` pedestal); fitted-but-gated kernel mixture has `"candidate": true` +
-  `"promotion": "OPERATOR_GATED"`. Consumer: `src/data/replacement_forecast_materializer.py:1593-1628`.
+  `"promotion": "candidate"`. Consumer: `src/data/replacement_forecast_materializer.py:1593-1628`.
 - **evidence**: live `calibration_at_k1_w0` ring-0 ratio = **0.585** (q_mode 0.381 vs realized 0.223);
   the fitted candidate's `calibration_at_fit` ring-0 ratio = 1.042. 21/148 settled winners crushed.
 - **bin consequence**: mode q overstated ~1.7×; ring (±1/±2) q understated; winning ring bin's q_lcb

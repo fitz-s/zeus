@@ -67,7 +67,7 @@ Posterior median σ by computed_at day: 06-07/09 = **0.83–0.90** → 06-10..06
 | PRE-floor (<06-10) | 124 | −0.74 | 0.88 | **1.93** | 75% | 1.32 |
 | POST-floor (≥06-10) | 106 | −0.31 | 1.46 | **1.35** | 86% | 1.06 |
 
-**The σ-floor closed ≈half the gap (z-std 1.93→1.35).** Residual z-std 1.35 ⇒ σ still ~1.35× too narrow; the candidate `m`/`w` two-normal mixture (`sigma_scale_fit.candidate.json`) targets exactly this residual but is `candidate:true`, OPERATOR_GATED, un-promoted.
+**The σ-floor closed ≈half the gap (z-std 1.93→1.35).** Residual z-std 1.35 ⇒ σ still ~1.35× too narrow; the candidate `m`/`w` two-normal mixture (`sigma_scale_fit.candidate.json`) targets exactly this residual but is `candidate:true`, candidate, un-promoted.
 
 **The verdict-stale fact:** the deduped settled trade substrate behind the entire "no edge" finding is **1,475/1,484 events decided ≤06-06 (99% PRE-floor)**; 06-10/06-11 contribute **9 events**. The realized 0.945→0.884 overconfidence and −1.9¢ adverse selection are properties of the **superseded narrow-σ belief.** No settled sample exists to grade the corrected belief.
 
