@@ -42,7 +42,7 @@ the order-execution state-machine extension and the reservation ledger. Both are
 | C4 joint scenarios / correlation | **BUILD** (samples) + **ADAPT** (envelope) | zero cross-family samplers; `strategy/correlation.py` + `regime_correlation_store.py` (Ledoit-Wolf) exist but are exposure-CAP framed, strategy-owned, coupled to regime taxonomy slated for deletion — rehome under probability authority |
 | event loop (§3.2) | **40-50% REUSE** | `opportunity_events` + EventWriter + idempotency; market-channel WS pushes BOOK/BBA and already triggers `EDLI_REDECISION_PENDING` for held/screened families (`price_channel_ingest.py:2148-2220`); user-channel WS fills live. BUILD: `SOURCE_RUN_ARRIVED` event type (probe is poll+cursor, `source_clock_update_probe.py`), universalize the book bridge beyond held families |
 | input calendar (C2 shadow values, REST_ELIGIBLE) | **REUSE** | `release_calendar.py` + `dissemination_schedules.py` are exactly the deterministic schedule |
-| order state machine (§3.1) | **ADAPT (K0)** | `CommandState` (INV-29) + `venue_order_facts` CHECK cover submit_pending/live/partially_filled/cancel_pending/terminal; ADD `STALE_PENDING_CANCEL` (q-version-driven, not command-driven), `delayed`, per-order q_version/snapshot stamping (snapshot precedent exists at `executor.py:1215`), reserved-cash link. Extend the append-only fact model — do NOT fold into position LifecyclePhase (orthogonal K0 objects) |
+| order state machine (§3.1) | **ADAPT (K0)** | AMENDED 2026-07-02 (evidence: W1.2 schema packet): `venue_commands` gains a `q_version` stamp at creation (decision truth; snapshot precedent `executor.py:1216-1226`); `STALE_PENDING_CANCEL` and `delayed` are **DERIVED predicates, not stored states** — staleness ≡ order open ∧ stamped q_version ≠ current family q_version; delayed ≡ in-flight dwell > measured submit p99. `venue_order_facts` CHECK untouched (venue truth ≠ decision plane); reserved-cash link already exists (`collateral_reservations` PK = command_id); CommandState NOT expanded (INV-29 amendment); do NOT fold into position LifecyclePhase |
 | reservation ledger (§3.1, A4) | **ADAPT + BUILD (K0)** | `collateral_ledger.py` reserve-on-submit/release-on-terminal wired at one choke point (`venue_command_repo.py:1179`) BUT: check-then-insert TOCTOU (no aggregate atomicity) with real thread concurrency live today (reactor pool + 20-worker pool); FILLED released not converted (~180s phantom-cash window); partial fills untracked; no unsettled-proceeds bucket. BUILD CAS + convert-on-fill + identity check |
 | A4 identity → RED | **ADAPT** | `exchange_reconcile.py` (findings table, record/resolve API) reconciles orders/positions but never dollars, and findings don't feed `risk_level.py` — add a collateral-identity finding kind routed into the EXISTING RiskGuard RED (constitution forbids a parallel kill-switch) |
 | SOLVE (§3.3) | **BUILD** | `family_decision_engine.decide()/_select()` is filter-then-rank top-1 — not a solver. Reusable: `payoff_vector.optimize_vector_stake` (log-utility ΔU vs existing exposure — right shape, 1-D); `negrisk_routes.build_negrisk_route_set` (direct/synthetic/pair/full-basket routes, size-aware on executable ladders) = the §3.3 menu, REUSE-grade. Single instantiation seam: `qkernel_spine_bridge.py:1332` → clean module swap |
@@ -117,12 +117,53 @@ do not repeat); `db_table_ownership.yaml` + schema-fingerprint refresh for any n
   regret-ledger decision inputs · Day0 decision-time mask consolidation (after trust in
   authority-side conditioning) · each with its tests and registry rows, same commit.
 
-## 4. Open operator decisions
+## 4. Decisions — RESOLVED 2026-07-02 (operator axiom applied)
 
-1. **market_coherence.py** — model-vs-market veto lane (not a q mutation): axioms say delete;
-   it currently gates `decide()` at 3 sites. Delete with W5 or keep as an A3-class incident reporter?
-2. **W3 interim correlation rail** — accept single-family solve + risk_allocator caps until the C4
-   service lands, or block W3 promotion on C4?
-3. **exit_portfolio_execution_authority_2026-06-13.md** prescribes flag-gated shadow for this exact
-   build and contradicts the same-day no-shadow operator law — the authority doc needs an erratum;
-   this plan follows the operator law (time-boxed promotion harness, flag deleted at promotion).
+**Operator axiom (2026-07-02):** the decision is a continuous flow, not a one-shot event; the
+system wins only by being persistently faster than the market's motive; time and efficiency are
+first-class decision inputs. This affirms authority X1 (event-driven re-decision) as core law and
+resolves all three open decisions:
+
+1. **market_coherence.py → DELETE the veto, INVERT into a re-decision router (dies with W3, not W5).**
+   First principles: alpha IS disagreement with price (win-rate vs settled price, not vs our own
+   q_lcb) — a divergence veto refuses to trade exactly where measured edge is largest. The failure
+   mode it guards (our inputs are broken and the market knows) is already owned by the principled
+   defenses: freshness fail-closed, the A2 latency SLA, q_lcb uncertainty shading, and
+   settlement-graded evidence. A binary veto is gate-mass, and under continuous flow it oscillates
+   (blocked → book drifts → unblocked → re-enter = churn). Execution: the new SOLVE simply does not
+   include `coherence_allows` (the 3 `decide()` filter sites die with the engine swap at W3);
+   `assess_market_coherence`/`MarketCoherenceReport` survive REUSED as (a) a typed divergence event
+   into `opportunity_events` for monitoring/calibration diagnostics, and (b) the **re-decision
+   priority key** — divergence × staleness ranks which family the event loop re-solves first. The
+   brake becomes the router: largest disagreement gets the fastest look, never a refusal.
+
+2. **W3 interim correlation rail → ACCEPT transitional (single-family solve + risk_allocator caps);
+   do NOT block on C4.** First principles with the time axiom: blocking serializes the critical
+   path behind the longest-lead BUILD while the top-1 picker keeps leaving EV on the table every
+   cycle. The strongest correlation (bins of one market, same city×metric) is INSIDE the family and
+   fully handled by the single-family joint solve; residual cross-family exposure is bounded by
+   `risk_allocator/governor.py` hard caps (the surviving outer rail) plus κ shading. Bounded
+   overexposure, never sign error. Three binding conditions: (a) every decision receipt stamps
+   `correlation_rail=caps` so settlement grading can later measure exactly what C4 changes;
+   (b) the solver consumes a `ScenarioService` interface from day one — transitional impl is the
+   per-family independent product measure, so C4 is a drop-in service swap, not a solver rewrite;
+   (c) C4 runs W3-parallel with its own evidence gate — a dated follow-up, not dessert.
+
+3. **exit_portfolio_execution_authority_2026-06-13.md → ERRATUM WRITTEN (2026-07-02, in the doc).**
+   Operator word outranks the authority doc: the flag-gated/shadow-computed delivery mechanism is
+   superseded by the time-boxed promotion harness (G3 byte-identical-OFF → evidence gate → ARM flip
+   → flag deleted). Scope is mechanism only — E/Q/X/K math stands, X1 is affirmed as core law, and
+   K4's paired-replay estimation stays licensed (offline analysis ≠ runtime shadow lane).
+
+### 4b. What the axiom changes in the plan (beyond the three decisions)
+
+- **A2 latency metric is confirmed as W0's first deliverable** — speed cannot be managed unmeasured;
+  the SLA is the axiom made executable. Current detection floor: 60–90s scan; websocket-triggered
+  sync re-solve exists only for held/screened families until W4.
+- **The DAG order stands under the axiom — W1 before W4 is not caution, it is causal:** raising
+  decision frequency multiplies exposure to the live reservation-ledger TOCTOU race. Event-driven
+  triggers without the CAS ledger = faster wrong decisions. Correctness objects first, then cadence.
+- **Restart churn is a speed defect, not just noise:** the daemon's ~20-min auto-restart cycle
+  breaks websocket continuity — each reconnect is a blind window in the continuous flow. W0 adds a
+  blind-window metric (time not covered by a live book subscription) beside the A2 latency metric;
+  the restart root-cause gets triaged on that evidence.
