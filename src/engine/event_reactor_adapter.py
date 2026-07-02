@@ -218,6 +218,7 @@ from src.engine.replacement_forecast_reactor_hook import (
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
+from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.state.snapshot_repo import (
     executable_snapshot_from_row,
     get_snapshot,
@@ -11318,76 +11319,25 @@ _POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
 )
 
 
-def _parse_source_cycle_utc(value: object) -> datetime | None:
-    if value is None or value == "":
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
+# W0.1 (2026-07-02): the raw-input HWM lag logic itself now lives in
+# src/data/replacement_input_hwm.py so read paths other than this adapter (e.g. the
+# hook_factory live decision path) can enforce the SAME fail-closed tripwire without a
+# private cross-module import. These four wrappers keep IDENTICAL names/signatures
+# (family=...) so existing call sites and tests
+# (tests/test_live_safety_invariants.py:4356,:4417) stay byte-identical.
 def _latest_raw_model_input_cycle_for_family(
     conn: sqlite3.Connection,
     *,
     family,
     decision_time: datetime,
 ) -> datetime | None:
-    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
-    if table_ref is None:
-        return None
-    columns = _table_ref_columns(conn, table_ref)
-    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
-    if not required.issubset(columns):
-        return None
-    predicates = ["city = ?", "target_date = ?", "metric = ?"]
-    params: list[object] = [family.city, family.target_date, family.metric]
-    decision_iso = decision_time.astimezone(UTC).isoformat()
-    if "endpoint" in columns:
-        predicates.append("endpoint = 'single_runs'")
-    if "coverage_status" in columns:
-        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
-    if "captured_at" in columns:
-        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
-        params.append(decision_iso)
-    if "source_available_at" in columns:
-        predicates.append(
-            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
-        )
-        params.append(decision_iso)
-    anchor_terms = ["model = 'ecmwf_ifs'"]
-    if "source_id" in columns:
-        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
-    if "product_id" in columns:
-        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
-    anchor_expr = " OR ".join(anchor_terms)
-    try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-              FROM {table_ref}
-             WHERE {' AND '.join(predicates)}
-               AND datetime(source_cycle_time) <= datetime(?)
-             GROUP BY source_cycle_time
-             HAVING COUNT(DISTINCT model) >= 2
-                AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
-             ORDER BY datetime(source_cycle_time) DESC
-             LIMIT 1
-            """,
-            tuple([*params, decision_iso]),
-        ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except Exception:  # noqa: BLE001
-        raw_value = row[0]
-    return _parse_source_cycle_utc(raw_value)
+    return _replacement_input_hwm.latest_raw_model_input_cycle(
+        conn,
+        city=family.city,
+        target_date=family.target_date,
+        metric=family.metric,
+        decision_time=decision_time,
+    )
 
 
 def _latest_raw_artifact_input_cycle_for_family(
@@ -11396,57 +11346,13 @@ def _latest_raw_artifact_input_cycle_for_family(
     family,
     decision_time: datetime,
 ) -> datetime | None:
-    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
-    if table_ref is None:
-        return None
-    columns = _table_ref_columns(conn, table_ref)
-    required = {
-        "source_cycle_time",
-        "captured_at",
-        "source_available_at",
-        "artifact_metadata_json",
-    }
-    if not required.issubset(columns):
-        return None
-    predicates = [
-        "json_extract(artifact_metadata_json, '$.city') = ?",
-        "json_extract(artifact_metadata_json, '$.target_date') = ?",
-        "json_extract(artifact_metadata_json, '$.metric') = ?",
-        "datetime(captured_at) <= datetime(?)",
-        "datetime(source_available_at) <= datetime(?)",
-    ]
-    decision_iso = decision_time.astimezone(UTC).isoformat()
-    params: list[object] = [
-        family.city,
-        family.target_date,
-        family.metric,
-        decision_iso,
-        decision_iso,
-    ]
-    if "source_id" in columns:
-        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
-    try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-              FROM {table_ref}
-             WHERE {' AND '.join(predicates)}
-               AND datetime(source_cycle_time) <= datetime(?)
-             GROUP BY source_cycle_time
-             ORDER BY datetime(source_cycle_time) DESC
-             LIMIT 1
-            """,
-            tuple([*params, decision_iso]),
-        ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except Exception:  # noqa: BLE001
-        raw_value = row[0]
-    return _parse_source_cycle_utc(raw_value)
+    return _replacement_input_hwm.latest_raw_artifact_input_cycle(
+        conn,
+        city=family.city,
+        target_date=family.target_date,
+        metric=family.metric,
+        decision_time=decision_time,
+    )
 
 
 def _latest_live_input_cycle_for_family(
@@ -11455,24 +11361,13 @@ def _latest_live_input_cycle_for_family(
     family,
     decision_time: datetime,
 ) -> tuple[datetime | None, str | None]:
-    candidates = [
-        (
-            _latest_raw_model_input_cycle_for_family(
-                conn, family=family, decision_time=decision_time
-            ),
-            "source_cycle_time_raw_model_forecasts_lag",
-        ),
-        (
-            _latest_raw_artifact_input_cycle_for_family(
-                conn, family=family, decision_time=decision_time
-            ),
-            "source_cycle_time_raw_forecast_artifacts_lag",
-        ),
-    ]
-    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
-    if not candidates:
-        return None, None
-    return max(candidates, key=lambda item: item[0])
+    return _replacement_input_hwm.latest_live_input_cycle(
+        conn,
+        city=family.city,
+        target_date=family.target_date,
+        metric=family.metric,
+        decision_time=decision_time,
+    )
 
 
 def _replacement_live_input_lag_reason(
@@ -11482,20 +11377,13 @@ def _replacement_live_input_lag_reason(
     decision_time: datetime,
     posterior_source_cycle_time: object,
 ) -> str | None:
-    posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
-    if posterior_cycle is None:
-        return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
-    latest_raw_cycle, basis = _latest_live_input_cycle_for_family(
-        conn, family=family, decision_time=decision_time
-    )
-    if latest_raw_cycle is None or latest_raw_cycle <= posterior_cycle:
-        return None
-    lag_hours = (latest_raw_cycle - posterior_cycle).total_seconds() / 3600.0
-    return (
-        f"basis={basis or 'source_cycle_time_live_input_lag'}:"
-        f"latest_raw_cycle={latest_raw_cycle.isoformat()}:"
-        f"posterior_cycle={posterior_cycle.isoformat()}:"
-        f"lag_h={lag_hours:.2f}"
+    return _replacement_input_hwm.replacement_live_input_lag_reason(
+        conn,
+        city=family.city,
+        target_date=family.target_date,
+        metric=family.metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=posterior_source_cycle_time,
     )
 
 

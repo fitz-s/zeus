@@ -142,6 +142,41 @@ def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_
     )
 
 
+def _insert_raw_model_forecast(
+    conn: sqlite3.Connection,
+    *,
+    model: str,
+    source_cycle_time: datetime,
+    captured_at: datetime,
+    source_available_at: datetime,
+    city: str = "Shanghai",
+    target_date: str = "2026-06-07",
+    metric: str = "high",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c, endpoint,
+            coverage_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            model,
+            city,
+            target_date,
+            metric,
+            source_cycle_time.isoformat(),
+            source_available_at.isoformat(),
+            captured_at.isoformat(),
+            1,
+            28.0,
+            "single_runs",
+            "COVERED",
+        ),
+    )
+
+
 def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(conn)
@@ -315,3 +350,95 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior() -> None:
         current_bin_topology_hash="topology-hash",
     )
     assert computed_late.reason_code == "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME"
+
+
+def test_replacement_bundle_reader_enforce_raw_input_hwm_blocks_stale_serve() -> None:
+    """W0.1: when opted in, a raw input newer than the served posterior's source_cycle_time
+    must block the read instead of serving the stale posterior."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)  # source_cycle_time = 2026-06-06T00:00:00+00:00
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is False
+    assert result.reason_code.startswith("REPLACEMENT_RAW_INPUT_HWM:")
+    assert "latest_raw_cycle=2026-06-06T03:00:00+00:00" in result.reason_code
+    assert "posterior_cycle=2026-06-06T00:00:00+00:00" in result.reason_code
+
+
+def test_replacement_bundle_reader_raw_input_hwm_default_is_byte_identical() -> None:
+    """W0.1: enforce_raw_input_hwm defaults to False — a caller that never opts in must
+    keep serving the SAME posterior even when a newer raw input cycle exists."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == posterior_id
+
+
+def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() -> None:
+    """W0.1: opting in must not block a posterior that is already the freshest input."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)  # source_cycle_time = 2026-06-06T00:00:00+00:00
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(0),
+            captured_at=_dt(0, 5),
+            source_available_at=_dt(0, 5),
+        )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"

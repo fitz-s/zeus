@@ -109,6 +109,8 @@ modules:
       - src/engine/monitor_refresh.py
       - src/engine/replay.py
       - src/engine/lifecycle_events.py
+      - src/engine/replacement_forecast_hook_factory.py
+      - src/engine/position_belief.py
     public_entry_files:
       - src/engine/cycle_runner.py
       - src/engine/evaluator.py
@@ -224,6 +226,9 @@ modules:
       - src/data/polymarket_client.py
       - src/data/openmeteo_model_updates.py
       - src/data/source_clock_update_probe.py
+      - src/data/replacement_forecast_materializer.py
+      - src/data/replacement_forecast_bundle_reader.py
+      - src/data/replacement_input_hwm.py
     public_entry_files:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py

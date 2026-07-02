@@ -328,6 +328,32 @@ files:
     - src/data/replacement_forecast_production.py
     - scripts/materialize_replacement_forecast_live.py
     - tests/data/test_replacement_cycle_availability.py
+  src/data/replacement_forecast_materializer.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_posterior_writer
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_bundle_reader.py
+    - src/data/replacement_input_hwm.py
+  src/data/replacement_forecast_bundle_reader.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_posterior_reader
+    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers) that fails the read closed when a raw model/artifact input newer than the served posterior's source_cycle_time already exists.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/replacement_forecast_hook_factory.py
+    - src/data/replacement_input_hwm.py
+  src/data/replacement_input_hwm.py:
+    zone: K2_runtime
+    authority_role: replacement_raw_input_hwm_check
+    why: W0.1 (2026-07-02) shared read-time raw-input high-water-mark (HWM) check, moved out of event_reactor_adapter.py so read paths other than the no-submit-cert path (replacement_forecast_bundle_reader's enforce_raw_input_hwm opt-in) can enforce the same fail-closed tripwire without a private cross-module import. Compares the latest raw_model_forecasts/raw_forecast_artifacts source_cycle_time available by decision_time against a served posterior's source_cycle_time.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/data/replacement_forecast_bundle_reader.py
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
@@ -1416,6 +1442,21 @@ files:
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
+  src/engine/replacement_forecast_hook_factory.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_live_decision_hook
+    why: DB-backed hook factory for replacement forecast pre-intent admission; build_replacement_forecast_event_hook is the LIVE decision path wired at event_reactor_adapter.py's _resolve_replacement_forecast_adapter_hook, feeding effective_q_posterior/effective_q_lcb/effective_kelly_fraction to real order sizing. W0.1 (2026-07-02) its read_replacement_forecast_bundle call opts in with enforce_raw_input_hwm=True so this path can no longer serve a posterior once a newer raw input cycle has already arrived (previously the only q-serving read path with no raw-input HWM tripwire).
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_bundle_reader.py
+    - src/engine/replacement_forecast_reactor_hook.py
+  src/engine/position_belief.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_monitor_exit_belief
+    why: Read-only freshness annotation for held positions during monitor/exit; independently re-derives the latest raw-input cycle (_latest_live_input_cycle, separate implementation from src/data/replacement_input_hwm.py) and sets a fresh=False flag when the served posterior is behind newer raw input. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. Not touched by W0.1; consolidating its duplicate raw-HWM query onto src/data/replacement_input_hwm.py is deferred to a later wave.
+    downstream:
+    - src/engine/monitor_refresh.py
   src/engine/time_context.py:
     zone: K2_runtime
     authority_role: time_semantics
