@@ -6541,6 +6541,32 @@ def test_monitor_cadence_restart_evidence_rejects_future_events_even_main_absent
     assert result.evidence["future_monitor_event_count"] == 1
 
 
+def test_monitor_cadence_restart_evidence_tolerates_near_future_concurrent_write(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_monitor_events(
+        conn,
+        monitor_at=datetime.now(timezone.utc) + timedelta(seconds=10),
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["fresh_position_count"] == 1
+    assert result.evidence["future_monitor_event_count"] == 0
+
+
 # --- B1: submit_authority_config fail-closed tests ---
 
 

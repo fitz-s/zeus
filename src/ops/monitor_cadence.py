@@ -18,6 +18,7 @@ from src.contracts.position_truth import (
 
 
 MONITOR_CADENCE_EXPOSURE_EPS = 0.01
+MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS = 30.0
 MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
 NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
 EXIT_REDECISION_EVENT_TYPES = frozenset({"EXIT_ORDER_REJECTED", "EXIT_RETRY_RELEASED"})
@@ -101,8 +102,10 @@ def collect_monitor_cadence_evidence(
             continue
         age_seconds = (now_utc - occurred_dt).total_seconds()
         position_evidence["age_seconds"] = round(age_seconds, 1)
-        if age_seconds < 0.0:
+        if age_seconds < -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS:
             future_events.append(position_evidence)
+        elif age_seconds < 0.0:
+            fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
             if _exit_redecision_event_is_fresh(
                 position,
