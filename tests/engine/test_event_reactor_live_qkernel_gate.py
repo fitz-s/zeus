@@ -539,6 +539,50 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
         )
 
 
+def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
+    cert = _qkernel_cert()
+    cert.update(
+        route_id="DIRECT_NO:bin-1@proof",
+        candidate_id="NO:bin-1:DIRECT_NO:bin-1@proof",
+        side="NO",
+        payoff_q_point=0.8142,
+        payoff_q_lcb=0.7043,
+        cost=0.65733,
+        edge_lcb=0.04697,
+        optimal_stake_usd=154.0,
+        optimal_delta_u=0.25,
+        delta_u_at_min=0.01,
+        selection_guard_q_safe=0.7043,
+    )
+    proof = SimpleNamespace(
+        direction="buy_no",
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    assert (
+        era._qkernel_final_submit_floor_rejection_reason(
+            proof=proof,
+            cert=cert,
+            strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        )
+        is None
+    )
+    reason = era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=6.23,
+        actual_cost=0.65733,
+    )
+
+    assert reason is not None
+    assert reason.startswith(
+        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_profit_below_strategy_floor:"
+    )
+    assert "strategy=forecast_qkernel_entry" in reason
+    assert "floor=1.000000" in reason
+
+
 def test_qkernel_selection_rejection_names_no_positive_edge_not_generic_invalid():
     cert = _qkernel_cert()
     cert.update(

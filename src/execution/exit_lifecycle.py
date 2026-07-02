@@ -2117,6 +2117,18 @@ def _below_snapshot_min_order_error(position: Position, snapshot_context: dict[s
     return f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
 
 
+def _exit_no_executable_bid_error(
+    exit_intent: ExitIntent,
+    snapshot_context: dict[str, object],
+) -> str:
+    """Classify one-sided/no-bid sell attempts as liquidity blocked."""
+
+    best_bid = _positive_decimal(exit_intent.best_bid)
+    if best_bid is not None:
+        return ""
+    return "exit_no_executable_bid"
+
+
 def _dual_write_canonical_pending_exit_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -2378,6 +2390,26 @@ def _execute_live_exit(
                 error=snapshot_error,
             )
         return "exit_blocked: executable_snapshot_unavailable"
+
+    liquidity_error = _exit_no_executable_bid_error(exit_intent, snapshot_context)
+    if liquidity_error:
+        liquidity_reason = f"{exit_context.exit_reason} [NO_EXECUTABLE_BID]"
+        _mark_exit_retry(
+            position,
+            reason=liquidity_reason,
+            error=liquidity_error,
+            conn=conn,
+        )
+        if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=liquidity_reason,
+                error=liquidity_error,
+            )
+            log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
+        return "exit_blocked: no_executable_bid"
 
     if conn is not None:
         try:
@@ -2820,6 +2852,7 @@ def _latest_exit_snapshot_context(
     token_id: str,
     *,
     now: datetime | None = None,
+    require_sell_bid: bool = True,
 ) -> dict[str, object]:
     """Return executor snapshot kwargs for the latest fresh snapshot by token.
 
@@ -2837,15 +2870,22 @@ def _latest_exit_snapshot_context(
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute(
+        bid_filter = (
             """
+               AND orderbook_top_bid IS NOT NULL
+               AND TRIM(CAST(orderbook_top_bid AS TEXT)) != ''
+               AND UPPER(TRIM(CAST(orderbook_top_bid AS TEXT))) != 'ABSENT'
+            """
+            if require_sell_bid
+            else ""
+        )
+        row = conn.execute(
+            f"""
             SELECT snapshot_id, min_tick_size, min_order_size, neg_risk
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
                AND selected_outcome_token_id = ?
-               AND orderbook_top_bid IS NOT NULL
-               AND TRIM(CAST(orderbook_top_bid AS TEXT)) != ''
-               AND UPPER(TRIM(CAST(orderbook_top_bid AS TEXT))) != 'ABSENT'
+               {bid_filter}
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
@@ -3093,8 +3133,16 @@ def _latest_or_capture_exit_snapshot_context(
     """
 
     context = _latest_exit_snapshot_context(conn, token_id, now=now)
-    if context or conn is None or clob is None or not token_id:
+    if context:
         return context
+    no_bid_context = _latest_exit_snapshot_context(
+        conn,
+        token_id,
+        now=now,
+        require_sell_bid=False,
+    )
+    if conn is None or clob is None or not token_id:
+        return no_bid_context
 
     market_id = str(
         getattr(position, "market_id", "")
@@ -3110,7 +3158,7 @@ def _latest_or_capture_exit_snapshot_context(
         no_token = no_token or str(identity_seed.get("no_token_id") or "").strip()
         market_id = market_id or str(identity_seed.get("condition_id") or "").strip()
     if not market_id or not yes_token or not no_token:
-        return {}
+        return no_bid_context
 
     try:
         from src.data.market_scanner import (
@@ -3127,14 +3175,14 @@ def _latest_or_capture_exit_snapshot_context(
                 position.trade_id,
                 scan_authority,
             )
-            return {}
+            return no_bid_context
         if not siblings:
             logger.warning(
                 "Exit executable snapshot capture blocked for %s: no Gamma siblings for market_id=%s",
                 position.trade_id,
                 market_id,
             )
-            return {}
+            return no_bid_context
         if not any(_outcome_has_executable_identity(outcome) for outcome in siblings):
             if not identity_seed:
                 identity_seed = _latest_exit_snapshot_identity_seed(conn, token_id)
@@ -3175,7 +3223,22 @@ def _latest_or_capture_exit_snapshot_context(
                 position.trade_id,
                 token_id,
             )
-            return {}
+            return no_bid_context
+        refreshed_context = _latest_exit_snapshot_context(
+            conn,
+            token_id,
+            now=captured_at,
+        )
+        if refreshed_context:
+            return refreshed_context
+        refreshed_no_bid_context = _latest_exit_snapshot_context(
+            conn,
+            token_id,
+            now=captured_at,
+            require_sell_bid=False,
+        )
+        if refreshed_no_bid_context:
+            return refreshed_no_bid_context
         from src.state.snapshot_repo import get_snapshot
 
         snapshot = get_snapshot(conn, snapshot_id)
@@ -3194,7 +3257,7 @@ def _latest_or_capture_exit_snapshot_context(
             token_id,
             exc,
         )
-        return {}
+        return no_bid_context
 
 
 def _payload_decimal(payload: object, *keys: str) -> Decimal | None:

@@ -6105,6 +6105,62 @@ def _build_event_bound_no_submit_receipt_core(
             kelly_size_usd=kelly.size_usd,
             kelly_cost_basis_id=kelly_cost_basis_id,
         ))
+    actual_submit_quality_reason = _qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type=event.event_type,
+        actual_stake_usd=float(kelly.size_usd),
+        actual_cost=float(execution_price.value),
+    )
+    if actual_submit_quality_reason is not None:
+        return _with_shrink(EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=actual_submit_quality_reason,
+            city=family.city,
+            target_date=family.target_date,
+            metric=family.metric,
+            condition_id=str(candidate.condition_id or ""),
+            token_id=selected_token_id,
+            executable_snapshot_id=proof.executable_snapshot_id,
+            family_id=family.family_id,
+            bin_label=candidate.bin.label,
+            direction=direction,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
+            c_fee_adjusted=execution_price.value,
+            c_cost_95pct=proof.c_cost_95pct,
+            p_fill_lcb=proof.p_fill_lcb,
+            trade_score=trade_score,
+            native_quote_available=True,
+            source_status="MATCH",
+            family_complete=True,
+            fdr_pass=True,
+            fdr_family_id=fdr.fdr_family_id,
+            fdr_hypothesis_count=fdr.attempted_hypotheses,
+            kelly_pass=False,
+            kelly_execution_price_type=execution_price.__class__.__name__,
+            kelly_price_fee_deducted=execution_price.fee_deducted,
+            kelly_size_usd=kelly.size_usd,
+            kelly_cost_basis_id=kelly_cost_basis_id,
+            q_source=proof.q_source,
+            qkernel_execution_economics=_json_finite(proof.qkernel_execution_economics),
+            selection_authority_applied=proof.selection_authority_applied,
+            q_lcb_calibration_source=proof.q_lcb_calibration_source,
+            same_bin_yes_posterior=proof.same_bin_yes_posterior,
+            settlement_coverage_status=proof.settlement_coverage_status,
+            posterior_id=proof.posterior_id,
+            probability_authority=proof.probability_authority,
+            opportunity_book=(
+                _json_finite(opportunity_book.to_receipt_dict())
+                if opportunity_book is not None
+                else None
+            ),
+            execution_mode_intent=proof.execution_mode_intent,
+            maker_limit_price=proof.maker_limit_price,
+            rest_then_cross_policy=proof.rest_then_cross_policy,
+            rest_escalation_deadline_minutes=proof.rest_escalation_deadline_minutes,
+        ))
     risk = evaluate_riskguard(
         risk_decision_id=f"edli_risk:{event.event_id}:{selected_token_id}",
         level=get_current_level(),
@@ -13082,6 +13138,124 @@ def _qkernel_final_submit_floor_rejection_reason(
             "QKERNEL_FINAL_SUBMIT_FLOOR:expected_profit_below_strategy_floor:"
             f"strategy={strategy_key}:profit_lcb_usd={profit_lcb_usd:.6f}:"
             f"floor={min_expected_profit_usd:.6f}"
+        )
+    return None
+
+
+def _qkernel_actual_submit_quality_rejection_reason(
+    *,
+    proof: _CandidateProof,
+    strategy_policy_event_type: str | None = None,
+    actual_stake_usd: float,
+    actual_cost: float,
+) -> str | None:
+    """Reject qkernel orders that only looked profitable at theoretical size.
+
+    Selection certificates carry the qkernel's unconstrained optimal stake.  Live
+    submission is sized later by recapture, Kelly haircuts, free-cash, and venue
+    constraints.  The final money-path quality proof must therefore use the
+    notional and limit price that will actually be submitted.
+    """
+
+    cert = _valid_qkernel_execution_economics_payload(
+        getattr(proof, "qkernel_execution_economics", None),
+        direction=str(getattr(proof, "direction", "") or ""),
+    )
+    if cert is None:
+        return None
+    try:
+        stake = float(actual_stake_usd)
+        cost = float(actual_cost)
+        payoff_q_point = float(cert.get("payoff_q_point"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+    except (TypeError, ValueError):
+        return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:invalid_actual_submit_economics"
+    if not all(math.isfinite(value) for value in (stake, cost, payoff_q_point, payoff_q_lcb)):
+        return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:non_finite_actual_submit_economics"
+    if stake <= 0.0 or not (0.0 < cost < 1.0):
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:non_positive_actual_submit:"
+            f"stake_usd={stake:.6f}:cost={cost:.6f}"
+        )
+    edge_lcb = payoff_q_lcb - cost
+    if edge_lcb <= 0.0:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_edge_non_positive:"
+            f"payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}"
+        )
+
+    if not str(strategy_policy_event_type or "").strip():
+        return None
+    try:
+        strategy_key = _event_bound_strategy_key(
+            event_type=str(strategy_policy_event_type or ""),
+            direction=str(getattr(proof, "direction", "") or ""),
+            metric=str(
+                getattr(getattr(proof, "candidate", None), "metric", "")
+                or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
+                or ""
+            ),
+            require_metric_live=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR_UNAVAILABLE:{type(exc).__name__}"
+
+    floors = _event_bound_strategy_live_quality_floors(strategy_key)
+    floor_decision = entry_price_floor_decision(
+        strategy_key=strategy_key,
+        direction=str(getattr(proof, "direction", "") or ""),
+        declared_min_entry_price=floors["min_entry_price"],
+        selection_authority_applied="qkernel_spine",
+        economics=cert,
+        q_live=payoff_q_point,
+        q_lcb=payoff_q_lcb,
+        limit_price=cost,
+    )
+    effective_min_entry_price = float(floor_decision.effective_min_entry_price)
+    if cost + 1e-12 < effective_min_entry_price:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:limit_price_below_strategy_entry_floor:"
+            f"strategy={strategy_key}:cost={cost:.6f}:floor={effective_min_entry_price:.6f}"
+        )
+
+    min_expected_profit_usd = float(floors["min_expected_profit_usd"])
+    profit_lcb_usd = roi_frontier_profit_lcb_usd(
+        stake=stake,
+        cost=cost,
+        edge_lcb=edge_lcb,
+    )
+    if profit_lcb_usd + 1e-9 < min_expected_profit_usd:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_profit_below_strategy_floor:"
+            f"strategy={strategy_key}:profit_lcb_usd={profit_lcb_usd:.6f}:"
+            f"floor={min_expected_profit_usd:.6f}:stake_usd={stake:.6f}:cost={cost:.6f}"
+        )
+
+    min_submit_edge_density = float(floors["min_submit_edge_density"])
+    edge_density = edge_lcb / cost
+    if edge_density + 1e-9 < min_submit_edge_density:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_edge_density_below_strategy_floor:"
+            f"strategy={strategy_key}:edge_density={edge_density:.6f}:"
+            f"floor={min_submit_edge_density:.6f}:stake_usd={stake:.6f}:cost={cost:.6f}"
+        )
+    try:
+        side = str(cert.get("side") or "").strip().upper()
+        delta_u_at_min = float(cert.get("delta_u_at_min"))
+    except (TypeError, ValueError):
+        return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:invalid_roi_frontier_economics"
+    if not roi_frontier_useful_values(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=stake,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_roi_frontier_not_useful:"
+            f"strategy={strategy_key}:stake_usd={stake:.6f}:cost={cost:.6f}:"
+            f"edge_lcb={edge_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}"
         )
     return None
 

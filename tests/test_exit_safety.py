@@ -2855,6 +2855,103 @@ def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, mon
     assert json.loads(event["payload_json"])["error"] == "exit_executable_snapshot_unavailable"
 
 
+def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    fresh_now = datetime.now(timezone.utc)
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-exit-fresh-no-bid",
+        captured_at=fresh_now,
+        freshness_deadline=fresh_now + timedelta(minutes=5),
+        orderbook_top_bid=None,
+        orderbook_top_ask=Decimal("0.02"),
+    )
+    position = Position(
+        trade_id="pos-exit-fresh-no-bid",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Manila",
+        cluster="asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.71,
+        size_usd=10.0,
+        shares=10.0,
+        cost_basis_usd=7.10,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+        current_market_price=0.02,
+        current_market_price_is_fresh=True,
+        best_bid=None,
+        day0_active=True,
+    )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no-bid liquidity block must preempt collateral refresh")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no-bid liquidity block must preempt collateral check")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no-bid liquidity block must preempt executor")
+        ),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=None,
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: no_executable_bid"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "exit_no_executable_bid"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert event["phase_after"] == "pending_exit"
+    assert event["venue_status"] == "retry_pending"
+    assert json.loads(event["payload_json"])["error"] == "exit_no_executable_bid"
+
+
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position

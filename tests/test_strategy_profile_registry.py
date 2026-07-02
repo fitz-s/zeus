@@ -309,6 +309,7 @@ def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
         assert profile.min_submit_edge_density == pytest.approx(0.05)
     assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
     assert sp.get("day0_nowcast_entry").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("forecast_qkernel_entry").min_expected_profit_usd == pytest.approx(1.0)
     assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
     assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
 
