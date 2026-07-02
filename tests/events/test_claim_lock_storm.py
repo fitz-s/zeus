@@ -201,6 +201,42 @@ def test_claim_lock_contention_is_bounded_and_keeps_event_pending(tmp_path, monk
     assert not conn.in_transaction
 
 
+def test_world_mutex_contention_before_claim_is_bounded_and_keeps_event_pending(
+    tmp_path, monkeypatch
+):
+    """A process-local world mutex holder must not wedge the reactor before claim.
+
+    No venue side effect has happened before Window A acquires the mutex, so a
+    mutex miss is a retryable bounce. This pins the scheduler-liveness regression
+    where an unbounded Python mutex wait could make one reactor cycle overrun the
+    next APScheduler trigger.
+    """
+    from src.state.db import world_write_mutex
+
+    _db_path, conn, store = _file_store(tmp_path)
+    event = _event("snap-mutex-bounded")
+    store.insert_or_ignore(event)
+    conn.commit()
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "50")
+
+    reactor = _reactor(conn, store)
+    mutex = world_write_mutex()
+    assert mutex.acquire(timeout=1.0)
+    try:
+        started = time.monotonic()
+        result = reactor.process_pending(decision_time=_DT, limit=1)
+        elapsed = time.monotonic() - started
+    finally:
+        mutex.release()
+
+    assert elapsed < 0.5, f"world mutex bounce waited too long: {elapsed:.3f}s"
+    assert result.claim_lock_bounces == 1
+    assert result.retried == 1
+    assert result.processed == 0 and result.rejected == 0 and result.dead_lettered == 0
+    assert _status(conn, event.event_id) == "pending"
+    assert not conn.in_transaction
+
+
 def test_dangling_stale_snapshot_txn_cannot_storm_the_cycle(tmp_path):
     """ANTIBODY (b) — the storm reproducer: a dangling txn on the store conn with a
     PINNED READ SNAPSHOT, made stale by another writer's commit. On the old code

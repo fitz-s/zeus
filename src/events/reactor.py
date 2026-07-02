@@ -162,6 +162,10 @@ def _reactor_claim_busy_timeout_ms() -> int:
     return max(1, min(30_000, value))
 
 
+def _reactor_claim_mutex_timeout_seconds() -> float:
+    return _reactor_claim_busy_timeout_ms() / 1000.0
+
+
 def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
     row = conn.execute("PRAGMA busy_timeout").fetchone()
     return int(row[0]) if row is not None else 0
@@ -1028,7 +1032,18 @@ class OpportunityEventReactor:
         """
         # ---- Window A: pre-submit world write unit (claim + gates) under mutex ----
         mutex = world_write_mutex()
-        mutex.acquire()
+        if not mutex.acquire(timeout=_reactor_claim_mutex_timeout_seconds()):
+            result.claim_lock_bounces += 1
+            result.retried += 1
+            import logging as _logging
+
+            _logging.getLogger("zeus.events.reactor").warning(
+                "reactor claim mutex-bounce event_id=%s claim_mutex_timeout_ms=%s "
+                "(event stays pending; no venue side effect attempted)",
+                event.event_id,
+                _reactor_claim_busy_timeout_ms(),
+            )
+            return
         pre_disposition: str | None
         should_submit = False
         try:
