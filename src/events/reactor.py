@@ -472,6 +472,11 @@ class EventSubmissionReceipt:
     # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
+    # Day0 remaining-window probability authority. This is the proof that a same-day
+    # observed extreme was used as a settlement mask/bound while q/q_lcb came from
+    # remaining-day forecast members, not from treating the observed bin as a
+    # hard-fact probability model. None on non-Day0 and legacy receipts.
+    day0_probability_authority: dict[str, Any] | None = None
     # qkernel spine execution economics certificate. This is distinct from q_live /
     # q_lcb_5pct, which are receipt-facing probability provenance. When present,
     # execution sizing is accountable to this guarded payoff-space certificate.

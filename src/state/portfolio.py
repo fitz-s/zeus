@@ -443,6 +443,16 @@ def _finite_float_or_zero(value: object) -> float:
     return result if math.isfinite(result) else 0.0
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
 # view consumed by exit_triggers / monitor_refresh / risk gates. Routes by
 # fill_authority so balance-only (venue_position_observed) positions expose
@@ -2394,6 +2404,9 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         last_monitor_market_price_is_fresh=bool(
             row.get("last_monitor_market_price_is_fresh") or False
         ),
+        last_monitor_best_bid=_finite_float_or_none(row.get("last_monitor_best_bid")),
+        last_monitor_best_ask=_finite_float_or_none(row.get("last_monitor_best_ask")),
+        last_monitor_market_vig=_finite_float_or_none(row.get("last_monitor_market_vig")),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
         # PR #352 (Part-5 audit Finding 1): the durable projection stores chain

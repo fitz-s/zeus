@@ -45,6 +45,15 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
             "rounding_status": "MATCH",
             "source_authorized_status": "AUTHORIZED",
             "live_authority_status": "live",
+            "raw_value": 20.0,
+            "rounded_value": 20,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "day0_probability_authority": _day0_probability_authority(),
+            "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_q_mode": "remaining_day",
+            "_edli_day0_remaining_models": 3,
+            "_edli_day0_lcb_transform": _day0_lcb_transform(),
         },
         extra_parent_payloads={
             claims.DAY0_AUTHORITY: {
@@ -59,6 +68,34 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
     )
 
     verify_actionable_trade(action, parents)
+
+
+def _day0_lcb_transform():
+    return {
+        "yes_lcb_by_condition": {"condition-1": 0.6},
+        "no_lcb_by_condition": {"condition-1": 0.2},
+        "mask": [1.0],
+        "absorbing_yes_conditions": [],
+        "absorbing_no_conditions": [],
+        "staleness_suppressed_conditions": [],
+        "immature_finite_yes_suppressed_conditions": [],
+        "day0_exit_authority_status": "mature",
+        "day0_exit_authority_reason": "day0_high_extreme_post_peak",
+        "rounded_extreme": 20.0,
+        "metric": "high",
+    }
+
+
+def _day0_probability_authority():
+    return {
+        "q_source": "day0_remaining_day",
+        "q_mode": "remaining_day",
+        "remaining_models": 3,
+        "rounded_value": 20,
+        "observation_time": "2026-05-25T11:30:00+00:00",
+        "observation_available_at": "2026-05-25T11:35:00+00:00",
+        "lcb_transform": _day0_lcb_transform(),
+    }
 
 
 def test_actionable_requires_positive_action_score():

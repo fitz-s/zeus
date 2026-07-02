@@ -223,6 +223,24 @@ def build_final_intent_certificate_from_actionable(
         "c_cost_95pct": action.get("c_cost_95pct"),
         "selection_authority_applied": action.get("selection_authority_applied"),
         "qkernel_execution_economics": action.get("qkernel_execution_economics"),
+        "day0_probability_authority": action.get("day0_probability_authority"),
+        "_edli_q_source": action.get("_edli_q_source"),
+        "_edli_day0_q_mode": action.get("_edli_day0_q_mode"),
+        "_edli_day0_remaining_models": action.get("_edli_day0_remaining_models"),
+        "_edli_day0_remaining_model_names": action.get("_edli_day0_remaining_model_names"),
+        "_edli_day0_remaining_source_cycle_time_utc": action.get(
+            "_edli_day0_remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_capture_times_utc": action.get(
+            "_edli_day0_remaining_capture_times_utc"
+        ),
+        "_edli_day0_remaining_expected_models": action.get(
+            "_edli_day0_remaining_expected_models"
+        ),
+        "_edli_day0_exit_authority_status": action.get("_edli_day0_exit_authority_status"),
+        "_edli_day0_exit_authority_reason": action.get("_edli_day0_exit_authority_reason"),
+        "_edli_day0_bound_classification": action.get("_edli_day0_bound_classification"),
+        "_edli_day0_lcb_transform": action.get("_edli_day0_lcb_transform"),
         "source_match_status": action.get("source_match_status"),
         "local_date_status": action.get("local_date_status"),
         "station_match_status": action.get("station_match_status"),
@@ -231,6 +249,12 @@ def build_final_intent_certificate_from_actionable(
         "rounding_status": action.get("rounding_status"),
         "source_authorized_status": action.get("source_authorized_status"),
         "live_authority_status": action.get("live_authority_status"),
+        "raw_value": action.get("raw_value"),
+        "rounded_value": action.get("rounded_value"),
+        "high_so_far": action.get("high_so_far"),
+        "low_so_far": action.get("low_so_far"),
+        "observation_time": action.get("observation_time"),
+        "observation_available_at": action.get("observation_available_at"),
         # WALL C (2026-06-01): for multi-level TAKER fills the sweep VWAP (average
         # fill price) differs from limit_price.  executor.py:1778 checks
         # sweep.average_price == intent.expected_fill_price_before_fee; storing the

@@ -33,6 +33,9 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "last_monitor_edge",
     "last_monitor_market_price",
     "last_monitor_market_price_is_fresh",
+    "last_monitor_best_bid",
+    "last_monitor_best_ask",
+    "last_monitor_market_vig",
     "decision_snapshot_id",
     "entry_method",
     "strategy_key",
@@ -256,6 +259,9 @@ _MONITOR_SNAPSHOT_COLUMNS = frozenset(
         "last_monitor_edge",
         "last_monitor_market_price",
         "last_monitor_market_price_is_fresh",
+        "last_monitor_best_bid",
+        "last_monitor_best_ask",
+        "last_monitor_market_vig",
     }
 )
 _CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
@@ -330,7 +336,13 @@ def _preserve_existing_monitor_snapshot_for_chain_projection(
             if column in current:
                 merged[column] = current[column]
     if bool(current.get("last_monitor_market_price_is_fresh")):
-        for column in ("last_monitor_market_price", "last_monitor_market_price_is_fresh"):
+        for column in (
+            "last_monitor_market_price",
+            "last_monitor_market_price_is_fresh",
+            "last_monitor_best_bid",
+            "last_monitor_best_ask",
+            "last_monitor_market_vig",
+        ):
             if column in current:
                 merged[column] = current[column]
     return merged

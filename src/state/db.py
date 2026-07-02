@@ -3213,6 +3213,20 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
+    # Live monitor quote fields are execution evidence, not belief. Persist
+    # them alongside the monitor price so restart/recovery can distinguish a
+    # real no-bid exit from a missing quote.
+    for _monitor_quote_col in (
+        "last_monitor_best_bid",
+        "last_monitor_best_ask",
+        "last_monitor_market_vig",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE position_current ADD COLUMN {_monitor_quote_col} REAL;")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
     # position_current. F1 added chain_avg_price / chain_cost_basis_usd to the canonical
     # column contract (src/state/projection.py CANONICAL_POSITION_CURRENT_COLUMNS) and the
@@ -5067,6 +5081,9 @@ CREATE TABLE IF NOT EXISTS position_current (
     last_monitor_market_price_is_fresh INTEGER CHECK (
         last_monitor_market_price_is_fresh IS NULL OR last_monitor_market_price_is_fresh IN (0,1)
     ),
+    last_monitor_best_bid REAL,
+    last_monitor_best_ask REAL,
+    last_monitor_market_vig REAL,
     decision_snapshot_id TEXT,
     entry_method TEXT,
     strategy_key TEXT NOT NULL,

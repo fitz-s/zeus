@@ -758,13 +758,13 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="PreSubmitRevalidated",
-        payload=_pre_submit_payload(
-            strategy_key="center_buy",
-            q_live=0.20,
-            q_lcb_5pct=0.074,
-            limit_price=0.024,
-            expected_edge=0.050,
-            size=30.0,
+            payload=_pre_submit_payload(
+                strategy_key="center_buy",
+                q_live=0.25,
+                q_lcb_5pct=0.15,
+                limit_price=0.024,
+                expected_edge=0.126,
+                size=30.0,
             min_entry_price=0.02,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
@@ -772,13 +772,13 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
             current_best_ask=0.034,
             qkernel_execution_economics={
                 "source": "qkernel_spine",
-                "route_id": "DIRECT_YES:b24@proof",
-                "route_type": "direct",
-                "side": "YES",
-                "payoff_q_point": 0.20,
-                "payoff_q_lcb": 0.074,
-                "cost": 0.024,
-                "edge_lcb": 0.050,
+                    "route_id": "DIRECT_YES:b24@proof",
+                    "route_type": "direct",
+                    "side": "YES",
+                    "payoff_q_point": 0.25,
+                    "payoff_q_lcb": 0.15,
+                    "cost": 0.024,
+                    "edge_lcb": 0.126,
                 "delta_u_at_min": 0.01,
                 "optimal_stake_usd": 30.0,
                 "optimal_delta_u": 0.01,
@@ -787,9 +787,9 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
                 "coherence_allows": True,
                 "selection_guard_basis": "SELECTION_BETA_95",
                 "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.074,
-            },
-        ),
+                    "selection_guard_q_safe": 0.15,
+                },
+            ),
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
@@ -868,6 +868,58 @@ def test_pre_submit_accepts_day0_observation_authority_with_qkernel():
     assert pre_submit is not None
     assert pre_submit.payload["event_type"] == "DAY0_EXTREME_UPDATED"
     assert pre_submit.payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
+    assert pre_submit.payload["_edli_q_source"] == "day0_remaining_day"
+
+
+def test_pre_submit_rejects_day0_missing_remaining_window_probability_authority():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="remaining-window probability authority required"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                day0_probability_authority=None,
+                _edli_q_source=None,
+                _edli_day0_q_mode=None,
+                _edli_day0_remaining_models=None,
+                _edli_day0_lcb_transform=None,
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_day0_hard_fact_probability_authority():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="hard-fact calibration"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                day0_probability_authority={
+                    **_day0_probability_authority(),
+                    "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
 def test_pre_submit_rejects_day0_missing_observation_authority():
@@ -1156,7 +1208,44 @@ def _pre_submit_payload(**overrides):
     return payload
 
 
+def _day0_lcb_transform(condition_id: str = "condition-1", q_lcb: float = 0.60):
+    return {
+        "yes_lcb_by_condition": {condition_id: q_lcb},
+        "no_lcb_by_condition": {condition_id: 0.20},
+        "mask": [1.0],
+        "absorbing_yes_conditions": [],
+        "absorbing_no_conditions": [],
+        "staleness_suppressed_conditions": [],
+        "immature_finite_yes_suppressed_conditions": [],
+        "day0_exit_authority_status": "mature",
+        "day0_exit_authority_reason": "day0_high_extreme_post_peak",
+        "rounded_extreme": 20.0,
+        "metric": "high",
+    }
+
+
+def _day0_probability_authority(condition_id: str = "condition-1", q_lcb: float = 0.60):
+    return {
+        "q_source": "day0_remaining_day",
+        "q_mode": "remaining_day",
+        "remaining_models": 3,
+        "remaining_model_names": ["ecmwf", "gfs", "icon"],
+        "remaining_source_cycle_time_utc": "2026-05-25T12:00:00+00:00",
+        "remaining_capture_times_utc": ["2026-05-25T12:20:00+00:00"],
+        "exit_authority_status": "mature",
+        "exit_authority_reason": "day0_high_extreme_post_peak",
+        "observed_extreme_native": 20.0,
+        "rounded_value": 20,
+        "observation_time": "2026-05-25T17:30:00+00:00",
+        "observation_available_at": "2026-05-25T17:35:00+00:00",
+        "lcb_transform": _day0_lcb_transform(condition_id, q_lcb),
+    }
+
+
 def _day0_pre_submit_payload(**overrides):
+    condition_id = str(overrides.get("condition_id") or "condition-1")
+    q_lcb = float(overrides.get("q_lcb_5pct") or 0.60)
+    day0_probability = _day0_probability_authority(condition_id, q_lcb)
     payload = _pre_submit_payload(
         event_type="DAY0_EXTREME_UPDATED",
         source_match_status="MATCH",
@@ -1167,6 +1256,21 @@ def _day0_pre_submit_payload(**overrides):
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
         live_authority_status="live",
+        raw_value=20.0,
+        rounded_value=20,
+        high_so_far=20.0,
+        observation_time="2026-05-25T17:30:00+00:00",
+        observation_available_at="2026-05-25T17:35:00+00:00",
+        day0_probability_authority=day0_probability,
+        _edli_q_source="day0_remaining_day",
+        _edli_day0_q_mode="remaining_day",
+        _edli_day0_remaining_models=3,
+        _edli_day0_remaining_model_names=["ecmwf", "gfs", "icon"],
+        _edli_day0_remaining_source_cycle_time_utc="2026-05-25T12:00:00+00:00",
+        _edli_day0_remaining_capture_times_utc=["2026-05-25T12:20:00+00:00"],
+        _edli_day0_exit_authority_status="mature",
+        _edli_day0_exit_authority_reason="day0_high_extreme_post_peak",
+        _edli_day0_lcb_transform=day0_probability["lcb_transform"],
     )
     payload.update(overrides)
     return payload

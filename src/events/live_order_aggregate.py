@@ -16,6 +16,7 @@ from src.decision.family_decision_engine import (
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.events.day0_authority import (
     Day0AuthorityError,
+    assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
 )
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
@@ -880,18 +881,30 @@ def _validate_pre_submit_probability_authority(
 ) -> None:
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == _DAY0_EVENT_TYPE:
-        _validate_day0_submit_observation_authority(payload)
+        _validate_day0_submit_observation_authority(payload, q_lcb=q_lcb)
         _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
         return
     _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
 
 
-def _validate_day0_submit_observation_authority(payload: dict[str, Any]) -> None:
+def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lcb: float) -> None:
     try:
         assert_live_day0_payload_authority(payload)
     except Day0AuthorityError as exc:
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated day0 observation authority required:"
+            + str(exc)
+        ) from None
+    try:
+        assert_live_day0_probability_authority(
+            payload,
+            direction=payload.get("direction"),
+            condition_id=payload.get("condition_id"),
+            q_lcb=q_lcb,
+        )
+    except Day0AuthorityError as exc:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated day0 remaining-window probability authority required:"
             + str(exc)
         ) from None
 

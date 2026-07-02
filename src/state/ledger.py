@@ -233,6 +233,13 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         # INCOMPLETE_EXIT_CONTEXT even after a fresh monitor event.
         ("last_monitor_prob_is_fresh", "INTEGER"),
         ("last_monitor_market_price_is_fresh", "INTEGER"),
+        # Monitor executable quote projection (2026-07-02): hold/exit
+        # decisions must preserve the held-side bid/ask/vig separately from
+        # midpoint-like market price so no-bid exits remain auditable after
+        # projection reload.
+        ("last_monitor_best_bid", "REAL"),
+        ("last_monitor_best_ask", "REAL"),
+        ("last_monitor_market_vig", "REAL"),
         # Exit-retry persistence (2026-06-12 infinite-loop incident): the
         # chain-truth gate's _mark_exit_retry incremented exit_retry_count
         # ONLY in memory — every load_portfolio() reset it to 0, so the

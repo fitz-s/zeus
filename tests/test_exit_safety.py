@@ -2737,11 +2737,12 @@ def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch)
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *args, **kwargs: {
-            "executable_snapshot_id": "snap-exit-collateral",
-            "executable_snapshot_min_order_size": "5",
-        },
-    )
+            lambda *args, **kwargs: {
+                "executable_snapshot_id": "snap-exit-collateral",
+                "executable_snapshot_min_order_size": "5",
+                "executable_snapshot_orderbook_top_bid": "0.49",
+            },
+        )
 
     def fake_refresh(active_conn, **kwargs):
         assert active_conn is conn
@@ -2809,11 +2810,12 @@ def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, mon
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *args, **kwargs: {
-            "executable_snapshot_id": "snap-exit-collateral-refresh-failed",
-            "executable_snapshot_min_order_size": "5",
-        },
-    )
+            lambda *args, **kwargs: {
+                "executable_snapshot_id": "snap-exit-collateral-refresh-failed",
+                "executable_snapshot_min_order_size": "5",
+                "executable_snapshot_orderbook_top_bid": "0.49",
+            },
+        )
     monkeypatch.setattr(
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
@@ -2919,6 +2921,19 @@ def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, mon
     assert event["phase_after"] == "pending_exit"
     assert event["venue_status"] == "retry_pending"
     assert json.loads(event["payload_json"])["error"] == "exit_executable_snapshot_unavailable"
+    lifecycle_events = conn.execute(
+        """
+        SELECT event_type
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no
+        """,
+        (position.trade_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in lifecycle_events][-2:] == [
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+    ]
 
 
 def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
@@ -3016,6 +3031,19 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     assert event["phase_after"] == "pending_exit"
     assert event["venue_status"] == "retry_pending"
     assert json.loads(event["payload_json"])["error"] == "exit_no_executable_bid"
+    lifecycle_events = conn.execute(
+        """
+        SELECT event_type
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no
+        """,
+        (position.trade_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in lifecycle_events][-2:] == [
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+    ]
 
 
 def test_exit_no_bid_classification_uses_snapshot_bid_truth():
@@ -3352,7 +3380,8 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
     current = conn.execute(
         """
         SELECT last_monitor_prob, last_monitor_prob_is_fresh, last_monitor_edge,
-               last_monitor_market_price, last_monitor_market_price_is_fresh
+               last_monitor_market_price, last_monitor_market_price_is_fresh,
+               last_monitor_best_bid, last_monitor_best_ask, last_monitor_market_vig
           FROM position_current
          WHERE position_id = ?
         """,
@@ -3363,6 +3392,9 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
     assert current["last_monitor_edge"] == pytest.approx(0.16)
     assert current["last_monitor_market_price"] == pytest.approx(0.75)
     assert current["last_monitor_market_price_is_fresh"] == 1
+    assert float(current["last_monitor_best_bid"]) == pytest.approx(0.74)
+    assert float(current["last_monitor_best_ask"]) == pytest.approx(0.76)
+    assert float(current["last_monitor_market_vig"]) == pytest.approx(0.02)
 
     event = conn.execute(
         """
@@ -3381,6 +3413,58 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
     assert payload["last_monitor_prob_is_fresh"] is True
     assert payload["last_monitor_market_price_is_fresh"] is True
     assert "closed_market_hold_preserved_monitor_evidence" in payload["applied_validations"]
+
+
+def test_position_projection_round_trips_zero_monitor_bid(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import Position, _position_from_projection_row
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-zero-monitor-bid-roundtrip",
+        market_id="condition-test",
+        city="Manila",
+        cluster="asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction="buy_yes",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="day0_window",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=4.4,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-07-02T00:00:00+00:00",
+        last_monitor_at="2026-07-02T01:00:00+00:00",
+        order_status="filled",
+        last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.0,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.0,
+        last_monitor_best_ask=0.001,
+        last_monitor_market_vig=None,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+
+    row = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+
+    restored = _position_from_projection_row(dict(row), current_mode="live")
+    assert restored.last_monitor_market_price == pytest.approx(0.0)
+    assert restored.last_monitor_market_price_is_fresh is True
+    assert restored.last_monitor_best_bid == pytest.approx(0.0)
+    assert restored.last_monitor_best_ask == pytest.approx(0.001)
 
 
 def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
@@ -4279,11 +4363,12 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *args, **kwargs: {
-            "executable_snapshot_id": "snap-adopted-cancel",
-            "executable_snapshot_min_order_size": "5",
-        },
-    )
+            lambda *args, **kwargs: {
+                "executable_snapshot_id": "snap-adopted-cancel",
+                "executable_snapshot_min_order_size": "5",
+                "executable_snapshot_orderbook_top_bid": "0.01",
+            },
+        )
     monkeypatch.setattr(
         exit_lifecycle,
         "check_sell_collateral",

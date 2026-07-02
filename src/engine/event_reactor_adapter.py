@@ -200,7 +200,10 @@ from src.decision_kernel.compiler import (
     normalize_forecast_reader_status,
 )
 from src.decision_kernel.ledger import DecisionCertificateLedger
-from src.decision_kernel.verifier import DAY0_OBSERVATION_CALIBRATION_AUTHORITY
+from src.decision_kernel.verifier import (
+    DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+    DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
+)
 from src.engine.event_bound_final_intent import (
     EventBoundExecutorSubmitResult,
     EventBoundFinalIntent,
@@ -1966,6 +1969,17 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
     if authority == DAY0_OBSERVATION_CALIBRATION_AUTHORITY:
+        raise ValueError(
+            "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:"
+            "DAY0_LIVE_OBSERVATION_HARD_FACT"
+        )
+    if authority == DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY:
+        from src.events.day0_authority import Day0AuthorityError, assert_live_day0_probability_authority
+
+        try:
+            assert_live_day0_probability_authority(payload)
+        except Day0AuthorityError as exc:
+            raise ValueError(f"EDLI_LIVE_CALIBRATION_DAY0_REMAINING_WINDOW_BLOCKED:{exc}") from None
         return
     if authority == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY:
         if coverage_status != "INSUFFICIENT_DATA":
@@ -6740,6 +6754,12 @@ def build_event_bound_no_submit_receipt(
     _belief = provenance_capture.get("edli_belief")
     if _belief is not None and receipt.belief_payload is None:
         receipt = dataclass_replace(receipt, belief_payload=_belief)
+    _day0_probability = provenance_capture.get("day0_probability_authority")
+    if _day0_probability is not None and receipt.day0_probability_authority is None:
+        receipt = dataclass_replace(
+            receipt,
+            day0_probability_authority=_json_finite(_day0_probability),
+        )
     # D1 FILL-UP (2026-06-22 lifecycle consult): carry the acquired fill-up lease
     # context onto the receipt so the live submit wrapper runs the pre-submit family-
     # exposure reread and advances the lease to a terminal status. Only set when the
@@ -6901,6 +6921,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
+        day0_probability_authority=(
+            raw_receipt.get("day0_probability_authority")
+            if isinstance(raw_receipt.get("day0_probability_authority"), dict)
+            else None
+        ),
         # B3 authority stamp (mirrors q_source above): the spine-selected execution
         # authority must survive the dict->typed reconstruction or the taker-quality
         # gate is starved (stamp=None) and rejects every live spine taker.
@@ -8654,6 +8679,29 @@ def _actionable_payload_from_receipt(
         )
         if qkernel_cert is not None:
             qkernel_execution_economics = _json_finite(dict(qkernel_cert))
+    day0_probability_authority = (
+        _json_finite(receipt.day0_probability_authority)
+        if isinstance(receipt.day0_probability_authority, dict)
+        else None
+    )
+
+    def _day0_probability_value(key: str) -> object | None:
+        if isinstance(day0_probability_authority, dict):
+            value = day0_probability_authority.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _present(value: object | None) -> object | None:
+        return None if value in (None, "") else value
+
+    def _first_present(*values: object | None) -> object | None:
+        for value in values:
+            present = _present(value)
+            if present is not None:
+                return present
+        return None
+
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -8675,6 +8723,24 @@ def _actionable_payload_from_receipt(
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
         "qkernel_execution_economics": qkernel_execution_economics,
+        "day0_probability_authority": day0_probability_authority,
+        "_edli_q_source": _day0_probability_value("q_source"),
+        "_edli_day0_q_mode": _day0_probability_value("q_mode"),
+        "_edli_day0_remaining_models": _day0_probability_value("remaining_models"),
+        "_edli_day0_remaining_model_names": _day0_probability_value("remaining_model_names"),
+        "_edli_day0_remaining_source_cycle_time_utc": _day0_probability_value(
+            "remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_capture_times_utc": _day0_probability_value(
+            "remaining_capture_times_utc"
+        ),
+        "_edli_day0_remaining_expected_models": _day0_probability_value(
+            "remaining_expected_models"
+        ),
+        "_edli_day0_exit_authority_status": _day0_probability_value("exit_authority_status"),
+        "_edli_day0_exit_authority_reason": _day0_probability_value("exit_authority_reason"),
+        "_edli_day0_bound_classification": _day0_probability_value("bound_classification"),
+        "_edli_day0_lcb_transform": _day0_probability_value("lcb_transform"),
         "opportunity_book": _json_finite(receipt.opportunity_book),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -8714,6 +8780,24 @@ def _actionable_payload_from_receipt(
         "rounding_status": _event_identity_value(event, "rounding_status"),
         "source_authorized_status": _event_identity_value(event, "source_authorized_status"),
         "live_authority_status": _event_identity_value(event, "live_authority_status"),
+        "raw_value": _first_present(
+            _event_identity_value(event, "raw_value"),
+            _day0_probability_value("observed_extreme_native"),
+        ),
+        "rounded_value": _first_present(
+            _event_identity_value(event, "rounded_value"),
+            _day0_probability_value("rounded_value"),
+        ),
+        "high_so_far": _event_identity_value(event, "high_so_far"),
+        "low_so_far": _event_identity_value(event, "low_so_far"),
+        "observation_time": _first_present(
+            _event_identity_value(event, "observation_time"),
+            _day0_probability_value("observation_time"),
+        ),
+        "observation_available_at": _first_present(
+            _event_identity_value(event, "observation_available_at"),
+            _day0_probability_value("observation_available_at"),
+        ),
         "bin_label": receipt.bin_label,
         "outcome_label": receipt.outcome_label,
         "unit": receipt.unit,
@@ -9341,6 +9425,24 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "c_cost_95pct": payload.get("c_cost_95pct"),
         "selection_authority_applied": payload.get("selection_authority_applied"),
         "qkernel_execution_economics": payload.get("qkernel_execution_economics"),
+        "day0_probability_authority": payload.get("day0_probability_authority"),
+        "_edli_q_source": payload.get("_edli_q_source"),
+        "_edli_day0_q_mode": payload.get("_edli_day0_q_mode"),
+        "_edli_day0_remaining_models": payload.get("_edli_day0_remaining_models"),
+        "_edli_day0_remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
+        "_edli_day0_remaining_source_cycle_time_utc": payload.get(
+            "_edli_day0_remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_capture_times_utc": payload.get(
+            "_edli_day0_remaining_capture_times_utc"
+        ),
+        "_edli_day0_remaining_expected_models": payload.get(
+            "_edli_day0_remaining_expected_models"
+        ),
+        "_edli_day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
+        "_edli_day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
+        "_edli_day0_bound_classification": payload.get("_edli_day0_bound_classification"),
+        "_edli_day0_lcb_transform": payload.get("_edli_day0_lcb_transform"),
         "source_match_status": payload.get("source_match_status"),
         "local_date_status": payload.get("local_date_status"),
         "station_match_status": payload.get("station_match_status"),
@@ -9349,6 +9451,12 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "rounding_status": payload.get("rounding_status"),
         "source_authorized_status": payload.get("source_authorized_status"),
         "live_authority_status": payload.get("live_authority_status"),
+        "raw_value": payload.get("raw_value"),
+        "rounded_value": payload.get("rounded_value"),
+        "high_so_far": payload.get("high_so_far"),
+        "low_so_far": payload.get("low_so_far"),
+        "observation_time": payload.get("observation_time"),
+        "observation_available_at": payload.get("observation_available_at"),
         "would_cross_book": would_cross,
         "tick_size": tick_size,
         "tick_aligned": _is_price_tick_aligned(limit_price, tick_size),
@@ -11880,10 +11988,11 @@ def _day0_calibration_authority_payload_and_clock(
     forecast_payload: Mapping[str, Any],
     decision_time: datetime,
 ) -> tuple[dict[str, Any], EvidenceClock]:
-    """Certificate calibration authority for live Day0 hard facts."""
+    """Certificate calibration authority for live Day0 remaining-window probability."""
 
     from src.events.day0_authority import (
         Day0AuthorityEvidence,
+        assert_live_day0_probability_authority,
         assert_live_day0_authority,
         normalize_day0_live_authority_status,
     )
@@ -11922,19 +12031,26 @@ def _day0_calibration_authority_payload_and_clock(
     available_time = _parse_utc(evidence.observation_available_at)
     if source_time is None or available_time is None:
         raise ValueError("DAY0_CALIBRATION_AUTHORITY_MISSING:clock")
+    try:
+        assert_live_day0_probability_authority(payload)
+    except Exception as exc:
+        raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
     horizon_profile = _nonnull(
         payload.get("horizon_profile") or forecast_payload.get("horizon_profile")
     )
+    lcb_transform = payload.get("_edli_day0_lcb_transform")
+    lcb_transform_hash = _hash_jsonish(lcb_transform) if isinstance(lcb_transform, Mapping) else ""
     model_key = (
-        "day0_live_observation_hard_fact_v1:"
+        "day0_remaining_window_probability_v1:"
         f"{evidence.city}:{evidence.target_date}:{evidence.metric}:"
-        f"{evidence.rounded_value}:{evidence.observation_time}"
+        f"{evidence.rounded_value}:{evidence.observation_time}:"
+        f"{payload.get('_edli_day0_remaining_source_cycle_time_utc') or 'cycle_unknown'}"
     )
     payload_out = {
         "identity": model_key,
         "calibrator_model_key": model_key,
         "calibrator_version": model_key,
-        "calibration_method": "day0_live_observation_hard_fact",
+        "calibration_method": "day0_remaining_window_probability",
         "model_hash": _hash_jsonish(
             {
                 "model_key": model_key,
@@ -11945,20 +12061,45 @@ def _day0_calibration_authority_payload_and_clock(
                 "source": payload.get("source") or payload.get("settlement_source"),
                 "rounding_rule": semantics.rounding_rule,
                 "rounded_value": evidence.rounded_value,
+                "q_source": payload.get("_edli_q_source"),
+                "q_mode": payload.get("_edli_day0_q_mode"),
+                "remaining_models": payload.get("_edli_day0_remaining_models"),
+                "lcb_transform_hash": lcb_transform_hash,
             }
         ),
         "horizon_profile": horizon_profile,
-        "training_cutoff": evidence.observation_time,
+        "training_cutoff": (
+            payload.get("_edli_day0_remaining_source_cycle_time_utc")
+            or evidence.observation_time
+        ),
         "model_available_at": evidence.observation_available_at,
         "model_materialized_at": decision_time.astimezone(UTC).isoformat(),
         "observation_time": evidence.observation_time,
         "observation_available_at": evidence.observation_available_at,
         "source_authorized_status": evidence.source_authorized_status,
         "live_authority_status": evidence.live_authority_status,
-        "input_space": "day0_live_observation_hard_fact",
+        "input_space": "day0_remaining_window_probability",
+        "q_source": payload.get("_edli_q_source"),
+        "q_mode": payload.get("_edli_day0_q_mode"),
+        "remaining_models": payload.get("_edli_day0_remaining_models"),
+        "remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
+        "remaining_source_cycle_time_utc": payload.get("_edli_day0_remaining_source_cycle_time_utc"),
+        "remaining_capture_times_utc": payload.get("_edli_day0_remaining_capture_times_utc"),
+        "day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
+        "day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
+        "lcb_transform_hash": lcb_transform_hash,
+        "day0_probability_authority": {
+            "q_source": payload.get("_edli_q_source"),
+            "q_mode": payload.get("_edli_day0_q_mode"),
+            "remaining_models": payload.get("_edli_day0_remaining_models"),
+            "rounded_value": evidence.rounded_value,
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "lcb_transform": lcb_transform if isinstance(lcb_transform, Mapping) else None,
+        },
         "maturity_level": 4,
-        "n_samples": 0,
-        "authority": DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+        "n_samples": payload.get("_edli_day0_remaining_models") or 0,
+        "authority": DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
     }
     return payload_out, EvidenceClock(source_time, available_time, decision_time)
 
@@ -16878,6 +17019,42 @@ def _live_yes_probabilities(
             lcb_by_condition=lcb_by_condition,
             decision_time=decision_time,
         )
+        if provenance_capture is not None:
+            observed_extreme_native = payload.get(
+                "high_so_far"
+                if str(payload.get("metric") or payload.get("temperature_metric") or "")
+                == "high"
+                else "low_so_far"
+            )
+            if observed_extreme_native in (None, ""):
+                observed_extreme_native = payload.get("raw_value")
+            if observed_extreme_native in (None, ""):
+                observed_extreme_native = payload.get("rounded_value")
+            provenance_capture["day0_probability_authority"] = _json_finite(
+                {
+                    "q_source": payload.get("_edli_q_source"),
+                    "q_mode": payload.get("_edli_day0_q_mode"),
+                    "remaining_models": payload.get("_edli_day0_remaining_models"),
+                    "remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
+                    "remaining_source_cycle_time_utc": payload.get(
+                        "_edli_day0_remaining_source_cycle_time_utc"
+                    ),
+                    "remaining_capture_times_utc": payload.get(
+                        "_edli_day0_remaining_capture_times_utc"
+                    ),
+                    "remaining_expected_models": payload.get(
+                        "_edli_day0_remaining_expected_models"
+                    ),
+                    "exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
+                    "exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
+                    "bound_classification": payload.get("_edli_day0_bound_classification"),
+                    "observed_extreme_native": observed_extreme_native,
+                    "rounded_value": payload.get("rounded_value"),
+                    "observation_time": payload.get("observation_time"),
+                    "observation_available_at": payload.get("observation_available_at"),
+                    "lcb_transform": payload.get("_edli_day0_lcb_transform"),
+                }
+            )
         p_values, prefilter = _day0_hard_fact_fdr_maps(
             family=family,
             native_costs=native_costs,

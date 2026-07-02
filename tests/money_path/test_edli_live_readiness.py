@@ -1839,6 +1839,44 @@ def test_day0_actionable_payload_reads_authority_from_event_payload_json():
     adapter._assert_live_entry_submit_authority(payload)
 
 
+def test_day0_actionable_payload_preserves_zero_observation_values():
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _day0_event()
+    event_payload = json.loads(event.payload_json)
+    event_payload.update(
+        {
+            "raw_value": 0.0,
+            "rounded_value": 0,
+            "high_so_far": 0.0,
+        }
+    )
+    event = replace(event, payload_json=json.dumps(event_payload, sort_keys=True))
+    receipt = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        day0_probability_authority={
+            "observed_extreme_native": 20.0,
+            "rounded_value": 20,
+            "observation_time": "2026-05-24T19:00:00+00:00",
+            "observation_available_at": "2026-05-24T19:01:00+00:00",
+        },
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 15.39,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["raw_value"] == pytest.approx(0.0)
+    assert payload["rounded_value"] == 0
+
+
 def test_actionable_payload_drops_nonfinite_qkernel_economics_before_cert_boundary():
     from src.engine import event_reactor_adapter as adapter
 

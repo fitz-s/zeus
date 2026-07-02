@@ -2723,12 +2723,10 @@ def _emit_day0_window_entered_canonical_if_available(
     _write + append_many_and_project. Clears T1.c-followup L875 OBSOLETE_
     PENDING_FEATURE (test_day0_transition_emits_durable_lifecycle_event).
 
-    Returns True when canonical Day0 truth is represented durably, including
-    the idempotent repair case where the DAY0_WINDOW_ENTERED event already
-    exists and only position_current projection needs to be refreshed. Returns
-    False on non-fatal skip (conn None or RuntimeError from canonical
-    transaction schema absence — matches the pattern from
-    _dual_write_canonical_entry_if_available).
+    Returns True only when this call appends a new DAY0_WINDOW_ENTERED event.
+    If the event already exists and only position_current projection needs to
+    be refreshed, returns False so monitor replay paths can distinguish an
+    idempotent repair from a new lifecycle transition.
     """
     if conn is None:
         return False
@@ -2776,7 +2774,7 @@ def _emit_day0_window_entered_canonical_if_available(
             projection = build_position_current_projection(pos)
             projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
             upsert_position_current(conn, projection)
-            return True
+            return False
         # Query next sequence_no for this position (same pattern as
         # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
         # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /

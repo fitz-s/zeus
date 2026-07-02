@@ -24,6 +24,7 @@ from src.strategy.live_inference.live_admission import (
 )
 from src.events.day0_authority import (
     Day0AuthorityError,
+    assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
 )
 
@@ -80,6 +81,7 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY = "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB"
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 DAY0_OBSERVATION_CALIBRATION_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
+DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY = "DAY0_REMAINING_WINDOW_PROBABILITY"
 FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
 FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
 FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
@@ -95,6 +97,7 @@ ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
         FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
         DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+        DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
     }
 )
 
@@ -119,6 +122,7 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
         FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
         DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+        DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
     }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
@@ -448,6 +452,7 @@ def _verify_actionable_probability_authority(
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(payload, label="actionable")
+        _verify_day0_probability_payload_authority(payload, q_lcb=q_lcb, label="actionable")
         _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
@@ -459,6 +464,20 @@ def _verify_day0_observation_payload_authority(payload: dict, *, label: str) -> 
     except Day0AuthorityError as exc:
         raise CertificateVerificationError(
             f"{label} day0 observation authority required:{exc}"
+        ) from None
+
+
+def _verify_day0_probability_payload_authority(payload: dict, *, q_lcb: float, label: str) -> None:
+    try:
+        assert_live_day0_probability_authority(
+            payload,
+            direction=payload.get("direction"),
+            condition_id=payload.get("condition_id"),
+            q_lcb=q_lcb,
+        )
+    except Day0AuthorityError as exc:
+        raise CertificateVerificationError(
+            f"{label} day0 remaining-window probability authority required:{exc}"
         ) from None
 
 
@@ -872,6 +891,7 @@ def _verify_pre_submit_probability_authority(
     event_type = str(pre_submit.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
+        _verify_day0_probability_payload_authority(pre_submit, q_lcb=q_lcb, label="pre-submit")
         _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)

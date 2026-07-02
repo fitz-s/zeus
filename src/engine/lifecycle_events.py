@@ -242,6 +242,9 @@ def build_position_current_projection(position: Any) -> dict:
         "last_monitor_market_price_is_fresh": _nullable_bool_int(
             getattr(position, "last_monitor_market_price_is_fresh", None)
         ),
+        "last_monitor_best_bid": _nullable(getattr(position, "last_monitor_best_bid", None)),
+        "last_monitor_best_ask": _nullable(getattr(position, "last_monitor_best_ask", None)),
+        "last_monitor_market_vig": _nullable(getattr(position, "last_monitor_market_vig", None)),
         "decision_snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
         "entry_method": getattr(position, "entry_method", ""),
         "strategy_key": _strategy_key(position),

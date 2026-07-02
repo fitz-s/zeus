@@ -592,6 +592,8 @@ def place_sell_order(
     executable_snapshot_min_tick_size: str | None = None,
     executable_snapshot_min_order_size: str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    executable_snapshot_orderbook_top_bid: object | None = None,
+    executable_snapshot_orderbook_top_ask: object | None = None,
     decision_id: str = "",
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
@@ -2132,6 +2134,31 @@ def _exit_no_executable_bid_error(
     return ""
 
 
+def _record_exit_intent_before_execution_gates(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    exit_intent: ExitIntent,
+) -> None:
+    """Persist the semantic exit decision before executable-liquidity gates.
+
+    Snapshot, liquidity, collateral, and venue checks are execution facts.  The
+    monitor's decision to exit is a separate lifecycle fact and must be visible
+    even when no sell command can be created.
+    """
+
+    _mark_pending_exit(position)
+    position.exit_state = "exit_intent"
+    position.order_status = "exit_intent"
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=exit_intent.reason or "EXIT_INTENT",
+        error="",
+        event_type="EXIT_INTENT",
+    )
+    _commit_before_exit_venue_io(conn, stage="exit_intent")
+
+
 def _dual_write_canonical_pending_exit_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -2304,14 +2331,7 @@ def _execute_live_exit(
         from src.state.db import log_exit_attempt_event, log_exit_fill_event, log_exit_retry_event
         from src.state.db import log_pending_exit_recovery_event
 
-        log_pending_exit_recovery_event(
-            conn,
-            position,
-            event_type="EXIT_INTENT",
-            reason=exit_intent.reason,
-            error="",
-        )
-        _commit_before_exit_venue_io(conn, stage="exit_intent")
+    _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     token_id = exit_intent.token_id
     if not token_id:
@@ -2394,7 +2414,11 @@ def _execute_live_exit(
             )
         return "exit_blocked: executable_snapshot_unavailable"
 
-    liquidity_error = _exit_no_executable_bid_error(exit_intent, snapshot_context)
+    liquidity_error = (
+        _exit_no_executable_bid_error(exit_intent, snapshot_context)
+        if conn is not None
+        else ""
+    )
     if liquidity_error:
         liquidity_reason = f"{exit_context.exit_reason} [NO_EXECUTABLE_BID]"
         _mark_exit_retry(
@@ -2626,18 +2650,6 @@ def _execute_live_exit(
             if outcome.status != "CANCELED":
                 _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status, conn=conn)
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
-
-    _mark_pending_exit(position)
-    position.exit_state = "exit_intent"
-    position.order_status = "exit_intent"
-    _dual_write_canonical_pending_exit_if_available(
-        conn,
-        position,
-        reason=exit_intent.reason or "EXIT_INTENT",
-        error="",
-        event_type="EXIT_INTENT",
-    )
-    _commit_before_exit_venue_io(conn, stage="exit_intent")
 
     try:
         raw_sell_result = place_sell_order(
