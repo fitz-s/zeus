@@ -7055,6 +7055,23 @@ def _build_event_bound_taker_quality_proof(
     touch_dec = Decimal(str(touch))
     q_lcb_dec = Decimal(str(q_lcb))
     notional_dec = Decimal(str(max(float(notional), 0.0)))
+    from src.strategy.live_inference.live_admission import (
+        live_win_rate_floor_rejection_reason,
+    )
+
+    live_win_rate_floor_reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    if live_win_rate_floor_reason is not None:
+        return {
+            "schema_version": 1,
+            "passed": False,
+            "reason": live_win_rate_floor_reason,
+            "model_confidence": "0",
+            "taker_fee_adjusted_edge": "0",
+            "taker_expected_profit_usd": "0",
+            "maker_expected_profit_usd": "0",
+            "incremental_expected_profit_usd": "0",
+            "q_lcb_source": q_lcb_source,
+        }
     fee_dec = Decimal("0.05") * touch_dec * (Decimal("1") - touch_dec)
     # P0-1 (2026-06-23): the after-cost admissibility edge is gated on the EXECUTION-CONDITIONED
     # bound q_exec_lcb = min(q_lcb, settlement-evidenced cell LCB), never the plain q_lcb. Absent/
@@ -8096,10 +8113,13 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
-    # Qkernel-selected entries are governed by the family optimizer's executable
-    # cert: selected-side q_lcb, selection calibrator, ROI frontier, profit floor,
-    # and edge-density floor. A fixed raw price floor is not probability evidence
-    # and was hiding high-quality cheap YES before/after selection.
+    from src.strategy.live_inference.live_admission import (
+        live_win_rate_floor_rejection_reason,
+    )
+
+    win_rate_reason = live_win_rate_floor_rejection_reason(q_lcb=cert_q_lcb)
+    if win_rate_reason is not None:
+        raise ValueError(win_rate_reason)
 
 
 def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mapping[str, object]) -> None:
@@ -12572,6 +12592,28 @@ def _qkernel_final_submit_floor_rejection_reason(
 ) -> str | None:
     """Reject qkernel candidates that cannot clear the final live submit floors."""
 
+    try:
+        cost = float(cert.get("cost"))
+        edge_lcb = float(cert.get("edge_lcb"))
+        payoff_q_point = float(cert.get("payoff_q_point"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        optimal_stake_usd = float(cert.get("optimal_stake_usd"))
+    except (TypeError, ValueError):
+        return "QKERNEL_FINAL_SUBMIT_FLOOR:invalid_economics"
+    if not all(
+        math.isfinite(value)
+        for value in (cost, edge_lcb, payoff_q_point, payoff_q_lcb, optimal_stake_usd)
+    ):
+        return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
+
+    from src.strategy.live_inference.live_admission import (
+        live_win_rate_floor_rejection_reason,
+    )
+
+    win_rate_reason = live_win_rate_floor_rejection_reason(q_lcb=payoff_q_lcb)
+    if win_rate_reason is not None:
+        return win_rate_reason
+
     if not str(strategy_policy_event_type or "").strip():
         return None
     try:
@@ -12587,20 +12629,6 @@ def _qkernel_final_submit_floor_rejection_reason(
         )
     except Exception as exc:  # noqa: BLE001
         return f"QKERNEL_FINAL_SUBMIT_FLOOR_UNAVAILABLE:{type(exc).__name__}"
-
-    try:
-        cost = float(cert.get("cost"))
-        edge_lcb = float(cert.get("edge_lcb"))
-        payoff_q_point = float(cert.get("payoff_q_point"))
-        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
-        optimal_stake_usd = float(cert.get("optimal_stake_usd"))
-    except (TypeError, ValueError):
-        return "QKERNEL_FINAL_SUBMIT_FLOOR:invalid_economics"
-    if not all(
-        math.isfinite(value)
-        for value in (cost, edge_lcb, payoff_q_point, payoff_q_lcb, optimal_stake_usd)
-    ):
-        return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
 
     floors = _event_bound_strategy_live_quality_floors(strategy_key)
     floor_decision = entry_price_floor_decision(

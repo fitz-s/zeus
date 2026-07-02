@@ -76,7 +76,7 @@ def test_deep_favorite_buy_no_still_needs_taker_margin(monkeypatch):
 
 def test_buy_yes_is_identity(monkeypatch):
     _patch(monkeypatch, _bound())  # bound has buy_no only
-    payload = dict(_BUY_NO, direction="buy_yes", q_live="0.30", q_lcb_5pct="0.30")
+    payload = dict(_BUY_NO, direction="buy_yes", q_live="0.70", q_lcb_5pct="0.60")
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload, order_mode="TAKER", fresh_best_bid=0.11, fresh_best_ask=0.12
     )
@@ -91,8 +91,8 @@ def test_center_buy_taker_quality_preserves_declared_floor_above_registry(monkey
         event_type="FORECAST_SNAPSHOT_READY",
         strategy_key="center_buy",
         direction="buy_yes",
-        q_live="0.24",
-        q_lcb_5pct="0.18",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
         kelly_size_usd="10.0",
         min_entry_price="0.05",
         min_expected_profit_usd="0.05",
@@ -120,8 +120,8 @@ def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
         event_type="FORECAST_SNAPSHOT_READY",
         strategy_key="center_buy",
         direction="buy_yes",
-        q_live="0.40",
-        q_lcb_5pct="0.40",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
         kelly_size_usd="10.0",
         min_entry_price="0.10",
         min_expected_profit_usd="0.05",
@@ -143,15 +143,15 @@ def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
     assert float(proof["effective_min_entry_price"]) == pytest.approx(0.10)
 
 
-def test_qkernel_center_buy_taker_rejects_price_below_entry_floor_even_when_profit_and_edge_clear(monkeypatch):
+def test_qkernel_center_buy_taker_allows_low_price_only_after_live_quality_clears(monkeypatch):
     _patch(monkeypatch, _bound())
     payload = dict(
         _BUY_NO,
         event_type="FORECAST_SNAPSHOT_READY",
         strategy_key="center_buy",
         direction="buy_yes",
-        q_live="0.30",
-        q_lcb_5pct="0.30",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
         kelly_size_usd="10.0",
         min_entry_price="0.05",
         min_expected_profit_usd="0.05",
@@ -165,9 +165,9 @@ def test_qkernel_center_buy_taker_rejects_price_below_entry_floor_even_when_prof
             "bin_id": "bin-yes-30c",
             "route_id": "DIRECT_YES:bin-yes-30c@proof",
             "side": "YES",
-            "payoff_q_point": 0.30,
-            "payoff_q_lcb": 0.30,
-            "edge_lcb": 0.26,
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.60,
+            "edge_lcb": 0.56,
             "delta_u_at_min": 0.01,
             "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.02,
@@ -177,7 +177,7 @@ def test_qkernel_center_buy_taker_rejects_price_below_entry_floor_even_when_prof
             "coherence_allows": True,
             "selection_guard_basis": "SELECTION_BETA_95",
             "selection_guard_abstained": False,
-            "selection_guard_q_safe": 0.30,
+            "selection_guard_q_safe": 0.60,
         },
     )
 
@@ -189,11 +189,11 @@ def test_qkernel_center_buy_taker_rejects_price_below_entry_floor_even_when_prof
     )
 
     assert proof is not None
-    assert proof["passed"] is False
-    assert proof["reason"] == "strategy_live_quality_floor_not_met"
-    assert proof["entry_price_floor_applies"] == "True"
-    assert proof["entry_price_floor_pass"] == "False"
-    assert proof["effective_min_entry_price"] == "0.05"
-    assert proof["qkernel_low_price_floor_authorized"] == "False"
+    assert proof["passed"] is True
+    assert proof["reason"] == "allowed"
+    assert proof["entry_price_floor_applies"] == "False"
+    assert proof["entry_price_floor_pass"] == "True"
+    assert proof["effective_min_entry_price"] == "0.02"
+    assert proof["qkernel_low_price_floor_authorized"] == "True"
     assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
     assert proof["min_entry_price"] == "0.05"

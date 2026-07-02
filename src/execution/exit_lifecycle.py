@@ -2843,6 +2843,9 @@ def _latest_exit_snapshot_context(
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
                AND selected_outcome_token_id = ?
+               AND orderbook_top_bid IS NOT NULL
+               AND TRIM(CAST(orderbook_top_bid AS TEXT)) != ''
+               AND UPPER(TRIM(CAST(orderbook_top_bid AS TEXT))) != 'ABSENT'
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,

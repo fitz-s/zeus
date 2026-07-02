@@ -406,10 +406,13 @@ def entry_price_floor_decision(
     declared_floor = _finite_submit_float(declared_min_entry_price)
     if declared_floor is None:
         declared_floor = 0.0
+    effective_min_entry_price = (
+        live_floor if qkernel_floor_candidate else max(declared_floor, live_floor)
+    )
     return EntryPriceFloorDecision(
         live_min_entry_price=live_floor,
-        effective_min_entry_price=max(declared_floor, live_floor),
-        qkernel_low_price_floor_authorized=False,
+        effective_min_entry_price=effective_min_entry_price,
+        qkernel_low_price_floor_authorized=qkernel_floor_candidate,
     )
 
 

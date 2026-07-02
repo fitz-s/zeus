@@ -107,8 +107,8 @@ def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_
     assert verdict["allowed"] is False
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
     assert verdict["details"]["live_min_entry_price"] == 0.02
-    assert verdict["details"]["effective_min_entry_price"] == 0.10
-    assert verdict["details"]["qkernel_low_price_floor_authorized"] is False
+    assert verdict["details"]["effective_min_entry_price"] == 0.02
+    assert verdict["details"]["qkernel_low_price_floor_authorized"] is True
 
 
 def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():

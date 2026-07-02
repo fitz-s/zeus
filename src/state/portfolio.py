@@ -54,6 +54,7 @@ from src.contracts.semantic_types import VenueVisibilityStatus, Direction, Direc
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
+from src.strategy.live_inference.live_admission import LIVE_DIRECTION_WIN_RATE_FLOOR
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
@@ -132,6 +133,28 @@ def _ci_intervals_separated(
     if not all(math.isfinite(v) for v in (lo_a, hi_a, lo_b, hi_b)):
         return None
     return (hi_a < lo_b - _CI_SEP_EPS) or (hi_b < lo_a - _CI_SEP_EPS)
+
+
+def _held_side_lcb_or_point(
+    ci: Optional[tuple],
+    point: Optional[float],
+) -> Optional[float]:
+    if ci is not None:
+        try:
+            lower = float(min(ci))
+        except (TypeError, ValueError):
+            lower = float("nan")
+        if math.isfinite(lower):
+            return lower
+    if point is None:
+        return None
+    try:
+        point_float = float(point)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(point_float):
+        return point_float
+    return None
 
 
 @dataclass(frozen=True)
@@ -1026,6 +1049,50 @@ class Position:
         )
         applied.append("forward_edge_compute")
 
+        def _live_floor_revoked_decision() -> ExitDecision | None:
+            entry_held_prob = (
+                float(exit_context.entry_posterior)
+                if ExitContext._is_finite(exit_context.entry_posterior)
+                else float(self.p_posterior or 0.0)
+            )
+            current_held_prob = float(exit_context.fresh_prob)
+            entry_held_lcb = _held_side_lcb_or_point(exit_context.entry_ci, entry_held_prob)
+            current_held_lcb = _held_side_lcb_or_point(exit_context.current_ci, current_held_prob)
+            if not (
+                entry_held_lcb is not None
+                and current_held_lcb is not None
+                and current_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
+                and entry_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
+                and not (exit_context.day0_active and current_held_prob <= 1e-9)
+            ):
+                return None
+            applied.append("live_win_rate_floor_revoked")
+            if not ExitContext._is_finite(exit_context.best_bid):
+                applied.append("best_bid_unavailable")
+                applied.append("exit_context_incomplete")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="LIVE_WIN_RATE_FLOOR_REVOKED_CONTEXT_INCOMPLETE",
+                )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                (
+                    "LIVE_WIN_RATE_FLOOR_REVOKED "
+                    f"(entry_lcb={entry_held_lcb:.4f}, current_lcb={current_held_lcb:.4f}, "
+                    f"entry_point={entry_held_prob:.4f}, current_point={current_held_prob:.4f}, "
+                    f"floor={LIVE_DIRECTION_WIN_RATE_FLOOR:.4f})"
+                ),
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="LIVE_WIN_RATE_FLOOR_REVOKED",
+            )
+
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
             applied.append("day0_standard_exit_optimizer")
@@ -1279,6 +1346,9 @@ class Position:
             # terminal hold here prevents the standard EV/consecutive optimizer from
             # ever reacting to the same fresh belief. Keep the overlap as evidence,
             # but let Day0 continue into the normal exit optimizer.
+            floor_revoked_decision = _live_floor_revoked_decision()
+            if floor_revoked_decision is not None:
+                return floor_revoked_decision
             if exit_context.day0_active:
                 applied.append("ci_overlap_nonterminal_day0")
             else:
@@ -1292,6 +1362,10 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="CI_OVERLAP_HOLD",
                 )
+
+        floor_revoked_decision = _live_floor_revoked_decision()
+        if floor_revoked_decision is not None:
+            return floor_revoked_decision
 
         # Direction-specific exit logic
         if self.direction == "buy_no":
@@ -1362,64 +1436,7 @@ class Position:
         applied.append("ci_threshold")
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            applied.append("ev_gate")
-            shares = self.effective_shares
-            if hold_value_exit_costs_enabled():
-                applied.append("hold_value_exit_costs_enabled")
-                if hours_to_settlement is None or hours_to_settlement < 0.0:
-                    # T6.4-hardening (con-nyx finding c): authority gap —
-                    # time_cost collapses to 0.0, silently degrading D6
-                    # protection at this call site. Surface via breadcrumb
-                    # so monitor summaries can count these occurrences.
-                    applied.append("hold_value_hours_unknown_time_cost_zero")
-                _crowding = _compute_exit_correlation_crowding(
-                    this_cluster=self.cluster,
-                    portfolio_positions=portfolio_positions,
-                    bankroll=bankroll,
-                    shares=shares,
-                    best_bid=best_bid,
-                    crowding_rate=exit_correlation_crowding_rate(),
-                )
-                if _crowding > 0.0:
-                    applied.append("hold_value_correlation_crowding_applied")
-                hold_value = HoldValue.compute_with_exit_costs(
-                    shares=shares,
-                    current_p_posterior=current_p_posterior,
-                    best_bid=best_bid,
-                    hours_to_settlement=hours_to_settlement,
-                    fee_rate=exit_fee_rate(),
-                    daily_hurdle_rate=exit_daily_hurdle_rate(),
-                    correlation_crowding=_crowding,
-                )
-            else:
-                hold_value = HoldValue.compute(
-                    gross_value=shares * current_p_posterior,
-                    fee_cost=0.0,
-                    time_cost=0.0,
-                )
-            if shares * best_bid <= hold_value.net_value:
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            # Day0 observation posterior can move abruptly right after the
-            # local day opens, before enough of the settlement day has elapsed
-            # to prove a real reversal. The CI-separation gate above owns
-            # evidence-backed belief reversals; settlement-imminent remains a
-            # separate force-exit below. Do not turn a point-estimate day0
-            # swing plus a tiny cash-out improvement into an immediate sell.
-            self.neg_edge_count = 0
-            applied.append("day0_observation_reversal_requires_ci_separation")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
-            )
+            applied.append("day0_observation_reversal_nonterminal")
         applied.append("consecutive_cycle_check")
         if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0
@@ -1521,71 +1538,16 @@ class Position:
 
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            if not ExitContext._is_finite(best_bid):
-                applied.append("best_bid_unavailable")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            shares = self.effective_shares
-            if shares > 0:
-                applied.append("ev_gate")
-                if hold_value_exit_costs_enabled():
-                    applied.append("hold_value_exit_costs_enabled")
-                    if hours_to_settlement is None or hours_to_settlement < 0.0:
-                        applied.append("hold_value_hours_unknown_time_cost_zero")
-                    _crowding = _compute_exit_correlation_crowding(
-                        this_cluster=self.cluster,
-                        portfolio_positions=portfolio_positions,
-                        bankroll=bankroll,
-                        shares=shares,
-                        best_bid=best_bid,
-                        crowding_rate=exit_correlation_crowding_rate(),
-                    )
-                    if _crowding > 0.0:
-                        applied.append("hold_value_correlation_crowding_applied")
-                    hold_value = HoldValue.compute_with_exit_costs(
-                        shares=shares,
-                        current_p_posterior=current_p_posterior,
-                        best_bid=best_bid,
-                        hours_to_settlement=hours_to_settlement,
-                        fee_rate=exit_fee_rate(),
-                        daily_hurdle_rate=exit_daily_hurdle_rate(),
-                        correlation_crowding=_crowding,
-                    )
-                else:
-                    hold_value = HoldValue.compute(
-                        gross_value=shares * current_p_posterior,
-                        fee_cost=0.0,
-                        time_cost=0.0,
-                    )
-                sell_value = shares * best_bid
-                if sell_value <= hold_value.net_value:
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                    )
-            # Same evidence rule as buy-YES: a day0 point-estimate reversal is
-            # not enough to liquidate. CI-separated reversal and
-            # settlement-imminent exits are handled outside this flat EV gate.
-            self.neg_edge_count = 0
-            applied.append("day0_observation_reversal_requires_ci_separation")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
-            )
+            applied.append("day0_observation_reversal_nonterminal")
 
-        # Near-settlement hold (unless deeply negative)
-        if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():
+        # Near-settlement hold (unless deeply negative). Day0 already passed
+        # through the shared settlement-imminent gate in evaluate_exit; do not
+        # let this wider buy-NO shortcut bypass the standard Day0 optimizer.
+        if (
+            not day0_active
+            and hours_to_settlement is not None
+            and hours_to_settlement < near_settlement_hours()
+        ):
             applied.append("near_settlement_gate")
             if forward_edge < near_threshold:
                 self.applied_validations = _dedupe_validations(applied)

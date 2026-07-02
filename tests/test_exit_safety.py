@@ -150,6 +150,8 @@ def _ensure_snapshot(
     closed: bool = False,
     accepting_orders: bool | None = True,
     enable_orderbook: bool = True,
+    orderbook_top_bid: Decimal | str | None = Decimal("0.49"),
+    orderbook_top_ask: Decimal | str | None = Decimal("0.51"),
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -194,8 +196,12 @@ def _ensure_snapshot(
             token_map_raw={"YES": token_id, "NO": no_token},
             rfqe=None,
             neg_risk=False,
-            orderbook_top_bid=Decimal("0.49"),
-            orderbook_top_ask=Decimal("0.51"),
+            orderbook_top_bid=(
+                Decimal(str(orderbook_top_bid)) if orderbook_top_bid is not None else None
+            ),
+            orderbook_top_ask=(
+                Decimal(str(orderbook_top_ask)) if orderbook_top_ask is not None else None
+            ),
             orderbook_depth_jsonb="{}",
             raw_gamma_payload_hash="a" * 64,
             raw_clob_market_info_hash="b" * 64,
@@ -2392,6 +2398,110 @@ def test_live_exit_static_topology_identity_seed_marks_clob_reconstructed_tradab
     )
 
     assert context["executable_snapshot_id"] == "snap-exit-static-reconstructed"
+
+
+def test_live_exit_skips_fresh_snapshot_without_sell_bid_and_captures_new_one(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-fresh-missing-bid",
+        captured_at=_NOW,
+        freshness_deadline=_NOW + timedelta(minutes=5),
+        orderbook_top_bid=None,
+        orderbook_top_ask=Decimal("0.05"),
+    )
+    position = Position(
+        trade_id="pos-exit-refresh-missing-bid",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.04,
+        size_usd=10.0,
+        shares=250.0,
+    )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "question_id": "question-test",
+                "token_id": YES_TOKEN,
+                "no_token_id": NO_TOKEN,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "id": "gamma-test-current",
+                    "conditionId": market_id,
+                    "questionID": "question-test",
+                    "clobTokenIds": [YES_TOKEN, NO_TOKEN],
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def fake_capture_snapshot(
+        conn_arg,
+        *,
+        market,
+        decision,
+        clob,
+        captured_at,
+        scan_authority,
+        execution_side,
+    ):
+        assert execution_side == "SELL"
+        return {
+            "executable_snapshot_id": _ensure_snapshot(
+                conn_arg,
+                token_id=YES_TOKEN,
+                no_token_id=NO_TOKEN,
+                selected_outcome_token_id=YES_TOKEN,
+                outcome_label="YES",
+                snapshot_id="snap-exit-with-bid",
+                captured_at=captured_at,
+                orderbook_top_bid=Decimal("0.03"),
+                orderbook_top_ask=Decimal("0.05"),
+            ),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", fake_capture_snapshot)
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context["executable_snapshot_id"] == "snap-exit-with-bid"
 
 
 def test_live_exit_identity_seed_does_not_reuse_stale_accepting_orders_as_tradability(

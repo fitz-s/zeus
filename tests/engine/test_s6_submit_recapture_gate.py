@@ -863,8 +863,8 @@ def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(
         direction="buy_yes",
         row=low_floor_row,
         token_id="yes-low",
-        q_posterior=0.12,
-        q_lcb_5pct=0.08,
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
         bin_obj=_BIN_X,
     )
     live_floor_row = _snapshot_row(
@@ -879,7 +879,7 @@ def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(
         row=live_floor_row,
         token_id="yes-live",
         q_posterior=0.70,
-        q_lcb_5pct=0.50,
+        q_lcb_5pct=0.60,
         bin_obj=_BIN_Y,
     )
 
@@ -912,13 +912,13 @@ def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(
             (era._candidate_bin_id(low_floor_proof), "YES"): _cert(
                 low_floor_proof,
                 cost=0.005,
-                q_lcb=0.08,
+                q_lcb=0.60,
                 stake=10.0,
             ),
             (era._candidate_bin_id(live_floor_proof), "YES"): _cert(
                 live_floor_proof,
                 cost=0.20,
-                q_lcb=0.50,
+                q_lcb=0.60,
                 stake=10.0,
             ),
         },
@@ -981,6 +981,59 @@ def test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes():
     )
 
     assert scoped == (high_confidence_proof,)
+
+
+def test_qkernel_selection_scopes_out_low_payoff_lcb_even_when_legacy_lcb_is_high():
+    row = _snapshot_row(
+        yes_asks=(("0.041", "1000000"),),
+        condition_id="cond-buenos-low-payoff",
+        yes_token_id="yes-buenos-low-payoff",
+        no_token_id="no-buenos-low-payoff",
+        snapshot_id="snap-buenos-low-payoff",
+    )
+    proof = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-buenos-low-payoff",
+        q_posterior=0.24833093804728934,
+        q_lcb_5pct=0.65,
+        bin_obj=_BIN_X,
+    )
+    bin_id = era._candidate_bin_id(proof)
+    proofs = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={
+            (bin_id, "YES"): {
+                "source": "qkernel_spine",
+                "candidate_id": f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+                "bin_id": bin_id,
+                "route_id": f"DIRECT_YES:{bin_id}@proof",
+                "side": "YES",
+                "payoff_q_point": 0.24833093804728934,
+                "payoff_q_lcb": 0.0990451308919892,
+                "edge_lcb": 0.04521706636697825,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 20.0,
+                "optimal_delta_u": 0.02,
+                "cost": 0.053828064525010946,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.0990451308919892,
+            }
+        },
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+    )
+
+    assert proofs[0].missing_reason is not None
+    assert proofs[0].missing_reason.startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert era._selection_scoped_proofs(
+        proofs=proofs,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    ) == ()
 
 
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():

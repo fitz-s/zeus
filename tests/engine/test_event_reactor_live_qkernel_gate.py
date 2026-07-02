@@ -439,9 +439,9 @@ def test_live_entry_qkernel_gate_rejects_bin_mismatch():
         )
 
 
-def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_authoritative():
+def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_high_confidence():
     cert = _qkernel_cert()
-    cert.update(cost=0.07, payoff_q_lcb=0.18, payoff_q_point=0.24, edge_lcb=0.11)
+    cert.update(cost=0.07, payoff_q_lcb=0.60, payoff_q_point=0.70, edge_lcb=0.53)
 
     _assert_live_entry_submit_authority(
         {
@@ -450,12 +450,38 @@ def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_authorita
             "direction": "buy_yes",
             "strategy_key": "center_buy",
             "candidate_bin_id": "bin-1",
-            "q_live": 0.24,
-            "q_lcb_5pct": 0.18,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
             "min_entry_price": 0.10,
             "qkernel_execution_economics": cert,
         }
     )
+
+
+def test_live_entry_qkernel_gate_rejects_buenos_aires_low_win_rate_yes():
+    cert = _qkernel_cert()
+    cert.update(
+        cost=0.053828064525010946,
+        payoff_q_lcb=0.0990451308919892,
+        payoff_q_point=0.24833093804728934,
+        edge_lcb=0.04521706636697825,
+        selection_guard_q_safe=0.0990451308919892,
+    )
+
+    with pytest.raises(ValueError, match="ADMISSION_WIN_RATE_FLOOR"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "center_buy",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.24833093804728934,
+                "q_lcb_5pct": 0.0990451308919892,
+                "min_entry_price": 0.02,
+                "qkernel_execution_economics": cert,
+            }
+        )
 
 
 def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_floor():
@@ -544,7 +570,7 @@ def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
 
 def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():
     cert = _qkernel_cert()
-    cert.update(cost=0.07, payoff_q_lcb=0.18, payoff_q_point=0.24, edge_lcb=0.11)
+    cert.update(cost=0.07, payoff_q_lcb=0.60, payoff_q_point=0.70, edge_lcb=0.53)
 
     _assert_live_entry_submit_authority(
         {
@@ -553,8 +579,8 @@ def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():
             "direction": "buy_yes",
             "strategy_key": "center_buy",
             "candidate_bin_id": "bin-1",
-            "q_live": 0.24,
-            "q_lcb_5pct": 0.18,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
             "min_entry_price": 0.05,
             "qkernel_execution_economics": cert,
         }

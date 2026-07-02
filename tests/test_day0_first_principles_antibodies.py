@@ -720,7 +720,8 @@ class TestDay0TransitionMonotonicity:
         )
         assert decision.should_exit is False
         assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
-        assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
+        assert "day0_observation_reversal_nonterminal" in decision.applied_validations
+        assert "consecutive_cycle_check" in decision.applied_validations
 
     def test_bin_contains_running_extreme_survives_day0_arrival(self):
         """Operator first principle: a position whose bin contains the running
@@ -840,11 +841,10 @@ class TestDay0TransitionMonotonicity:
 
     def test_no_single_cycle_day0_reversal_sell_producer_in_source(self):
         """Static antibody: portfolio.py must not reconstruct the pre-2026-06-07
-        single-cycle DAY0_OBSERVATION_REVERSAL sell. The bare trigger may only
-        appear as the HELD_FOR_EVIDENCE hold or in the re-entry blocklist."""
+        single-cycle DAY0_OBSERVATION_REVERSAL sell."""
         source = (ROOT / "src" / "state" / "portfolio.py").read_text(encoding="utf-8")
         assert 'trigger="DAY0_OBSERVATION_REVERSAL"' not in source
-        assert 'trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"' in source
+        assert "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE" not in source
 
     def test_buy_no_day0_monitor_probability_uses_explicit_held_side_conversion(self):
         """Static antibody: buy_no monitor probability must be explicitly held-side.

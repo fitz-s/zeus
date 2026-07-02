@@ -8063,9 +8063,79 @@ def test_day0_buy_yes_point_reversal_requires_stronger_evidence():
     )
 
     assert decision.should_exit is False
-    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"
+    assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
     assert "day0_observation_gate" in decision.applied_validations
-    assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
+    assert "day0_observation_reversal_nonterminal" in decision.applied_validations
+    assert "consecutive_cycle_check" in decision.applied_validations
+
+
+def test_low_win_rate_lottery_position_exits_before_ci_overlap_hold():
+    """A live-invalid tail position must not be held forever by CI overlap."""
+
+    pos = _make_position(
+        direction="buy_yes",
+        p_posterior=0.24833093804728934,
+        entry_price=0.041,
+        entry_ci_width=0.2985716143106003,
+        shares=69.34,
+        cost_basis_usd=2.8429,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.24833093804728934,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.030649376417233552,
+            current_market_price_is_fresh=True,
+            best_bid=0.022,
+            best_ask=0.039,
+            hours_to_settlement=10.0,
+            position_state="holding",
+            day0_active=False,
+            entry_posterior=0.24833093804728934,
+            entry_ci=(0.0990451308919892, 0.3976167452025895),
+            current_ci=(0.0990451308919892, 0.3976167452025895),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "LIVE_WIN_RATE_FLOOR_REVOKED"
+    assert "live_win_rate_floor_revoked" in decision.applied_validations
+
+
+def test_low_lcb_position_exits_even_when_point_probability_is_high_and_ci_overlaps():
+    """The live floor is q_lcb, not point q; CI overlap cannot hold an invalid bound."""
+
+    pos = _make_position(
+        direction="buy_yes",
+        p_posterior=0.70,
+        entry_price=0.04,
+        entry_ci_width=0.50,
+        shares=100.0,
+        cost_basis_usd=4.0,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.70,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.06,
+            current_market_price_is_fresh=True,
+            best_bid=0.055,
+            best_ask=0.065,
+            hours_to_settlement=10.0,
+            position_state="holding",
+            day0_active=False,
+            entry_posterior=0.70,
+            entry_ci=(0.40, 0.90),
+            current_ci=(0.40, 0.90),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "LIVE_WIN_RATE_FLOOR_REVOKED"
+    assert "live_win_rate_floor_revoked" in decision.applied_validations
+    assert "ci_overlap_hold" not in decision.applied_validations
 
 
 def test_day0_buy_no_point_reversal_requires_stronger_evidence():
@@ -8085,9 +8155,10 @@ def test_day0_buy_no_point_reversal_requires_stronger_evidence():
     )
 
     assert decision.should_exit is False
-    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"
+    assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
     assert "day0_observation_gate" in decision.applied_validations
-    assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
+    assert "day0_observation_reversal_nonterminal" in decision.applied_validations
+    assert "consecutive_cycle_check" in decision.applied_validations
 
 
 def test_day0_observation_exits_when_settlement_imminent():
