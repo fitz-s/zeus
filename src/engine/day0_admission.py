@@ -44,7 +44,7 @@ class Day0AdmissionContext:
     edge_survives_one_bin_stress: bool
     # stage policy (the caller supplies the current stage's allowlists / admissible health set)
     city_allowlist: frozenset[str]
-    metric_allowlist: frozenset[str] = field(default_factory=lambda: frozenset({"high"}))
+    metric_allowlist: frozenset[str] = field(default_factory=lambda: frozenset({"high", "low"}))
     allowed_health_states: frozenset[str] = field(default_factory=lambda: frozenset({"OK_FAST_AND_WU", "OK_FAST_ONLY"}))
     maker_only_required: bool = True
 
@@ -61,7 +61,7 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     if ctx.city not in ctx.city_allowlist:
         return "DAY0_CITY_NOT_ALLOWLISTED"
 
-    # 2) metric not in the current stage set (initial live = high only).
+    # 2) metric not in the current stage set.
     if ctx.metric not in ctx.metric_allowlist:
         return "DAY0_METRIC_NOT_IN_STAGE"
 

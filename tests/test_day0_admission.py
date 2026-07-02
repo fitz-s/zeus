@@ -39,8 +39,17 @@ def test_city_not_allowlisted() -> None:
     assert day0_live_admission_rejection_reason(_ctx(city="Lagos")) == "DAY0_CITY_NOT_ALLOWLISTED"
 
 
-def test_metric_not_in_stage() -> None:
-    assert day0_live_admission_rejection_reason(_ctx(metric="low")) == "DAY0_METRIC_NOT_IN_STAGE"
+def test_low_metric_is_live_by_default() -> None:
+    assert day0_live_admission_rejection_reason(_ctx(metric="low")) is None
+
+
+def test_metric_not_in_stage_when_stage_override_excludes_it() -> None:
+    assert (
+        day0_live_admission_rejection_reason(
+            _ctx(metric="low", metric_allowlist=frozenset({"high"}))
+        )
+        == "DAY0_METRIC_NOT_IN_STAGE"
+    )
 
 
 def test_fast_obs_unsupported() -> None:

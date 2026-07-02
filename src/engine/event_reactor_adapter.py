@@ -11833,6 +11833,89 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
     return cert
 
 
+def _qkernel_candidate_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
+    """Return a candidate-local qkernel certificate without granting submit authority.
+
+    Submit sizing still requires ``_qkernel_execution_economics`` on the selected proof,
+    which checks the qkernel selection stamp.  Family-rank recapture, however, must compare
+    the sibling certificates emitted by the same qkernel decision.  Non-selected siblings
+    deliberately do not carry the submit-authority stamp, so this read boundary validates
+    the certificate's economics, route identity, and served-belief consistency without
+    treating that sibling as directly submittable.
+    """
+
+    cert = _valid_qkernel_execution_economics_payload(
+        getattr(proof, "qkernel_execution_economics", None),
+        direction=str(getattr(proof, "direction", "") or ""),
+    )
+    if cert is None:
+        return None
+    bin_id = str(cert.get("bin_id") or "").strip()
+    if bin_id and bin_id != _candidate_bin_id(proof):
+        return None
+    route_id = str(cert.get("route_id") or "").strip()
+    native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
+    if route_id.startswith("DIRECT_YES:") and native_side != "YES":
+        return None
+    if route_id.startswith("DIRECT_NO:") and native_side != "NO":
+        return None
+    if _qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=_optional_float(getattr(proof, "q_posterior", None)),
+        proof_q_lcb=_optional_float(getattr(proof, "q_lcb_5pct", None)),
+    ):
+        return None
+    return cert
+
+
+def _qkernel_recapture_rank_key(
+    proof: "_CandidateProof",
+) -> tuple[float, float, float, float, float, float] | None:
+    cert = _qkernel_candidate_execution_economics(proof)
+    if cert is None:
+        return None
+    try:
+        side = str(cert.get("side") or "").strip().upper()
+        cost = float(cert.get("cost"))
+        edge_lcb = float(cert.get("edge_lcb"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        stake = float(cert.get("optimal_stake_usd"))
+        delta_u_at_min = float(cert.get("delta_u_at_min"))
+        optimal_delta_u = float(cert.get("optimal_delta_u"))
+    except (TypeError, ValueError):
+        return None
+    if not all(
+        math.isfinite(value)
+        for value in (cost, edge_lcb, payoff_q_lcb, stake, delta_u_at_min, optimal_delta_u)
+    ):
+        return None
+    profit_lcb = roi_frontier_profit_lcb_usd(stake=stake, cost=cost, edge_lcb=edge_lcb)
+    growth_density = roi_frontier_growth_density(
+        cost=cost,
+        edge_lcb=edge_lcb,
+        payoff_q_lcb=payoff_q_lcb,
+    )
+    roi_lcb = edge_lcb / cost if cost > 0.0 else float("-inf")
+    utility_density = optimal_delta_u / stake if stake > 0.0 else float("-inf")
+    if not roi_frontier_useful_values(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=stake,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        return None
+    return (
+        float(growth_density),
+        float(roi_lcb),
+        float(profit_lcb),
+        float(utility_density),
+        float(optimal_delta_u),
+        -float(cost),
+    )
+
+
 def _qkernel_cert_served_belief_rejection_reason(
     cert: Mapping[str, Any],
     *,
@@ -15205,13 +15288,23 @@ def _family_rank_reversed_at_recapture(
     Conflating the two would mislabel a plain edge collapse as a family switch.
     """
     if _proof_uses_qkernel_spine(selected_proof):
-        # The qkernel spine is the live selection authority for qkernel-selected proofs.
-        # Re-running the legacy robust-marginal-utility ranker here lets an inert
-        # legacy surface overrule the qkernel argmax after the qkernel has already
-        # selected and certified execution economics for this same fresh proof set.
-        # A qkernel-compatible submit rerank must route through the spine; until that
-        # exists, this legacy family-rank gate has no authority over qkernel proofs.
-        return False
+        scoped = _selection_scoped_proofs(
+            proofs=tuple(all_proofs),
+            locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        )
+        ranked: list[tuple[tuple[float, float, float, float, float, float], _CandidateProof]] = []
+        for proof in scoped:
+            key = _qkernel_recapture_rank_key(proof)
+            if key is not None:
+                ranked.append((key, proof))
+        if not ranked:
+            return False
+        fresh_primary = max(ranked, key=lambda item: item[0])[1]
+        return _candidate_evaluation_id(fresh_primary) != _candidate_evaluation_id(
+            selected_proof
+        )
 
     # S6 SCOPE-SET INVARIANT (2026-06-09): the fresh-curve re-rank MUST be computed over
     # the SAME scoped candidate set SELECTION ranked over — `_selection_scoped_proofs`
@@ -20477,10 +20570,16 @@ def _apply_day0_mask_to_generated_probabilities(
             ),
             source="FORECAST_BOOTSTRAP",
         )
+        if absorbing_no[index]:
+            masked_no_lcb = 1.0
+        elif absorbing_yes[index]:
+            masked_no_lcb = 0.0
+        else:
+            masked_no_lcb = min(no_lcb, max(0.0, 1.0 - q_value))
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_no"),
-            1.0 if absorbing_no[index] else 0.0,
+            masked_no_lcb,
             source="FORECAST_BOOTSTRAP",
         )
     # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
@@ -20497,10 +20596,10 @@ def _apply_day0_mask_to_generated_probabilities(
             for candidate in family.candidates
         },
         "no_lcb_by_condition": {
-            str(candidate.condition_id or ""): (
-                1.0 if absorbing_no[index] else 0.0
+            str(candidate.condition_id or ""): _qlcb_float(
+                masked_lcb_by_direction.get((str(candidate.condition_id or ""), "buy_no"), 0.0)
             )
-            for index, candidate in enumerate(family.candidates)
+            for candidate in family.candidates
         },
         "mask": [float(value) for value in mask],
         "absorbing_yes_conditions": [

@@ -677,6 +677,75 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
     ) is False
 
 
+def test_qkernel_recapture_detects_qkernel_sibling_reversal():
+    """Qkernel submit recapture must rerank qkernel certs, not always return pass."""
+
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B2",
+                          yes_token_id="yes-B2", no_token_id="no-B2", snapshot_id="snapB2")
+    selected = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                               q_posterior=0.70, q_lcb_5pct=0.60, bin_obj=_BIN_X)
+    sibling = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B2",
+                              q_posterior=0.85, q_lcb_5pct=0.78, bin_obj=_BIN_Y)
+
+    def _cert(*, candidate_id, bin_id, q_point, q_lcb, cost, edge, du):
+        return {
+            "source": "qkernel_spine",
+            "candidate_id": candidate_id,
+            "route_id": f"DIRECT_YES:{bin_id}@proof",
+            "side": "YES",
+            "bin_id": bin_id,
+            "payoff_q_point": q_point,
+            "payoff_q_lcb": q_lcb,
+            "edge_lcb": edge,
+            "point_ev": q_point - cost,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "10",
+            "optimal_delta_u": du,
+            "q_dot_payoff": q_point,
+            "cost": cost,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
+        }
+
+    qkernel_selected = dataclass_replace(
+        selected,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=_cert(
+            candidate_id="DIRECT_YES:cond-A@proof",
+            bin_id=era._candidate_bin_id(selected),
+            q_point=0.70,
+            q_lcb=0.60,
+            cost=0.50,
+            edge=0.10,
+            du=0.02,
+        ),
+    )
+    qkernel_sibling = dataclass_replace(
+        sibling,
+        qkernel_execution_economics=_cert(
+            candidate_id="DIRECT_YES:cond-B2@proof",
+            bin_id=era._candidate_bin_id(sibling),
+            q_point=0.85,
+            q_lcb=0.78,
+            cost=0.20,
+            edge=0.58,
+            du=0.08,
+        ),
+    )
+
+    assert era._family_rank_reversed_at_recapture(
+        family_key="fam",
+        selected_proof=qkernel_selected,
+        all_proofs=(qkernel_selected, qkernel_sibling),
+    ) is True
+
+
 def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(monkeypatch):
     import sqlite3
 

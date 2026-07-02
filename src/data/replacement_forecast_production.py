@@ -1273,20 +1273,35 @@ def _replacement_forecast_download_cycle() -> None:
     station_report = _ingest_station_forecasts_live(cfg)
     if station_report:
         logger.info("station-forecast live ingest wrote rows: %s", station_report)
+    catchup_report = _run_replacement_forecast_live_materialization_queue_once(cfg)
+    catchup_payload = catchup_report.as_dict()
+    if (
+        catchup_report.processed_count
+        or catchup_report.seed_processed_count
+        or catchup_report.failed_count
+        or catchup_report.seed_failed_count
+    ):
+        logger.info(
+            "replacement forecast live materialization download-catchup: %s",
+            catchup_payload,
+        )
 
 
 @_scheduler_job("replacement_forecast_live_materialize")
 def _replacement_forecast_live_materialize_cycle() -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    report = _run_replacement_forecast_live_materialization_queue_once(cfg)
+    _log_replacement_forecast_materialization_report(report)
+
+
+def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, object]):
     from src.data.replacement_forecast_live_materialization_queue import (
         process_replacement_forecast_live_materialization_queue,
     )
 
-    # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
-    # so it can never block this seed->materialize cycle (see that function's note).
-    cfg = _replacement_forecast_live_materialization_queue_config()
-    report = process_replacement_forecast_live_materialization_queue(
+    return process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
         failed_dir=cfg["failed_dir"],
@@ -1299,6 +1314,9 @@ def _replacement_forecast_live_materialize_cycle() -> None:
         seed_limit=int(cfg["seed_limit"]),
         limit=int(cfg["limit"]),
     )
+
+
+def _log_replacement_forecast_materialization_report(report) -> None:
     report_payload = report.as_dict()
     seed_discovery = report_payload.get("seed_discovery_report")
     seed_discovery_active = (
