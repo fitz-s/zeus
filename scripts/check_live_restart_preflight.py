@@ -268,13 +268,11 @@ def _live_restart_in_progress() -> bool:
 def _live_trading_process_absent_check() -> CheckResult:
     processes = _live_main_processes()
     restart_in_progress = _live_restart_in_progress()
-    ok = not processes or restart_in_progress
+    ok = not processes
     if not processes:
-        detail = "src.main is not running"
-    elif restart_in_progress:
-        detail = "src.main is running during deploy restart; stop before bootstrap is required"
+        detail = "no src.main process running"
     else:
-        detail = "src.main is already running"
+        detail = "src.main is still running"
     return CheckResult(
         "live_trading_process_absent",
         ok,
@@ -282,11 +280,7 @@ def _live_trading_process_absent_check() -> CheckResult:
         {
             "processes": processes,
             "restart_in_progress": restart_in_progress,
-            "restart_recovery_obligation": (
-                "deploy restart must stop the old src.main before bootstrapping the replacement"
-                if processes and restart_in_progress
-                else None
-            ),
+            "restart_recovery_obligation": None,
         },
     )
 
@@ -5556,7 +5550,7 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
     evidence["restart_recovery_obligation"] = (
         "post-start health must observe fresh per-position MONITOR_REFRESHED events before live is considered recovered"
     )
-    if not main_processes or restart_in_progress:
+    if not main_processes:
         return CheckResult(
             "monitor_cadence_restart_evidence",
             True,

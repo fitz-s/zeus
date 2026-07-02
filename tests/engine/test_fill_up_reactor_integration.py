@@ -113,6 +113,22 @@ def test_same_token_pending_excludes_materialized():
     assert pending == pytest.approx(0.0)  # represented → not double-counted as pending
 
 
+def test_family_pending_counts_selected_sibling_token_live_cap():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u1','e1','edli_intent:e1:tok-B','cmd1', 6.5, 'RESERVED')"
+    )
+
+    pending = era._family_pending_entry_usd(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B"),
+        trade_conn=conn,
+    )
+
+    assert pending == pytest.approx(6.5)
+
+
 # ---------------------------------------------------------------------------
 # Entry-path byte-identity: the gate is a no-op for non-fill-up candidates.
 # ---------------------------------------------------------------------------

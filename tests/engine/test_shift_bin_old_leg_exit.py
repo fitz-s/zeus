@@ -211,6 +211,30 @@ def test_placed_sell_records_durable_command_id_not_venue_order_id(monkeypatch):
     assert "venue_order_id=ord456" in (row["abort_reason"] or "")
 
 
+def test_pending_sell_without_durable_command_does_not_record_exit_submitted(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(status="pending", order_id="ord-no-command"),
+    )
+
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["old_exit_command_id"] in (None, "")
+    assert row["abort_reason"] == "SHIFT_BIN_EXIT_PENDING_NO_DURABLE_COMMAND"
+
+
 def test_buy_no_shift_exit_sells_no_token(monkeypatch):
     conn = _conn()
     _insert_old_leg(

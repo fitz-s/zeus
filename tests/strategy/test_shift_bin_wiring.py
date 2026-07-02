@@ -474,7 +474,7 @@ def test_old_leg_residual_keeps_synced_chain_position_over_collateral_zero():
 
 
 def test_old_leg_residual_keeps_zero_cost_current_risk_chain_position():
-    """Current chain risk cannot disappear just because cost projection is zero."""
+    """Current chain risk keeps share sellability without fabricating USD residual."""
 
     conn = _conn()
     _insert_held(
@@ -490,9 +490,37 @@ def test_old_leg_residual_keeps_zero_cost_current_risk_chain_position():
     )
     _insert_chain_collateral(conn, {})
 
-    residual = sbw.read_old_leg_residual_usd(conn, token_id="no-30")
+    residual = sbw.read_old_leg_residual(conn, token_id="no-30")
 
-    assert residual == pytest.approx(29.14)
+    assert residual.shares == pytest.approx(29.14)
+    assert residual.usd is None
+    assert sbw.read_old_leg_residual_usd(conn, token_id="no-30") == pytest.approx(0.0)
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is True
+
+
+def test_old_leg_residual_does_not_treat_sub_min_shares_as_usd():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=0.0,
+        chain_cost_basis_usd=0.0,
+        chain_shares=0.9,
+        chain_state="synced",
+    )
+
+    residual = sbw.read_old_leg_residual(conn, token_id="tok-A")
+
+    assert residual.shares == pytest.approx(0.9)
+    assert residual.usd is None
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is False
+
+
+def test_old_leg_live_predicate_treats_equal_dust_floor_as_live():
+    residual = sbw.OldLegResidual(shares=0.5, usd=0.20, source="position_current_usd")
+
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is True
 
 
 def test_chain_zero_old_leg_admits_new_bin_under_shift_lease():

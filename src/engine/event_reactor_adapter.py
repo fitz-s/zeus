@@ -155,7 +155,7 @@ from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Mapping
-from typing import Any, Callable, get_args
+from typing import Any, Callable, Iterable, get_args
 
 import numpy as np
 
@@ -1337,6 +1337,79 @@ def _same_token_pending_entry_usd(
     return total
 
 
+def _family_pending_entry_usd(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate_token_ids: Iterable[str],
+    trade_conn: sqlite3.Connection | None = None,
+) -> float:
+    """Sum in-flight ENTRY exposure for candidate family tokens not yet materialized."""
+
+    tokens = {str(token or "").strip() for token in candidate_token_ids}
+    tokens.discard("")
+    if conn is None or not tokens:
+        return 0.0
+    total = 0.0
+    if (
+        _adapter_table_exists(conn, "edli_live_cap_usage")
+        and _adapter_table_exists(conn, "edli_live_order_events")
+    ):
+        rows = conn.execute(
+            """
+            SELECT final_intent_id, execution_command_id, reserved_notional_usd
+              FROM edli_live_cap_usage
+             WHERE reservation_status IN ('RESERVED', 'CONSUMED')
+               AND reserved_notional_usd > 0
+            """
+        ).fetchall()
+        for row in rows:
+            final_intent_id = str(
+                row[0] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or ""
+            )
+            execution_command_id = str(
+                row[1] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or ""
+            )
+            token = _durable_live_cap_final_intent_token(final_intent_id)
+            if token not in tokens:
+                continue
+            if _durable_live_cap_usage_is_represented_in_trade_truth(
+                trade_conn or conn,
+                execution_command_id=execution_command_id,
+                final_intent_id=final_intent_id,
+            ):
+                continue
+            reserved = float(
+                row[2] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"]
+            )
+            if reserved > 0.0:
+                total += reserved
+
+    command_conn = trade_conn or conn
+    if command_conn is not None and _adapter_table_exists(command_conn, "venue_commands"):
+        placeholders = ",".join("?" for _ in tokens)
+        rows = command_conn.execute(
+            f"""
+            SELECT token_id, size, price
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND token_id IN ({placeholders})
+               AND state IN ('INTENT_CREATED', 'SUBMITTING', 'ACKED', 'POST_ACKED',
+                             'UNKNOWN', 'REVIEW_REQUIRED', 'PARTIAL',
+                             'PARTIALLY_FILLED', 'FILLED')
+            """,
+            tuple(sorted(tokens)),
+        ).fetchall()
+        for row in rows:
+            try:
+                size = float(row[1] if not isinstance(row, sqlite3.Row) else row["size"] or 0.0)
+                price = float(row[2] if not isinstance(row, sqlite3.Row) else row["price"] or 0.0)
+            except (TypeError, ValueError):
+                size = 0.0
+                price = 0.0
+            total += max(size * price, 1e-9)
+    return total
+
+
 def _read_old_leg_exit_inputs(
     conn: sqlite3.Connection | None,
     *,
@@ -1846,6 +1919,25 @@ def _submit_shift_bin_old_leg_exit(
     durable_command_id = str(getattr(result, "command_id", "") or "")
     venue_order_id = str(getattr(result, "order_id", "") or getattr(result, "external_order_id", "") or "")
     if status == "pending":
+        if not durable_command_id:
+            reason = "SHIFT_BIN_EXIT_PENDING_NO_RESULT_COMMAND_ID"
+            if _shift_exit_has_durable_command(conn, decision_id=decision_id):
+                _shift_bin_wiring.record_exit_submitted(
+                    conn,
+                    intent_id,
+                    now_iso=now_iso,
+                    old_exit_command_id=None,
+                    status="EXIT_UNKNOWN",
+                    reason=reason,
+                )
+            else:
+                _shift_bin_wiring.abort_shift_bin_lease(
+                    conn,
+                    intent_id,
+                    now_iso=now_iso,
+                    reason="SHIFT_BIN_EXIT_PENDING_NO_DURABLE_COMMAND",
+                )
+            return
         reason = f"SHIFT_BIN_EXIT_SUBMITTED:venue_order_id={venue_order_id}" if venue_order_id else None
         _shift_bin_wiring.record_exit_submitted(
             conn, intent_id, now_iso=now_iso,
@@ -5758,11 +5850,15 @@ def _build_event_bound_no_submit_receipt_core(
                     _min_order_shares * _price_for_min
                     if _price_for_min > 0.0 else _min_order_shares
                 )
-                _old_leg_residual = _shift_bin_wiring.read_old_leg_residual_usd(
+                _old_leg_residual = _shift_bin_wiring.read_old_leg_residual(
                     trade_conn,
                     token_id=_existing_shift_lease.held_token_id,
                 )
-                _old_leg_live = float(_old_leg_residual) > float(_dust_floor_usd)
+                _old_leg_live = _shift_bin_wiring.old_leg_is_live(
+                    _old_leg_residual,
+                    min_order_shares=float(_min_order_shares),
+                    dust_floor_usd=float(_dust_floor_usd),
+                )
                 if _existing_shift_lease.status in {
                     "EXIT_SUBMITTED",
                     "EXIT_UNKNOWN",
@@ -6053,7 +6149,7 @@ def _build_event_bound_no_submit_receipt_core(
                     # (no live row for the old token); +inf on ambiguous read (treat as
                     # live → exit first, never falsely enter). The dust floor is the
                     # venue min order in USD (a sub-min remainder can never be sold).
-                    _old_leg_residual = _shift_bin_wiring.read_old_leg_residual_usd(
+                    _old_leg_residual = _shift_bin_wiring.read_old_leg_residual(
                         trade_conn, token_id=_held_sibling.token_id
                     )
                     _min_order_shares = (
@@ -6069,12 +6165,20 @@ def _build_event_bound_no_submit_receipt_core(
                     # shift closed (reuse the SAME pending-entry truth D1 uses; >0 means
                     # an in-flight same-token-or-sibling entry that is not yet position
                     # truth — ambiguous family exposure).
-                    _family_pending_usd = _same_token_pending_entry_usd(
+                    _family_pending_usd = _family_pending_entry_usd(
                         locked_opportunity_conn,
-                        token_id=_held_sibling.token_id,
+                        candidate_token_ids=(
+                            _held_sibling.token_id,
+                            str(selected_token_id or ""),
+                        ),
                         trade_conn=trade_conn,
                     )
-                    if float(_old_leg_residual) > float(_dust_floor_usd):
+                    _old_leg_live = _shift_bin_wiring.old_leg_is_live(
+                        _old_leg_residual,
+                        min_order_shares=float(_min_order_shares),
+                        dust_floor_usd=float(_dust_floor_usd),
+                    )
+                    if _old_leg_live:
                         _day0_shift_block = _day0_shift_old_leg_exit_block_reason(
                             event=event,
                             payload=payload,
@@ -6114,7 +6218,11 @@ def _build_event_bound_no_submit_receipt_core(
                         selected_bin_id=_candidate_bin_id(proof),
                         selected_direction=str(direction or ""),
                         held=_held_sibling,
-                        old_leg_residual_usd=float(_old_leg_residual),
+                        old_leg_residual_usd=(
+                            float(_old_leg_residual.usd)
+                            if _old_leg_residual.usd is not None
+                            else float(_dust_floor_usd if _old_leg_live else 0.0)
+                        ),
                         has_unowned_pending_or_unknown_entry=bool(_family_pending_usd > 0.0),
                         now_iso=decision_time.isoformat(),
                         old_leg_dust_floor_usd=float(_dust_floor_usd),

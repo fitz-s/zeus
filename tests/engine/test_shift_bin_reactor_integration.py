@@ -101,6 +101,16 @@ def test_reactor_runs_same_family_management_for_forecast_selections_too():
     assert "_shift_bin_wiring.read_held_sibling_exposure(" in src
 
 
+def test_existing_and_new_shift_paths_share_old_leg_live_predicate():
+    src = inspect.getsource(era)
+    existing = src.index("_existing_shift_lease is not None")
+    sibling = src.index("_held_sibling is not None", existing)
+
+    assert "_shift_bin_wiring.old_leg_is_live(" in src[existing:sibling]
+    assert "_shift_bin_wiring.old_leg_is_live(" in src[sibling:]
+    assert "> float(_dust_floor_usd)" not in src[existing:sibling]
+
+
 def test_reactor_fails_closed_when_held_family_cannot_bind_sibling():
     """Held-family truth with no old-leg binding must not fall through to fresh entry."""
 

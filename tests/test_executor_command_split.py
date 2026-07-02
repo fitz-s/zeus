@@ -2243,7 +2243,7 @@ class TestLiveOrderCommandSplit:
             == 0
         )
 
-    def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
+    def test_idempotency_key_collision_raises_before_submit(self, mem_conn, monkeypatch):
         """Duplicate idempotency key: place_limit_order must NOT be called.
 
         Insert a command with a known idempotency_key first, then run a second
@@ -2253,8 +2253,17 @@ class TestLiveOrderCommandSplit:
         from src.execution.executor import _live_order
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command
+        import src.execution.executor as executor_module
 
         intent = _make_entry_intent(mem_conn, token_id="tok-idem" + "0" * 33)
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_actionable_certificate_payload_and_component",
+            lambda *args, **kwargs: (
+                {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+                {"actionable_certificate_hash": "hash-test"},
+            ),
+        )
 
         # Pre-insert a command with the key that _live_order will derive
         idem = IdempotencyKey.from_inputs(
@@ -2307,10 +2316,11 @@ class TestLiveOrderCommandSplit:
         assert result.reason is not None and "idempotency_collision" in result.reason, (
             f"Expected reason containing 'idempotency_collision', got {result.reason!r}"
         )
+        assert result.idempotency_key == idem.value
         # Most importantly: place_limit_order was never reached
         mock_inst.place_limit_order.assert_not_called()
 
-    def test_v2_preflight_failure_writes_rejected_event(self, mem_conn):
+    def test_v2_preflight_failure_writes_rejected_event(self, mem_conn, monkeypatch):
         """V2 preflight raises V2PreflightError -> state=REJECTED, place_limit_order not called.
 
         The command is already persisted (SUBMITTING) when preflight runs.
@@ -2320,9 +2330,54 @@ class TestLiveOrderCommandSplit:
         from src.execution.executor import _live_order
         from src.data.polymarket_client import V2PreflightError
         from src.state.venue_command_repo import get_command
+        import src.execution.executor as executor_module
 
         intent = _make_entry_intent(mem_conn)
         command_ids_seen: list[str] = []
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_actionable_certificate_payload_and_component",
+            lambda *args, **kwargs: (
+                {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+                {"actionable_certificate_hash": "hash-test"},
+            ),
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_duplicate_same_token_component",
+            lambda *args, **kwargs: {
+                "component": "entry_duplicate_same_token",
+                "allowed": True,
+                "reason": "no_duplicate",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_same_token_cooldown_component",
+            lambda *args, **kwargs: {
+                "component": "entry_same_token_cooldown",
+                "allowed": True,
+                "reason": "not_in_cooldown",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_decision_source_component",
+            lambda *args, **kwargs: {
+                "component": "entry_decision_source",
+                "allowed": True,
+                "reason": "valid",
+            },
+        )
 
         import src.state.venue_command_repo as _repo
         _real_insert = _repo.insert_command
@@ -2357,6 +2412,9 @@ class TestLiveOrderCommandSplit:
         assert cmd["state"] == "REJECTED", (
             f"Expected state=REJECTED after v2_preflight failure, got {cmd['state']!r}"
         )
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
 
     def test_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,
@@ -3418,6 +3476,7 @@ class TestExitOrderCommandSplit:
 
         assert result.status == "rejected"
         assert result.reason is not None and "idempotency_collision" in result.reason
+        assert result.idempotency_key == idem.value
         mock_inst.place_limit_order.assert_not_called()
 
 
@@ -3757,14 +3816,59 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
 # MEDIUM-3 payload shape: v2_preflight SUBMIT_REJECTED payload
 # ---------------------------------------------------------------------------
 
-def test_v2_preflight_payload_shape(mem_conn):
+def test_v2_preflight_payload_shape(mem_conn, monkeypatch):
     """V2 preflight failure must write SUBMIT_REJECTED with payload {{reason: v2_preflight_failed}}."""
     from src.execution.executor import _live_order
     from src.data.polymarket_client import V2PreflightError
     from src.state.venue_command_repo import get_command, list_events
+    import src.execution.executor as executor_module
 
     intent = _make_entry_intent(mem_conn)
     command_ids_seen: list[str] = []
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: (
+            {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+            {"actionable_certificate_hash": "hash-test"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_control_pause_component",
+        lambda *args, **kwargs: {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "not_paused",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_duplicate_same_token_component",
+        lambda *args, **kwargs: {
+            "component": "entry_duplicate_same_token",
+            "allowed": True,
+            "reason": "no_duplicate",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_same_token_cooldown_component",
+        lambda *args, **kwargs: {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "not_in_cooldown",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_decision_source_component",
+        lambda *args, **kwargs: {
+            "component": "entry_decision_source",
+            "allowed": True,
+            "reason": "valid",
+        },
+    )
 
     import src.state.venue_command_repo as _repo
     _real_insert = _repo.insert_command

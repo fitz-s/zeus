@@ -4602,7 +4602,7 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
             )
         except sqlite3.OperationalError as exc:
             # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. A transient
@@ -5335,6 +5335,7 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
             )
         effective_order_type = submit_order_type or order_type
         submit_post_only = bool(getattr(intent, "post_only", False))
@@ -5765,6 +5766,7 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
             )
         except PreSubmitIdentityBindingError as exc:
             try:
@@ -5880,6 +5882,7 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
             )
         except sqlite3.OperationalError as exc:
             # C-DBLOCK-UNKNOWN (2026-06-16): a transient 'database is locked' in this
@@ -5992,6 +5995,9 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
             )
         except Exception as exc:
             logger.error(

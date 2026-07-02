@@ -6271,11 +6271,11 @@ def test_live_trading_process_absent_blocks_running_main_without_deploy_restart(
     result = preflight._live_trading_process_absent_check()
 
     assert result.ok is False
-    assert result.detail == "src.main is already running"
+    assert result.detail == "src.main is still running"
     assert result.evidence["restart_in_progress"] is False
 
 
-def test_live_trading_process_absent_allows_running_main_during_deploy_restart(
+def test_live_trading_process_absent_blocks_running_main_during_deploy_restart(
     monkeypatch,
 ):
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
@@ -6283,13 +6283,13 @@ def test_live_trading_process_absent_allows_running_main_during_deploy_restart(
 
     result = preflight._live_trading_process_absent_check()
 
-    assert result.ok is True
-    assert result.detail == "src.main is running during deploy restart; stop before bootstrap is required"
+    assert result.ok is False
+    assert result.detail == "src.main is still running"
     assert result.evidence["restart_in_progress"] is True
-    assert result.evidence["restart_recovery_obligation"].startswith("deploy restart")
+    assert result.evidence["restart_recovery_obligation"] is None
 
 
-def test_monitor_cadence_restart_evidence_allows_stale_main_during_deploy_restart(
+def test_monitor_cadence_restart_evidence_blocks_stale_main_during_deploy_restart(
     monkeypatch, tmp_path
 ):
     trade_db = tmp_path / "zeus_trades.db"
@@ -6311,10 +6311,52 @@ def test_monitor_cadence_restart_evidence_allows_stale_main_during_deploy_restar
 
     result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.detail == "src.main is running but held-position monitor cadence is stale"
     assert result.evidence["restart_in_progress"] is True
     assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
     assert result.evidence["restart_recovery_obligation"].startswith("post-start health")
+
+
+def test_final_preflight_fails_when_restart_env_set_but_old_main_running(monkeypatch):
+    pass_check = preflight.CheckResult("pass", True, "ok", {})
+
+    monkeypatch.setattr(preflight, "_settings", lambda: {"edli": {"live_execution_mode": "disabled"}})
+    monkeypatch.setattr(preflight, "_open_positions", lambda positive_chain_only=True: [])
+    monkeypatch.setattr(preflight, "_open_positions_requiring_executable_quote", lambda rows: [])
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+    monkeypatch.setenv("ZEUS_LIVE_RESTART_IN_PROGRESS", "1")
+    monkeypatch.setattr(preflight, "_live_trading_launchagent_installed_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_live_trading_launchagent_bootstrapable_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_clob_signature_type_config_check", lambda *, required: pass_check)
+    monkeypatch.setattr(preflight, "_qkernel_spine_cutover_check", lambda cfg: pass_check)
+    monkeypatch.setattr(preflight, "_src_main_boot_guard_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_family_portfolio_single_leg_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_qlcb_reliability_artifact_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_forecast_sidecar_health", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_posterior_summary", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_live_input_posterior_cycle_alignment_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_sidecar_heartbeat_checks", lambda: [])
+    monkeypatch.setattr(preflight, "_collateral_snapshot_freshness_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_edli_live_order_presubmit_shape_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_live_actionable_certificate_semantics_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_live_money_certificate_parent_mode_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_venue_point_order_truth_alignment_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_edli_confirmed_fill_bridge_coverage_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_position_current_projection_integrity_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_economically_closed_sell_projection_exposure_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_resting_venue_command_lifecycle_alignment_check", lambda: pass_check)
+    monkeypatch.setattr(preflight, "_full_family_executable_substrate_redecision_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_execution_feasibility_evidence_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_pending_exit_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_belief_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_monitor_cadence_restart_evidence_check", lambda rows: pass_check)
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    blocker = next(c for c in result["blockers"] if c["name"] == "live_trading_process_absent")
+    assert blocker["detail"] == "src.main is still running"
 
 
 def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recovery(

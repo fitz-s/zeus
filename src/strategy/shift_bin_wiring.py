@@ -123,6 +123,49 @@ class ShiftBinPlan:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class OldLegResidual:
+    """Typed OLD-leg residual truth; never stores shares in the USD slot."""
+
+    shares: float | None
+    usd: float | None
+    source: str
+
+
+def old_leg_is_live(
+    residual: OldLegResidual,
+    *,
+    min_order_shares: float,
+    dust_floor_usd: float,
+) -> bool:
+    """Conservative close-before-open predicate shared by new and existing leases."""
+
+    if residual.source == "ambiguous":
+        return True
+    try:
+        shares = float(residual.shares) if residual.shares is not None else None
+    except (TypeError, ValueError):
+        shares = None
+    try:
+        usd = float(residual.usd) if residual.usd is not None else None
+    except (TypeError, ValueError):
+        usd = None
+    try:
+        min_shares = max(float(min_order_shares), 0.0)
+    except (TypeError, ValueError):
+        min_shares = 0.0
+    try:
+        dust_floor = max(float(dust_floor_usd), 0.0)
+    except (TypeError, ValueError):
+        dust_floor = 0.0
+
+    if shares is not None and shares >= min_shares and shares > 0.0:
+        return True
+    if usd is not None and usd >= dust_floor and usd > 0.0:
+        return True
+    return False
+
+
 def active_shift_lease_for_family(
     conn: sqlite3.Connection,
     *,
@@ -326,7 +369,25 @@ def read_old_leg_residual_usd(
     *,
     token_id: str,
 ) -> float:
-    """Return the OLD leg's current live committed USD, or 0.0 when no longer held.
+    """Return the OLD leg's current live committed USD, or 0.0 when no USD remains.
+
+    Compatibility wrapper for callers that still expect a numeric USD residual. It
+    intentionally does not convert shares to USD; callers that need sellability must
+    use ``read_old_leg_residual`` plus ``old_leg_is_live``.
+    """
+
+    residual = read_old_leg_residual(conn, token_id=token_id)
+    if residual.usd is None:
+        return float("inf") if residual.source == "ambiguous" else 0.0
+    return float(residual.usd)
+
+
+def read_old_leg_residual(
+    conn: Optional[sqlite3.Connection],
+    *,
+    token_id: str,
+) -> OldLegResidual:
+    """Return typed OLD-leg residual truth, or ambiguous when it cannot be proven.
 
     The CLOSE proof for close-before-open: when the old leg has been exited/voided to
     zero (or dust below min-order), no live ``position_current`` row remains for the
@@ -340,15 +401,15 @@ def read_old_leg_residual_usd(
     """
     token = str(token_id or "").strip()
     if conn is None or not token:
-        return float("inf")  # ambiguous truth → treat as live, never falsely enter
+        return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
     try:
         if not _table_exists(conn, "position_current"):
-            return float("inf")
+            return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
         cols = _columns(conn, "position_current")
     except sqlite3.Error:
-        return float("inf")
+        return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
     if "token_id" not in cols:
-        return float("inf")
+        return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
     phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
@@ -371,7 +432,7 @@ def read_old_leg_residual_usd(
                 ("COALESCE(chain_shares,0) > ?", (_LIVE_CHAIN_SHARE_EPSILON,))
             )
     if not positive_terms:
-        return float("inf")
+        return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
     positive_sql = " AND (" + " OR ".join(term for term, _ in positive_terms) + ")"
     positive_params: list[object] = []
     for _, params_for_term in positive_terms:
@@ -396,9 +457,9 @@ def read_old_leg_residual_usd(
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
     except sqlite3.Error:
-        return float("inf")
+        return OldLegResidual(shares=None, usd=float("inf"), source="ambiguous")
     if row is None:
-        return 0.0  # no live row for the old token → proven closed
+        return OldLegResidual(shares=0.0, usd=0.0, source="no_live_position")
 
     def _g(name: str):
         return _row_get(row, selected_names, name)
@@ -430,8 +491,16 @@ def read_old_leg_residual_usd(
     )
     if row_asserts_current_chain_risk:
         if row_live_usd > 0.0:
-            return row_live_usd
-        return float(row_chain_shares or 0.0)
+            return OldLegResidual(
+                shares=row_chain_shares,
+                usd=row_live_usd,
+                source="position_current_chain_usd",
+            )
+        return OldLegResidual(
+            shares=row_chain_shares,
+            usd=None,
+            source="position_current_chain_shares",
+        )
 
     chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
     if chain_available_shares == 0.0:
@@ -440,11 +509,15 @@ def read_old_leg_residual_usd(
         # the wallet has no old-leg collateral left. This may only override rows that
         # do NOT still assert current chain risk in position_current; a synced positive
         # chain_shares row is itself chain evidence and must stay live.
-        return 0.0
+        return OldLegResidual(shares=0.0, usd=0.0, source="chain_collateral_zero")
 
     if row_live_usd > 0.0:
-        return row_live_usd
-    return 0.0
+        return OldLegResidual(
+            shares=row_chain_shares,
+            usd=row_live_usd,
+            source="position_current_usd",
+        )
+    return OldLegResidual(shares=row_chain_shares, usd=0.0, source="no_live_usd")
 
 
 def plan_shift_bin(
