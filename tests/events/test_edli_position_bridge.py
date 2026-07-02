@@ -52,6 +52,28 @@ def test_qkernel_spine_is_registered_live_entry_method():
     assert EntryMethod.from_value(EntryMethod.QKERNEL_SPINE.value) is EntryMethod.QKERNEL_SPINE
 
 
+def test_forecast_strategy_fallback_uses_qkernel_entry_not_direction_aliases():
+    from src.events.edli_position_bridge import _resolve_strategy_key_from_pre_submit
+
+    for direction in ("buy_yes", "buy_no"):
+        assert (
+            _resolve_strategy_key_from_pre_submit(
+                {"event_type": "FORECAST_SNAPSHOT_READY"},
+                direction=direction,
+                metric="high",
+            )
+            == "forecast_qkernel_entry"
+        )
+        assert (
+            _resolve_strategy_key_from_pre_submit(
+                {"event_type": "EDLI_REDECISION_PENDING"},
+                direction=direction,
+                metric="low",
+            )
+            == "forecast_qkernel_entry"
+        )
+
+
 def test_edli_events_table_prefers_trade_main_when_world_copy_is_stale(tmp_path):
     from src.events.edli_position_bridge import _edli_events_table
     from src.state.db import init_schema

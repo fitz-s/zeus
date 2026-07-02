@@ -514,8 +514,13 @@ def _resolve_strategy_key_from_pre_submit(
                 raise EdliPositionBridgeError(
                     f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
                 )
-        elif event_type == "FORECAST_SNAPSHOT_READY":
-            strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
+        elif event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
+            if direction in {"buy_yes", "buy_no"}:
+                strategy_key = "forecast_qkernel_entry"
+            else:
+                raise EdliPositionBridgeError(
+                    f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
+                )
         else:
             raise EdliPositionBridgeError(
                 "EDLI_BRIDGE_STRATEGY_MISSING: strategy_key required when event_type is absent"

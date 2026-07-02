@@ -746,7 +746,7 @@ def test_qkernel_recapture_detects_qkernel_sibling_reversal():
     ) is True
 
 
-def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(monkeypatch):
+def test_edli_forecast_qkernel_strategy_gate_does_not_misclassify_buy_no_as_opening_inertia(monkeypatch):
     import sqlite3
 
     from src.riskguard import policy as risk_policy
@@ -823,7 +823,15 @@ def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(
         enforce_win_rate_floor=False,
     )
 
-    assert scoped == (yes_proof,)
+    assert scoped == (no_proof, yes_proof)
+    assert (
+        era._event_bound_strategy_key(
+            event_type="FORECAST_SNAPSHOT_READY",
+            direction="buy_no",
+            metric="high",
+        )
+        == "forecast_qkernel_entry"
+    )
 
     book = era._opportunity_book_from_proofs(
         event_id="evt",
@@ -835,11 +843,11 @@ def test_edli_selection_honors_strategy_policy_gate_without_blocking_center_buy(
         decision_time=decision_time,
     )
     reason = book.evaluations[0].missing_reason
-    assert reason is not None
-    assert reason.startswith("STRATEGY_POLICY_GATED:opening_inertia:")
+    assert reason is None
     family_reason = era._family_all_candidates_rejected_reason(book)
     assert family_reason is not None
-    assert "strategy_policy=1" in family_reason
+    assert "strategy_policy" not in family_reason
+    assert "opening_inertia" not in family_reason
 
 
 def test_edli_selection_does_not_treat_global_pause_as_strategy_rejection(monkeypatch):

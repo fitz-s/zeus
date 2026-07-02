@@ -37,9 +37,19 @@ from typing import Any, Literal
 
 from src.state.db import query_authoritative_settlement_rows
 
-# Mirrors src/state/strategy_tracker.py:49 STRATEGIES enum (and the schema
-# CHECK constraint at architecture/2026_04_02_architecture_kernel.sql:53-58).
-STRATEGY_KEYS: list[str] = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
+def _strategy_keys() -> list[str]:
+    from src.strategy.strategy_profile import all_profiles, reportable_strategy_keys
+
+    reportable = reportable_strategy_keys()
+    return [
+        key
+        for key, profile in all_profiles().items()
+        if key in reportable
+    ]
+
+
+# Mirrors src/state/strategy_tracker.py:56 STRATEGIES.
+STRATEGY_KEYS: list[str] = _strategy_keys()
 
 # Sample-quality boundaries per dispatch §"BATCH 1" + boot §2.
 SAMPLE_QUALITY_BOUNDARIES: dict[str, int] = {
@@ -115,7 +125,7 @@ def compute_realized_edge_per_strategy(
         end_date: ISO YYYY-MM-DD inclusive end day; defaults to today UTC
 
     Returns:
-        dict keyed by the 4 STRATEGY_KEYS. Every key is always present.
+        dict keyed by STRATEGY_KEYS. Every key is always present.
         Each value is a dict with edge_realized, n_trades, n_wins, win_rate,
         sample_quality, window_start, window_end.
     """
@@ -148,9 +158,9 @@ def compute_realized_edge_per_strategy(
         strategy = row.get("strategy")
         if strategy not in per_strategy:
             # Unknown strategy_key (e.g., legacy data with strategy="" or some other
-            # tag). Quarantine: do not include in any of the 4 buckets. Per
+            # tag). Quarantine: do not include outside the governed buckets. Per
             # AGENTS.md §"strategy families" — strategy_key is sole governance ID;
-            # only the 4 known families exist on current law.
+            # only the registered boot-allowed families exist on current law.
             continue
         outcome = row.get("outcome")
         p_post = row.get("p_posterior")

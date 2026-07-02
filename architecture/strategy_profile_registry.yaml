@@ -96,7 +96,8 @@
 # Initial values
 # --------------
 # Each strategy below mirrors the current registry behavior.
-# - settlement_capture, center_buy, opening_inertia → live (in _LIVE_ALLOWED)
+# - settlement_capture, center_buy, forecast_qkernel_entry, opening_inertia → live
+#   (in _LIVE_ALLOWED)
 # - shoulder_sell → blocked (refuted and removed from boot/runtime entry)
 # - shoulder_buy, center_sell → blocked (not in either allowlist pre-A4)
 #
@@ -201,6 +202,40 @@ center_buy:
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
   min_entry_price: 0.02
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.25
+  min_submit_edge_density: 0.05
+  allow_ultra_low_tail: false
+
+forecast_qkernel_entry:
+  thesis: >
+    Forecast-family q-kernel entry: choose the best executable YES/NO claim
+    across the full weather family from the current settlement-aware predictive
+    distribution, q band, executable family book, and robust Delta-U economics.
+    This is ordinary forecast re-decision alpha, not opening-tick inertia; it
+    must not inherit opening_inertia gates merely because the selected side is NO.
+  live_status: live
+  evidence_tier: LIVE_NORMAL
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes, buy_no]
+  allowed_bin_topology: [point, finite_range]
+  metric_support:
+    high: live
+    low:  live
+  kelly_default_multiplier: 1.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 1.0
+    settlement_day: 0.5
+    post_trading: 0.0
+    resolved: 0.0
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/reference/zeus_domain_model.md
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.25
   min_submit_edge_density: 0.05

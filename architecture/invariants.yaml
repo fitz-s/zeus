@@ -813,18 +813,21 @@ invariants:
   - id: INV-41
     zones: [K2_runtime, live_venue_submit, decision_kernel]
     statement: >
-      Every live entry for a selected buy_yes or buy_no side must prove the
-      selected-side q_lcb_5pct is at least LIVE_DIRECTION_WIN_RATE_FLOOR at
+      Every ordinary live entry for a selected buy_yes or buy_no side must prove
+      the selected-side q_lcb_5pct is at least LIVE_DIRECTION_WIN_RATE_FLOOR at
       selection, actionable certificate verification, and pre-submit/submit
-      economics. Positive expected value, cheap ask price, ROI density, or
-      taker/maker route quality cannot waive this selected-side conservative
-      win-rate proof.
+      economics. The q-kernel exact-bin YES lane is the explicit exception:
+      because it buys one Arrow-Debreu weather bin in a multi-bin family, it
+      must instead prove qkernel_center_yes_quality_floor plus positive
+      settlement-aware edge, ROI-frontier profit, and executable submit floors.
+      Positive expected value, cheap ask price, ROI density, or taker/maker
+      route quality cannot waive the applicable conservative probability floor.
     why: >
       The 2026-07-01 Buenos Aires 11C YES incident showed a 4.1c tail price
       could make a low-confidence side look positive-EV even though the live
       decision payload carried q_live≈0.248 and q_lcb≈0.099. That is not
       high-confidence market alpha. Live money entry requires both positive
-      edge against price and a conservative selected-side win-rate floor; long
+      edge against price and the applicable conservative probability floor; long
       tail research can remain outside submit authority.
     enforced_by:
       tests:

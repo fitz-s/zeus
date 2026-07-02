@@ -70,12 +70,13 @@ from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_STRATEGY_KEYS = {
-    "settlement_capture",
-    "shoulder_sell",
-    "center_buy",
-    "opening_inertia",
-}
+def _canonical_strategy_keys() -> frozenset[str]:
+    from src.strategy.strategy_profile import live_safe_keys
+
+    return live_safe_keys()
+
+
+CANONICAL_STRATEGY_KEYS = _canonical_strategy_keys()
 
 POSITION_ENV_UNKNOWN = "unknown_env"
 
@@ -1837,7 +1838,7 @@ def _runtime_strategy_key_from_projection_row(row: dict) -> str:
 
     from src.strategy.strategy_profile import try_get
 
-    profile = try_get("opening_inertia")
+    profile = try_get("forecast_qkernel_entry")
     if (
         profile is not None
         and profile.is_runtime_live()
@@ -1846,11 +1847,11 @@ def _runtime_strategy_key_from_projection_row(row: dict) -> str:
     ):
         logger.warning(
             "runtime repaired legacy EDLI forecast strategy label: position_id=%s "
-            "settlement_capture -> opening_inertia metric=%s",
+            "settlement_capture -> forecast_qkernel_entry metric=%s",
             row.get("position_id") or row.get("trade_id") or "",
             metric,
         )
-        return "opening_inertia"
+        return "forecast_qkernel_entry"
     return strategy_key
 
 

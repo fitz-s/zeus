@@ -254,6 +254,23 @@ def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
     )
 
 
+def test_forecast_strategy_fallback_preserves_qkernel_semantics():
+    from src.execution.command_recovery import _event_bound_strategy_key_from_payload
+
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "FORECAST_SNAPSHOT_READY", "direction": "buy_yes"}
+        )
+        == "forecast_qkernel_entry"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "FORECAST_SNAPSHOT_READY", "direction": "buy_no"}
+        )
+        == "forecast_qkernel_entry"
+    )
+
+
 def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatch):
     """Boot-fast recovery must not block scheduler startup on CLOB reads."""
     from src.execution import command_recovery
@@ -1345,7 +1362,7 @@ def _insert_actionable_certificate_for_recovery(
         "target_date": "2026-05-17",
         "bin_label": "Will the highest temperature in Karachi be 40C on May 17?",
         "direction": direction,
-        "strategy_key": "center_buy" if direction == "buy_yes" else "opening_inertia",
+        "strategy_key": "forecast_qkernel_entry",
         "metric": "high",
         "unit": "C",
         "q_live": q_live,
@@ -1451,7 +1468,7 @@ def _insert_final_intent_certificate_for_recovery(
         "target_date": "2026-05-17",
         "bin_label": "Will the highest temperature in Karachi be 40C on May 17?",
         "direction": direction,
-        "strategy_key": "center_buy" if direction == "buy_yes" else "opening_inertia",
+        "strategy_key": "forecast_qkernel_entry",
         "metric": "high",
         "unit": "C",
         "q_live": q_live,

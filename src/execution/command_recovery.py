@@ -120,6 +120,7 @@ _CANONICAL_STRATEGY_KEYS = frozenset({
     "day0_nowcast_entry",
     "shoulder_sell",
     "center_buy",
+    "forecast_qkernel_entry",
     "opening_inertia",
 })
 _LEGACY_STRATEGY_KEY_ALIASES = {
@@ -3343,7 +3344,7 @@ def _snapshot_trade_case_for_command(conn: sqlite3.Connection, command: dict, *,
     if created_at[:10] and target_date <= created_at[:10]:
         return {}
 
-    strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
+    strategy_key = "forecast_qkernel_entry"
     return {
         "trade_id": str(command.get("position_id") or ""),
         "decision_id": str(command.get("decision_id") or ""),
@@ -3361,7 +3362,7 @@ def _snapshot_trade_case_for_command(conn: sqlite3.Connection, command: dict, *,
         "selected_method": "ens_member_counting",
         "entry_method": "ens_member_counting",
         "edge_source": strategy_key,
-        "discovery_mode": "opening_hunt",
+        "discovery_mode": "update_reaction",
         "cluster": city,
         "p_posterior": 0.0,
         "decision_snapshot_id": str(command.get("snapshot_id") or ""),
@@ -3376,7 +3377,9 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
     event_type = str(payload.get("event_type") or "").strip()
     direction = str(payload.get("direction") or "").strip().lower()
     if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
-        return "opening_inertia" if direction == "buy_no" else "center_buy"
+        if direction in {"buy_yes", "buy_no"}:
+            return "forecast_qkernel_entry"
+        return ""
     if event_type == "DAY0_EXTREME_UPDATED":
         if direction == "buy_no":
             return "settlement_capture"

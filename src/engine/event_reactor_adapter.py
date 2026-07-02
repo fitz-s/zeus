@@ -1829,7 +1829,9 @@ def _event_bound_strategy_key(
         else:
             raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
     elif event_type in _FORECAST_DECISION_EVENT_TYPES:
-        strategy = "opening_inertia" if normalized_direction == "buy_no" else "center_buy"
+        if normalized_direction not in {"buy_yes", "buy_no"}:
+            raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
+        strategy = "forecast_qkernel_entry"
     else:
         raise ValueError(f"EDLI_STRATEGY_UNSUPPORTED_EVENT_TYPE:{event_type}")
 

@@ -211,6 +211,7 @@ from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
 from src.strategy.live_inference.live_admission import (
     LIVE_DIRECTION_WIN_RATE_FLOOR,
+    is_qkernel_exact_yes_strategy,
     qkernel_center_yes_quality_floor,
 )
 from src.strategy.utility_ranker import (
@@ -367,7 +368,7 @@ def native_curve_side_for_direction(direction: object) -> str | None:
 
 def live_entry_min_price_floor(*, strategy_key: object, direction: object) -> float:
     if (
-        str(strategy_key or "").strip() == "center_buy"
+        is_qkernel_exact_yes_strategy(strategy_key)
         and str(direction or "").strip().lower() == "buy_yes"
     ):
         return float(CENTER_BUY_YES_MIN_ENTRY_PRICE)
@@ -400,7 +401,7 @@ def entry_price_floor_decision(
         direction=direction,
     )
     qkernel_floor_candidate = bool(
-        str(strategy_key or "").strip() == "center_buy"
+        is_qkernel_exact_yes_strategy(strategy_key)
         and str(direction or "").strip().lower() == "buy_yes"
         and str(selection_authority_applied or "").strip() == "qkernel_spine"
         and isinstance(economics, Mapping)

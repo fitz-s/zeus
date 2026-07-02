@@ -565,6 +565,23 @@ def live_allowed_keys(*, conn=None) -> frozenset[str]:
     )
 
 
+def historical_attribution_keys() -> frozenset[str]:
+    """Retired strategy keys that remain reportable for settled-history slices.
+
+    These keys are not boot-safe and cannot place live orders.  They stay visible
+    only so attribution, realized-edge, and reaction-latency reports can explain
+    historical rows whose strategy_key was valid when the position was opened.
+    """
+
+    return frozenset({"shoulder_sell"})
+
+
+def reportable_strategy_keys() -> frozenset[str]:
+    """Strategy keys visible in read-only attribution/reporting projections."""
+
+    return live_safe_keys() | historical_attribution_keys()
+
+
 def cycle_axis_dispatch_inverse() -> dict[str, frozenset[str]]:
     """Return the discovery_mode → strategies inverse map for cycle-axis dispatch.
 

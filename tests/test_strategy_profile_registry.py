@@ -63,6 +63,7 @@ def test_all_registered_strategies():
     assert keys == frozenset({
         "settlement_capture",
         "center_buy",
+        "forecast_qkernel_entry",
         "opening_inertia",
         "shoulder_sell",
         "shoulder_buy",
@@ -118,6 +119,7 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
     assert sp.live_safe_keys() == frozenset({
         "opening_inertia",
         "center_buy",
+        "forecast_qkernel_entry",
         "settlement_capture",
         "day0_nowcast_entry",
         # shoulder_sell removed: D6 (2026-05-22) set live_status=blocked (REFUTED)
@@ -133,6 +135,7 @@ def test_live_allowed_keys_match_pre_A4__LIVE_ALLOWED_STRATEGIES():
     assert sp.live_allowed_keys() == frozenset({
         "settlement_capture",
         "center_buy",
+        "forecast_qkernel_entry",
         "opening_inertia",
         "day0_nowcast_entry",
         "imminent_open_capture",  # added 2026-05-19
@@ -206,6 +209,7 @@ def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
     assert is_strategy_enabled("shoulder_sell") is False
     assert is_strategy_enabled("settlement_capture") is True
     assert is_strategy_enabled("center_buy") is True
+    assert is_strategy_enabled("forecast_qkernel_entry") is True
     assert is_strategy_enabled("opening_inertia") is True
     assert is_strategy_enabled("shoulder_buy") is False
     assert is_strategy_enabled("center_sell") is False

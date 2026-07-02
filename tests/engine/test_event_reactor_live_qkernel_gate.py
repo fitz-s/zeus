@@ -336,11 +336,11 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
     family_row = conn.execute(
         "SELECT strategy_key FROM world.selection_family_fact"
     ).fetchone()
-    assert family_row["strategy_key"] == "center_buy"
+    assert family_row["strategy_key"] == "forecast_qkernel_entry"
     hypothesis_row = conn.execute(
         "SELECT meta_json FROM world.selection_hypothesis_fact"
     ).fetchone()
-    assert json.loads(hypothesis_row["meta_json"])["strategy_key"] == "center_buy"
+    assert json.loads(hypothesis_row["meta_json"])["strategy_key"] == "forecast_qkernel_entry"
     conn.close()
 
 
@@ -494,14 +494,22 @@ def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_qual
     )
 
 
-def test_event_bound_strategy_key_treats_native_yes_as_center_buy():
+def test_event_bound_strategy_key_treats_forecast_family_as_qkernel_entry():
     assert (
         _event_bound_strategy_key(
             event_type="FORECAST_SNAPSHOT_READY",
             direction="YES",
             metric="high",
         )
-        == "center_buy"
+        == "forecast_qkernel_entry"
+    )
+    assert (
+        _event_bound_strategy_key(
+            event_type="FORECAST_SNAPSHOT_READY",
+            direction="buy_no",
+            metric="high",
+        )
+        == "forecast_qkernel_entry"
     )
 
 
@@ -521,7 +529,7 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
                 "direction": "buy_yes",
-                "strategy_key": "center_buy",
+                "strategy_key": "forecast_qkernel_entry",
                 "candidate_bin_id": "bin-1",
                 "q_live": 0.24833093804728934,
                 "q_lcb_5pct": 0.0990451308919892,
@@ -660,7 +668,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
                 "candidate_bin_id": "bin-1",
                 "q_live": 0.70,
                 "q_lcb_5pct": 0.60,
-                "strategy_key": "center_buy",
+                "strategy_key": "forecast_qkernel_entry",
                 "qkernel_execution_economics": cert,
             }
         )
@@ -688,7 +696,7 @@ def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_f
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
                 "direction": "buy_yes",
-                "strategy_key": "center_buy",
+                "strategy_key": "forecast_qkernel_entry",
                 "candidate_bin_id": "b34",
                 "q_live": 0.12180248510788458,
                 "q_lcb_5pct": 0.06052567908958011,

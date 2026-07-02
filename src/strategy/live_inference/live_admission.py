@@ -27,6 +27,10 @@ from src.calibration.settlement_backward_coverage import (
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.15
+LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS = frozenset({
+    "center_buy",
+    "forecast_qkernel_entry",
+})
 LIVE_NEAR_DAY0_FORECAST_ENTRY_LEAD_HOURS = 12.0
 LIVE_NEAR_DAY0_FORECAST_ENTRY_POST_START_HOURS = 24.0
 LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE = 1.0
@@ -85,6 +89,10 @@ def qkernel_center_yes_quality_floor() -> float:
     return float(LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB)
 
 
+def is_qkernel_exact_yes_strategy(strategy_key: object) -> bool:
+    return str(strategy_key or "").strip() in LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS
+
+
 def live_entry_probability_quality_rejection_reason(
     *,
     q_lcb: float | int | None,
@@ -111,7 +119,7 @@ def live_entry_probability_quality_rejection_reason(
     authority_text = str(selection_authority_applied or "").strip()
     is_qkernel_center_yes = (
         direction_is_buy_yes
-        and strategy_text == "center_buy"
+        and is_qkernel_exact_yes_strategy(strategy_text)
         and authority_text == "qkernel_spine"
         and isinstance(qkernel_execution_economics, Mapping)
         and str(qkernel_execution_economics.get("source") or "").strip() == "qkernel_spine"

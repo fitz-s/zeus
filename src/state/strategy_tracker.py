@@ -46,7 +46,18 @@ from src.config import state_path
 
 logger = logging.getLogger(__name__)
 
-STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
+def _strategy_keys() -> list[str]:
+    from src.strategy.strategy_profile import all_profiles, reportable_strategy_keys
+
+    reportable = reportable_strategy_keys()
+    return [
+        key
+        for key, profile in all_profiles().items()
+        if key in reportable
+    ]
+
+
+STRATEGIES = _strategy_keys()
 TRACKER_PATH = state_path("strategy_tracker.json")
 _TRACKER_SINGLETON: "StrategyTracker | None" = None
 
