@@ -217,6 +217,120 @@ def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_can
     assert cycle_runtime._monitoring_phase_positions(portfolio, conn=conn) == [pos]
 
 
+def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monkeypatch):
+    """Held-position monitoring must preserve cadence instead of overrunning the scheduler."""
+    from src.engine import cycle_runtime
+
+    first = _make_position(
+        trade_id="held-budget-first",
+        city="Chicago",
+        target_date="2026-07-04",
+        direction="buy_yes",
+        state="holding",
+        shares=10.0,
+        chain_shares=10.0,
+        chain_state="synced",
+    )
+    second = _make_position(
+        trade_id="held-budget-second",
+        city="Chicago",
+        target_date="2026-07-04",
+        direction="buy_no",
+        state="holding",
+        shares=10.0,
+        chain_shares=10.0,
+        chain_state="synced",
+    )
+    portfolio = _make_portfolio(first, second)
+    visited: list[str] = []
+
+    def fake_refresh(conn, clob, position):
+        visited.append(position.trade_id)
+        position.last_monitor_prob = 0.61
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.12
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        return SimpleNamespace(
+            p_market=np.array([0.49]),
+            p_posterior=0.61,
+            forward_edge=0.12,
+            confidence_band_lower=0.08,
+            confidence_band_upper=0.16,
+        )
+
+    def fake_evaluate_exit(self, exit_context):
+        return ExitDecision(
+            False,
+            "CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior"],
+        )
+
+    monotonic_values = [0.0, 0.0, 1.0]
+
+    def fake_monotonic():
+        if monotonic_values:
+            return monotonic_values.pop(0)
+        return 1.0
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *args, **kwargs: True,
+    )
+
+    monitor_results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_monitor_budget"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        type("Tracker", (), {"record_exit": lambda self, position: None})(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=0.5,
+    )
+
+    assert visited == ["held-budget-first"]
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["held_monitor_candidates"] == 2
+    assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
+    assert summary["held_monitor_positions_scanned"] == 1
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+    assert summary["monitors"] == 1
+    assert len(monitor_results) == 1
+
+
 def _make_position(**overrides) -> Position:
     """Create a test position with sensible defaults."""
     defaults = dict(

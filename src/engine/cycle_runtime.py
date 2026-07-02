@@ -105,7 +105,26 @@ _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
 )
 _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
+_HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
+_HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD = Decimal("1")
+
+
+def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
+    raw = override
+    if raw is None:
+        raw = os.environ.get(_HELD_POSITION_MONITOR_BUDGET_ENV, "")
+    if raw in (None, ""):
+        return _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS
+    if not math.isfinite(value):
+        return _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS
+    if override is None and value <= 0:
+        return _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS
+    return max(0.0, value)
 
 
 def _marketable_buy_min_notional_usd(final_intent_context: dict) -> Decimal:
@@ -4341,6 +4360,7 @@ def execute_monitoring_phase(
     deps,
     exit_order_submit_enabled: bool = True,
     run_exit_preflight: bool = True,
+    held_position_monitor_budget_seconds: float | None = None,
 ):
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import (
@@ -4384,6 +4404,23 @@ def execute_monitoring_phase(
 
         summary["pending_exits_filled"] = exit_stats["filled"]
         summary["pending_exits_retried"] = exit_stats["retried"]
+        summary["pending_exit_scan_candidates"] = exit_stats.get(
+            "pending_exit_scan_candidates",
+            0,
+        )
+        summary["pending_exit_positions_scanned"] = exit_stats.get(
+            "pending_exit_positions_scanned",
+            0,
+        )
+        if exit_stats.get("pending_exit_positions_deferred"):
+            summary["pending_exit_positions_deferred"] = exit_stats.get(
+                "pending_exit_positions_deferred",
+                0,
+            )
+            summary["pending_exit_defer_reason"] = exit_stats.get(
+                "pending_exit_defer_reason",
+                "",
+            )
         _release_monitor_write_lock_boundary(
             conn,
             summary,
@@ -4393,7 +4430,24 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    for pos in _monitoring_phase_positions(portfolio, conn=conn):
+    monitor_positions = _monitoring_phase_positions(portfolio, conn=conn)
+    monitor_budget_seconds = _held_position_monitor_budget_seconds(
+        held_position_monitor_budget_seconds
+    )
+    monitor_deadline = time.monotonic() + monitor_budget_seconds
+    summary["held_monitor_candidates"] = len(monitor_positions)
+    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
+
+    for position_index, pos in enumerate(monitor_positions):
+        if time.monotonic() >= monitor_deadline:
+            deferred_count = len(monitor_positions) - position_index
+            if deferred_count > 0:
+                summary["held_monitor_positions_deferred"] = deferred_count
+                summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+            break
+        summary["held_monitor_positions_scanned"] = (
+            summary.get("held_monitor_positions_scanned", 0) + 1
+        )
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)

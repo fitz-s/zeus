@@ -153,6 +153,8 @@ def _emit_typed_realized_fill(
 
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
+DEFAULT_PENDING_EXIT_STATUS_MAX_POSITIONS = 6
+DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS = 10.0
 # Transient submit-channel gap: retry ~each monitor cycle and NEVER give up, so a
 # correct reversal exit sells once the channel recovers instead of being abandoned.
 CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
@@ -186,6 +188,57 @@ _VENUE_OPEN_ORDER_TERMINAL_STATUSES = frozenset(
         "REJECTED",
     }
 )
+_PENDING_EXIT_SCAN_CURSOR = 0
+
+
+def _pending_exit_status_max_positions() -> int:
+    raw = os.environ.get(
+        "ZEUS_PENDING_EXIT_STATUS_MAX_POSITIONS",
+        str(DEFAULT_PENDING_EXIT_STATUS_MAX_POSITIONS),
+    )
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_PENDING_EXIT_STATUS_MAX_POSITIONS
+
+
+def _pending_exit_status_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_PENDING_EXIT_STATUS_BUDGET_SECONDS",
+        str(DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS),
+    )
+    try:
+        return max(0.25, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS
+
+
+def _pending_exit_scan_candidate(position: Position) -> bool:
+    raw_exit_state = getattr(position, "exit_state", "")
+    exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
+    if exit_state == "retry_pending":
+        return True
+    if exit_state in ("sell_placed", "sell_pending", "exit_intent"):
+        return True
+    return str(getattr(position, "order_status", "") or "") == "sell_pending_confirmation"
+
+
+def _rotated_pending_exit_scan_positions(
+    portfolio: PortfolioState,
+    *,
+    stats: dict,
+) -> list[Position]:
+    positions: list[Position] = []
+    for pos in list(portfolio.positions):
+        if _runtime_state_value(pos) in _PENDING_EXIT_SCAN_INACTIVE_STATES:
+            stats["skipped_inactive"] = stats.get("skipped_inactive", 0) + 1
+            continue
+        if _pending_exit_scan_candidate(pos):
+            positions.append(pos)
+    if len(positions) <= 1:
+        return positions
+    offset = int(_PENDING_EXIT_SCAN_CURSOR) % len(positions)
+    return positions[offset:] + positions[:offset]
 
 
 def _is_channel_not_ready_error(error: str) -> bool:
@@ -210,6 +263,7 @@ def _is_channel_not_ready_error(error: str) -> bool:
     return (
         ("ws_gap=" in e and "m5_reconcile_required=true" in e)
         or "clob_market_info" in e
+        or "exit_executable_snapshot_unavailable" in e
         or "venue_read_transient" in e
         or "transientvenueread" in e
     )
@@ -3669,12 +3723,17 @@ def check_pending_exits(
     portfolio: PortfolioState,
     clob,
     conn: sqlite3.Connection | None = None,
+    *,
+    max_positions: int | None = None,
+    cycle_budget_seconds: float | None = None,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
 
     Called at start of each cycle, before monitor phase.
     Returns: {"filled": int, "retried": int, "unchanged": int, "filled_positions": list[Position]}
     """
+    global _PENDING_EXIT_SCAN_CURSOR
+
     if conn is not None:
         from src.state.db import (
             log_exit_fill_check_error_event,
@@ -3686,11 +3745,37 @@ def check_pending_exits(
         )
 
     stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
+    max_scan_positions = (
+        _pending_exit_status_max_positions()
+        if max_positions is None
+        else max(1, int(max_positions))
+    )
+    budget_seconds = (
+        _pending_exit_status_budget_seconds()
+        if cycle_budget_seconds is None
+        else max(0.25, float(cycle_budget_seconds))
+    )
+    deadline = _time_module.monotonic() + budget_seconds
+    scan_positions = _rotated_pending_exit_scan_positions(portfolio, stats=stats)
+    stats["pending_exit_scan_candidates"] = len(scan_positions)
+    stats["pending_exit_scan_max_positions"] = max_scan_positions
+    stats["pending_exit_scan_budget_seconds"] = budget_seconds
+    processed_scan_positions = 0
 
-    for pos in list(portfolio.positions):
-        if _runtime_state_value(pos) in _PENDING_EXIT_SCAN_INACTIVE_STATES:
-            stats["skipped_inactive"] = stats.get("skipped_inactive", 0) + 1
-            continue
+    for index, pos in enumerate(scan_positions):
+        if processed_scan_positions >= max_scan_positions:
+            stats["pending_exit_positions_deferred"] = (
+                len(scan_positions) - index
+            )
+            stats["pending_exit_defer_reason"] = "max_positions"
+            break
+        if _time_module.monotonic() >= deadline:
+            stats["pending_exit_positions_deferred"] = (
+                len(scan_positions) - index
+            )
+            stats["pending_exit_defer_reason"] = "cycle_budget"
+            break
+        processed_scan_positions += 1
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         if exit_state == "retry_pending":
@@ -3702,10 +3787,6 @@ def check_pending_exits(
                 stats["released_retry"] = stats.get("released_retry", 0) + 1
             else:
                 stats["unchanged"] += 1
-            continue
-        if exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
-            getattr(pos, "order_status", "") or ""
-        ) != "sell_pending_confirmation":
             continue
         _mark_pending_exit(pos)
         # NOTE: no canonical event here — upstream transition sites (execute_exit,
@@ -3928,6 +4009,12 @@ def check_pending_exits(
                     stats["retried"] += 1
                 else:
                     stats["unchanged"] += 1
+
+    stats["pending_exit_positions_scanned"] = processed_scan_positions
+    if scan_positions:
+        _PENDING_EXIT_SCAN_CURSOR = (
+            _PENDING_EXIT_SCAN_CURSOR + processed_scan_positions
+        ) % len(scan_positions)
 
     return stats
 

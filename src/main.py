@@ -8802,6 +8802,11 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
                 seen.add(key)
                 families.append(key)
 
+    # Held money is the first refresh consumer. Pending event queues can grow
+    # large when the reactor is behind; putting them first lets stale candidates
+    # delay fresh held-position Day0 probabilities.
+    add(sorted(_edli_current_held_position_family_keys()))
+
     try:
         world_ro = get_world_connection_read_only()
         try:
@@ -8834,11 +8839,71 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
 
-    add(sorted(_edli_current_held_position_family_keys()))
     return families
 
 
 _DAY0_HOURLY_REFRESH_CURSOR = 0
+
+
+def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
+    try:
+        configured = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "1"))
+    except (TypeError, ValueError):
+        configured = 1
+    try:
+        priority_cap = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "1"))
+    except (TypeError, ValueError):
+        priority_cap = 1
+    if priority_city_count <= 0:
+        return max(0, configured)
+    return max(0, max(configured, min(int(priority_city_count), max(0, priority_cap))))
+
+
+def _day0_hourly_refresh_budget_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "3.0")))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _day0_hourly_fetch_timeout_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5")))
+    except (TypeError, ValueError):
+        return 1.5
+
+
+def _reactor_day0_hourly_refresh_interval_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS",
+        "300.0",
+    )
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def _reactor_day0_hourly_refresh_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_BUDGET_SECONDS",
+        os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "2.5"),
+    )
+    try:
+        return max(0.25, float(raw))
+    except (TypeError, ValueError):
+        return 2.5
+
+
+def _reactor_day0_hourly_fetch_timeout_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
+        os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5"),
+    )
+    try:
+        return max(0.25, float(raw))
+    except (TypeError, ValueError):
+        return 1.5
 
 
 def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
@@ -8951,14 +9016,15 @@ def _edli_day0_hourly_refresh_cycle() -> None:
                 "priority_cities=%d",
                 priority_city_count,
             )
-        configured_max_cities = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3"))
-        max_cities = max(configured_max_cities, priority_city_count)
+        max_cities = _day0_hourly_refresh_max_cities(
+            priority_city_count=priority_city_count,
+        )
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
-            budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
+            budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
-            timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+            timeout_s=_day0_hourly_fetch_timeout_seconds(),
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -9598,10 +9664,10 @@ def _edli_reactor_day0_hourly_refresher():
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
                 decision_time=datetime.now(timezone.utc),
-                interval_s=0.0,
-                budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
+                interval_s=_reactor_day0_hourly_refresh_interval_seconds(),
+                budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
                 max_cities=1,
-                timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+                timeout_s=_reactor_day0_hourly_fetch_timeout_seconds(),
                 persist_lock_blocking=False,
                 return_stats=True,
             )
@@ -11036,7 +11102,7 @@ def main():
         scheduler.add_job(
             _edli_day0_hourly_refresh_cycle,
             "interval",
-            seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "180")),
+            seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "45")),
             id="edli_day0_hourly_refresh",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
             max_instances=1,

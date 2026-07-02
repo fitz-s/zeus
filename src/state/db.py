@@ -1269,6 +1269,11 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
 }
 
 
+def _portfolio_loader_runtime_state_from_phase(phase: object) -> str:
+    phase_value = str(phase or "")
+    return PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase_value, phase_value)
+
+
 def _positive_finite_decimal_text(value: object) -> int:
     try:
         parsed = Decimal(str(value))
@@ -10872,7 +10877,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
             row,
             fill_hints.get(trade_id),
         )
-        runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
+        runtime_state = _portfolio_loader_runtime_state_from_phase(phase)
         explicit_env = str(row["env"] or event_envs.get(str(row["position_id"] or "")) or "unknown_env")
         positions.append(
             {
@@ -12065,7 +12070,9 @@ def _hydrate_pending_exit_pre_state_hints(
         trade_id = str(row["position_id"] or "")
         phase_before = str(row["phase_before"] or "")
         if trade_id and phase_before:
-            hints.setdefault(trade_id, {})["pre_exit_state"] = phase_before
+            hints.setdefault(trade_id, {})["pre_exit_state"] = (
+                _portfolio_loader_runtime_state_from_phase(phase_before)
+            )
 
 
 def _exit_state_hint_from_event(event_type: str, details: dict) -> str | None:

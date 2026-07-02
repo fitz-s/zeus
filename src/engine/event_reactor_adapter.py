@@ -8658,7 +8658,10 @@ def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mappi
     if not isinstance(economics, Mapping):
         raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
     try:
-        assert_live_day0_qkernel_guard_authority(economics)
+        assert_live_day0_qkernel_guard_authority(
+            economics,
+            probability_payload=actionable_payload,
+        )
     except Day0AuthorityError as exc:
         raise ValueError(f"LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED:{exc}") from None
     _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
@@ -12426,14 +12429,6 @@ def _qkernel_day0_guard_rejection_reason(cert: Mapping[str, Any]) -> str | None:
     for basis in bases:
         if basis == "DAY0_OBSERVED_BOUNDARY":
             return "QKERNEL_DAY0_OBSERVED_BOUNDARY_NOT_ENTRY_AUTHORITY"
-    if "DAY0_REMAINING_DAY_Q_LCB" not in bases:
-        return None
-    try:
-        selection_guard_n = int(float(cert.get("selection_guard_n")))
-    except (TypeError, ValueError):
-        return "QKERNEL_DAY0_REMAINING_DAY_GUARD_N_MISSING"
-    if selection_guard_n <= 0:
-        return "QKERNEL_DAY0_REMAINING_DAY_GUARD_N_MISSING"
     return None
 
 

@@ -512,7 +512,10 @@ def _verify_actionable_qkernel_economics(
     _verify_qkernel_selection_guard(economics, label="actionable qkernel")
     if str(payload.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
         try:
-            assert_live_day0_qkernel_guard_authority(economics)
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=payload,
+            )
         except Day0AuthorityError as exc:
             raise CertificateVerificationError(
                 f"actionable day0 qkernel guard authority required:{exc}"
@@ -1688,7 +1691,10 @@ def _verify_pre_submit_qkernel_economics(
     _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
     if str(pre_submit.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
         try:
-            assert_live_day0_qkernel_guard_authority(economics)
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=pre_submit,
+            )
         except Day0AuthorityError as exc:
             raise CertificateVerificationError(
                 f"pre-submit day0 qkernel guard authority required:{exc}"

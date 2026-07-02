@@ -82,6 +82,18 @@ POSITION_ENV_UNKNOWN = "unknown_env"
 
 POSITIONS_PATH = state_path("positions.json")
 
+_CANONICAL_PHASE_TO_RUNTIME_STATE: dict[str, str] = {
+    "pending_entry": LifecycleState.PENDING_TRACKED.value,
+    "active": LifecycleState.ENTERED.value,
+}
+
+
+def _normalize_runtime_lifecycle_state(value: str | LifecycleState) -> str | LifecycleState:
+    if isinstance(value, LifecycleState):
+        return value
+    state_value = str(value or "")
+    return _CANONICAL_PHASE_TO_RUNTIME_STATE.get(state_value, state_value)
+
 # Portfolio authority labels are a separate grammar from observation authority.
 # ObservationAtom uses Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
 # (src/types/observation_atom.py). DEGRADED_PROJECTION is a portfolio-only
@@ -708,6 +720,7 @@ class Position:
         )
         if not isinstance(self.direction, Direction):
             self.direction = Direction(self.direction)
+        self.state = _normalize_runtime_lifecycle_state(self.state)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
         if not isinstance(self.chain_state, VenueVisibilityStatus):
@@ -715,6 +728,7 @@ class Position:
         if not isinstance(self.exit_state, ExitState):
             self.exit_state = ExitState(self.exit_state)
         if self.pre_exit_state:
+            self.pre_exit_state = _normalize_runtime_lifecycle_state(self.pre_exit_state)
             self.pre_exit_state = LifecycleState(self.pre_exit_state).value
         if not isinstance(self.lifecycle_state, SettlementOutcome):
             self.lifecycle_state = SettlementOutcome(int(self.lifecycle_state))

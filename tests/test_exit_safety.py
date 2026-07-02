@@ -1145,6 +1145,88 @@ def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
     assert stats["unchanged"] == 1
 
 
+def test_pending_exit_status_poll_is_bounded_and_rotates(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    exit_lifecycle._PENDING_EXIT_SCAN_CURSOR = 0
+    positions = []
+    for idx in range(4):
+        position = Position(
+            trade_id=f"pos-pending-exit-budget-{idx}",
+            market_id=f"mkt-pending-exit-budget-{idx}",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-27",
+            bin_label="50-51°F",
+            direction="buy_yes",
+            strategy_key="center_buy",
+            size_usd=10.0,
+            entry_price=0.50,
+            shares=20.0,
+            cost_basis_usd=10.0,
+            state="pending_exit",
+            exit_state="sell_pending",
+            last_exit_order_id=f"ord-pending-exit-budget-{idx}",
+            token_id=YES_TOKEN,
+            no_token_id=NO_TOKEN,
+            condition_id=f"condition-pending-exit-budget-{idx}",
+            last_monitor_market_price=0.45,
+            last_monitor_best_bid=0.44,
+        )
+        _insert_exit_command(
+            conn,
+            command_id=f"cmd-pending-exit-budget-{idx}",
+            position_id=position.trade_id,
+            size=20.0,
+            price=0.44,
+            venue_order_id=position.last_exit_order_id,
+        )
+        positions.append(position)
+
+    class FakeClob:
+        def __init__(self):
+            self.order_status_calls = []
+
+        def get_order_status(self, order_id):
+            self.order_status_calls.append(order_id)
+            return {"status": "LIVE"}
+
+        def get_orderbook(self, token_id):
+            assert token_id == YES_TOKEN
+            return {"bids": [{"price": "0.44", "size": "10"}], "asks": []}
+
+    clob = FakeClob()
+    portfolio = PortfolioState(positions=positions)
+
+    first = exit_lifecycle.check_pending_exits(
+        portfolio,
+        clob,
+        conn=conn,
+        max_positions=2,
+        cycle_budget_seconds=100.0,
+    )
+    second = exit_lifecycle.check_pending_exits(
+        portfolio,
+        clob,
+        conn=conn,
+        max_positions=2,
+        cycle_budget_seconds=100.0,
+    )
+
+    assert first["pending_exit_scan_candidates"] == 4
+    assert first["pending_exit_positions_scanned"] == 2
+    assert first["pending_exit_positions_deferred"] == 2
+    assert first["pending_exit_defer_reason"] == "max_positions"
+    assert second["pending_exit_positions_scanned"] == 2
+    assert clob.order_status_calls == [
+        "ord-pending-exit-budget-0",
+        "ord-pending-exit-budget-1",
+        "ord-pending-exit-budget-2",
+        "ord-pending-exit-budget-3",
+    ]
+
+
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
@@ -2906,6 +2988,7 @@ def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, mon
     assert outcome == "exit_blocked: executable_snapshot_unavailable"
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 0
     assert position.last_exit_error == "exit_executable_snapshot_unavailable"
     event = conn.execute(
         """
@@ -3016,6 +3099,7 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     assert outcome == "exit_blocked: no_executable_bid"
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 1
     assert position.last_exit_error == "exit_no_executable_bid"
     event = conn.execute(
         """

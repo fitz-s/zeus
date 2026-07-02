@@ -938,7 +938,10 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_abstained must be false")
     if str(payload.get("event_type") or "").strip() == _DAY0_EVENT_TYPE:
         try:
-            assert_live_day0_qkernel_guard_authority(economics)
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=payload,
+            )
         except Day0AuthorityError as exc:
             raise LiveOrderAggregateError(
                 "PreSubmitRevalidated day0 qkernel guard authority required:"

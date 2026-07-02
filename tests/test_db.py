@@ -1970,6 +1970,41 @@ def test_portfolio_loader_restores_day0_pending_exit_identity_over_chain_correct
     assert loaded["pre_exit_state"] == "day0_window"
 
 
+def test_portfolio_loader_normalizes_active_pre_exit_state_for_runtime_position(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row
+
+    conn = get_connection(tmp_path / "active-pre-exit-loader.db")
+    init_schema(conn)
+    position_id = "active-pre-exit-loader-pos"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+        order_status="retry_pending",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-07-02T02:17:35+00:00",
+        sequence_no=1,
+        phase_before="active",
+        phase_after="pending_exit",
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loaded = loader_view["positions"][0]
+    assert loaded["state"] == "pending_exit"
+    assert loaded["pre_exit_state"] == "entered"
+    position = _position_from_projection_row(loaded, current_mode="live")
+    assert position.pre_exit_state == "entered"
+
+
 def test_position_current_views_do_not_cap_full_open_fill_cost_to_projection(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,

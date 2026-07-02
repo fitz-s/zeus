@@ -29,7 +29,6 @@ DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
 DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
-DAY0_REMAINING_DAY_LCB_Z = 1.6448536269514722
 DAY0_REMAINING_DAY_LCB_TOLERANCE = 1e-6
 
 
@@ -123,31 +122,19 @@ def _day0_lcb_transform(payload: Mapping[str, object], block: Mapping[str, objec
     return transform
 
 
-def _one_sided_wilson_lcb(p_hat: float, n: int, *, z: float = DAY0_REMAINING_DAY_LCB_Z) -> float:
-    if n <= 0:
-        raise Day0AuthorityError("remaining_day_models missing")
-    p = min(max(float(p_hat), 0.0), 1.0)
-    denominator = 1.0 + (z * z) / float(n)
-    center = p + (z * z) / (2.0 * float(n))
-    radius = z * math.sqrt((p * (1.0 - p) + (z * z) / (4.0 * float(n))) / float(n))
-    return min(max((center - radius) / denominator, 0.0), p)
+def _assert_remaining_day_lcb_is_supported_by_transform(*, q_live: float, q_lcb: float) -> None:
+    """Validate the selected-side Day0 qLCB shape.
 
+    ``remaining_models`` is evidence that the remaining-window probability was
+    built from live model vectors. It is not a binomial success count, so it must
+    not be reused as a Wilson denominator. The load-bearing proof is the
+    transform identity checked below: selected qLCB must equal the persisted
+    remaining-window transform for the selected condition/direction and must not
+    degenerate to the point q.
+    """
 
-def _assert_remaining_day_lcb_is_statistically_supported(
-    *,
-    q_live: float,
-    q_lcb: float,
-    remaining_models: int,
-) -> None:
     if q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE:
         raise Day0AuthorityError("remaining_day q_lcb is degenerate with q_live")
-    supported_lcb = _one_sided_wilson_lcb(q_live, remaining_models)
-    if q_lcb > supported_lcb + DAY0_REMAINING_DAY_LCB_TOLERANCE:
-        raise Day0AuthorityError(
-            "remaining_day q_lcb exceeds model-count Wilson lower bound:"
-            f"q_live={q_live:.12g}:q_lcb={q_lcb:.12g}:"
-            f"remaining_models={remaining_models}:wilson_lcb={supported_lcb:.12g}"
-        )
 
 
 def assert_live_day0_probability_authority(
@@ -209,10 +196,9 @@ def assert_live_day0_probability_authority(
             raise Day0AuthorityError("remaining_day q_live/q_lcb nonfinite")
         if q_live_value < 0.0 or q_live_value > 1.0 or q_lcb_value < 0.0 or q_lcb_value > 1.0:
             raise Day0AuthorityError("remaining_day q_live/q_lcb out of range")
-        _assert_remaining_day_lcb_is_statistically_supported(
+        _assert_remaining_day_lcb_is_supported_by_transform(
             q_live=q_live_value,
             q_lcb=q_lcb_value,
-            remaining_models=remaining_models,
         )
     selected_condition = str(condition_id or payload.get("condition_id") or "").strip()
     if not selected_condition:
@@ -243,7 +229,11 @@ def assert_live_day0_probability_authority(
         )
 
 
-def assert_live_day0_qkernel_guard_authority(economics: Mapping[str, object]) -> None:
+def assert_live_day0_qkernel_guard_authority(
+    economics: Mapping[str, object],
+    *,
+    probability_payload: Mapping[str, object] | None = None,
+) -> None:
     """Fail closed unless Day0 entry qkernel evidence uses remaining-day guard law.
 
     ``DAY0_OBSERVED_BOUNDARY`` is a hard-fact observation boundary. It can rule out
@@ -265,11 +255,22 @@ def assert_live_day0_qkernel_guard_authority(economics: Mapping[str, object]) ->
         if economics.get(field_name) is not False:
             raise Day0AuthorityError(f"{field_name} must be false")
     try:
-        selection_guard_n = int(float(economics.get("selection_guard_n")))
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
     except (TypeError, ValueError):
-        raise Day0AuthorityError("selection_guard_n must be positive") from None
-    if selection_guard_n <= 0:
-        raise Day0AuthorityError("selection_guard_n must be positive")
+        raise Day0AuthorityError("selection_guard_q_safe must be positive") from None
+    if not math.isfinite(selection_guard_q_safe) or selection_guard_q_safe <= 0.0:
+        raise Day0AuthorityError("selection_guard_q_safe must be positive")
+    if probability_payload is not None:
+        block = _day0_probability_block(probability_payload)
+        remaining_models = _first_int(
+            probability_payload,
+            block,
+            "_edli_day0_remaining_models",
+            "day0_remaining_models",
+            "remaining_models",
+        )
+        if remaining_models is None or remaining_models <= 0:
+            raise Day0AuthorityError("remaining_day_models missing")
 
 
 @dataclass(frozen=True)

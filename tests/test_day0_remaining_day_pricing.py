@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-30
+# Last reused or audited: 2026-07-02
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -940,3 +940,79 @@ class TestRequestHashProvenance:
         )
 
         assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
+
+    def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
+        import src.main as main
+
+        monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", raising=False)
+        monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", raising=False)
+        monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", raising=False)
+        monkeypatch.delenv("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", raising=False)
+
+        assert main._day0_hourly_refresh_max_cities(priority_city_count=31) == 1
+        assert main._day0_hourly_refresh_budget_seconds() == 3.0
+        assert main._day0_hourly_fetch_timeout_seconds() == 1.5
+        assert main._reactor_day0_hourly_refresh_interval_seconds() == 300.0
+
+    def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
+        self, monkeypatch
+    ):
+        import src.config as config
+        import src.data.day0_hourly_vectors as hv
+        import src.main as main
+
+        captured = {}
+
+        def fake_refresh(cities, **kwargs):
+            captured.update(kwargs)
+            assert [city.name for city in cities] == ["Paris"]
+            return SimpleNamespace(
+                vectors_written=2,
+                cities_attempted=1,
+                incomplete_expected_bundles=0,
+            )
+
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", fake_refresh)
+        monkeypatch.delenv("ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS", raising=False)
+
+        refresh = main._edli_reactor_day0_hourly_refresher()
+
+        assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
+        assert captured["interval_s"] == 300.0
+        assert captured["max_cities"] == 1
+        assert captured["persist_lock_blocking"] is False
+
+    def test_day0_hourly_priority_source_puts_held_families_before_backlog(
+        self, monkeypatch
+    ):
+        import src.main as main
+        import src.state.db as state_db
+
+        class _Conn:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            main,
+            "_edli_current_held_position_family_keys",
+            lambda: frozenset({("Paris", "2026-06-25", "low")}),
+        )
+        monkeypatch.setattr(main, "get_world_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(
+            main,
+            "_pending_family_rows_for_refresh",
+            lambda *a, **kw: [("Wellington", "2026-06-26", "high")],
+        )
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(
+            main,
+            "_open_rest_family_rows_for_refresh",
+            lambda _conn: [("London", "2026-06-25", "high")],
+        )
+
+        assert main._edli_day0_hourly_priority_families() == [
+            ("paris", "2026-06-25", "low"),
+            ("wellington", "2026-06-26", "high"),
+            ("london", "2026-06-25", "high"),
+        ]

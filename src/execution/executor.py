@@ -195,6 +195,7 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
+_ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -872,7 +873,10 @@ def _entry_economics_component(
         )
 
         try:
-            assert_live_day0_qkernel_guard_authority(economics)
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=actionable_payload or {},
+            )
         except Day0AuthorityError as exc:
             day0_qkernel_guard_error = str(exc)
     from src.strategy.live_inference.live_admission import (
@@ -1458,7 +1462,12 @@ def _entry_same_token_cooldown_component(
         command_id=command_id,
         state=state,
     )
-    remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
+    cooldown_seconds = (
+        _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS
+        if terminal_no_fill
+        else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
+    )
+    remaining_seconds = cooldown_seconds - age_seconds
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
@@ -1468,7 +1477,7 @@ def _entry_same_token_cooldown_component(
                 if terminal_no_fill
                 else "same_token_entry_cooling_down"
             ),
-            "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+            "cooldown_seconds": cooldown_seconds,
             "remaining_seconds": int(remaining_seconds),
             "existing_command_id": command_id,
             "existing_position_id": position_id,
@@ -1488,7 +1497,7 @@ def _entry_same_token_cooldown_component(
             if terminal_no_fill
             else "allowed_cooldown_elapsed"
         ),
-        "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+        "cooldown_seconds": cooldown_seconds,
         "age_seconds": int(age_seconds),
         "existing_command_id": command_id,
         "existing_position_id": position_id,

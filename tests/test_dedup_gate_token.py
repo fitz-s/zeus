@@ -26,6 +26,7 @@ from src.state.portfolio import (
 from src.engine.evaluator import _layer7_dedup_fires
 from src.execution.executor import (
     _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+    _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS,
     _entry_duplicate_same_token_component,
     _entry_same_token_cooldown_component,
 )
@@ -635,7 +636,10 @@ def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):
 
     assert result["allowed"] is False
     assert result["reason"] == "same_token_terminal_no_fill_cooling_down"
-    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 60
+    assert (
+        result["remaining_seconds"]
+        == _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS - 60
+    )
     assert result["existing_command_id"] == "cmd-cancelled"
     assert result["candidate_price"] == "0.73"
     assert result["candidate_shares"] == "12.7"
@@ -674,11 +678,12 @@ def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
         candidate_position_id="fresh-candidate",
         limit_price=0.74,
         shares=12.7,
-        now=datetime.fromisoformat("2026-06-18T10:30:01+00:00"),
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
     )
 
     assert result["allowed"] is True
     assert result["reason"] == "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
+    assert result["cooldown_seconds"] == _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS
     assert result["existing_command_id"] == "cmd-cancelled"
 
 

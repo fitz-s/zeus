@@ -75,7 +75,7 @@ def _day0_probability_fields(
         "day0_probability_authority": {
             "q_source": "day0_remaining_day",
             "q_mode": "remaining_day",
-            "remaining_models": 80,
+            "remaining_models": 3,
             "rounded_value": 32,
             "observation_time": "2026-07-02T02:00:00+00:00",
             "observation_available_at": "2026-07-02T02:06:24+00:00",
@@ -83,7 +83,7 @@ def _day0_probability_fields(
         },
         "_edli_q_source": "day0_remaining_day",
         "_edli_day0_q_mode": "remaining_day",
-        "_edli_day0_remaining_models": 80,
+        "_edli_day0_remaining_models": 3,
         "_edli_day0_lcb_transform": lcb_transform,
     }
 
@@ -101,7 +101,7 @@ def _day0_qkernel_cert(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dict:
         selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
         selection_guard_abstained=False,
         selection_guard_cell_key="day0_remaining_day_q_lcb",
-        selection_guard_n=80,
+        selection_guard_n=0,
         selection_guard_q_safe=q_lcb,
     )
     return cert
@@ -1082,22 +1082,21 @@ def test_live_entry_day0_gate_rejects_observed_boundary_qkernel_guard():
         )
 
 
-def test_live_entry_day0_gate_rejects_remaining_guard_without_sample_count():
+def test_live_entry_day0_gate_accepts_remaining_guard_without_oof_sample_count():
     cert = _day0_qkernel_cert()
     cert.update(selection_guard_n=0)
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED"):
-        _assert_live_entry_submit_authority(
-            _day0_payload(
-                **_day0_probability_fields(),
-                selection_authority_applied="qkernel_spine",
-                direction="buy_yes",
-                strategy_key="day0_nowcast_entry",
-                candidate_bin_id="bin-1",
-                min_entry_price=0.10,
-                qkernel_execution_economics=cert,
-            )
+    _assert_live_entry_submit_authority(
+        _day0_payload(
+            **_day0_probability_fields(),
+            selection_authority_applied="qkernel_spine",
+            direction="buy_yes",
+            strategy_key="day0_nowcast_entry",
+            candidate_bin_id="bin-1",
+            min_entry_price=0.10,
+            qkernel_execution_economics=cert,
         )
+    )
 
 
 def test_live_entry_day0_gate_rejects_missing_live_observation_authority():

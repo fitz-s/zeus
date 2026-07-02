@@ -2390,8 +2390,8 @@ def test_day0_observed_boundary_does_not_mint_guarded_false_edge_rate():
     ) is None
 
 
-def test_day0_remaining_day_guard_mints_false_edge_rate_only_with_sample_count():
-    """Day0 remaining-window q_lcb is a 95% guard only when it has sample support."""
+def test_day0_remaining_day_guard_mints_false_edge_rate_from_remaining_window_guard():
+    """Day0 remaining-window q_lcb is a 95% guard; support is payload authority."""
 
     from types import SimpleNamespace
 
@@ -2424,14 +2424,14 @@ def test_day0_remaining_day_guard_mints_false_edge_rate_only_with_sample_count()
         )
         return bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "YES")]
 
-    unsupported = _payload(0)
+    producer_shape = _payload(0)
     supported = _payload(80)
 
-    assert unsupported["false_edge_rate"] == pytest.approx(1.0 / 3.0)
+    assert producer_shape["false_edge_rate"] == pytest.approx(0.05)
     assert era._valid_qkernel_execution_economics_payload(
-        unsupported,
+        producer_shape,
         direction="buy_yes",
-    ) is None
+    ) is not None
     assert supported["false_edge_rate"] == pytest.approx(0.05)
     assert era._valid_qkernel_execution_economics_payload(
         supported,

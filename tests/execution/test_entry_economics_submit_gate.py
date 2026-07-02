@@ -43,8 +43,8 @@ def _day0_econ(**overrides) -> dict:
     return payload
 
 
-def _day0_actionable_payload(*, q_lcb: float = 0.91, remaining_models: int = 100) -> dict:
-    return {
+def _day0_actionable_payload(*, q_lcb: float = 0.91, remaining_models: int | None = 100) -> dict:
+    payload = {
         "event_type": "DAY0_EXTREME_UPDATED",
         "condition_id": "condition-1",
         "direction": "buy_yes",
@@ -79,6 +79,10 @@ def _day0_actionable_payload(*, q_lcb: float = 0.91, remaining_models: int = 100
             "no_lcb_by_condition": {"condition-1": 0.02},
         },
     }
+    if remaining_models is None:
+        payload["day0_probability_authority"].pop("remaining_models", None)
+        payload.pop("_edli_day0_remaining_models", None)
+    return payload
 
 
 def _intent(**overrides) -> ExecutionIntent:
@@ -563,7 +567,7 @@ def test_entry_economics_blocks_day0_degenerate_remaining_window_lcb():
     assert "degenerate with q_live" in verdict["details"]["error"]
 
 
-def test_entry_economics_blocks_day0_selection_guard_without_sample_count():
+def test_entry_economics_accepts_day0_selection_guard_without_oof_sample_count():
     verdict = _entry_economics_component(
         _intent(
             q_live=0.70,
@@ -586,9 +590,37 @@ def test_entry_economics_blocks_day0_selection_guard_without_sample_count():
         actionable_payload=_day0_actionable_payload(q_lcb=0.60, remaining_models=80),
     )
 
+    assert verdict["allowed"] is True
+    assert verdict["details"]["day0_observation_authority"] is True
+    assert verdict["details"]["qkernel_source"] == "qkernel_spine"
+
+
+def test_entry_economics_blocks_day0_without_remaining_window_authority_support():
+    verdict = _entry_economics_component(
+        _intent(
+            q_live=0.70,
+            q_lcb_5pct=0.60,
+            limit_price=0.40,
+            expected_edge=0.20,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            qkernel_execution_economics=_day0_econ(
+                payoff_q_point=0.70,
+                payoff_q_lcb=0.60,
+                cost=0.40,
+                edge_lcb=0.20,
+                selection_guard_n=0,
+                selection_guard_q_safe=0.60,
+            ),
+        ),
+        shares=10.0,
+        actionable_payload=_day0_actionable_payload(q_lcb=0.60, remaining_models=None),
+    )
+
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "day0_qkernel_guard_authority_missing"
-    assert "selection_guard_n must be positive" in verdict["details"]["day0_qkernel_guard_error"]
+    assert verdict["reason"] == "day0_probability_authority_missing"
+    assert "remaining_day_models missing" in verdict["details"]["error"]
 
 
 def test_entry_economics_allows_positive_side_matched_edge():

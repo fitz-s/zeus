@@ -1321,11 +1321,15 @@ def _day0_lcb_transform(condition_id: str = "condition-1", q_lcb: float = 0.60):
     }
 
 
-def _day0_probability_authority(condition_id: str = "condition-1", q_lcb: float = 0.60):
-    return {
+def _day0_probability_authority(
+    condition_id: str = "condition-1",
+    q_lcb: float = 0.60,
+    *,
+    remaining_models: int | None = 3,
+):
+    payload = {
         "q_source": "day0_remaining_day",
         "q_mode": "remaining_day",
-        "remaining_models": 80,
         "remaining_model_names": ["ecmwf", "gfs", "icon"],
         "remaining_source_cycle_time_utc": "2026-05-25T12:00:00+00:00",
         "remaining_capture_times_utc": ["2026-05-25T12:20:00+00:00"],
@@ -1337,13 +1341,20 @@ def _day0_probability_authority(condition_id: str = "condition-1", q_lcb: float 
         "observation_available_at": "2026-05-25T17:35:00+00:00",
         "lcb_transform": _day0_lcb_transform(condition_id, q_lcb),
     }
-
+    if remaining_models is not None:
+        payload["remaining_models"] = remaining_models
+    return payload
 
 def _day0_pre_submit_payload(**overrides):
     condition_id = str(overrides.get("condition_id") or "condition-1")
     q_live = float(overrides.get("q_live") or 0.70)
     q_lcb = float(overrides.get("q_lcb_5pct") or 0.60)
-    day0_probability = _day0_probability_authority(condition_id, q_lcb)
+    remaining_models = overrides.pop("remaining_models", 3)
+    day0_probability = _day0_probability_authority(
+        condition_id,
+        q_lcb,
+        remaining_models=remaining_models,
+    )
     payload = _pre_submit_payload(
         q_live=q_live,
         q_lcb_5pct=q_lcb,
@@ -1365,7 +1376,7 @@ def _day0_pre_submit_payload(**overrides):
         day0_probability_authority=day0_probability,
         _edli_q_source="day0_remaining_day",
         _edli_day0_q_mode="remaining_day",
-        _edli_day0_remaining_models=80,
+        _edli_day0_remaining_models=remaining_models,
         _edli_day0_remaining_model_names=["ecmwf", "gfs", "icon"],
         _edli_day0_remaining_source_cycle_time_utc="2026-05-25T12:00:00+00:00",
         _edli_day0_remaining_capture_times_utc=["2026-05-25T12:20:00+00:00"],
@@ -1390,7 +1401,7 @@ def _day0_qkernel_economics(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dic
             "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
             "selection_guard_abstained": False,
             "selection_guard_cell_key": "day0_remaining_day_q_lcb",
-            "selection_guard_n": 80,
+            "selection_guard_n": 0,
             "selection_guard_q_safe": q_lcb,
         }
     )
