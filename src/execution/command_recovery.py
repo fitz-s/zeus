@@ -2615,6 +2615,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
                        / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
                    MAX(fact.observed_at) AS observed_at,
+                   MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
               FROM canonical_trade_fact fact
@@ -2627,7 +2628,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                entry_fill.fill_fact_count AS fill_fact_count,
                entry_fill.filled_size AS fill_filled_size,
                entry_fill.fill_price AS fill_price,
-               entry_fill.observed_at AS fill_observed_at,
+               COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at) AS fill_observed_at,
                entry_fill.fill_states AS fill_states,
                entry_fill.trade_fact_id AS source_trade_fact_id,
                env.condition_id AS env_condition_id,
@@ -3906,8 +3907,13 @@ def _log_filled_entry_execution_fact(
     from src.state.db import log_execution_fact
 
     position_id = str(position.trade_id)
-    filled_at = str(candidate.get("fill_observed_at") or position.entered_at or _now_iso())
-    posted_at = str(position.order_posted_at or candidate.get("created_at") or filled_at)
+    filled_at = str(
+        candidate.get("fill_observed_at")
+        or candidate.get("observed_at")
+        or position.entered_at
+        or _now_iso()
+    )
+    posted_at = str(candidate.get("created_at") or position.order_posted_at or filled_at)
     terminal_status = "partial" if str(position.order_status or "") == "partial" else "filled"
     venue_status = "PARTIAL" if terminal_status == "partial" else str(position.fill_states or "FILLED")
     log_execution_fact(
@@ -5735,7 +5741,10 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                'REST' AS source,
                entry_fill.observed_at,
                entry_fill.venue_timestamp,
+               COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at) AS execution_filled_at,
                ef.command_id AS ef_command_id,
+               ef.posted_at AS ef_posted_at,
+               ef.filled_at AS ef_filled_at,
                ef.shares AS ef_shares,
                ef.fill_price AS ef_fill_price,
                ef.terminal_exec_status AS ef_terminal_exec_status
@@ -5755,6 +5764,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND (
                ef.intent_id IS NULL
                OR COALESCE(ef.command_id, '') != cmd.command_id
+               OR COALESCE(ef.posted_at, '') != COALESCE(cmd.created_at, '')
+               OR COALESCE(ef.filled_at, '') != COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at, '')
                OR ABS(COALESCE(CAST(ef.shares AS REAL), 0.0) - CAST(entry_fill.filled_size AS REAL)) > 0.000001
                OR ABS(COALESCE(CAST(ef.fill_price AS REAL), 0.0) - CAST(entry_fill.fill_price AS REAL)) > 0.000001
                OR COALESCE(ef.terminal_exec_status, '') != CASE
@@ -5781,7 +5792,12 @@ def _log_filled_entry_trade_candidate_execution_fact(
 
     terminal_status = _entry_execution_fact_terminal_status(candidate)
     position_id = str(candidate.get("position_id") or "")
-    observed_at = str(candidate.get("observed_at") or _now_iso())
+    observed_at = str(
+        candidate.get("execution_filled_at")
+        or candidate.get("venue_timestamp")
+        or candidate.get("observed_at")
+        or _now_iso()
+    )
     log_execution_fact(
         conn,
         intent_id=f"{position_id}:entry",

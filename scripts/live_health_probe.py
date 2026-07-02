@@ -570,6 +570,7 @@ def main():
 
     prefix = "ALERT " if alerts else "OK    "
     flags = ",".join(alerts) if alerts else "all_healthy"
+    runtime_health = "DEAD" if "daemon_dead" in alerts else ("DEGRADED" if alerts else "OK")
     summary = (
         f"{prefix}{now} hb={report['hb'].get('age_s')}s "
         f"cycle_age={ss_age}s "
@@ -580,7 +581,8 @@ def main():
         f"commit={report.get('code_plane',{}).get('head','?')} "
         f"expected={report.get('code_plane',{}).get('expected_commit','?')} "
         f"dirty={report.get('code_plane',{}).get('dirty','?')} "
-        f"risk={report.get('cycle',{}).get('risk_level','?')} "
+        f"runtime_health={runtime_health} "
+        f"cycle_risk={report.get('cycle',{}).get('risk_level','?')} "
         f"ws={report.get('cycle',{}).get('ws_subscription','?')} "
         f"funnel={report.get('funnel',{}).get('evaluated','?')}/{report.get('funnel',{}).get('selected','?')}/{report.get('funnel',{}).get('filled','?')} "
         f"entry={report.get('entry_capable',{}).get('status','?')} "

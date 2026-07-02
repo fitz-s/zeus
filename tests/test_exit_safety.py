@@ -3356,7 +3356,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert position.state == "day0_window"
     assert position.exit_state == ""
     assert position.order_status == "filled"
-    assert position.exit_reason == ""
+    assert position.exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert position.exit_retry_count == 0
 
     current = conn.execute(
@@ -3370,7 +3370,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert dict(current) == {
         "phase": "day0_window",
         "order_status": "filled",
-        "exit_reason": "",
+        "exit_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
         "exit_retry_count": 0,
         "next_exit_retry_at": "",
     }
@@ -3597,7 +3597,7 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
         "phase": "quarantined",
         "chain_state": "entry_authority_quarantined",
         "order_status": "filled",
-        "exit_reason": "",
+        "exit_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
     }
     event = conn.execute(
         """

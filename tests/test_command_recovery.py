@@ -1147,6 +1147,9 @@ def _seed_pending_entry_projection(
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
         "last_monitor_market_price_is_fresh": None,
+        "last_monitor_best_bid": None,
+        "last_monitor_best_ask": None,
+        "last_monitor_market_vig": None,
         "decision_snapshot_id": "snap-pos-001",
         "entry_method": "ens_member_counting",
         "strategy_key": "opening_inertia",
@@ -9224,17 +9227,46 @@ class TestRecoveryResolutionTable:
         }
         execution = conn.execute(
             """
-            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+            SELECT command_id, posted_at, filled_at, shares, fill_price,
+                   venue_status, terminal_exec_status
               FROM execution_fact
              WHERE intent_id = 'pos-001:entry'
             """
         ).fetchone()
         assert dict(execution) == {
             "command_id": "cmd-001",
+            "posted_at": "2026-04-26T00:00:00Z",
+            "filled_at": "2026-04-26T00:06:00Z",
             "shares": 5.116278,
             "fill_price": 0.429999894454523,
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
+        }
+        conn.execute(
+            """
+            UPDATE execution_fact
+               SET posted_at = '2026-07-02T12:12:18.608703+00:00',
+                   filled_at = '2026-07-02T12:12:18.608703+00:00'
+             WHERE intent_id = 'pos-001:entry'
+            """
+        )
+        timestamp_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert timestamp_summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        repaired_timestamps = conn.execute(
+            """
+            SELECT posted_at, filled_at
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(repaired_timestamps) == {
+            "posted_at": "2026-04-26T00:00:00Z",
+            "filled_at": "2026-04-26T00:06:00Z",
         }
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_execution_fact_repair"] == {

@@ -1041,7 +1041,7 @@ def mark_market_closed_hold_to_settlement(
         "sell_placed",
     }:
         position.order_status = "filled"
-    position.exit_reason = ""
+    position.exit_reason = reason
     position.last_exit_error = f"{reason}:{error}"[:500]
     monitor_provenance = str(position.selected_method or position.entry_method or "")
     if not bool(getattr(position, "last_monitor_prob_is_fresh", False)) or not monitor_provenance:
@@ -1189,7 +1189,7 @@ def _dual_write_market_closed_hold_if_available(
         projection["updated_at"] = occurred_at
         projection["phase"] = phase_after
         projection["order_status"] = getattr(position, "order_status", "") or "filled"
-        projection["exit_reason"] = ""
+        projection["exit_reason"] = reason
         projection["exit_retry_count"] = 0
         projection["next_exit_retry_at"] = ""
         append_many_and_project(conn, [event], projection)

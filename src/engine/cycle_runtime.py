@@ -3970,12 +3970,13 @@ def _finite_float_or_none(value):
 def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[float | None, float | None]:
     """Return current-cycle monitor probability/edge only when authority is fresh."""
 
-    if edge_ctx is None or not bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
+    if not bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
         return None, None
-    fresh_prob = _finite_float_or_none(getattr(edge_ctx, "p_posterior", None))
-    fresh_edge = _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
+    fresh_prob = _finite_float_or_none(getattr(pos, "last_monitor_prob", None))
+    fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
     if fresh_edge is None:
-        fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+        if edge_ctx is not None:
+            fresh_edge = _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
     if fresh_prob is None:
         return None, None
     return fresh_prob, fresh_edge
@@ -4035,7 +4036,12 @@ def _build_exit_context(
         _ = pos.entry_method
         _ = pos.selected_method
     p_market = None
-    if getattr(edge_ctx, "p_market", None) is not None and len(edge_ctx.p_market) > 0:
+    if (
+        bool(getattr(pos, "last_monitor_market_price_is_fresh", False))
+        and getattr(pos, "last_monitor_market_price", None) is not None
+    ):
+        p_market = float(pos.last_monitor_market_price)
+    elif getattr(edge_ctx, "p_market", None) is not None and len(edge_ctx.p_market) > 0:
         # Bug #64: edge_ctx.p_market from monitor_refresh is single-element
         # [held_bin_price], so index 0 is correct here. The held_bin_index
         # routing happens in monitor_refresh._build_all_bins.

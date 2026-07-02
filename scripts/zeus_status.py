@@ -40,6 +40,7 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # --------------------------------------------------------------------------
 # Live DB paths (absolute; read-only). These are the K1-split canonical DBs.
@@ -57,6 +58,33 @@ EVENT_PROCESSING_STATUSES = (
     "pending",
     "processing",
 )
+EXPECTED_DAEMONS = (
+    "live-trading",
+    "data-ingest",
+    "forecast-live",
+    "substrate-observer",
+    "price-channel-ingest",
+    "post-trade-capital",
+    "riskguard-live",
+    "venue-heartbeat",
+)
+LOAD_BEARING_DAEMONS = {
+    "live-trading",
+    "data-ingest",
+    "forecast-live",
+    "substrate-observer",
+    "price-channel-ingest",
+    "post-trade-capital",
+}
+DAEMON_HEARTBEATS = {
+    "live-trading": "daemon-heartbeat.json",
+    "data-ingest": "daemon-heartbeat-ingest.json",
+    "forecast-live": "forecast-live-heartbeat.json",
+    "substrate-observer": "daemon-heartbeat-substrate-observer.json",
+    "price-channel-ingest": "daemon-heartbeat-price-channel-ingest.json",
+    "post-trade-capital": "daemon-heartbeat-post-trade-capital.json",
+}
+DAEMON_HEARTBEAT_STALE_SECONDS = 300.0
 
 # Substrate-transient vs honest-economics classification for BLOCKS.
 # Substring sets (case-insensitive) — display-only, not authority.
@@ -172,6 +200,7 @@ def section_daemons() -> dict:
         if res.returncode != 0:
             out["error"] = f"launchctl rc={res.returncode}"
             return out
+        observed: dict[str, dict] = {}
         for line in res.stdout.splitlines():
             if "com.zeus" not in line:
                 continue
@@ -179,12 +208,145 @@ def section_daemons() -> dict:
             if len(parts) < 3:
                 continue
             pid, status, label = parts[0], parts[1], parts[-1]
-            out["rows"].append(
-                {"label": label.replace("com.zeus.", ""), "pid": pid, "status": status}
+            short_label = label.replace("com.zeus.", "")
+            observed[short_label] = {
+                "label": short_label,
+                "pid": pid,
+                "status": status,
+                "present": True,
+            }
+        ordered = list(EXPECTED_DAEMONS)
+        ordered.extend(label for label in sorted(observed) if label not in EXPECTED_DAEMONS)
+        rows: list[dict] = []
+        for label in ordered:
+            row = dict(
+                observed.get(
+                    label,
+                    {
+                        "label": label,
+                        "pid": "-",
+                        "status": "missing",
+                        "present": False,
+                    },
+                )
             )
+            pid_text = str(row.get("pid") or "-")
+            row["critical"] = label in LOAD_BEARING_DAEMONS
+            row["alive"] = _pid_is_alive(pid_text)
+            issues: list[str] = []
+            if not row.get("present"):
+                issues.append("missing_from_launchctl")
+            if pid_text in {"-", "", "0"}:
+                issues.append("pid_missing")
+            elif not row["alive"]:
+                issues.append("pid_not_running")
+            heartbeat = _daemon_heartbeat_status(label)
+            if heartbeat is not None:
+                row["heartbeat"] = heartbeat
+                if not heartbeat.get("ok", False):
+                    issues.append(str(heartbeat.get("issue") or "heartbeat_unhealthy"))
+            row["ok"] = bool(row["alive"]) and not any(
+                issue.startswith("heartbeat_") for issue in issues
+            )
+            row["issues"] = issues
+            rows.append(row)
+        out["rows"] = rows
     except (subprocess.SubprocessError, OSError) as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out
+
+
+def _pid_is_alive(pid_text: str) -> bool:
+    if pid_text in {"-", "", "0"}:
+        return False
+    try:
+        int(pid_text)
+    except ValueError:
+        return False
+    try:
+        res = subprocess.run(
+            ["ps", "-p", pid_text],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return res.returncode == 0
+
+
+def _current_git_head() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _daemon_heartbeat_status(label: str) -> dict | None:
+    filename = DAEMON_HEARTBEATS.get(label)
+    if not filename:
+        return None
+    path = Path(STATE) / filename
+    if not path.exists():
+        return {"ok": False, "issue": "heartbeat_missing", "path": str(path)}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        return {
+            "ok": False,
+            "issue": "heartbeat_unreadable",
+            "path": str(path),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    raw_ts = (
+        payload.get("timestamp")
+        or payload.get("alive_at")
+        or payload.get("written_at")
+        or payload.get("generated_at")
+    )
+    try:
+        parsed = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "issue": "heartbeat_timestamp_invalid",
+            "path": str(path),
+            "timestamp": raw_ts,
+        }
+    age_seconds = (_now() - parsed).total_seconds()
+    heartbeat_git_head = str(payload.get("git_head") or "").strip()
+    current_git_head = _current_git_head()
+    git_head_matches = True
+    if heartbeat_git_head and current_git_head:
+        git_head_matches = (
+            current_git_head.startswith(heartbeat_git_head)
+            or heartbeat_git_head.startswith(current_git_head)
+        )
+    fresh = 0.0 <= age_seconds <= DAEMON_HEARTBEAT_STALE_SECONDS
+    ok = fresh and git_head_matches
+    issue = None
+    if not fresh:
+        issue = "heartbeat_stale"
+    elif not git_head_matches:
+        issue = "heartbeat_git_head_mismatch"
+    return {
+        "ok": ok,
+        "issue": issue,
+        "path": str(path),
+        "timestamp": parsed.isoformat(),
+        "age_seconds": round(age_seconds, 1),
+        "git_head": heartbeat_git_head or None,
+        "current_git_head": current_git_head or None,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -653,7 +815,13 @@ def render_text(data: dict) -> str:
     if d.get("error"):
         L.append(f"DAEMONS  ERR {d['error']}")
     else:
-        cells = [f"{r['label']}=pid{r['pid']}/{r['status']}" for r in d["rows"]]
+        cells = []
+        for r in d["rows"]:
+            if r.get("ok"):
+                cells.append(f"{r['label']}=pid{r['pid']}/{r['status']}")
+                continue
+            issues = ",".join(r.get("issues") or ["down"])
+            cells.append(f"{r['label']}=DOWN({issues})")
         L.append("DAEMONS  " + ("  ".join(cells) if cells else "(none)"))
     L.append("")
 

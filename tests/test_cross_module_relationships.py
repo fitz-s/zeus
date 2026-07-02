@@ -413,6 +413,75 @@ def test_monitor_refresh_updates_exit_context_freshness():
     assert exit_ctx_stale.day0_zero_probability_exit_authority is False
 
 
+def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary():
+    """Paris 15C regression: monitor-refresh authority must be the single exit
+    boundary source. If the Day0 monitor stamps a fresh held-side probability of
+    exactly zero, stale edge_ctx probability/price values cannot turn that into
+    a CI-overlap hold or a misleading monitor artifact.
+    """
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import (
+        _build_exit_context,
+        _current_monitor_result_probability_and_edge,
+    )
+    from src.execution.exit_lifecycle import ExitContext
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="paris-low-15c-regression",
+        market_id="paris-low-15c",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-07-02",
+        bin_label="Will the lowest temperature in Paris be 15C on July 2?",
+        direction="buy_no",
+        entry_price=0.49,
+        p_posterior=0.8109,
+        shares=10.91,
+        cost_basis_usd=5.35,
+        size_usd=5.35,
+        state="day0_window",
+        chain_state="synced",
+        last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.002,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.002,
+        last_monitor_best_ask=0.013,
+        last_monitor_edge=-0.002,
+    )
+    setattr(pos, "_day0_zero_probability_exit_authority", True)
+
+    stale_edge_ctx = SimpleNamespace(
+        p_posterior=0.8109,
+        p_market=[0.49],
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+        forward_edge=0.3209,
+        confidence_band_lower=-0.02,
+        confidence_band_upper=0.02,
+    )
+
+    exit_ctx = _build_exit_context(
+        pos,
+        stale_edge_ctx,
+        hours_to_settlement=9.0,
+        ExitContext=ExitContext,
+    )
+    assert exit_ctx.fresh_prob == 0.0
+    assert exit_ctx.current_market_price == 0.002
+
+    monitor_prob, monitor_edge = _current_monitor_result_probability_and_edge(pos, stale_edge_ctx)
+    assert monitor_prob == 0.0
+    assert monitor_edge == -0.002
+
+    decision = pos.evaluate_exit(exit_ctx)
+    assert decision.should_exit is True
+    assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+    assert "ci_overlap_hold" not in decision.applied_validations
+
+
 # ---------------------------------------------------------------------------
 # Test 6: exit_lifecycle.FILL_STATUSES == fill_tracker.FILL_STATUSES
 # ---------------------------------------------------------------------------
