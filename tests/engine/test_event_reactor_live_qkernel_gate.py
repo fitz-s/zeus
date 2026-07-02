@@ -57,6 +57,56 @@ def _qkernel_cert() -> dict:
     }
 
 
+def _day0_probability_fields(
+    *,
+    condition_id: str = "condition-1",
+    q_live: float = 0.70,
+    q_lcb: float = 0.60,
+) -> dict[str, object]:
+    lcb_transform = {
+        "yes_lcb_by_condition": {condition_id: q_lcb},
+        "no_lcb_by_condition": {condition_id: 0.20},
+        "mask": [1.0],
+    }
+    return {
+        "condition_id": condition_id,
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb,
+        "day0_probability_authority": {
+            "q_source": "day0_remaining_day",
+            "q_mode": "remaining_day",
+            "remaining_models": 80,
+            "rounded_value": 32,
+            "observation_time": "2026-07-02T02:00:00+00:00",
+            "observation_available_at": "2026-07-02T02:06:24+00:00",
+            "lcb_transform": lcb_transform,
+        },
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 80,
+        "_edli_day0_lcb_transform": lcb_transform,
+    }
+
+
+def _day0_qkernel_cert(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dict:
+    cert = _qkernel_cert()
+    cert.update(
+        payoff_q_point=q_live,
+        payoff_q_lcb=q_lcb,
+        cost=0.40,
+        edge_lcb=q_lcb - 0.40,
+        q_lcb_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="day0_remaining_day_q_lcb",
+        selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="day0_remaining_day_q_lcb",
+        selection_guard_n=80,
+        selection_guard_q_safe=q_lcb,
+    )
+    return cert
+
+
 def _fake_qkernel_decision() -> SimpleNamespace:
     cost = SimpleNamespace(value=0.40)
     economics = SimpleNamespace(
@@ -870,6 +920,26 @@ def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
         )
 
 
+def test_live_entry_qkernel_gate_rejects_false_edge_rate_above_live_alpha():
+    cert = _qkernel_cert()
+    cert.update(false_edge_rate=0.50)
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "center_buy",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.70,
+                "q_lcb_5pct": 0.60,
+                "min_entry_price": 0.10,
+                "qkernel_execution_economics": cert,
+            }
+        )
+
+
 def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():
     cert = _qkernel_cert()
     cert.update(cost=0.07, payoff_q_lcb=0.60, payoff_q_point=0.70, edge_lcb=0.53)
@@ -908,14 +978,13 @@ def _day0_payload(**overrides) -> dict:
 def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
     _assert_live_entry_submit_authority(
         _day0_payload(
+            **_day0_probability_fields(),
             selection_authority_applied="qkernel_spine",
             direction="buy_yes",
             strategy_key="day0_nowcast_entry",
             candidate_bin_id="bin-1",
-            q_live=0.70,
-            q_lcb_5pct=0.60,
             min_entry_price=0.10,
-            qkernel_execution_economics=_qkernel_cert(),
+            qkernel_execution_economics=_day0_qkernel_cert(),
         )
     )
 
@@ -962,8 +1031,71 @@ def test_live_entry_day0_gate_rejects_missing_qkernel_economics():
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED"):
         _assert_live_entry_submit_authority(
             _day0_payload(
+                **_day0_probability_fields(),
                 selection_authority_applied="qkernel_spine",
+                direction="buy_yes",
+                strategy_key="day0_nowcast_entry",
+                candidate_bin_id="bin-1",
+                min_entry_price=0.10,
                 qkernel_execution_economics=None,
+            )
+        )
+
+
+def test_live_entry_day0_gate_rejects_missing_probability_authority():
+    with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED"):
+        _assert_live_entry_submit_authority(
+            _day0_payload(
+                selection_authority_applied="qkernel_spine",
+                direction="buy_yes",
+                strategy_key="day0_nowcast_entry",
+                candidate_bin_id="bin-1",
+                q_live=0.70,
+                q_lcb_5pct=0.60,
+                min_entry_price=0.10,
+                qkernel_execution_economics=_day0_qkernel_cert(),
+            )
+        )
+
+
+def test_live_entry_day0_gate_rejects_observed_boundary_qkernel_guard():
+    cert = _day0_qkernel_cert()
+    cert.update(
+        q_lcb_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        q_lcb_guard_cell_key="day0_observed_boundary",
+        selection_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        selection_guard_cell_key="day0_observed_boundary",
+        selection_guard_n=1,
+    )
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED"):
+        _assert_live_entry_submit_authority(
+            _day0_payload(
+                **_day0_probability_fields(),
+                selection_authority_applied="qkernel_spine",
+                direction="buy_yes",
+                strategy_key="day0_nowcast_entry",
+                candidate_bin_id="bin-1",
+                min_entry_price=0.10,
+                qkernel_execution_economics=cert,
+            )
+        )
+
+
+def test_live_entry_day0_gate_rejects_remaining_guard_without_sample_count():
+    cert = _day0_qkernel_cert()
+    cert.update(selection_guard_n=0)
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED"):
+        _assert_live_entry_submit_authority(
+            _day0_payload(
+                **_day0_probability_fields(),
+                selection_authority_applied="qkernel_spine",
+                direction="buy_yes",
+                strategy_key="day0_nowcast_entry",
+                candidate_bin_id="bin-1",
+                min_entry_price=0.10,
+                qkernel_execution_economics=cert,
             )
         )
 

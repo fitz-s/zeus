@@ -2350,6 +2350,95 @@ def test_candidate_economics_selection_cert_carries_false_edge_rate():
     ) is not None
 
 
+def test_day0_observed_boundary_does_not_mint_guarded_false_edge_rate():
+    """Observed-boundary is not a statistical lower-bound guard for live entry."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30, side="YES"
+    )
+    candidate_decision = SimpleNamespace(
+        economics=economics,
+        route=SimpleNamespace(side="YES", bin_id="b1", payoff_vector=np.array([1.0])),
+        q_lcb_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="day0_observed_boundary",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="day0_observed_boundary",
+        selection_guard_n=1,
+        selection_guard_q_safe=0.60,
+        robust_trade_score=0.20,
+    )
+    decision = SimpleNamespace(
+        decision_id="decision-observed-boundary-fdr",
+        receipt_hash="receipt-observed-boundary-fdr",
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.70], [0.70]])),
+        candidate_decisions=(candidate_decision,),
+    )
+
+    payload = bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "YES")]
+
+    assert payload["false_edge_rate"] == pytest.approx(1.0 / 3.0)
+    assert era._valid_qkernel_execution_economics_payload(
+        payload,
+        direction="buy_yes",
+    ) is None
+
+
+def test_day0_remaining_day_guard_mints_false_edge_rate_only_with_sample_count():
+    """Day0 remaining-window q_lcb is a 95% guard only when it has sample support."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30, side="YES"
+    )
+
+    def _payload(selection_guard_n: int) -> dict:
+        candidate_decision = SimpleNamespace(
+            economics=economics,
+            route=SimpleNamespace(side="YES", bin_id="b1", payoff_vector=np.array([1.0])),
+            q_lcb_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+            q_lcb_guard_abstained=False,
+            q_lcb_guard_cell_key="day0_remaining_day_q_lcb",
+            direction_law_ok=True,
+            coherence_allows=True,
+            selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+            selection_guard_abstained=False,
+            selection_guard_cell_key="day0_remaining_day_q_lcb",
+            selection_guard_n=selection_guard_n,
+            selection_guard_q_safe=0.60,
+            robust_trade_score=0.20,
+        )
+        decision = SimpleNamespace(
+            decision_id=f"decision-day0-remaining-{selection_guard_n}",
+            receipt_hash=f"receipt-day0-remaining-{selection_guard_n}",
+            selected=economics,
+            band=SimpleNamespace(samples=np.array([[0.70], [0.70]])),
+            candidate_decisions=(candidate_decision,),
+        )
+        return bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "YES")]
+
+    unsupported = _payload(0)
+    supported = _payload(80)
+
+    assert unsupported["false_edge_rate"] == pytest.approx(1.0 / 3.0)
+    assert era._valid_qkernel_execution_economics_payload(
+        unsupported,
+        direction="buy_yes",
+    ) is None
+    assert supported["false_edge_rate"] == pytest.approx(0.05)
+    assert era._valid_qkernel_execution_economics_payload(
+        supported,
+        direction="buy_yes",
+    ) is not None
+
+
 def test_fdr_maps_consume_selected_qkernel_overlay_authority():
     """FDR must see the selected qkernel false-edge rate, not the stale base proof p-value."""
 

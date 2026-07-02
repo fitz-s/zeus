@@ -52,7 +52,7 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
             "day0_probability_authority": _day0_probability_authority(),
             "_edli_q_source": "day0_remaining_day",
             "_edli_day0_q_mode": "remaining_day",
-            "_edli_day0_remaining_models": 3,
+            "_edli_day0_remaining_models": 80,
             "_edli_day0_lcb_transform": _day0_lcb_transform(),
             "qkernel_execution_economics": _day0_qkernel_economics(),
         },
@@ -90,7 +90,7 @@ def test_actionable_rejects_degenerate_day0_remaining_window_q():
             "day0_probability_authority": _day0_probability_authority(),
             "_edli_q_source": "day0_remaining_day",
             "_edli_day0_q_mode": "remaining_day",
-            "_edli_day0_remaining_models": 3,
+            "_edli_day0_remaining_models": 80,
             "_edli_day0_lcb_transform": _day0_lcb_transform(),
             "q_live": 0.6,
             "q_lcb_5pct": 0.6,
@@ -112,7 +112,7 @@ def test_actionable_rejects_degenerate_day0_remaining_window_q():
         },
     )
 
-    with pytest.raises(CertificateVerificationError, match="q_lcb must be strictly below q_live"):
+    with pytest.raises(CertificateVerificationError, match="degenerate with q_live"):
         verify_actionable_trade(action, parents)
 
 
@@ -135,7 +135,7 @@ def test_actionable_rejects_day0_observed_boundary_as_entry_qkernel_guard():
             "day0_probability_authority": _day0_probability_authority(),
             "_edli_q_source": "day0_remaining_day",
             "_edli_day0_q_mode": "remaining_day",
-            "_edli_day0_remaining_models": 3,
+            "_edli_day0_remaining_models": 80,
             "_edli_day0_lcb_transform": _day0_lcb_transform(),
             "qkernel_execution_economics": {
                 **_day0_qkernel_economics(),
@@ -181,7 +181,7 @@ def _day0_probability_authority():
     return {
         "q_source": "day0_remaining_day",
         "q_mode": "remaining_day",
-        "remaining_models": 3,
+        "remaining_models": 80,
         "rounded_value": 20,
         "observation_time": "2026-05-25T11:30:00+00:00",
         "observation_available_at": "2026-05-25T11:35:00+00:00",
@@ -199,7 +199,7 @@ def _day0_qkernel_economics() -> dict:
             "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
             "selection_guard_abstained": False,
             "selection_guard_cell_key": "day0_remaining_day_q_lcb",
-            "selection_guard_n": 0,
+            "selection_guard_n": 80,
             "selection_guard_q_safe": economics["payoff_q_lcb"],
         }
     )

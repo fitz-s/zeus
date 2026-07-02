@@ -37,13 +37,13 @@ def _day0_econ(**overrides) -> dict:
         selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
         selection_guard_abstained=False,
         selection_guard_cell_key="day0_remaining_day_q_lcb",
-        selection_guard_n=0,
+        selection_guard_n=80,
     )
     payload.update(overrides)
     return payload
 
 
-def _day0_actionable_payload(*, q_lcb: float = 0.954) -> dict:
+def _day0_actionable_payload(*, q_lcb: float = 0.91, remaining_models: int = 100) -> dict:
     return {
         "event_type": "DAY0_EXTREME_UPDATED",
         "condition_id": "condition-1",
@@ -63,7 +63,7 @@ def _day0_actionable_payload(*, q_lcb: float = 0.954) -> dict:
         "day0_probability_authority": {
             "q_source": "day0_remaining_day",
             "q_mode": "remaining_day",
-            "remaining_models": 3,
+            "remaining_models": remaining_models,
             "rounded_value": 20,
             "observation_time": "2026-05-25T11:30:00+00:00",
             "lcb_transform": {
@@ -73,7 +73,7 @@ def _day0_actionable_payload(*, q_lcb: float = 0.954) -> dict:
         },
         "_edli_q_source": "day0_remaining_day",
         "_edli_day0_q_mode": "remaining_day",
-        "_edli_day0_remaining_models": 3,
+        "_edli_day0_remaining_models": remaining_models,
         "_edli_day0_lcb_transform": {
             "yes_lcb_by_condition": {"condition-1": q_lcb},
             "no_lcb_by_condition": {"condition-1": 0.02},
@@ -478,18 +478,18 @@ def test_entry_economics_accepts_day0_observation_authority_with_qkernel():
     verdict = _entry_economics_component(
         _intent(
             q_live=0.96,
-            q_lcb_5pct=0.954,
+            q_lcb_5pct=0.91,
             limit_price=0.70,
-            expected_edge=0.238,
+            expected_edge=0.21,
             min_entry_price=0.10,
             min_expected_profit_usd=0.05,
             min_submit_edge_density=0.02,
             qkernel_execution_economics=_day0_econ(
                 payoff_q_point=0.96,
-                payoff_q_lcb=0.954,
+                payoff_q_lcb=0.91,
                 cost=0.70,
-                edge_lcb=0.254,
-                selection_guard_q_safe=0.954,
+                edge_lcb=0.21,
+                selection_guard_q_safe=0.91,
             ),
         ),
         shares=10.0,
@@ -499,38 +499,96 @@ def test_entry_economics_accepts_day0_observation_authority_with_qkernel():
     assert verdict["allowed"] is True
     assert verdict["details"]["qkernel_source"] == "qkernel_spine"
     assert verdict["details"]["day0_observation_authority"] is True
-    assert abs(verdict["details"]["submit_edge"] - 0.254) < 1e-9
+    assert abs(verdict["details"]["submit_edge"] - 0.21) < 1e-9
 
 
 def test_entry_economics_blocks_day0_observed_boundary_entry_guard():
     verdict = _entry_economics_component(
         _intent(
-            q_live=0.9614944294185659,
-            q_lcb_5pct=0.96,
+            q_live=0.90,
+            q_lcb_5pct=0.80,
             limit_price=0.44,
-            expected_edge=0.2459479999235843,
+            expected_edge=0.25,
             min_entry_price=0.10,
             min_expected_profit_usd=0.05,
             min_submit_edge_density=0.02,
             qkernel_execution_economics=_day0_econ(
-                payoff_q_point=0.9614944294185659,
-                payoff_q_lcb=0.96,
-                cost=0.7140520000764157,
-                edge_lcb=0.2459479999235843,
+                payoff_q_point=0.90,
+                payoff_q_lcb=0.80,
+                cost=0.55,
+                edge_lcb=0.25,
                 selection_guard_basis="DAY0_OBSERVED_BOUNDARY",
                 q_lcb_guard_basis="DAY0_OBSERVED_BOUNDARY",
                 selection_guard_cell_key="day0_observed_boundary",
                 q_lcb_guard_cell_key="day0_observed_boundary",
-                selection_guard_q_safe=0.96,
+                selection_guard_q_safe=0.80,
             ),
         ),
         shares=40.25,
-        actionable_payload=_day0_actionable_payload(q_lcb=0.96),
+        actionable_payload=_day0_actionable_payload(q_lcb=0.80),
     )
 
     assert verdict["allowed"] is False
     assert verdict["reason"] == "day0_qkernel_guard_authority_missing"
     assert "DAY0_OBSERVED_BOUNDARY" in verdict["details"]["day0_qkernel_guard_error"]
+
+
+def test_entry_economics_blocks_day0_degenerate_remaining_window_lcb():
+    verdict = _entry_economics_component(
+        _intent(
+            q_live=0.960232579405669,
+            q_lcb_5pct=0.960232573644274,
+            limit_price=0.70,
+            expected_edge=0.25,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            qkernel_execution_economics=_day0_econ(
+                payoff_q_point=0.960232579405669,
+                payoff_q_lcb=0.960232573644274,
+                cost=0.70,
+                edge_lcb=0.260232573644274,
+                selection_guard_q_safe=0.960232573644274,
+            ),
+        ),
+        shares=10.0,
+        actionable_payload=_day0_actionable_payload(
+            q_lcb=0.960232573644274,
+            remaining_models=3,
+        ),
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "day0_probability_authority_missing"
+    assert "degenerate with q_live" in verdict["details"]["error"]
+
+
+def test_entry_economics_blocks_day0_selection_guard_without_sample_count():
+    verdict = _entry_economics_component(
+        _intent(
+            q_live=0.70,
+            q_lcb_5pct=0.60,
+            limit_price=0.40,
+            expected_edge=0.20,
+            min_entry_price=0.10,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            qkernel_execution_economics=_day0_econ(
+                payoff_q_point=0.70,
+                payoff_q_lcb=0.60,
+                cost=0.40,
+                edge_lcb=0.20,
+                selection_guard_n=0,
+                selection_guard_q_safe=0.60,
+            ),
+        ),
+        shares=10.0,
+        actionable_payload=_day0_actionable_payload(q_lcb=0.60, remaining_models=80),
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "day0_qkernel_guard_authority_missing"
+    assert "selection_guard_n must be positive" in verdict["details"]["day0_qkernel_guard_error"]
 
 
 def test_entry_economics_allows_positive_side_matched_edge():

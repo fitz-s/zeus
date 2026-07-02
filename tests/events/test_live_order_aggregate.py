@@ -721,6 +721,33 @@ def test_pre_submit_rejects_qkernel_low_price_yes_below_roi_frontier_floor():
         )
 
 
+def test_pre_submit_rejects_qkernel_false_edge_rate_above_live_alpha():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    economics = {
+        **_pre_submit_payload()["qkernel_execution_economics"],
+        "false_edge_rate": 0.50,
+    }
+
+    with pytest.raises(LiveOrderAggregateError, match="qkernel false_edge_rate blocks"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                expected_edge=0.20,
+                qkernel_execution_economics=economics,
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
 def test_pre_submit_rejects_nonpositive_qkernel_delta_u_at_min():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
@@ -881,7 +908,7 @@ def test_pre_submit_rejects_degenerate_day0_remaining_window_probability():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="q_lcb must be strictly below q_live"):
+    with pytest.raises(LiveOrderAggregateError, match="degenerate with q_live"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
@@ -917,23 +944,23 @@ def test_pre_submit_rejects_day0_observed_boundary_guard_without_remaining_windo
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
             payload=_day0_pre_submit_payload(
-                q_live=0.9614944294185659,
-                q_lcb_5pct=0.96,
+                q_live=0.90,
+                q_lcb_5pct=0.80,
                 limit_price=0.44,
-                expected_edge=0.2459479999235843,
+                expected_edge=0.25,
                 current_best_bid=0.43,
                 current_best_ask=0.45,
                 qkernel_execution_economics={
                     **_day0_qkernel_economics(),
-                    "payoff_q_point": 0.9614944294185659,
-                    "payoff_q_lcb": 0.96,
-                    "cost": 0.7140520000764157,
-                    "edge_lcb": 0.2459479999235843,
+                    "payoff_q_point": 0.90,
+                    "payoff_q_lcb": 0.80,
+                    "cost": 0.55,
+                    "edge_lcb": 0.25,
                     "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
                     "q_lcb_guard_cell_key": "day0_observed_boundary",
                     "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
                     "selection_guard_cell_key": "day0_observed_boundary",
-                    "selection_guard_q_safe": 0.96,
+                    "selection_guard_q_safe": 0.80,
                 },
             ),
             occurred_at=NOW,
@@ -1298,7 +1325,7 @@ def _day0_probability_authority(condition_id: str = "condition-1", q_lcb: float 
     return {
         "q_source": "day0_remaining_day",
         "q_mode": "remaining_day",
-        "remaining_models": 3,
+        "remaining_models": 80,
         "remaining_model_names": ["ecmwf", "gfs", "icon"],
         "remaining_source_cycle_time_utc": "2026-05-25T12:00:00+00:00",
         "remaining_capture_times_utc": ["2026-05-25T12:20:00+00:00"],
@@ -1338,7 +1365,7 @@ def _day0_pre_submit_payload(**overrides):
         day0_probability_authority=day0_probability,
         _edli_q_source="day0_remaining_day",
         _edli_day0_q_mode="remaining_day",
-        _edli_day0_remaining_models=3,
+        _edli_day0_remaining_models=80,
         _edli_day0_remaining_model_names=["ecmwf", "gfs", "icon"],
         _edli_day0_remaining_source_cycle_time_utc="2026-05-25T12:00:00+00:00",
         _edli_day0_remaining_capture_times_utc=["2026-05-25T12:20:00+00:00"],
@@ -1363,7 +1390,7 @@ def _day0_qkernel_economics(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dic
             "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
             "selection_guard_abstained": False,
             "selection_guard_cell_key": "day0_remaining_day_q_lcb",
-            "selection_guard_n": 0,
+            "selection_guard_n": 80,
             "selection_guard_q_safe": q_lcb,
         }
     )

@@ -2073,7 +2073,7 @@ def qkernel_candidate_economics_by_bin_side(
 
 
 _GUARDED_FALSE_EDGE_RATE_95_BASES = {
-    "DAY0_OBSERVED_BOUNDARY",
+    "DAY0_REMAINING_DAY_Q_LCB",
     "OOF_WILSON_95",
     "OOF_WILSON_95_POOLED_TAIL",
     "SELECTION_BETA_95",
@@ -2121,6 +2121,13 @@ def _guarded_qkernel_false_edge_rate(selected_decision: Any | None) -> float | N
         q_lcb_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
         and getattr(selected_decision, "q_lcb_guard_abstained", None) is False
     ):
+        if q_lcb_basis == "DAY0_REMAINING_DAY_Q_LCB":
+            try:
+                selection_guard_n = int(float(getattr(selected_decision, "selection_guard_n")))
+            except (TypeError, ValueError):
+                return None
+            if selection_guard_n <= 0:
+                return None
         guarded_bases.append(q_lcb_basis)
 
     selection_basis = str(getattr(selected_decision, "selection_guard_basis", "") or "").strip()
@@ -2128,6 +2135,13 @@ def _guarded_qkernel_false_edge_rate(selected_decision: Any | None) -> float | N
         selection_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
         and getattr(selected_decision, "selection_guard_abstained", None) is False
     ):
+        if selection_basis == "DAY0_REMAINING_DAY_Q_LCB":
+            try:
+                selection_guard_n = int(float(getattr(selected_decision, "selection_guard_n")))
+            except (TypeError, ValueError):
+                return None
+            if selection_guard_n <= 0:
+                return None
         try:
             selection_q_safe = float(getattr(selected_decision, "selection_guard_q_safe"))
         except (TypeError, ValueError):

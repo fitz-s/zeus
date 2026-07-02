@@ -986,6 +986,16 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated qkernel false_edge_rate requires probability"
         )
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if false_edge_rate > max_false_edge_rate:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel false_edge_rate blocks"
+        )
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff edge inconsistent")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")

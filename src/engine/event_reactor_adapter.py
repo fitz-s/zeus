@@ -2103,7 +2103,10 @@ def _valid_qkernel_execution_economics_payload(
         false_edge_rate = float(cert.get("false_edge_rate"))
     except (TypeError, ValueError):
         return None
-    if not (math.isfinite(false_edge_rate) and 0.0 < false_edge_rate <= 1.0):
+    if not (
+        math.isfinite(false_edge_rate)
+        and 0.0 < false_edge_rate <= _qkernel_max_false_edge_rate()
+    ):
         return None
     try:
         payoff_q_point = float(cert.get("payoff_q_point"))
@@ -2151,6 +2154,8 @@ def _valid_qkernel_execution_economics_payload(
         return None
     selection_guard_basis = str(cert.get("selection_guard_basis") or "").strip()
     if not selection_guard_basis or selection_guard_basis == "SIDE_NOT_ARMED":
+        return None
+    if _qkernel_day0_guard_rejection_reason(cert) is not None:
         return None
     raw_selection_guard_abstained = cert.get("selection_guard_abstained")
     if isinstance(raw_selection_guard_abstained, bool):
@@ -2252,6 +2257,12 @@ def _qkernel_selection_economics_rejection_reason(
     false_edge_rate = numeric["false_edge_rate"]
     if not (0.0 < false_edge_rate <= 1.0):
         return f"QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_INVALID:value={false_edge_rate:.6f}"
+    max_false_edge_rate = _qkernel_max_false_edge_rate()
+    if false_edge_rate > max_false_edge_rate:
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_BLOCKS:"
+            f"value={false_edge_rate:.6f}:alpha={max_false_edge_rate:.6f}"
+        )
     payoff_q_point = numeric["payoff_q_point"]
     payoff_q_lcb = numeric["payoff_q_lcb"]
     cost = numeric["cost"]
@@ -2320,6 +2331,9 @@ def _qkernel_selection_economics_rejection_reason(
         return "QKERNEL_SELECTION_GUARD_MISSING"
     if selection_guard_basis == "SIDE_NOT_ARMED":
         return f"QKERNEL_SELECTION_SIDE_NOT_ARMED:side={side or 'UNKNOWN'}"
+    day0_guard_reason = _qkernel_day0_guard_rejection_reason(cert)
+    if day0_guard_reason is not None:
+        return day0_guard_reason
     raw_selection_guard_abstained = cert.get("selection_guard_abstained")
     if isinstance(raw_selection_guard_abstained, bool):
         selection_guard_abstained = raw_selection_guard_abstained
@@ -8621,13 +8635,32 @@ def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mappi
 
     from src.events.day0_authority import (
         Day0AuthorityError,
+        assert_live_day0_probability_authority,
         assert_live_day0_payload_authority,
+        assert_live_day0_qkernel_guard_authority,
     )
 
     try:
         assert_live_day0_payload_authority(actionable_payload)
     except Day0AuthorityError as exc:
         raise ValueError(f"LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:{exc}") from None
+    try:
+        assert_live_day0_probability_authority(
+            actionable_payload,
+            direction=actionable_payload.get("direction"),
+            condition_id=actionable_payload.get("condition_id"),
+            q_live=actionable_payload.get("q_live"),
+            q_lcb=actionable_payload.get("q_lcb_5pct"),
+        )
+    except Day0AuthorityError as exc:
+        raise ValueError(f"LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:{exc}") from None
+    economics = actionable_payload.get("qkernel_execution_economics")
+    if not isinstance(economics, Mapping):
+        raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
+    try:
+        assert_live_day0_qkernel_guard_authority(economics)
+    except Day0AuthorityError as exc:
+        raise ValueError(f"LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED:{exc}") from None
     _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
 
 
@@ -12371,6 +12404,37 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
         "selection_guard_q_safe",
     }
 )
+
+
+def _qkernel_max_false_edge_rate() -> float:
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        alpha = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        alpha = 0.05
+    if not math.isfinite(alpha) or alpha <= 0.0:
+        return 0.05
+    return alpha
+
+
+def _qkernel_day0_guard_rejection_reason(cert: Mapping[str, Any]) -> str | None:
+    bases = (
+        str(cert.get("q_lcb_guard_basis") or "").strip(),
+        str(cert.get("selection_guard_basis") or "").strip(),
+    )
+    for basis in bases:
+        if basis == "DAY0_OBSERVED_BOUNDARY":
+            return "QKERNEL_DAY0_OBSERVED_BOUNDARY_NOT_ENTRY_AUTHORITY"
+    if "DAY0_REMAINING_DAY_Q_LCB" not in bases:
+        return None
+    try:
+        selection_guard_n = int(float(cert.get("selection_guard_n")))
+    except (TypeError, ValueError):
+        return "QKERNEL_DAY0_REMAINING_DAY_GUARD_N_MISSING"
+    if selection_guard_n <= 0:
+        return "QKERNEL_DAY0_REMAINING_DAY_GUARD_N_MISSING"
+    return None
 
 
 def _qkernel_roi_frontier_useful_cert(
