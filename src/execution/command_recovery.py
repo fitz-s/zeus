@@ -6477,6 +6477,9 @@ def _append_zero_exposure_entry_void_projection(
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
         "last_monitor_market_price_is_fresh": None,
+        "last_monitor_best_bid": None,
+        "last_monitor_best_ask": None,
+        "last_monitor_market_vig": None,
         "decision_snapshot_id": str(command.get("snapshot_id") or ""),
         "entry_method": "zero_fill_terminal_no_fill",
         "strategy_key": strategy_key,
@@ -6628,6 +6631,9 @@ def _append_entry_order_voided_projection(
             "updated_at": occurred_at,
         }
     )
+    projection.setdefault("last_monitor_best_bid", None)
+    projection.setdefault("last_monitor_best_ask", None)
+    projection.setdefault("last_monitor_market_vig", None)
     append_many_and_project(conn, [event], projection)
 
 
