@@ -71,3 +71,13 @@ regexes = [
 paths = [
     '''docs/operations/.*\.md''',
 ]
+
+[[allowlists]]
+description = "DECISION_GUARD_CELL_KEYS — q_lcb_guard_cell_key / selection_guard_cell_key are settlement-bin provenance identifiers inside CandidateDecision diagnostics, not credentials. See SECURITY-FALSE-POSITIVES.md [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS]."
+regexes = [
+    '''q_lcb_guard_cell_key="[^"]+"''',
+    '''selection_guard_cell_key="[^"]+"''',
+]
+paths = [
+    '''src/decision/family_decision_engine\.py''',
+]

@@ -543,9 +543,11 @@ class CandidateDecision:
     robust_trade_score: float
     q_lcb_guard_basis: str = ""
     q_lcb_guard_abstained: bool = False
+    # [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] Domain provenance identifier, not a credential.
     q_lcb_guard_cell_key: str = ""
     selection_guard_basis: str = ""
     selection_guard_abstained: bool = False
+    # [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] Domain provenance identifier, not a credential.
     selection_guard_cell_key: str = ""
     selection_guard_n: int = 0
     selection_guard_q_safe: float | None = None
