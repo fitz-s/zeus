@@ -236,7 +236,7 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
         "OOF_WILSON_95_POOLED_TAIL",
     }
 )
-DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
+DAY0_REMAINING_DAY_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
 _ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
@@ -1268,7 +1268,15 @@ class FamilyDecisionEngine:
         *,
         scored: tuple[CandidateDecision, ...],
     ) -> tuple[CandidateDecision, ...]:
-        """Stamp Day0 observed-boundary lower-bound provenance without OOF deflation."""
+        """Stamp Day0 remaining-day lower-bound provenance without OOF deflation.
+
+        Day0's probability surface is already conditioned on the observed running
+        extreme and the remaining-day member envelope.  This is not an empirical
+        OOF selection cell; recording it as a one-sample selection guard made the
+        live receipt look more statistically supported than it was.  The q_lcb
+        remains the served remaining-day payoff lower bound, while the selection
+        guard provenance records that no offline selection calibrator was applied.
+        """
 
         guarded: list[CandidateDecision] = []
         for d in scored:
@@ -1286,13 +1294,13 @@ class FamilyDecisionEngine:
             guarded.append(
                 replace(
                     d,
-                    q_lcb_guard_basis=DAY0_OBSERVED_BOUNDARY_GUARD_BASIS,
+                    q_lcb_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
                     q_lcb_guard_abstained=False,
-                    q_lcb_guard_cell_key="day0_observed_boundary",
-                    selection_guard_basis=DAY0_OBSERVED_BOUNDARY_GUARD_BASIS,
+                    q_lcb_guard_cell_key="day0_remaining_day_q_lcb",
+                    selection_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
                     selection_guard_abstained=False,
-                    selection_guard_cell_key="day0_observed_boundary",
-                    selection_guard_n=max(1, int(getattr(d, "selection_guard_n", 0) or 0)),
+                    selection_guard_cell_key="day0_remaining_day_q_lcb",
+                    selection_guard_n=0,
                     selection_guard_q_safe=q_safe,
                 )
             )

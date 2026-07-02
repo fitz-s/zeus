@@ -1320,8 +1320,9 @@ def test_day0_observed_boundary_uses_served_q_lcb_not_forecast_oof_guards(monkey
     )
     assert selected_decision.route.side == "YES"
     assert selected_decision.route.bin_id == "b25"
-    assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_OBSERVED_BOUNDARY_GUARD_BASIS
-    assert selected_decision.selection_guard_basis == fde_mod.DAY0_OBSERVED_BOUNDARY_GUARD_BASIS
+    assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert selected_decision.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert selected_decision.selection_guard_n == 0
     assert selected_decision.selection_guard_q_safe == pytest.approx(
         selected_decision.economics.payoff_q_lcb
     )

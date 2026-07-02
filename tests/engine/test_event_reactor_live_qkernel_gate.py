@@ -15,6 +15,7 @@ import pytest
 from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
+    _day0_live_submit_admission_rejection_reason,
     _fdr_rejection_reason,
     _final_intent_decision_source_context_payload,
     _pre_submit_revalidation_payload_from_final_intent,
@@ -188,6 +189,111 @@ def _fake_day0_event() -> SimpleNamespace:
         event_type="DAY0_EXTREME_UPDATED",
         causal_snapshot_id="snapshot-day0-selection",
     )
+
+
+def _day0_submit_witness() -> PreSubmitAuthorityWitness:
+    return PreSubmitAuthorityWitness(
+        quote_seen_at="2026-07-02T02:18:08+00:00",
+        book_hash="book-day0",
+        current_best_bid=0.43,
+        current_best_ask=0.44,
+        tick_size=0.01,
+        min_order_size=5.0,
+        neg_risk=True,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="clob_jit_book",
+        book_captured_at="2026-07-02T02:18:08+00:00",
+        heartbeat_authority_id="heartbeat",
+        heartbeat_checked_at="2026-07-02T02:18:08+00:00",
+        user_ws_authority_id="user_ws",
+        user_ws_checked_at="2026-07-02T02:18:08+00:00",
+        venue_connectivity_authority_id="venue",
+        venue_connectivity_checked_at="2026-07-02T02:18:08+00:00",
+        balance_allowance_authority_id="wallet",
+        balance_allowance_checked_at="2026-07-02T02:18:08+00:00",
+        checked_at="2026-07-02T02:18:08+00:00",
+    )
+
+
+def _day0_action_payload(*, bin_label: str) -> dict[str, object]:
+    return {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "city": "Manila",
+        "target_date": "2026-07-02",
+        "metric": "high",
+        "temperature_metric": "high",
+        "direction": "buy_yes",
+        "bin_label": bin_label,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+
+
+def _day0_event_payload() -> SimpleNamespace:
+    payload = {
+        "city": "Manila",
+        "target_date": "2026-07-02",
+        "metric": "high",
+        "station_id": "RPLL",
+        "settlement_source": "aviationweather_metar",
+        "observation_available_at": "2026-07-02T02:06:24+00:00",
+        "rounded_value": 32,
+    }
+    return SimpleNamespace(
+        event_id="event-day0-submit",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="metar-fast",
+        payload_json=json.dumps(payload),
+        payload=payload,
+    )
+
+
+def test_day0_submit_gate_blocks_point_yes_one_bin_fragility() -> None:
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be 32°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="TAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    assert reason == "DAY0_ONE_BIN_EDGE_FRAGILE"
+
+
+def test_day0_submit_gate_blocks_taker_even_when_range_survives_stress() -> None:
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="TAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    assert reason == "DAY0_TAKER_ENTRY_FORBIDDEN"
+
+
+def test_day0_submit_gate_allows_maker_range_with_fresh_observation() -> None:
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    assert reason is None
 
 
 def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_path):

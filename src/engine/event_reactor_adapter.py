@@ -7179,6 +7179,140 @@ def _build_event_bound_taker_quality_proof(
     }
 
 
+def _day0_live_source_health_state(actionable_payload: Mapping[str, object]) -> str:
+    """Compact health label for the Day0 live-admission predicate."""
+
+    live_authority = str(actionable_payload.get("live_authority_status") or "").strip().lower()
+    source_authorized = str(
+        actionable_payload.get("source_authorized_status") or ""
+    ).strip().upper()
+    source_match = str(actionable_payload.get("source_match_status") or "").strip().upper()
+    local_date = str(actionable_payload.get("local_date_status") or "").strip().upper()
+    station = str(actionable_payload.get("station_match_status") or "").strip().upper()
+    metric = str(actionable_payload.get("metric_match_status") or "").strip().upper()
+    rounding = str(actionable_payload.get("rounding_status") or "").strip().upper()
+    if (
+        live_authority == "live"
+        and source_authorized == "AUTHORIZED"
+        and source_match == "MATCH"
+        and local_date == "MATCH"
+        and station == "MATCH"
+        and metric == "MATCH"
+        and rounding == "MATCH"
+    ):
+        return "OK_FAST_AND_WU"
+    return "BLOCKED"
+
+
+def _day0_bin_stress_verdict(
+    *,
+    actionable_payload: Mapping[str, object],
+    event_payload: Mapping[str, object],
+) -> tuple[float, bool]:
+    """Return distance-to-death in integer quanta and one-bin-stress survival."""
+
+    direction = str(actionable_payload.get("direction") or "").strip().lower()
+    if direction != "buy_yes":
+        return float("inf"), True
+    observed_raw = event_payload.get("rounded_value")
+    if observed_raw is None:
+        observed_raw = actionable_payload.get("rounded_value")
+    observed = _optional_float(observed_raw)
+    if observed is None:
+        return 0.0, False
+    bin_label = str(actionable_payload.get("bin_label") or "").strip()
+    if not bin_label:
+        return 0.0, False
+    try:
+        from src.data.market_scanner import _parse_temp_range
+
+        low, high = _parse_temp_range(bin_label)
+    except Exception:  # noqa: BLE001
+        return 0.0, False
+    metric = str(
+        actionable_payload.get("metric")
+        or actionable_payload.get("temperature_metric")
+        or event_payload.get("metric")
+        or ""
+    ).strip().lower()
+    if metric == "high":
+        if high is None:
+            return float("inf"), True
+        distance = max(0.0, float(high) - float(observed))
+        return distance, bool(float(observed) + 1.0 <= float(high) + 1e-9)
+    if metric == "low":
+        if low is None:
+            return float("inf"), True
+        distance = max(0.0, float(observed) - float(low))
+        return distance, bool(float(observed) - 1.0 >= float(low) - 1e-9)
+    return 0.0, False
+
+
+def _day0_live_submit_admission_rejection_reason(
+    *,
+    event: OpportunityEvent,
+    actionable_payload: Mapping[str, object],
+    authority_witness: PreSubmitAuthorityWitness,
+    order_mode: str,
+    decision_time: datetime,
+) -> str | None:
+    """Apply the Day0 live-admission predicate at the final submit seam."""
+
+    event_type = str(actionable_payload.get("event_type") or "").strip()
+    if event_type != "DAY0_EXTREME_UPDATED":
+        return None
+    from src.engine.day0_admission import (
+        Day0AdmissionContext,
+        day0_live_admission_rejection_reason,
+    )
+
+    event_payload = _payload(event)
+    quote_time = (
+        _parse_utc(authority_witness.book_captured_at)
+        or _parse_utc(authority_witness.checked_at)
+        or decision_time.astimezone(UTC)
+    )
+    observation_available = _parse_utc(
+        event_payload.get("observation_available_at")
+        or actionable_payload.get("observation_available_at")
+    )
+    distance_quanta, stress_survives = _day0_bin_stress_verdict(
+        actionable_payload=actionable_payload,
+        event_payload=event_payload,
+    )
+    station_id = str(event_payload.get("station_id") or "").strip()
+    settlement_source_type = str(
+        event_payload.get("settlement_source_type")
+        or event_payload.get("source_type")
+        or event_payload.get("settlement_source")
+        or ""
+    ).strip().lower()
+    ctx = Day0AdmissionContext(
+        event_type=event_type,
+        city=str(actionable_payload.get("city") or event_payload.get("city") or ""),
+        metric=str(
+            actionable_payload.get("metric")
+            or actionable_payload.get("temperature_metric")
+            or event_payload.get("metric")
+            or ""
+        ),
+        settlement_source_type=settlement_source_type,
+        fast_obs_supported=bool(station_id and observation_available is not None),
+        source_health_state=_day0_live_source_health_state(actionable_payload),
+        execution_mode=str(order_mode or "").strip().lower(),
+        quote_time_utc=quote_time,
+        latest_observation_available_at_utc=observation_available,
+        in_post_extreme_quiet_window=False,
+        in_final_localday_noentry_window=False,
+        selected_bin_edge_distance_quanta=distance_quanta,
+        edge_survives_one_bin_stress=stress_survives,
+        city_allowlist=frozenset(
+            {str(actionable_payload.get("city") or event_payload.get("city") or "")}
+        ),
+    )
+    return day0_live_admission_rejection_reason(ctx)
+
+
 def _build_live_execution_command_certificates(
     *,
     event: OpportunityEvent,
@@ -7331,6 +7465,15 @@ def _build_live_execution_command_certificates(
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
         )
+        day0_admission_rejection = _day0_live_submit_admission_rejection_reason(
+            event=event,
+            actionable_payload=actionable.payload,
+            authority_witness=authority_witness,
+            order_mode=order_mode,
+            decision_time=decision_time,
+        )
+        if day0_admission_rejection is not None:
+            raise ValueError(f"DAY0_LIVE_ADMISSION_REJECTED:{day0_admission_rejection}")
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
         # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
