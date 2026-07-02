@@ -3676,7 +3676,14 @@ def check_pending_exits(
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         if exit_state == "retry_pending":
-            stats["unchanged"] += 1
+            if (
+                str(getattr(pos, "next_exit_retry_at", "") or "").strip()
+                and check_pending_retries(pos, conn=conn)
+            ):
+                stats["retried"] += 1
+                stats["released_retry"] = stats.get("released_retry", 0) + 1
+            else:
+                stats["unchanged"] += 1
             continue
         if exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
             getattr(pos, "order_status", "") or ""

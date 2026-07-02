@@ -856,6 +856,72 @@ def test_pending_exit_fill_poller_skips_retry_without_order_id(conn):
     ).fetchone()[0] == 0
 
 
+def test_pending_exit_fill_poller_releases_expired_retry_without_order_id(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-retry-expired-no-order",
+        market_id="mkt-retry-expired-no-order",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction="buy_yes",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=17.71,
+        entry_price=0.44,
+        shares=40.25,
+        cost_basis_usd=17.71,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-07-02T00:48:30+00:00",
+        entered_at="2026-07-02T00:11:43+00:00",
+        chain_state="synced",
+        env="live",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        last_exit_order_id="",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-retry-expired-no-order",
+        exit_retry_count=1,
+        next_exit_retry_at="2026-07-02T02:22:35+00:00",
+        last_exit_error="exit_executable_snapshot_unavailable",
+        exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"expired retry without order id must not be polled: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(PortfolioState(positions=[position]), FakeClob(), conn=conn)
+
+    assert stats["retried"] == 1
+    assert stats["released_retry"] == 1
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+    assert position.next_exit_retry_at == ""
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] == "ready"
+    assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
+    assert payload["previous_retry_count"] == 1
+
+
 def test_pending_exit_without_order_releases_for_redecision(conn):
     from src.execution.exit_lifecycle import release_pending_exit_without_order_if_retryable
     from src.state.portfolio import Position
