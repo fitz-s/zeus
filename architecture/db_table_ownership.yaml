@@ -55,6 +55,37 @@ tables:
   # MIGRATION FRAMEWORK tables
   # ---------------------------------------------------------------------------
 
+  - name: backtest_runs
+    db: backtest
+    schema_class: backtest_class
+    schema_version_owner: none
+    created_by: scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py
+    pk_col: run_id
+    notes: >
+      Offline backtest database table migrated by the lane-constraint repair
+      script. Not a live world/forecast/trade truth table.
+
+  - name: backtest_outcome_comparison
+    db: backtest
+    schema_class: backtest_class
+    schema_version_owner: none
+    created_by: scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py
+    pk_col: null
+    notes: >
+      Offline backtest comparison table migrated with backtest_runs. Not a live
+      world/forecast/trade truth table.
+
+  - name: position_events_v3
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: none
+    created_by: scripts/migrations/202605_position_events_occurred_at_iso_check.py
+    pk_col: null
+    notes: >
+      Temporary rebuild table used inside the position_events occurred_at CHECK
+      migration before renaming back to position_events. Registered for
+      db_table_delta_gate visibility; it is not a persistent canonical table.
+
   - name: _migrations_applied
     db: trade
     schema_class: trade_class
@@ -2720,6 +2751,28 @@ tables:
       world.db sqlite_master state for migration regression tests. Never
       created in production DBs; the _v2 suffix is intentional artifact
       of the era this snapshot was taken. (PR #359)
+
+  - name: shadow_signals
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: tests/fixtures/before_p2_sqlite_master.sql
+    pk_col: null
+    notes: >
+      Historical schema snapshot table used in test fixtures only
+      (tests/fixtures/before_p2_sqlite_master.sql). Never created in
+      production DBs.
+
+  - name: shadow_experiments
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: tests/fixtures/before_p2_sqlite_master.sql
+    pk_col: null
+    notes: >
+      Historical schema snapshot table used in test fixtures only
+      (tests/fixtures/before_p2_sqlite_master.sql). Never created in
+      production DBs.
 
   # EDLI live-order aggregate tables: authoritative in zeus-world.db (db: world above,
   # lines 998-1079). These 4 tables were also created on zeus_trades.db because the

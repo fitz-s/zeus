@@ -160,6 +160,15 @@ providers:
       endpoint only, target_date < decision_date, VERIFIED settlement). Intra-DB JOIN
       on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes). Not an
       external network source; reads Zeus's own persisted forecast history.
+  station_forecast:
+    role: forecast_skill_live_station
+    client: src/data/station_forecast_adapter.py
+    why: >
+      Config-routed official station forecast ingest for CWA/HKO station values,
+      called from replacement_forecast_production. These rows are forecast-skill
+      inputs to source-clock precision fusion only; they are not settlement,
+      Day0 observation, hourly-history, or venue truth. Per-source failures are
+      fail-soft and must not silently substitute settlement/source authority.
   polymarket_gamma:
     role: internal_probe
     client: src/data/station_migration_probe.py
