@@ -3114,12 +3114,12 @@ def _fresh_executable_snapshot_quote_for_exposure(
         return None
     where_sql, params = predicate
     freshness_terms: list[str] = []
-    if "active" in columns:
-        freshness_terms.append("COALESCE(active, 0) = 1")
     if "closed" in columns:
         freshness_terms.append("COALESCE(closed, 0) = 0")
     if "accepting_orders" in columns:
         freshness_terms.append("COALESCE(accepting_orders, 0) = 1")
+    if "enable_orderbook" in columns:
+        freshness_terms.append("COALESCE(enable_orderbook, 0) = 1")
     active_sql = " AND " + " AND ".join(freshness_terms) if freshness_terms else ""
     selected_token_select = (
         "selected_outcome_token_id"
@@ -4449,13 +4449,21 @@ def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         target_size = max(command_size, position_shares)
-        if target_size <= 0.0 or filled_size + 1e-9 < target_size or fill_notional <= 0.0:
+        residual_shares = max(0.0, target_size - filled_size)
+        if (
+            target_size <= 0.0
+            or residual_shares > DUST_SHARE_LIMIT
+            or fill_notional <= 0.0
+        ):
             continue
         repairable[str(row["position_id"])] = {
             "command_id": row["command_id"],
             "venue_order_id": row["venue_order_id"],
             "filled_size": filled_size,
             "target_size": target_size,
+            "residual_shares": residual_shares,
+            "residual_is_dust": residual_shares > 0.0,
+            "dust_share_limit": DUST_SHARE_LIMIT,
             "avg_fill_price": fill_notional / filled_size if filled_size > 0 else None,
             "trade_states": row["trade_states"],
             "observed_at": row["observed_at"],

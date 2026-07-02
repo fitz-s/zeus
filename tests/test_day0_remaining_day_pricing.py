@@ -573,6 +573,84 @@ class TestRemainingDayMembers:
         assert payload["_edli_day0_q_mode"] == "remaining_day_unavailable"
         assert payload["_edli_day0_q_block_reason"] == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
 
+    def test_live_day0_payload_blocks_without_family_event_type(self, monkeypatch):
+        """The q seam must recognize Day0 from the live observation payload.
+
+        Live market-family objects are rebuilt from market topology and may not
+        carry event_type.  A live Day0 observation payload still has to require
+        remaining-day vectors; otherwise the seam falls back to full-day masked
+        q and overprices the observed boundary bin.
+        """
+        import src.engine.event_reactor_adapter as era
+
+        bins = [Bin(25, 25, "C", "25°C"), Bin(26, None, "C", "26°C or higher")]
+        candidates = [
+            SimpleNamespace(
+                condition_id=f"cond-{i}",
+                bin=b,
+                yes_token_id=f"yes-{i}",
+                no_token_id=f"no-{i}",
+            )
+            for i, b in enumerate(bins)
+        ]
+        family = SimpleNamespace(
+            city="Paris",
+            metric="high",
+            target_date="2026-06-10",
+            bins=bins,
+            candidates=candidates,
+            yes_token_ids=[f"yes-{i}" for i in range(len(bins))],
+            no_token_ids=[f"no-{i}" for i in range(len(bins))],
+            family_id="day0-no-event-type-fam",
+        )
+        native_costs = {
+            (f"cond-{i}", side): (
+                None,
+                EP(price, "ask", fee_deducted=True, currency="probability_units"),
+                price,
+                None,
+                None,
+            )
+            for i in range(len(bins))
+            for side, price in (("buy_yes", 0.25), ("buy_no", 0.75))
+        }
+        payload = {
+            "metric": "high",
+            "rounded_value": 25,
+            "raw_value": 25.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "live_authority_status": "live",
+            "source_authorized_status": "AUTHORIZED",
+        }
+        snapshot = {
+            "settlement_unit": "C",
+            "temperature_metric": "high",
+            "members_json": "[24.0, 25.0, 26.0, 27.0]",
+            "members_precision": 1.0,
+            "source_id": "test",
+            "issue_time": "2026-06-10T00:00:00+00:00",
+            "dataset_id": "test_v1",
+            "data_version": "test_v1",
+        }
+
+        monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+        monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **kw: None)
+
+        def _legacy_fallback_called(*args, **kwargs):
+            raise AssertionError("legacy Day0 full-day fallback was called")
+
+        monkeypatch.setattr(era, "_maybe_apply_edli_bias_correction", _legacy_fallback_called)
+
+        with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
+            era._market_analysis_from_event_snapshot(
+                calibration_conn=sqlite3.connect(":memory:"),
+                snapshot=snapshot,
+                family=family,
+                native_costs=native_costs,
+                payload=payload,
+                decision_time=datetime(2026, 6, 10, 13, 5, tzinfo=UTC),
+            )
+
 
 # ===========================================================================
 # R22 — replayable provenance identity on persisted vectors (PR#404 P1)

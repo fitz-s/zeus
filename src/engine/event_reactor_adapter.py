@@ -18085,6 +18085,7 @@ def _market_analysis_from_event_snapshot(
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
+    is_day0 = _is_day0_extreme_event_context(family=family, payload=payload)
     # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
     # When EMOS serves this (city, season) cell and the flag is ON, the traded distribution IS
     # the EMOS predictive N(mu, sigma): point p_cal = analytic q_vec; the q_lcb bootstrap draws
@@ -18098,7 +18099,7 @@ def _market_analysis_from_event_snapshot(
     # the bias/grid/Platt maze is NEVER reached. served=raw / EMOS-miss / serve-fail therefore
     # routes to honest raw (members UN-shifted, identity p_cal), not _maybe_apply_edli_bias_correction.
     _emos_regime = (
-        family.event_type != "DAY0_EXTREME_UPDATED"
+        not is_day0
         and bool(settings["edli"].get("edli_emos_sole_calibrator_enabled", False))
     )
     if _emos_regime:
@@ -18231,9 +18232,7 @@ def _market_analysis_from_event_snapshot(
         # distributions, not remaining-day pools. The absorbing mask below still
         # applies, and the day0 bootstrap sampler draws from the SAME members.
         _day0_rd_members = None
-        _day0_rd_required = (
-            family.event_type == "DAY0_EXTREME_UPDATED" and _day0_remaining_day_q_enabled()
-        )
+        _day0_rd_required = is_day0 and _day0_remaining_day_q_enabled()
         if _day0_rd_required:
             _day0_rd_members = _day0_remaining_day_members(
                 payload=payload, family=family, unit=unit, decision_time=decision_time
@@ -18300,7 +18299,7 @@ def _market_analysis_from_event_snapshot(
                 payload=payload,
                 decision_time=decision_time,
             )
-        if family.event_type == "DAY0_EXTREME_UPDATED":
+        if is_day0:
             p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
             p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
     p_market_yes: list[float] = []
@@ -18318,7 +18317,6 @@ def _market_analysis_from_event_snapshot(
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
     sampler = _emos_sampler  # one-calibrator (#110): EMOS N(mu,sigma) lcb bootstrap, else None
-    is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
     if is_day0:
         # DAY0 q_lcb FIX (first-principles review 2026-06-10 item D): the prior
         # static sampler returned p_cal verbatim every draw, so the bootstrap
@@ -20022,6 +20020,38 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
 # post-hoc clamp was folded into the sizing kernel (PR#404 P0-1); now the kernel bound
 # itself ($25 family notional headroom) is DELETED. Day0 sizing = q_lcb + fractional
 # Kelly + free-cash + concentration, identical to every other lane — no day0 clamp.
+
+
+def _is_day0_extreme_event_context(*, family, payload: dict[str, object]) -> bool:
+    """Return whether this q-build is driven by a live Day0 observed extreme.
+
+    The reactor event type is the cleanest signal, but the market-family object
+    that reaches this q seam is rebuilt from market topology and has not always
+    carried ``event_type``.  The payload is the money-path authority surface here:
+    a live Day0 observation must carry an authorized source, metric, rounded
+    settlement value, and observation timestamp.  Without this helper a genuine
+    ``DAY0_EXTREME_UPDATED`` event can silently fall back to full-day forecast q,
+    which overstates boundary bins after an intraday observation.
+    """
+
+    event_type = str(
+        getattr(family, "event_type", "")
+        or payload.get("event_type")
+        or payload.get("_edli_event_type")
+        or ""
+    ).strip()
+    if event_type == "DAY0_EXTREME_UPDATED":
+        return True
+    metric = str(payload.get("metric") or payload.get("temperature_metric") or "").strip()
+    live_status = str(payload.get("live_authority_status") or "").strip().lower()
+    source_status = str(payload.get("source_authorized_status") or "").strip().upper()
+    return (
+        metric in {"high", "low"}
+        and payload.get("rounded_value") is not None
+        and bool(payload.get("observation_time"))
+        and live_status == "live"
+        and source_status == "AUTHORIZED"
+    )
 
 
 def _day0_remaining_day_q_enabled() -> bool:

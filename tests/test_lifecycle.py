@@ -437,6 +437,37 @@ def test_entry_proof_accepts_insufficient_data_empty_calibration_sample():
     assert rejection is None
 
 
+def test_entry_proof_accepts_day0_observation_hard_fact_empty_sample():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=json.dumps(
+            {
+                "q_source": "day0_remaining_day",
+                "opportunity_book": {
+                    "selected_candidate_id": "c1",
+                    "actual_receipt_selected_candidate_id": "c1",
+                },
+            }
+        ),
+        actionable_payload_json=json.dumps(
+            {
+                "strategy_key": "center_buy",
+                "q_source": "day0_remaining_day",
+                "opportunity_book": {"selected_candidate_id": "c1"},
+            }
+        ),
+        calibration_payload_json=json.dumps(
+            {
+                "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+                "n_samples": 0,
+            }
+        ),
+    )
+
+    assert rejection is None
+
+
 def test_invalid_entry_proof_emits_blocking_review_fact_for_repaired_high_position():
     from src.state.portfolio import _invalid_entry_proof_review_fact_from_position
 

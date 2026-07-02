@@ -4442,24 +4442,49 @@ def execute_monitoring_phase(
                     previous_phase_str = "active" if pos.state == "holding" else "active"
                     # Persist FIRST, then update memory (avoid split-brain)
                     if conn is not None:
+                        canonical_day0_written = False
                         try:
-                            from src.state.db import update_trade_lifecycle
-                            # Temporarily set fields for persistence
+                            # Temporarily set fields for canonical persistence.
                             old_state = pos.state
                             old_day0 = pos.day0_entered_at
                             pos.state = new_state
                             pos.day0_entered_at = new_day0_entered_at
-                            update_trade_lifecycle(conn=conn, pos=pos)
+                            canonical_day0_written = _emit_day0_window_entered_canonical_if_available(
+                                conn,
+                                pos,
+                                day0_entered_at=new_day0_entered_at,
+                                previous_phase=previous_phase_str,
+                                deps=deps,
+                            )
                         except Exception as exc:
                             # Revert memory to pre-transition state
                             pos.state = old_state
                             pos.day0_entered_at = old_day0
                             deps.logger.warning(
-                                "Day0 transition ABORTED for %s: persist failed: %s",
+                                "Day0 transition ABORTED for %s: canonical persist failed: %s",
                                 pos.trade_id,
                                 exc,
                             )
                             continue
+                        try:
+                            from src.state.db import update_trade_lifecycle
+                            update_trade_lifecycle(conn=conn, pos=pos)
+                        except Exception as exc:
+                            if canonical_day0_written:
+                                deps.logger.warning(
+                                    "Day0 transition legacy bridge skipped for %s: %s",
+                                    pos.trade_id,
+                                    exc,
+                                )
+                            else:
+                                pos.state = old_state
+                                pos.day0_entered_at = old_day0
+                                deps.logger.warning(
+                                    "Day0 transition ABORTED for %s: legacy persist failed before canonical write: %s",
+                                    pos.trade_id,
+                                    exc,
+                                )
+                                continue
                     else:
                         pos.state = new_state
                         pos.day0_entered_at = new_day0_entered_at
@@ -4469,13 +4494,14 @@ def execute_monitoring_phase(
                     # T1.c-followup L875 OBSOLETE_PENDING_FEATURE.
                     # Non-fatal: if canonical schema absent or write fails,
                     # logs warning but does not abort the cycle.
-                    _emit_day0_window_entered_canonical_if_available(
-                        conn,
-                        pos,
-                        day0_entered_at=new_day0_entered_at,
-                        previous_phase=previous_phase_str,
-                        deps=deps,
-                    )
+                    if conn is None:
+                        _emit_day0_window_entered_canonical_if_available(
+                            conn,
+                            pos,
+                            day0_entered_at=new_day0_entered_at,
+                            previous_phase=previous_phase_str,
+                            deps=deps,
+                        )
                     _release_monitor_write_lock_boundary(
                         conn,
                         summary,

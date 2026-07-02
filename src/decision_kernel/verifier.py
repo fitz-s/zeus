@@ -406,11 +406,6 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
             raise CertificateVerificationError(f"actionable {field} must be in [0, 1]")
     if q_lcb > q_live:
         raise CertificateVerificationError("actionable q_lcb_5pct exceeds q_live")
-    _verify_live_entry_win_rate_floor(
-        payload,
-        q_lcb=q_lcb,
-        label="actionable",
-    )
     for field in ("c_fee_adjusted", "c_cost_95pct"):
         value = _finite_float(payload.get(field), field)
         if value <= 0.0 or value >= 1.0:
@@ -437,6 +432,11 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
         if payload.get(field) in (None, ""):
             raise CertificateVerificationError(f"actionable {field} missing")
     _verify_actionable_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
+    _verify_live_entry_win_rate_floor(
+        payload,
+        q_lcb=q_lcb,
+        label="actionable",
+    )
 
 
 def _verify_actionable_probability_authority(

@@ -2070,6 +2070,8 @@ def _calibration_entry_authority_rejection(payload_json: str | None) -> str | No
     coverage_status = str(payload.get("coverage_status") or "").strip()
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         return "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
+    if authority == "DAY0_LIVE_OBSERVATION_HARD_FACT":
+        return None
     n_samples_raw = payload.get("n_samples")
     try:
         n_samples = int(n_samples_raw) if n_samples_raw is not None else None

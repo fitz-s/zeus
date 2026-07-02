@@ -3897,6 +3897,77 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(mo
     assert tolerated["repair_evidence"]["filled_size"] == 15.5
 
 
+def test_preflight_tolerates_pending_exit_with_full_exit_fill_plus_dust_repair_evidence(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'exit-filled-dust-pos', 'pending_exit', 'Kuala Lumpur', '2026-07-02', 'high',
+            'Will the highest temperature in Kuala Lumpur be 34°C on July 2?',
+            'buy_yes', 10.0102, 10.0102, 'sell_placed',
+            'DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES',
+            2, '2026-07-02T00:09:17+00:00', 0.0, 1, 0.009, 1,
+            '2026-07-02T00:16:16+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-exit-dust', 'exit-filled-dust-pos', 'EXIT', 'FILLED',
+            'ord-exit-dust', 10.01, '2026-07-02T00:10:29+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-exit-dust', 'MATCHED', '10.01', '0.009',
+            '2026-07-02T00:10:29+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "command_recovery_full_exit_fill_close"
+    repair = tolerated["repair_evidence"]
+    assert repair["filled_size"] == 10.01
+    assert repair["residual_is_dust"] is True
+    assert 0.0 < repair["residual_shares"] <= preflight.DUST_SHARE_LIMIT
+
+
 def _init_confirmed_fill_bridge_gap_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -5344,6 +5415,81 @@ def test_execution_feasibility_freshness_uses_fresh_executable_snapshot_quote():
     assert covered["freshness_basis"] == "executable_market_snapshots.captured_at"
     assert covered["snapshot_id"] == "snap-fresh"
     assert covered["execution_feasibility_age_seconds"] > 3600
+
+
+def test_execution_feasibility_freshness_accepts_negrisk_child_snapshot_active_false():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(hours=3)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT,
+            orderbook_top_ask TEXT,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-yes-target", stale.isoformat(), stale.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES (
+            'snap-active-false', 'cond-target', 'tok-yes-target', 'tok-no-target',
+            'tok-yes-target', 'YES', 1, 0, 0, 1, '0.03', '0.04', ?, ?
+        )
+        """,
+        (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Buenos Aires",
+                "target_date": "2026-07-02",
+                "temperature_metric": "high",
+                "bin_label": "Will the highest temperature in Buenos Aires be 11°C on July 2?",
+                "direction": "buy_yes",
+                "condition_id": "cond-target",
+                "tokens": ["tok-yes-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["freshness_basis"] == "executable_market_snapshots.captured_at"
+    assert covered["snapshot_id"] == "snap-active-false"
+    assert covered["outcome_label"] == "YES"
 
 
 def test_execution_feasibility_freshness_blocks_large_future_timestamp():
