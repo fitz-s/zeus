@@ -265,6 +265,32 @@ def _live_restart_in_progress() -> bool:
     }
 
 
+def _live_trading_process_absent_check() -> CheckResult:
+    processes = _live_main_processes()
+    restart_in_progress = _live_restart_in_progress()
+    ok = not processes or restart_in_progress
+    if not processes:
+        detail = "src.main is not running"
+    elif restart_in_progress:
+        detail = "src.main is running during deploy restart; stop before bootstrap is required"
+    else:
+        detail = "src.main is already running"
+    return CheckResult(
+        "live_trading_process_absent",
+        ok,
+        detail,
+        {
+            "processes": processes,
+            "restart_in_progress": restart_in_progress,
+            "restart_recovery_obligation": (
+                "deploy restart must stop the old src.main before bootstrapping the replacement"
+                if processes and restart_in_progress
+                else None
+            ),
+        },
+    )
+
+
 def _live_trading_launchagent_installed_check() -> CheckResult:
     evidence: dict[str, Any] = {
         "plist_path": str(LIVE_TRADING_PLIST_PATH),
@@ -5561,12 +5587,7 @@ def evaluate() -> dict[str, Any]:
     checks = [
         _live_trading_launchagent_installed_check(),
         _live_trading_launchagent_bootstrapable_check(),
-        CheckResult(
-            "live_trading_process_absent",
-            not _live_main_processes(),
-            "src.main is not running" if not _live_main_processes() else "src.main is already running",
-            {"processes": _live_main_processes()},
-        ),
+        _live_trading_process_absent_check(),
         CheckResult(
             "submit_authority_config",
             submit_ok,

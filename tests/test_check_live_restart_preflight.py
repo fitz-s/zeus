@@ -6262,6 +6262,33 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.evidence["restart_in_progress"] is False
 
 
+def test_live_trading_process_absent_blocks_running_main_without_deploy_restart(
+    monkeypatch,
+):
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+    monkeypatch.delenv("ZEUS_LIVE_RESTART_IN_PROGRESS", raising=False)
+
+    result = preflight._live_trading_process_absent_check()
+
+    assert result.ok is False
+    assert result.detail == "src.main is already running"
+    assert result.evidence["restart_in_progress"] is False
+
+
+def test_live_trading_process_absent_allows_running_main_during_deploy_restart(
+    monkeypatch,
+):
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+    monkeypatch.setenv("ZEUS_LIVE_RESTART_IN_PROGRESS", "1")
+
+    result = preflight._live_trading_process_absent_check()
+
+    assert result.ok is True
+    assert result.detail == "src.main is running during deploy restart; stop before bootstrap is required"
+    assert result.evidence["restart_in_progress"] is True
+    assert result.evidence["restart_recovery_obligation"].startswith("deploy restart")
+
+
 def test_monitor_cadence_restart_evidence_allows_stale_main_during_deploy_restart(
     monkeypatch, tmp_path
 ):
