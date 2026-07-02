@@ -167,7 +167,7 @@ _DC_INSERT = """
         authority_id, authority_version, algorithm_id, algorithm_version,
         payload_json, payload_hash, certificate_hash, verifier_status, created_at
     ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-              ?, 'FINAL_INTENT', 'SHADOW', '2026-05-22T00:00:00Z',
+              ?, 'FINAL_INTENT', 'NO_SUBMIT', '2026-05-22T00:00:00Z',
               'test_authority', '1.0', 'test_algorithm', '1.0',
               ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', '2026-05-22T00:00:00Z')
 """

@@ -41,13 +41,18 @@ import pytest
 import src.data.substrate_observer as substrate_observer
 
 
+def _edli_settings() -> dict:
+    from src.config import settings
+
+    return settings._data["edli"]
+
+
 def _test_git_sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
 def test_edli_online_config_defaults_inert_under_legacy_cron():
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
     # STALE_LAW re-pin 2026-06-09: the operator ARMED the live canary. Authority:
     # config note keys edli._edli_live_scope_note_2026_06_09 (operator directive
     # 2026-06-09 "全部打开 ... 把这些 gate 都删了": the shadow-only gate that blocked
@@ -113,7 +118,7 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
     # Order size is governed SOLELY by structural fractional-Kelly sizing. Assert
     # the cap is GONE at every layer (config, ledger API, source), and that the
     # exactly-once reservation knobs are NOT replaced by any new dollar/count cap.
-    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    edli = _edli_settings()
     for forbidden_key in (
         "tiny_live_max_notional_usd",
         "tiny_live_max_orders_per_day",
@@ -155,8 +160,7 @@ def test_day0_scope_admits_day0_with_market_channel_armed():
     # Authority: edli._edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
     # (operator "全部打开"). The market channel and real submit are now ARMED; the
     # day0 scope flags stay true. Pin armed-canary config truth.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
 
     assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
@@ -176,8 +180,7 @@ def test_pr_scope_document_matches_settings_flags():
     # dead config<->spec equality on the now-flipped safety flags is removed; the
     # spec doc is intentionally NOT edited (frozen PR package). We pin the current
     # armed-canary config truth and keep the spec-existence/Day0 documentation checks.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
     real_submit = edli["real_order_submit_enabled"]
@@ -202,8 +205,7 @@ def test_edli_online_invariants_market_channel_and_submit_are_armed():
     # STALE_LAW re-pin 2026-06-09 (was ..._do_not_claim_market_channel_deployed_when_disabled).
     # Operator armed the live canary; market channel + real submit are ON. Authority:
     # edli._mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
 
     assert edli["market_channel_ingestor_enabled"] is True
     real_submit = edli["real_order_submit_enabled"]
@@ -994,7 +996,7 @@ def test_edli_live_promotion_and_arm_gate_artifacts_no_longer_required(monkeypat
 
 def test_edli_live_artifact_gate_settings_keys_are_deleted():
     """Antibody: the promotion/arm-gate REQUIREMENT toggles are removed from config."""
-    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    edli = _edli_settings()
     assert "edli_live_promotion_artifact_required" not in edli
     assert "edli_arm_gate_artifact_required" not in edli
     assert "edli_live_min_canary_count" not in edli

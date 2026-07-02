@@ -15,6 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 
+def _edli_settings() -> dict:
+    from src.config import settings
+
+    return settings._data["edli"]
+
+
 def _install_unpaused_world_control_db(monkeypatch, tmp_path: Path) -> Path:
     from src.state import db as state_db
     from src.state.ledger import apply_architecture_kernel_schema
@@ -44,8 +50,7 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     real-submit wiring: live mode, live canary, durable outbox, and taker path all
     enabled together rather than a split shadow/live configuration.
     """
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
 
     assert edli["real_order_submit_enabled"] is True
     assert edli["live_execution_mode"] == "edli_live"

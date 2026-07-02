@@ -482,7 +482,7 @@ def _insert_decision_events(
                 market_slug, temperature_metric, target_date, observation_time,
                 decision_seq, decision_event_id, decision_time, outcome, side, strategy_key,
                 observation_available_at, polymarket_end_anchor_source, schema_version, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"test-market-{strategy_key}",
@@ -512,7 +512,7 @@ def _insert_decision_events(
                 authority_id, authority_version, algorithm_id, algorithm_version,
                 payload_json, payload_hash, certificate_hash, verifier_status, created_at
             ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-                      ?, 'FINAL_INTENT', 'SHADOW', '2026-05-01T12:00:00Z',
+                      ?, 'FINAL_INTENT', 'NO_SUBMIT', '2026-05-01T12:00:00Z',
                       'test_authority', '1.0', 'test_algorithm', '1.0',
                       ?, ?, ?, 'VERIFIED', '2026-05-01T12:00:00Z')
             """,

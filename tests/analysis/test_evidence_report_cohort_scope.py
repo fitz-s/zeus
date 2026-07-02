@@ -42,7 +42,7 @@ _DC_SQL = """
         authority_id, authority_version, algorithm_id, algorithm_version,
         payload_json, payload_hash, certificate_hash, verifier_status, created_at
     ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-              ?, 'FINAL_INTENT', 'SHADOW', ?,
+              ?, 'FINAL_INTENT', 'NO_SUBMIT', ?,
               'test_authority', '1.0', 'test_algorithm', '1.0',
               ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', ?)
 """
