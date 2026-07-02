@@ -8275,7 +8275,12 @@ def _confirmed_phantom_void_candidates(conn: sqlite3.Connection) -> list[dict]:
           JOIN latest_void
             ON latest_void.position_id = pc.position_id
          WHERE pc.phase = 'voided'
-           AND COALESCE(pc.shares, 0) > 0
+           AND (
+               COALESCE(pc.shares, 0) > 0
+               OR ABS(COALESCE(pc.chain_shares, 0)) > 0.000000001
+               OR ABS(COALESCE(pc.chain_avg_price, 0)) > 0.000000001
+               OR ABS(COALESCE(pc.chain_cost_basis_usd, 0)) > 0.000000001
+           )
            AND LOWER(COALESCE(pc.chain_state, '')) != 'chain_confirmed_zero'
          ORDER BY pc.updated_at
         """
@@ -8327,6 +8332,8 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
         return summary
     try:
         from src.state.chain_reconciliation import (
+            CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+            CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
             ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
             ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         )
@@ -8348,8 +8355,121 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             continue
         trade_fact_proof = _positive_trade_fact_proof_for_position(conn, position_id)
         has_projected_verified_fill = has_verified_trade_fill(row)
+        now = _now_iso()
+        next_sequence = int(row.get("latest_any_sequence_no") or row.get("latest_void_sequence_no") or 0) + 1
+        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
+        sp_name = f"sp_confirmed_phantom_void_repair_{safe_position_id}"
         if not has_projected_verified_fill and not trade_fact_proof["has_positive_trade_fact"]:
-            summary["stayed"] += 1
+            has_positive_chain_projection = False
+            for column in ("chain_shares", "chain_avg_price", "chain_cost_basis_usd"):
+                try:
+                    value = float(row.get(column) or 0.0)
+                except (TypeError, ValueError):
+                    value = 0.0
+                if abs(value) > 0.000000001:
+                    has_positive_chain_projection = True
+                    break
+            if not has_positive_chain_projection:
+                summary["stayed"] += 1
+                continue
+            payload = {
+                "schema_version": 1,
+                "reason": CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                "proof_class": "confirmed_phantom_void_chain_projection_fields_cleared",
+                "position_id": position_id,
+                "phase": str(row.get("phase") or ""),
+                "chain_state": str(row.get("chain_state") or ""),
+                "latest_void_event_id": str(row.get("latest_void_event_id") or ""),
+                "latest_void_payload_json": str(row.get("latest_void_payload_json") or ""),
+                "previous_chain_shares": row.get("chain_shares"),
+                "previous_chain_avg_price": row.get("chain_avg_price"),
+                "previous_chain_cost_basis_usd": row.get("chain_cost_basis_usd"),
+                "shares": row.get("shares"),
+                "cost_basis_usd": row.get("cost_basis_usd"),
+                "entry_price": row.get("entry_price"),
+                "positive_trade_fact_proof": trade_fact_proof,
+                "source_proof": {
+                    "source_function": "command_recovery.repair_confirmed_phantom_voids",
+                    "source_reason": (
+                        "phantom void has no verified fill projection and no positive venue "
+                        "trade fact; positive chain fields are stale projection debt"
+                    ),
+                },
+            }
+            try:
+                conn.execute(f"SAVEPOINT {sp_name}")
+                conn.execute(
+                    """
+                    INSERT INTO position_events (
+                        event_id, position_id, event_version, sequence_no,
+                        event_type, occurred_at, phase_before, phase_after,
+                        strategy_key, decision_id, snapshot_id, order_id,
+                        command_id, caused_by, idempotency_key, venue_status,
+                        source_module, payload_json, env
+                    ) VALUES (?, ?, 1, ?, 'REVIEW_REQUIRED', ?, 'voided', 'voided',
+                              ?, NULL, ?, ?, NULL, ?, ?, 'projection_repaired',
+                              ?, ?, 'live')
+                    """,
+                    (
+                        f"{position_id}:confirmed_phantom_void_projection_repair:{next_sequence}",
+                        position_id,
+                        next_sequence,
+                        now,
+                        str(row.get("strategy_key") or "unknown"),
+                        str(row.get("decision_snapshot_id") or ""),
+                        str(row.get("order_id") or ""),
+                        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                        f"{position_id}:confirmed_phantom_void_projection_repair:{next_sequence}",
+                        "src.execution.command_recovery",
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                    ),
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE position_current
+                       SET chain_state = ?,
+                           chain_shares = 0,
+                           chain_avg_price = 0,
+                           chain_cost_basis_usd = 0,
+                           exit_reason = CASE
+                               WHEN COALESCE(exit_reason, '') = '' THEN ?
+                               ELSE exit_reason
+                           END,
+                           chain_absence_at = CASE
+                               WHEN COALESCE(chain_absence_at, '') = '' THEN ?
+                               ELSE chain_absence_at
+                           END,
+                           updated_at = ?
+                     WHERE position_id = ?
+                       AND phase = 'voided'
+                       AND LOWER(COALESCE(chain_state, '')) != 'chain_confirmed_zero'
+                       AND (
+                           ABS(COALESCE(chain_shares, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                       )
+                    """,
+                    (
+                        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+                        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                        now,
+                        now,
+                        position_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("position_current update did not affect exactly one row")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                summary["advanced"] += 1
+            except Exception as exc:  # noqa: BLE001
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                logger.error(
+                    "recovery: confirmed phantom-void projection repair failed for %s: %s",
+                    position_id,
+                    exc,
+                )
+                summary["errors"] += 1
             continue
         repaired_fill_authority = str(row.get("fill_authority") or "").strip()
         if not has_projected_verified_fill:
@@ -8360,10 +8480,6 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             if direction == "buy_no"
             else str(row.get("token_id") or "")
         )
-        now = _now_iso()
-        next_sequence = int(row.get("latest_any_sequence_no") or row.get("latest_void_sequence_no") or 0) + 1
-        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
-        sp_name = f"sp_confirmed_phantom_void_repair_{safe_position_id}"
         payload = {
             "schema_version": 1,
             "reason": ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,

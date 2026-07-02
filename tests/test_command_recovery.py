@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-29
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-02
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -6502,7 +6502,7 @@ class TestRecoveryResolutionTable:
             "no_token_id": "tok-001-no",
             "shares": 5.0,
             "cost_basis_usd": 1.7,
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
             "unit": "C",
         }
@@ -6935,7 +6935,7 @@ class TestRecoveryResolutionTable:
         assert trade_case["target_date"] == "2026-06-08"
         assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
         assert trade_case["direction"] == "buy_no"
-        assert trade_case["strategy_key"] == "opening_inertia"
+        assert trade_case["strategy_key"] == "forecast_qkernel_entry"
         assert trade_case["unit"] == "C"
         assert trade_case["entry_method"] == "qkernel_spine"
         assert trade_case["p_posterior"] == pytest.approx(0.91)
@@ -8169,7 +8169,7 @@ class TestRecoveryResolutionTable:
             "token_id": "tok-001",
             "no_token_id": "tok-001-no",
             "order_id": "ord-live",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
         }
 
@@ -8297,7 +8297,7 @@ class TestRecoveryResolutionTable:
             "token_id": "tok-001",
             "no_token_id": "tok-001-no",
             "order_id": "ord-terminal",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
         }
         after_count, after_markets = count_unknown_side_effects(conn)
@@ -8521,7 +8521,7 @@ class TestRecoveryResolutionTable:
             "order_id": "ord-live-edli",
             "order_status": "pending",
             "entry_method": "qkernel_spine",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
         }
 
     def test_filled_day0_edli_entry_projects_from_nested_receipt_qkernel(
@@ -8833,7 +8833,7 @@ class TestRecoveryResolutionTable:
             "entry_price": pytest.approx(0.6100001092),
             "order_status": "partial",
             "entry_method": "qkernel_spine",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
         }
         execution = conn.execute(
             """
@@ -11684,6 +11684,225 @@ class TestRecoveryResolutionTable:
             "fill_authority": "cancelled_remainder",
             "chain_shares": pytest.approx(85.17),
         }
+
+    def test_confirmed_phantom_void_repair_uses_trade_fact_when_local_shares_zero(
+        self,
+        conn,
+    ):
+        position_id = "pos-phantom-zero-local-chain-positive"
+        command_id = _insert(
+            conn,
+            command_id="cmd-phantom-zero-local-chain-positive",
+            position_id=position_id,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            side="BUY",
+            size=5.07,
+            price=0.75,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-zero-local-chain-positive', 'ord-entry', ?, 'CONFIRMED',
+                '5.07', '0.75', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-17T11:17:11+00:00',
+                '2026-06-17T11:17:11+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "d" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_seen_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-houston', 'Houston', 'US',
+                '2026-06-17',
+                'Will the highest temperature in Houston be between 88-89°F on June 17?',
+                'buy_no', 'F', 0, 0, 0, 0.75, 0.12,
+                'snap-houston', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'synced', 'tok-yes',
+                'tok-no', 'cond-houston', 'ord-entry', 'filled',
+                '2026-06-17T12:00:00+00:00', 'high',
+                'PHANTOM_NOT_ON_CHAIN', 'none', 5.07, 0.75, 3.8025,
+                '2026-06-17T11:17:11+00:00'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-17T12:00:00+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-houston', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-no","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, fill_authority, exit_reason,
+                   shares, chain_shares, chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "fill_authority": "cancelled_remainder",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "shares": 0.0,
+            "chain_shares": 5.07,
+            "chain_avg_price": 0.75,
+            "chain_cost_basis_usd": 3.8025,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "voided"
+        assert event["phase_after"] == "quarantined"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
+        assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
+
+    def test_confirmed_phantom_void_repair_clears_stale_chain_projection_without_trade_fact(
+        self,
+        conn,
+    ):
+        position_id = "pos-phantom-stale-chain-projection"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-karachi', 'Karachi', 'Asia',
+                '2026-06-25',
+                'Will the highest temperature in Karachi be 35°C on June 25?',
+                'buy_no', 'C', 5.61, 8.25, 5.61, 0.68, 0.14,
+                'snap-karachi', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'synced', 'tok-yes',
+                'tok-no', 'cond-karachi', 'ord-entry', 'filled',
+                '2026-06-25T19:12:48+00:00', 'high',
+                'PHANTOM_NOT_ON_CHAIN', 'none', 8.25, 0.68, 5.61, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-25T19:12:48+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-karachi', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-no","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason, shares, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd,
+                   COALESCE(chain_absence_at, '') AS chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "exit_reason": "PHANTOM_NOT_ON_CHAIN",
+            "shares": 8.25,
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
+            "chain_absence_at": current["chain_absence_at"],
+        }
+        assert current["chain_absence_at"]
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "voided"
+        assert event["phase_after"] == "voided"
+        assert event["venue_status"] == "projection_repaired"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is False
+        assert payload["proof_class"] == "confirmed_phantom_void_chain_projection_fields_cleared"
 
     def test_confirmed_chain_absence_projection_repair_clears_stale_chain_fields(
         self,

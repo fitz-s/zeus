@@ -38,7 +38,10 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
-from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+)
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
@@ -4006,6 +4009,7 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
     ]
     terminal_by_position: dict[str, dict[str, Any]] = {}
     latest_entry_by_position: dict[str, dict[str, Any]] = {}
+    boot_fast_repair_by_position: dict[str, dict[str, Any]] = {}
     with _connect_live_ro() as conn:
         if position_ids and _table_exists(conn, "main", "position_events"):
             event_columns = _table_columns(conn, "main", "position_events")
@@ -4090,6 +4094,11 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
                 str(row["position_id"]): dict(row)
                 for row in event_rows
             }
+            boot_fast_repair_by_position = _phantom_void_boot_fast_repair_evidence(
+                conn,
+                position_ids=position_ids,
+                event_columns=event_columns,
+            )
 
         if position_ids and _table_exists(conn, "main", "venue_commands"):
             placeholders = ",".join("?" for _ in position_ids)
@@ -4150,6 +4159,8 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
+    redecision_required: list[dict[str, Any]] = []
+    boot_fast_repair_required: list[dict[str, Any]] = []
     for row in rows:
         phase = str(row["phase"] or "")
         try:
@@ -4172,8 +4183,32 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
             "p_posterior": row["p_posterior"],
             "cost_basis_usd": row["cost_basis_usd"],
         }
+        if _chain_backed_quarantine_requires_redecision(row, chain_shares=chain_shares):
+            redecision_required.append(
+                {
+                    **item,
+                    "restart_resolution": "chain_backed_quarantine_redecision_required",
+                    "reason": (
+                        "current chain-backed exposure is already quarantined; "
+                        "restart must route it through monitor/redecision, not new-entry authority"
+                    ),
+                }
+            )
+            continue
         terminal = terminal_by_position.get(position_id)
         if terminal is not None:
+            boot_fast_repair = boot_fast_repair_by_position.get(position_id)
+            if terminal_chain_exposure and boot_fast_repair is not None:
+                boot_fast_repair_required.append(
+                    {
+                        **item,
+                        "restart_resolution": boot_fast_repair["restart_resolution"],
+                        "reason": boot_fast_repair["reason"],
+                        "terminal_event": terminal,
+                        "boot_fast_repair": boot_fast_repair,
+                    }
+                )
+                continue
             risky.append(
                 {
                     **item,
@@ -4217,6 +4252,10 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
 
     evidence["risky"] = risky
     evidence["covered"] = covered
+    evidence["redecision_required"] = redecision_required
+    evidence["redecision_required_count"] = len(redecision_required)
+    evidence["boot_fast_repair_required"] = boot_fast_repair_required
+    evidence["boot_fast_repair_required_count"] = len(boot_fast_repair_required)
     evidence["covered_count"] = len(covered)
     return CheckResult(
         "position_current_projection_integrity",
@@ -4225,6 +4264,152 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         if not risky
         else "open position projections contradict terminal events or EDLI authority",
         evidence,
+    )
+
+
+def _phantom_void_boot_fast_repair_evidence(
+    conn: sqlite3.Connection,
+    *,
+    position_ids: list[str],
+    event_columns: set[str],
+) -> dict[str, dict[str, Any]]:
+    if not position_ids:
+        return {}
+    required_columns = {"position_id", "event_type", "payload_json", "sequence_no"}
+    if not required_columns.issubset(event_columns):
+        return {}
+
+    placeholders = ",".join("?" for _ in position_ids)
+    event_id_select = "event_id" if "event_id" in event_columns else "NULL AS event_id"
+    phase_before_select = "phase_before" if "phase_before" in event_columns else "NULL AS phase_before"
+    phase_after_select = "phase_after" if "phase_after" in event_columns else "NULL AS phase_after"
+    occurred_at_expr = "occurred_at" if "occurred_at" in event_columns else "NULL"
+    occurred_at_select = "occurred_at" if "occurred_at" in event_columns else "NULL AS occurred_at"
+    rows = conn.execute(
+        f"""
+        WITH phantom_void AS (
+            SELECT
+                {event_id_select},
+                position_id,
+                event_type,
+                {phase_before_select},
+                {phase_after_select},
+                sequence_no,
+                {occurred_at_select},
+                payload_json,
+                ROW_NUMBER() OVER (
+                    PARTITION BY position_id
+                    ORDER BY sequence_no DESC, datetime({occurred_at_expr}) DESC
+                ) AS rn
+              FROM position_events
+             WHERE position_id IN ({placeholders})
+               AND UPPER(COALESCE(event_type, '')) = 'ADMIN_VOIDED'
+               AND COALESCE(payload_json, '') LIKE '%PHANTOM_NOT_ON_CHAIN%'
+        )
+        SELECT event_id, position_id, event_type, phase_before, phase_after,
+               sequence_no, occurred_at, payload_json
+          FROM phantom_void
+         WHERE rn = 1
+        """,
+        tuple(position_ids),
+    ).fetchall()
+    if not rows:
+        return {}
+
+    trade_fact_proofs = _positive_trade_fact_proofs_by_position(
+        conn,
+        position_ids=position_ids,
+    )
+    evidence: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        proof = trade_fact_proofs.get(
+            position_id,
+            {"has_positive_trade_fact": False, "trade_fact_count": 0},
+        )
+        if bool(proof.get("has_positive_trade_fact")):
+            resolution = "boot_fast_reclassify_phantom_void_to_quarantine"
+            reason = (
+                "boot command recovery will restore venue-proven phantom void "
+                "as chain-backed quarantine for monitor/redecision"
+            )
+        else:
+            resolution = "boot_fast_clear_phantom_void_chain_projection"
+            reason = (
+                "boot command recovery will clear stale positive chain fields "
+                "for a phantom void with no positive venue trade fact"
+            )
+        evidence[position_id] = {
+            "restart_resolution": resolution,
+            "reason": reason,
+            "latest_phantom_void_event": dict(row),
+            "positive_trade_fact_proof": proof,
+        }
+    return evidence
+
+
+def _positive_trade_fact_proofs_by_position(
+    conn: sqlite3.Connection,
+    *,
+    position_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not position_ids:
+        return {}
+    if not (
+        _table_exists(conn, "main", "venue_commands")
+        and _table_exists(conn, "main", "venue_trade_facts")
+    ):
+        return {}
+    command_columns = _table_columns(conn, "main", "venue_commands")
+    trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+    if not {"position_id", "command_id"}.issubset(command_columns):
+        return {}
+    if not {"command_id", "state", "filled_size"}.issubset(trade_columns):
+        return {}
+
+    count_expr = "COUNT(DISTINCT vtf.trade_id)" if "trade_id" in trade_columns else "COUNT(*)"
+    observed_expr = "MAX(vtf.observed_at)" if "observed_at" in trade_columns else "NULL"
+    placeholders = ",".join("?" for _ in position_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            vc.position_id,
+            {count_expr} AS trade_fact_count,
+            {observed_expr} AS latest_observed_at
+          FROM venue_commands vc
+          JOIN venue_trade_facts vtf
+            ON vtf.command_id = vc.command_id
+         WHERE vc.position_id IN ({placeholders})
+           AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+         GROUP BY vc.position_id
+        """,
+        tuple(position_ids),
+    ).fetchall()
+    return {
+        str(row["position_id"]): {
+            "has_positive_trade_fact": int(row["trade_fact_count"] or 0) > 0,
+            "trade_fact_count": int(row["trade_fact_count"] or 0),
+            "latest_observed_at": row["latest_observed_at"],
+        }
+        for row in rows
+    }
+
+
+def _chain_backed_quarantine_requires_redecision(
+    row: sqlite3.Row,
+    *,
+    chain_shares: float,
+) -> bool:
+    if str(row["phase"] or "").strip().lower() != "quarantined":
+        return False
+    if chain_shares <= _POSITIVE_CHAIN_EXPOSURE_EPS:
+        return False
+    if str(row["direction"] or "").strip() not in {"buy_yes", "buy_no"}:
+        return False
+    return (
+        str(row["chain_state"] or "").strip()
+        in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
     )
 
 

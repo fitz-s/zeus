@@ -2049,6 +2049,61 @@ def test_position_projection_integrity_blocks_edli_legacy_projection(
     assert result.evidence["risky"][0]["position_id"] == "pos-1"
 
 
+def test_position_projection_integrity_routes_chain_backed_quarantine_to_redecision(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'entry_authority_quarantined',
+               entry_method = 'ens_member_counting',
+               p_posterior = 0.0,
+               cost_basis_usd = 0.1192,
+               chain_shares = 20.0
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        UPDATE venue_commands
+           SET decision_id = 'edli_exec_cmd:edli_evt_lucknow:intent:token-1:token-1:buy_yes'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["covered_count"] == 0
+    assert result.evidence["redecision_required_count"] == 1
+    required = result.evidence["redecision_required"][0]
+    assert required["position_id"] == "pos-1"
+    assert required["restart_resolution"] == "chain_backed_quarantine_redecision_required"
+
+
 def test_position_projection_integrity_blocks_hard_terminal_reactivation(
     monkeypatch, tmp_path
 ):
@@ -2173,6 +2228,174 @@ def test_position_projection_integrity_blocks_terminal_chain_exposure_projection
     assert result.evidence["covered_count"] == 0
     assert result.evidence["risky"][0]["risk"] == "terminal_position_with_positive_chain_exposure"
     assert result.evidence["risky"][0]["chain_shares"] == 9.0
+
+
+def test_position_projection_integrity_routes_phantom_void_projection_to_boot_repair(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               chain_shares = 9.0,
+               entry_method = 'ens_member_counting',
+               p_posterior = 0.0,
+               cost_basis_usd = 6.30
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (
+            'ev-terminal', 'pos-1', 7, 'ADMIN_VOIDED', ?, 'pending_exit',
+            'voided', '{"reason":"PHANTOM_NOT_ON_CHAIN"}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["boot_fast_repair_required_count"] == 1
+    required = result.evidence["boot_fast_repair_required"][0]
+    assert required["position_id"] == "pos-1"
+    assert required["restart_resolution"] == "boot_fast_clear_phantom_void_chain_projection"
+
+
+def test_position_projection_integrity_routes_trade_proven_phantom_void_to_redecision(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               chain_shares = 5.07,
+               entry_method = 'ens_member_counting',
+               p_posterior = 0.0,
+               cost_basis_usd = 3.80
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            trade_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, command_id, state, filled_size, observed_at
+        ) VALUES ('trade-1', 'cmd-1', 'CONFIRMED', '5.07', ?)
+        """,
+        (now,),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (
+            'ev-terminal', 'pos-1', 7, 'ADMIN_VOIDED', ?, 'pending_exit',
+            'voided', '{"reason":"PHANTOM_NOT_ON_CHAIN"}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["boot_fast_repair_required_count"] == 1
+    required = result.evidence["boot_fast_repair_required"][0]
+    assert required["position_id"] == "pos-1"
+    assert required["restart_resolution"] == "boot_fast_reclassify_phantom_void_to_quarantine"
+    assert required["boot_fast_repair"]["positive_trade_fact_proof"] == {
+        "has_positive_trade_fact": True,
+        "trade_fact_count": 1,
+        "latest_observed_at": now,
+    }
 
 
 def test_position_projection_integrity_allows_superseded_phantom_void_recovery(
