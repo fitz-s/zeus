@@ -2622,6 +2622,70 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
     }
 
 
+def test_recorded_confirmed_exit_trade_preserves_strategy_exit_reason(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    token = "exit-strategy-reason-token"
+    strategy_reason = "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES (entry=0.1218, current=0.0000)"
+    seed_position_baseline(conn, position_id="pos-exit-strategy-reason", order_id="ord-entry-strategy")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               chain_state = 'synced',
+               token_id = ?,
+               order_id = 'ord-entry-strategy',
+               order_status = 'retry_pending',
+               shares = 10.01,
+               chain_shares = 10.01,
+               cost_basis_usd = 0.31,
+               chain_cost_basis_usd = 0.31,
+               entry_price = 0.031,
+               exit_reason = ?,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-strategy-reason'
+        """,
+        (token, strategy_reason, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-strategy-exit-confirmed",
+        venue_order_id="ord-strategy-exit-confirmed",
+        position_id="pos-exit-strategy-reason",
+        token_id=token,
+        side="SELL",
+        size=10.01,
+        price=0.01,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-strategy-exit-confirmed",
+        venue_order_id="ord-strategy-exit-confirmed",
+        token_id=token,
+        trade_id="trade-strategy-exit-confirmed",
+        size="10.01",
+        fill_price="0.01",
+        state="CONFIRMED",
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary["exit_projected"] == 1
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason
+          FROM position_current
+         WHERE position_id = 'pos-exit-strategy-reason'
+        """
+    ).fetchone()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+        "exit_reason": strategy_reason,
+    }
+
+
 def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic_close(conn):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_order_fact

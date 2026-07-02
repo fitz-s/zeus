@@ -4533,6 +4533,7 @@ def _ensure_exit_fill_position_event(
         return
     shares_dec, exit_price_dec = fill_economics
     occurred_at = observed_at.isoformat()
+    exit_reason = _strategy_exit_reason_for_reconciled_fill(conn, position_id, current)
     position = SimpleNamespace(
         **{
             **current,
@@ -4547,7 +4548,7 @@ def _ensure_exit_fill_position_event(
             "last_exit_order_id": venue_order_id,
             "last_exit_at": occurred_at,
             "exit_price": _decimal_text(exit_price_dec),
-            "exit_reason": "M5_EXCHANGE_RECONCILE",
+            "exit_reason": exit_reason,
             "shares": current.get("shares") or _decimal_text(shares_dec),
             "chain_shares": 0.0,
             "chain_avg_price": 0.0,
@@ -4614,6 +4615,40 @@ def _ensure_exit_fill_position_event(
         exit_price=exit_price_dec,
         upsert_only=False,
     )
+
+
+def _strategy_exit_reason_for_reconciled_fill(
+    conn: sqlite3.Connection,
+    position_id: str,
+    current: Mapping[str, Any],
+) -> str:
+    """Preserve the strategy/monitor reason when M5 projects a sell fill."""
+
+    current_reason = str(current.get("exit_reason") or "").strip()
+    if current_reason and current_reason != "M5_EXCHANGE_RECONCILE":
+        return current_reason
+
+    rows = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type IN ('EXIT_INTENT', 'EXIT_ORDER_POSTED', 'EXIT_ORDER_REJECTED')
+         ORDER BY sequence_no DESC, occurred_at DESC
+         LIMIT 12
+        """,
+        (position_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        for key in ("exit_reason", "reason"):
+            reason = str(payload.get(key) or "").strip()
+            if reason and reason != "M5_EXCHANGE_RECONCILE":
+                return reason
+    return "M5_EXCHANGE_RECONCILE"
 
 
 def _exit_fill_economics_for_command(
