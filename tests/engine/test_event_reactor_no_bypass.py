@@ -124,6 +124,44 @@ def _enable_qkernel_fixture(conn: sqlite3.Connection) -> sqlite3.Connection:
     return conn
 
 
+def _fully_licensed_selection_calibrator_artifact() -> dict:
+    from src.decision import selection_calibrator as sc
+
+    cells: dict[str, dict[str, float | int]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for bin_class in ("modal", "nonmodal"):
+                for pb in range(len(sc.RAW_PROB_BUCKET_EDGES) - 1):
+                    cells[f"{side}|{lead}|{bin_class}|pb{pb}"] = {
+                        "n": 1000,
+                        "hit_rate": 0.95,
+                    }
+    return {
+        "_meta": {
+            "authority": "test_event_reactor_selection_calibrator",
+            "version": "sel_v1",
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+            "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
+        },
+        "cells": cells,
+    }
+
+
+def _coherent_market_report(*_args, **_kwargs):
+    from src.decision.market_coherence import MarketCoherenceReport
+
+    return MarketCoherenceReport(
+        status="COHERENT",
+        max_abs_logit_gap=0.0,
+        kl_model_to_market=0.0,
+        kl_market_to_model=0.0,
+        offending_bins=(),
+        reason="test_event_reactor_fixture",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_edli_settings(monkeypatch):
     """Keep fixture-local calibration stable and keep replacement as the live q path.
@@ -135,15 +173,42 @@ def _isolate_edli_settings(monkeypatch):
     TRADE_SCORE_NON_POSITIVE on every receipt assertion.
     """
     from src.config import settings
+    from src.decision import family_decision_engine as fde
+    from src.decision import selection_calibrator as sc
 
     edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
     monkeypatch.setitem(settings._data, "edli", edli)
+    monkeypatch.setattr(
+        "src.calibration.emos._sigma_floor_cache",
+        {
+            "_meta": {
+                "absolute_floor_c": 1.0,
+                "authority": "test_event_reactor_fixture",
+                "k_default": 1.0,
+            },
+            "cells": {
+                "Chicago|MAM|high": {
+                    "sigma_floor_c": 1.4085,
+                    "n": 57,
+                    "window": "test-fixture",
+                }
+            },
+        },
+        raising=False,
+    )
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
+    monkeypatch.setattr(
+        sc,
+        "load_artifact",
+        lambda: _fully_licensed_selection_calibrator_artifact(),
+    )
+    sc.reset_artifact_cache()
+    monkeypatch.setattr(fde, "assess_market_coherence", _coherent_market_report)
 
 
 def _forecast_event(completeness: str = "COMPLETE"):
