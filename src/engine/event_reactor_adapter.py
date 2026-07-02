@@ -12518,7 +12518,14 @@ def _opportunity_book_proofs_with_selection_rejections(
             continue
         if proof.execution_price is None:
             continue
-        reason = _candidate_limit_price_untradeable_reason(proof)
+        reason = _live_selection_rejection_reason(
+            proof,
+            strategy_policy_conn=strategy_policy_conn,
+            strategy_policy_event_type=strategy_policy_event_type,
+            decision_time=decision_time,
+        )
+        if reason is None:
+            reason = _candidate_limit_price_untradeable_reason(proof)
         if reason is None and locked_opportunity_conn is not None:
             reason = _locked_candidate_no_price_improvement_reason(
                 locked_opportunity_conn,
@@ -12531,13 +12538,6 @@ def _opportunity_book_proofs_with_selection_rejections(
             )
             if allow_same_family_monitor_owned and _is_entry_held_redecision_reason(reason):
                 reason = None
-        if reason is None:
-            reason = _strategy_policy_selection_rejection_reason(
-                proof,
-                strategy_policy_conn=strategy_policy_conn,
-                strategy_policy_event_type=strategy_policy_event_type,
-                decision_time=decision_time,
-            )
         if reason is not None:
             excluded_by_id[proof_id] = reason
     if not excluded_by_id:
