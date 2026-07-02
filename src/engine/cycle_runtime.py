@@ -2861,7 +2861,10 @@ def _emit_monitor_refreshed_canonical_if_available(
         monitor_occurred_at = (
             deps._utcnow().isoformat()
             if hasattr(deps, "_utcnow")
-            else datetime.now(timezone.utc).isoformat()
+            else (
+                str(getattr(pos, "last_monitor_at", "") or "").strip()
+                or datetime.now(timezone.utc).isoformat()
+            )
         )
         pos.last_monitor_at = monitor_occurred_at
         events, projection = build_monitor_refreshed_canonical_write(
@@ -2885,6 +2888,66 @@ def _emit_monitor_refreshed_canonical_if_available(
         return False
 
     return True
+
+
+def _record_monitor_hold_decision(
+    conn,
+    pos,
+    *,
+    artifact,
+    deps,
+    summary: dict,
+    reason: str,
+    trigger: str,
+    validation: str,
+    counter: str,
+) -> bool:
+    from src.state.portfolio import ExitDecision as _ExitDecision
+
+    validations = list(
+        dict.fromkeys([*(getattr(pos, "applied_validations", []) or []), validation])
+    )
+    pos.applied_validations = validations
+    exit_decision = _ExitDecision(
+        False,
+        reason,
+        urgency="normal",
+        trigger=trigger,
+        selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+        applied_validations=validations,
+    )
+    canonical_written = _emit_monitor_refreshed_canonical_if_available(
+        conn,
+        pos,
+        deps=deps,
+        exit_decision=exit_decision,
+        final_should_exit=False,
+        final_exit_reason=reason,
+        final_exit_trigger=trigger,
+    )
+    if not canonical_written:
+        summary["monitor_canonical_write_failed"] = (
+            summary.get("monitor_canonical_write_failed", 0) + 1
+        )
+    monitor_fresh_prob = (
+        getattr(pos, "last_monitor_prob", None)
+        if bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+        else None
+    )
+    monitor_fresh_edge = getattr(pos, "last_monitor_edge", None)
+    artifact.add_monitor_result(
+        deps.MonitorResult(
+            position_id=pos.trade_id,
+            fresh_prob=monitor_fresh_prob,
+            fresh_edge=monitor_fresh_edge,
+            should_exit=False,
+            exit_reason=reason,
+            neg_edge_count=pos.neg_edge_count,
+        )
+    )
+    summary[counter] = summary.get(counter, 0) + 1
+    summary["monitors"] = summary.get("monitors", 0) + 1
+    return canonical_written
 
 
 _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
@@ -4522,7 +4585,17 @@ def execute_monitoring_phase(
                     summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                     continue
             if is_exit_cooldown_active(pos):
-                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                _record_monitor_hold_decision(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    reason="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
+                    trigger="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
+                    validation="pending_exit_retry_cooldown_monitor_hold",
+                    counter="monitor_pending_exit_retry_cooldown_holds",
+                )
                 continue
             if run_exit_preflight:
                 check_pending_retries(pos, conn=conn)
@@ -4537,10 +4610,43 @@ def execute_monitoring_phase(
                     summary.get("monitor_pending_exit_phase_evaluated", 0) + 1
                 )
         if pos.exit_state in ("sell_placed", "sell_pending") and not pending_exit_monitor_only:
+            _record_monitor_hold_decision(
+                conn,
+                pos,
+                artifact=artifact,
+                deps=deps,
+                summary=summary,
+                reason="EXIT_ORDER_ALREADY_IN_FLIGHT",
+                trigger="EXIT_ORDER_ALREADY_IN_FLIGHT",
+                validation="exit_order_in_flight_monitor_hold",
+                counter="monitor_exit_order_in_flight_holds",
+            )
             continue
         if pos.exit_state == "backoff_exhausted":
+            _record_monitor_hold_decision(
+                conn,
+                pos,
+                artifact=artifact,
+                deps=deps,
+                summary=summary,
+                reason="PENDING_EXIT_BACKOFF_EXHAUSTED_REDECISION_BLOCKED",
+                trigger="PENDING_EXIT_BACKOFF_EXHAUSTED_REDECISION_BLOCKED",
+                validation="pending_exit_backoff_exhausted_monitor_hold",
+                counter="monitor_pending_exit_backoff_exhausted_holds",
+            )
             continue
         if is_exit_cooldown_active(pos):
+            _record_monitor_hold_decision(
+                conn,
+                pos,
+                artifact=artifact,
+                deps=deps,
+                summary=summary,
+                reason="EXIT_RETRY_COOLDOWN_ACTIVE",
+                trigger="EXIT_RETRY_COOLDOWN_ACTIVE",
+                validation="exit_retry_cooldown_monitor_hold",
+                counter="monitor_exit_retry_cooldown_holds",
+            )
             continue
 
         if run_exit_preflight:

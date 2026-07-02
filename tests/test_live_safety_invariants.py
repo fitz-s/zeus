@@ -3796,6 +3796,94 @@ def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecyc
     assert get_open_positions(_make_portfolio(zero)) == []
 
 
+def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.db import init_schema
+    from src.state.projection import upsert_position_current
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="pending-exit-retry-cooldown-monitor",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+        shares=9.7,
+        chain_shares=9.7,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        next_exit_retry_at="2099-01-01T00:00:00+00:00",
+        last_monitor_prob=0.12,
+        last_monitor_prob_is_fresh=True,
+        fill_authority="venue_confirmed_full",
+        condition_id="condition-pending-exit-retry-cooldown-monitor",
+        strategy_key="forecast_qkernel_entry",
+        entered_at="2026-07-02T19:00:00+00:00",
+    )
+    # execute_monitoring_phase consumes runtime DB/string state; _make_position
+    # normalizes through enums for some tests.
+    pos.state = "pending_exit"
+    pos.chain_state = "synced"
+    pos.exit_state = "retry_pending"
+    pos.order_status = "retry_pending"
+    upsert_position_current(conn, build_position_current_projection(pos))
+    portfolio = _make_portfolio(pos)
+    monitor_results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_pending_exit_retry_cooldown_monitor"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 2, 20, 20, tzinfo=timezone.utc)),
+        },
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        portfolio,
+        artifact,
+        type("Tracker", (), {"record_exit": lambda self, position: None})(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_pending_exit_retry_cooldown_holds"] == 1
+    assert summary["monitors"] == 1
+    assert monitor_results[0].exit_reason == "PENDING_EXIT_RETRY_COOLDOWN_ACTIVE"
+    event = conn.execute(
+        """
+        SELECT event_type, occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert event is not None
+    assert event["occurred_at"] == "2026-07-02T20:20:00+00:00"
+    payload = json.loads(event["payload_json"])
+    assert payload["exit_decision_reason"] == "PENDING_EXIT_RETRY_COOLDOWN_ACTIVE"
+
+    conn.close()
+
+
 def test_pending_exit_chain_absent_zero_balance_uses_chain_truth_resolution(monkeypatch):
     """Pending-exit chain-absent review rows must resolve via balanceOf instead of sell retry."""
     from src.execution.exit_lifecycle import handle_exit_pending_missing
