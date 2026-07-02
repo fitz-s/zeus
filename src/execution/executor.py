@@ -4324,12 +4324,12 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
 
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
         collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
             conn,
             token_id=intent.token_id,
             shares=shares,
         )
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
 
         try:
             pre_submit_envelope = _build_pre_submit_envelope(
@@ -4851,7 +4851,7 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
@@ -4902,7 +4902,7 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )

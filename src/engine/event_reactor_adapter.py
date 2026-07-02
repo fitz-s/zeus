@@ -1762,18 +1762,21 @@ def _submit_shift_bin_old_leg_exit(
         )
         return
     status = str(getattr(result, "status", "") or "")
-    command_id = str(getattr(result, "order_id", "") or getattr(result, "external_order_id", "") or "")
+    durable_command_id = str(getattr(result, "command_id", "") or "")
+    venue_order_id = str(getattr(result, "order_id", "") or getattr(result, "external_order_id", "") or "")
     if status == "pending":
+        reason = f"SHIFT_BIN_EXIT_SUBMITTED:venue_order_id={venue_order_id}" if venue_order_id else None
         _shift_bin_wiring.record_exit_submitted(
             conn, intent_id, now_iso=now_iso,
-            old_exit_command_id=command_id or None, status="EXIT_SUBMITTED",
+            old_exit_command_id=durable_command_id or None, status="EXIT_SUBMITTED",
+            reason=reason,
         )
     elif status == "unknown_side_effect":
         reason = str(getattr(result, "reason", "") or "unknown_side_effect")
-        if command_id or _shift_exit_has_durable_command(conn, decision_id=decision_id):
+        if durable_command_id or _shift_exit_has_durable_command(conn, decision_id=decision_id):
             _shift_bin_wiring.record_exit_submitted(
                 conn, intent_id, now_iso=now_iso,
-                old_exit_command_id=command_id or None, status="EXIT_UNKNOWN",
+                old_exit_command_id=durable_command_id or None, status="EXIT_UNKNOWN",
                 reason=f"SHIFT_BIN_EXIT_UNKNOWN:{reason}",
             )
         else:
@@ -1783,7 +1786,7 @@ def _submit_shift_bin_old_leg_exit(
             )
     else:
         reason = str(getattr(result, "reason", "") or status)
-        has_command = bool(command_id) or _shift_exit_has_durable_command(
+        has_command = bool(durable_command_id) or _shift_exit_has_durable_command(
             conn, decision_id=decision_id
         )
         if has_command and _shift_exit_rejection_requires_retry(reason):
@@ -1791,7 +1794,7 @@ def _submit_shift_bin_old_leg_exit(
                 conn,
                 intent_id,
                 now_iso=now_iso,
-                old_exit_command_id=command_id or None,
+                old_exit_command_id=durable_command_id or None,
                 status="EXIT_UNKNOWN",
                 reason=f"SHIFT_BIN_EXIT_RETRYABLE_REJECTED:{reason}",
             )

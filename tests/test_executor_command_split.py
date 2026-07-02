@@ -2802,6 +2802,78 @@ class TestExitOrderCommandSplit:
         assert order_type_selection["selected_order_type"] == "FOK"
         assert order_type_selection["order_type"] == "FAK"
 
+    def test_exit_collateral_refresh_precedes_sell_preflight_and_proof(self, mem_conn, monkeypatch):
+        """Exit sell collateral truth must refresh before the CTF sell preflight."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import list_events
+
+        call_order: list[str] = []
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        def refresh(conn, *, token_id, shares):
+            call_order.append("refresh")
+            return {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+                "reason": "refreshed_before_exit_submit",
+                "token_id": token_id,
+                "shares": shares,
+            }
+
+        def assert_sell(token_id, shares, *, conn):
+            call_order.append("assert_sell")
+            assert call_order == ["refresh", "assert_sell"]
+            return {
+                "component": "collateral_ledger",
+                "allowed": True,
+                "reason": "ctf_tokens_available",
+                "token_id": token_id,
+                "shares": shares,
+            }
+
+        monkeypatch.setattr(executor_module, "_refresh_exit_collateral_snapshot_for_submit", refresh)
+        monkeypatch.setattr(executor_module, "_assert_collateral_allows_sell", assert_sell)
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-refresh-before-preflight")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-refresh-before-preflight")
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-refresh-before-preflight",
+            )
+
+        assert result.status == "pending"
+        assert call_order == ["refresh", "assert_sell"]
+        command = mem_conn.execute(
+            "SELECT command_id FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-refresh-before-preflight",),
+        ).fetchone()
+        requested = [
+            event for event in list_events(mem_conn, command["command_id"])
+            if event["event_type"] == "SUBMIT_REQUESTED"
+        ][0]
+        capability = json.loads(requested["payload_json"])["execution_capability"]
+        component_names = [component["component"] for component in capability["components"]]
+        assert component_names.index("collateral_snapshot_refresh") < component_names.index("collateral_ledger")
+
     def test_exit_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,
         mem_conn,
@@ -2990,6 +3062,85 @@ class TestExitOrderCommandSplit:
             (payload["final_submission_envelope_id"],),
         ).fetchone()
         assert row["error_code"] == "POST_ONLY_REJECTED"
+
+    def test_exit_submit_rejected_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
+        """Exit success=false ACK returns the derived command idempotency key."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-success-false-idem")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+                bound,
+                success=False,
+                status="rejected",
+                error_code="CLOB_REJECTED",
+                error_message="rejected",
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-success-false-idem",
+            )
+
+        command = mem_conn.execute(
+            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-success-false-idem",),
+        ).fetchone()
+        assert result.status == "rejected"
+        assert result.idempotency_key == command["idempotency_key"]
+        assert result.idempotency_key != intent.idempotency_key
+
+    def test_exit_missing_order_id_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
+        """Exit missing-order-id ACK returns the derived command idempotency key."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-missing-order-idem")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id=None, status="LIVE")
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-missing-order-idem",
+            )
+
+        command = mem_conn.execute(
+            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-missing-order-idem",),
+        ).fetchone()
+        assert result.status == "rejected"
+        assert result.reason == "missing_order_id"
+        assert result.idempotency_key == command["idempotency_key"]
+        assert result.idempotency_key != intent.idempotency_key
 
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.

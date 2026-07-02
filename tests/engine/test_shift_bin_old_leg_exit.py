@@ -70,6 +70,7 @@ CREATE TABLE venue_commands (
 @dataclass
 class _FakeOrderResult:
     status: str
+    command_id: str = ""
     order_id: str = ""
     external_order_id: str = ""
     reason: str = ""
@@ -175,7 +176,7 @@ def test_placed_sell_advances_lease_exit_submitted(monkeypatch):
     import src.execution.exit_lifecycle as xl
     monkeypatch.setattr(
         xl, "place_sell_order",
-        lambda **kw: _FakeOrderResult(status="pending", order_id="exit-cmd-1"),
+        lambda **kw: _FakeOrderResult(status="pending", command_id="exit-cmd-1", order_id="ord-1"),
     )
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
@@ -184,6 +185,30 @@ def test_placed_sell_advances_lease_exit_submitted(monkeypatch):
     ).fetchone()
     assert row["status"] == "EXIT_SUBMITTED"  # family stays BLOCKING; no counter-entry
     assert row["old_exit_command_id"] == "exit-cmd-1"
+
+
+def test_placed_sell_records_durable_command_id_not_venue_order_id(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(status="pending", command_id="cmd123", order_id="ord456"),
+    )
+
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_SUBMITTED"
+    assert row["old_exit_command_id"] == "cmd123"
+    assert "venue_order_id=ord456" in (row["abort_reason"] or "")
 
 
 def test_buy_no_shift_exit_sells_no_token(monkeypatch):
@@ -211,7 +236,7 @@ def test_buy_no_shift_exit_sells_no_token(monkeypatch):
     import src.execution.exit_lifecycle as xl
     def _placed(**kw):
         captured["kw"] = kw
-        return _FakeOrderResult(status="pending", order_id="exit-cmd-1")
+        return _FakeOrderResult(status="pending", command_id="exit-cmd-1", order_id="ord-1")
 
     monkeypatch.setattr(xl, "place_sell_order", _placed)
     payload = _payload(intent)
@@ -229,7 +254,7 @@ def test_unknown_side_effect_blocks_family(monkeypatch):
     import src.execution.exit_lifecycle as xl
     monkeypatch.setattr(
         xl, "place_sell_order",
-        lambda **kw: _FakeOrderResult(status="unknown_side_effect", order_id="exit-cmd-2"),
+        lambda **kw: _FakeOrderResult(status="unknown_side_effect", command_id="exit-cmd-2", order_id="ord-2"),
     )
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
@@ -270,7 +295,8 @@ def test_auth_signature_rejection_keeps_shift_exit_retry_active(monkeypatch):
         "place_sell_order",
         lambda **kw: _FakeOrderResult(
             status="rejected",
-            order_id="exit-cmd-auth",
+            command_id="exit-cmd-auth",
+            order_id="ord-auth",
             reason=(
                 "venue_rejected_400: PolyApiException[status_code=400, "
                 "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"

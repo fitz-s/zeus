@@ -854,6 +854,7 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
 
 
 def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeypatch):
+    from src.execution import executor as executor_module
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
     from src.state.db import init_schema
@@ -864,6 +865,15 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor_module,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda conn, *, token_id, shares: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "test_noop_refresh",
+        },
+    )
 
     class ClientShouldNotBeConstructed:
         def __init__(self, *args, **kwargs):  # pragma: no cover - assertion tripwire
@@ -881,6 +891,60 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
         with pytest.raises(CollateralInsufficient, match="ctf_tokens_insufficient"):
             execute_exit_order(intent, conn=conn, decision_id="z4-sell")
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        configure_global_ledger(None)
+
+
+def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkeypatch):
+    from src.execution import executor as executor_module
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import configure_global_ledger
+    from src.state.db import init_schema
+
+    init_schema(conn)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 0}))
+    configure_global_ledger(ledger)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+
+    def refresh_exit_collateral(conn, *, token_id, shares):
+        assert token_id == YES_TOKEN
+        assert shares == pytest.approx(5.0)
+        ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 5}))
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "refreshed_before_exit_submit",
+            "token_id": token_id,
+        }
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            return _fake_submit_result(self.bound_envelope, order_id="exit-refresh-order-1", success=True)
+
+    monkeypatch.setattr(executor_module, "_refresh_exit_collateral_snapshot_for_submit", refresh_exit_collateral)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    intent = create_exit_order_intent(
+        trade_id="z4-sell-refresh-before-preflight",
+        token_id=YES_TOKEN,
+        shares=5.0,
+        current_price=0.50,
+        best_bid=0.49,
+        **_exec_snapshot_kwargs(conn, token_id=YES_TOKEN),
+    )
+    try:
+        result = execute_exit_order(
+            intent,
+            conn=conn,
+            decision_id="z4-sell-refresh-before-preflight",
+        )
+        assert result.status == "pending"
+        assert "pre_submit_collateral_reservation_failed" not in (result.reason or "")
+        assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
     finally:
         configure_global_ledger(None)
 
