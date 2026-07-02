@@ -6,6 +6,7 @@ than per-family ranking. They do not change q, price, FDR, Kelly, or venue state
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import math
 
 # BUY-NO MATERIAL-BIN VOCABULARY: this is stricter than the replacement certificate
@@ -17,11 +18,15 @@ from src.calibration.settlement_backward_coverage import (
 )
 
 
-# Operator objective: real participating trades must settle with stable win-rate
-# greater than 51% after costs. Positive-EV low-probability lottery legs remain
-# valid research evidence, but they are not live-money entries.
+# Operator objective for ordinary binary replacement/NO-side candidates: real
+# participating trades must settle with stable win-rate greater than 51% after
+# costs. Q-kernel center-buy YES is a different Arrow-Debreu point-bin contract:
+# a single exact-bin YES can be profitable with side probability below 51% when
+# it is the family-efficient claim. It uses the q-kernel quality floor below
+# instead of this binary replacement floor.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
+LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.15
 
 # A buy-NO on a single settlement bin is not a generic "not this exact value"
 # lottery when the model itself assigns material YES mass to that bin. The
@@ -69,6 +74,57 @@ def live_win_rate_floor_rejection_reason(
     if q_value < floor_value:
         return f"ADMISSION_WIN_RATE_FLOOR:q_lcb={q_value:.4f}:min={floor_value:.4f}"
     return None
+
+
+def qkernel_center_yes_quality_floor() -> float:
+    """Minimum conservative exact-bin YES probability for live q-kernel center buys."""
+
+    return float(LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB)
+
+
+def live_entry_probability_quality_rejection_reason(
+    *,
+    q_lcb: float | int | None,
+    direction: object = None,
+    strategy_key: object = None,
+    selection_authority_applied: object = None,
+    qkernel_execution_economics: object = None,
+    floor: float = LIVE_DIRECTION_WIN_RATE_FLOOR,
+) -> str | None:
+    """Return the probability-quality blocker for a live entry candidate.
+
+    Ordinary buy-side entries keep the binary selected-side win-rate floor. The
+    q-kernel center-buy YES lane is exempt from the 51% binary floor because it
+    buys one exact outcome in a multi-bin family; using the binary floor there
+    mechanically starves legitimate center YES trades and pushes the optimizer
+    toward NO. It still needs a real conservative probability floor so cheap
+    longshot tails cannot pass on ROI optics alone.
+    """
+
+    direction_value = getattr(direction, "value", direction)
+    direction_text = str(direction_value or "").strip().lower()
+    strategy_text = str(strategy_key or "").strip()
+    authority_text = str(selection_authority_applied or "").strip()
+    is_qkernel_center_yes = (
+        direction_text == "buy_yes"
+        and strategy_text == "center_buy"
+        and authority_text == "qkernel_spine"
+        and isinstance(qkernel_execution_economics, Mapping)
+        and str(qkernel_execution_economics.get("source") or "").strip() == "qkernel_spine"
+    )
+    if is_qkernel_center_yes:
+        reason = live_win_rate_floor_rejection_reason(
+            q_lcb=q_lcb,
+            floor=qkernel_center_yes_quality_floor(),
+        )
+        if reason is None:
+            return None
+        return reason.replace(
+            "ADMISSION_WIN_RATE_FLOOR",
+            "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
+            1,
+        )
+    return live_win_rate_floor_rejection_reason(q_lcb=q_lcb, floor=floor)
 
 
 def live_lcb_consistency_rejection_reason(

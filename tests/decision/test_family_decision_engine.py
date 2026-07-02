@@ -858,11 +858,12 @@ def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
     space = _outcome_space(case)
     high_confidence_yes = _hand_decision(
         _hand_route(space, side="YES", bin_id="b25", cost=0.01),
-        edge_lcb=0.06967772345617505,
+        edge_lcb=0.56,
         optimal_delta_u=0.0037257573362340303,
         delta_u_at_min=0.00031653668040189115,
-        robust_trade_score=0.06967772345617505,
+        robust_trade_score=0.56,
         optimal_stake_usd=Decimal("2.197675453300476"),
+        payoff_q_lcb=0.57,
     )
     larger_notional_no = _hand_decision(
         _hand_route(space, side="NO", bin_id="b24", cost=0.80),
@@ -918,17 +919,17 @@ def test_select_roi_frontier_rejects_six_cent_yes_with_barely_positive_safe_q(mo
 
 
 def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
-    """A cheap center YES remains live when its q_lcb clears the continuous margin."""
+    """A cheap center YES remains live when its q_lcb clears the center-YES quality floor."""
     case = _case()
     space = _outcome_space(case)
     strong_center_yes = _hand_decision(
         _hand_route(space, side="YES", bin_id="b25", cost=0.07),
-        edge_lcb=0.11,
+        edge_lcb=0.51,
         optimal_delta_u=0.0025,
         delta_u_at_min=0.0002,
-        robust_trade_score=0.11,
+        robust_trade_score=0.51,
         optimal_stake_usd=Decimal("2.50"),
-        payoff_q_lcb=0.18,
+        payoff_q_lcb=0.58,
     )
 
     engine = FamilyDecisionEngine(
@@ -945,6 +946,36 @@ def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
     assert engine._roi_frontier_useful(strong_center_yes) is True
     assert reason is None
     assert selected is strong_center_yes
+
+
+def test_select_roi_frontier_rejects_buenos_aires_low_quality_tail_yes(monkeypatch):
+    """BA live incident: q_lcb below center-YES quality floor is not a family optimum."""
+    case = _case()
+    space = _outcome_space(case)
+    ba_tail_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.041),
+        edge_lcb=0.041246376484684766,
+        optimal_delta_u=0.003,
+        delta_u_at_min=0.0002,
+        robust_trade_score=1.42,
+        optimal_stake_usd=Decimal("23.68994700639801"),
+        payoff_q_lcb=0.0990451308919892,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([ba_tail_yes])
+
+    assert engine._payoff_q_lcb(ba_tail_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.041,
+    )
+    assert engine._roi_frontier_useful(ba_tail_yes) is False
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 
 
 def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
@@ -1057,12 +1088,12 @@ def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):
     )
     honest_no = _hand_decision(
         _hand_route(space, side="NO", bin_id="b24", cost=0.35),
-        edge_lcb=0.08,
+        edge_lcb=0.21,
         optimal_delta_u=0.06,
         delta_u_at_min=0.01,
-        robust_trade_score=0.08,
+        robust_trade_score=0.21,
         optimal_stake_usd=Decimal("25"),
-        payoff_q_lcb=0.43,
+        payoff_q_lcb=0.56,
     )
 
     engine = FamilyDecisionEngine(

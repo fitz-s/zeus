@@ -836,6 +836,21 @@ def _entry_economics_component(
     selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
     selection_guard_abstained = _bool_field(economics.get("selection_guard_abstained"))
     selection_guard_q_safe = _float_field(economics.get("selection_guard_q_safe"))
+    from src.strategy.live_inference.live_admission import (
+        live_entry_probability_quality_rejection_reason,
+    )
+
+    live_probability_quality_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=q_lcb,
+        direction=intent.direction,
+        strategy_key=(
+            (actionable_payload or {}).get("strategy_key")
+            if actionable_payload
+            else None
+        ),
+        selection_authority_applied=intent.selection_authority_applied,
+        qkernel_execution_economics=economics,
+    )
     try:
         from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 
@@ -886,6 +901,8 @@ def _entry_economics_component(
         reason = "qkernel_direction_law_not_ok"
     elif economics.get("coherence_allows") is not True:
         reason = "qkernel_coherence_blocks"
+    elif live_probability_quality_reason is not None:
+        reason = live_probability_quality_reason
     elif not roi_frontier_useful_values(
         side=econ_side,
         cost=econ_cost,
@@ -935,11 +952,7 @@ def _entry_economics_component(
                 selection_guard_q_safe if selection_guard_q_safe is not None else ""
             ),
         )
-    from src.strategy.live_inference.live_admission import (
-        live_win_rate_floor_rejection_reason,
-    )
-
-    live_win_rate_floor_reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    live_win_rate_floor_reason = live_probability_quality_reason
     if live_win_rate_floor_reason is not None:
         return _capability_component(
             "entry_economics",

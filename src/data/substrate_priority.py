@@ -76,7 +76,7 @@ def mark_money_path_substrate_priority(
     families: Iterable[tuple[str, str, str]] | None = None,
     condition_ids: Iterable[str] | None = None,
     merge_existing: bool = False,
-) -> None:
+) -> dict:
     """Request scoped sidecar substrate capture for current live-money work.
 
     The marker is a current-request contract, not a backlog.  Live money loops
@@ -128,6 +128,15 @@ def mark_money_path_substrate_priority(
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+    return {
+        "request_id": str(payload.get("request_id") or "").strip(),
+        "reason": str(payload.get("reason") or "").strip(),
+        "requested_at": str(payload.get("requested_at") or "").strip(),
+        "expires_at": str(payload.get("expires_at") or "").strip(),
+        "pid": payload.get("pid"),
+        "families": [tuple(family) for family in merged_families],
+        "condition_ids": list(merged_condition_ids),
+    }
 
 
 def clear_money_path_substrate_priority(*, pid: int | None = None) -> None:
@@ -239,3 +248,46 @@ def record_money_path_substrate_priority_receipt(
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def money_path_substrate_priority_receipt(
+    *,
+    request_id: str | None = None,
+    now: datetime | None = None,
+    max_age_seconds: float | None = None,
+) -> dict | None:
+    """Return sidecar service evidence for a priority request.
+
+    A receipt is not executable price truth.  It only proves the sidecar serviced
+    the matching request; live callers must still verify fresh snapshot rows for
+    the exact condition scope before emitting money-path events.
+    """
+
+    path = _priority_receipt_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected = str(request_id or "").strip()
+    actual = str(payload.get("request_id") or "").strip()
+    if expected and actual != expected:
+        return None
+    if max_age_seconds is not None:
+        try:
+            max_age = max(0.0, float(max_age_seconds))
+            serviced_at = datetime.fromisoformat(str(payload.get("serviced_at") or ""))
+        except (TypeError, ValueError):
+            return None
+        if serviced_at.tzinfo is None:
+            serviced_at = serviced_at.replace(tzinfo=timezone.utc)
+        current = now if now is not None else datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        age = (
+            current.astimezone(timezone.utc) - serviced_at.astimezone(timezone.utc)
+        ).total_seconds()
+        if age < 0.0 or age > max_age:
+            return None
+    return payload

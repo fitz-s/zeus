@@ -635,6 +635,7 @@ def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
 ):
     """Chain-positive quarantine/voided exposure must stay in hot substrate scope."""
 
+    hot_target_date = datetime.now(timezone.utc).date().isoformat()
     db_path = tmp_path / "trades.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -654,14 +655,14 @@ def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
         )
         conn.executemany(
             "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                ("Munich", "2026-06-30", "high", "cond-munich-30", "quarantined", "chain_absent_confirmed_position_unattributed", 29.14, 29.14),
-                ("Madrid", "2026-06-30", "high", "cond-madrid-29", "voided", "synced", 4.5, 0.0),
-                ("Paris", "2026-06-30", "low", "cond-paris-19", "day0_window", "synced", 5.0, 5.0),
-                ("Seoul", "2026-06-30", "high", "cond-zero", "quarantined", "synced", 0.0, 10.0),
-                ("London", "2026-06-30", "high", "cond-closed", "economically_closed", "synced", 7.0, 7.0),
-            ],
-        )
+                [
+                    ("Munich", hot_target_date, "high", "cond-munich-30", "quarantined", "chain_absent_confirmed_position_unattributed", 29.14, 29.14),
+                    ("Madrid", hot_target_date, "high", "cond-madrid-29", "voided", "synced", 4.5, 0.0),
+                    ("Paris", hot_target_date, "low", "cond-paris-19", "day0_window", "synced", 5.0, 5.0),
+                    ("Seoul", hot_target_date, "high", "cond-zero", "quarantined", "synced", 0.0, 10.0),
+                    ("London", hot_target_date, "high", "cond-closed", "economically_closed", "synced", 7.0, 7.0),
+                ],
+            )
         conn.commit()
     finally:
         conn.close()
@@ -680,9 +681,9 @@ def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
         "cond-paris-19",
     }
     assert substrate_observer._edli_current_held_position_family_keys() == {
-        ("Munich", "2026-06-30", "high"),
-        ("Madrid", "2026-06-30", "high"),
-        ("Paris", "2026-06-30", "low"),
+        ("Munich", hot_target_date, "high"),
+        ("Madrid", hot_target_date, "high"),
+        ("Paris", hot_target_date, "low"),
     }
 
 
@@ -1083,6 +1084,46 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
             "condition_ids": {"cond-1", "cond-2"},
         }
     ]
+
+
+def test_continuous_redecision_confirm_refresh_uses_matching_sidecar_receipt(monkeypatch):
+    import src.data.substrate_priority as substrate_priority
+
+    def _mark(**_kwargs):
+        return {
+            "request_id": "req-confirm-1",
+            "families": [("Paris", "2026-06-20", "low")],
+            "condition_ids": ["cond-1"],
+        }
+
+    def _receipt(**kwargs):
+        assert kwargs["request_id"] == "req-confirm-1"
+        return {
+            "request_id": "req-confirm-1",
+            "serviced_at": "2026-06-19T12:00:01+00:00",
+            "summary": {
+                "status": "refreshed",
+                "executable_substrate_coverage_status": "PARTIAL",
+                "attempted": 1,
+                "inserted": 1,
+            },
+        }
+
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")))
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {("Paris", "2026-06-20", "low")},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        priority_condition_ids={"cond-1"},
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["priority_request_id"] == "req-confirm-1"
+    assert result["priority_receipt_matched"] is True
+    assert result["attempted"] == 1
+    assert result["inserted"] == 1
 
 
 def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypatch):
@@ -1877,10 +1918,11 @@ def test_priority_conditions_deferred_when_refresh_inserted_substrate():
 
 
 def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(monkeypatch):
-    """A concrete condition marker must not hide requeued reactor families."""
+    """A concrete condition marker must not expand back into full marker-family refresh."""
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
+    marker_noise_families = [("Buenos Aires", "2026-07-02", "high")]
     marker_condition_ids = ["cond-shanghai-31"]
     claim_families = [("Tokyo", "2026-06-28", "low")]
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
@@ -1889,14 +1931,14 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
         "money_path_substrate_priority_request",
         lambda: {
             "request_id": "req-1",
-            "families": marker_families,
+            "families": marker_families + marker_noise_families,
             "condition_ids": marker_condition_ids,
         },
     )
     monkeypatch.setattr(
         substrate_observer,
         "money_path_substrate_priority_families",
-        lambda: marker_families,
+        lambda: marker_families + marker_noise_families,
     )
     monkeypatch.setattr(
         substrate_observer,
@@ -1907,6 +1949,11 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
         substrate_observer,
         "_claim_order_priority_families_for_refresh",
         lambda *a, **k: claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda *a, **k: marker_families,
     )
     monkeypatch.setattr(
         substrate_observer,
@@ -1934,7 +1981,8 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == claim_families + marker_families
+    assert calls[0]["extra_priority_families"] == marker_families + claim_families
+    assert marker_noise_families[0] not in calls[0]["extra_priority_families"]
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert calls[0]["include_money_risk_families"] is False
@@ -2263,6 +2311,12 @@ def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
 
     calls: list[str] = []
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: [("Paris", "2026-06-30", "low")],
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     monkeypatch.setattr(
         substrate_observer,
         "_market_discovery_staleness_window_seconds",

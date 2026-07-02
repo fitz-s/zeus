@@ -16,6 +16,7 @@ from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
     _day0_live_submit_admission_rejection_reason,
+    _day0_selected_route_fdr_proof,
     _fdr_rejection_reason,
     _final_intent_decision_source_context_payload,
     _pre_submit_revalidation_payload_from_final_intent,
@@ -458,7 +459,35 @@ def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_high_conf
     )
 
 
-def test_live_entry_qkernel_gate_rejects_buenos_aires_low_win_rate_yes():
+def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_quality_clear():
+    cert = _qkernel_cert()
+    cert.update(
+        cost=0.12,
+        payoff_q_lcb=0.20,
+        payoff_q_point=0.28,
+        edge_lcb=0.08,
+        delta_u_at_min=0.01,
+        optimal_stake_usd=10.0,
+        optimal_delta_u=0.02,
+        selection_guard_q_safe=0.20,
+    )
+
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.28,
+            "q_lcb_5pct": 0.20,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": cert,
+        }
+    )
+
+
+def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
     cert = _qkernel_cert()
     cert.update(
         cost=0.053828064525010946,
@@ -468,7 +497,7 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_win_rate_yes():
         selection_guard_q_safe=0.0990451308919892,
     )
 
-    with pytest.raises(ValueError, match="ADMISSION_WIN_RATE_FLOOR"):
+    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
         _assert_live_entry_submit_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
@@ -500,7 +529,7 @@ def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_f
         selection_guard_q_safe=0.06052567908958011,
     )
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
         _assert_live_entry_submit_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
@@ -532,7 +561,7 @@ def test_live_entry_qkernel_gate_rejects_six_to_eight_cent_barely_positive_yes()
         selection_guard_q_safe=0.078120,
     )
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
+    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
         _assert_live_entry_submit_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
@@ -660,6 +689,34 @@ def test_day0_fdr_rejection_reason_carries_route_evidence():
     assert "price=0.620000" in reason
     assert "day0_false_edge_rate=0.090000" in reason
     assert "probability_authority=day0_absorbing_hard_fact" in reason
+
+
+def test_day0_absorbing_hard_fact_route_fdr_passes_before_qkernel_false_edge():
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        q_posterior=1.0,
+        q_lcb_5pct=1.0,
+        execution_price=SimpleNamespace(value=0.63),
+        trade_score=0.348848,
+        probability_authority="day0_absorbing_hard_fact",
+        missing_reason=None,
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "false_edge_rate": 0.95,
+        },
+    )
+
+    fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="Shanghai|2026-07-02|high",
+        all_hypothesis_ids=tuple(f"h{i}" for i in range(22)),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+
+    assert fdr is not None
+    assert fdr.passed is True
+    assert fdr.selected_post_fdr == ("h7",)
 
 
 def test_day0_pre_submit_payload_preserves_observation_authority_and_qkernel():

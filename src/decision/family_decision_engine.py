@@ -209,7 +209,10 @@ from src.decision.selection_calibrator import apply_selection_calibrator
 from src.probability.joint_q import JointQ, build_joint_q
 from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
-from src.strategy.live_inference.live_admission import LIVE_DIRECTION_WIN_RATE_FLOOR
+from src.strategy.live_inference.live_admission import (
+    LIVE_DIRECTION_WIN_RATE_FLOOR,
+    qkernel_center_yes_quality_floor,
+)
 from src.strategy.utility_ranker import (
     FamilyPayoffMatrix,
     PortfolioExposureVector,
@@ -238,9 +241,9 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
 )
 DAY0_REMAINING_DAY_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
-_ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
+_ROI_FRONTIER_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
 _ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
-_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB = 0.07
+_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
 _ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN = 0.05
 LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
@@ -256,16 +259,19 @@ class EntryPriceFloorDecision:
 def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
     """Conservative live floor for cheap YES routes.
 
-    Cheap YES routes are valid when the forecast genuinely prices a tail too low,
-    but raw edge/cost over-rewards lottery-like tails whose lower-bound probability
-    barely clears the book. Require an absolute lower q floor and a continuous
-    edge-over-cost margin that decays with price, instead of a discontinuous sub-5c
-    special case. Normal-priced and NO routes stay on the global frontier floor
-    plus the existing positive-edge/growth-density gates.
+    Cheap YES routes are valid when the forecast genuinely prices a center
+    point-bin too low, but raw edge/cost over-rewards lottery-like tails whose
+    lower bound merely clears the book. The live selector uses the same q-kernel
+    center-YES quality floor as submit/executor, while NO remains on the ordinary
+    binary win-rate floor.
     """
 
-    floor = float(_ROI_FRONTIER_MIN_PAYOFF_Q_LCB)
     side_text = str(side or "").strip().upper()
+    floor = (
+        qkernel_center_yes_quality_floor()
+        if side_text == "YES"
+        else float(LIVE_DIRECTION_WIN_RATE_FLOOR)
+    )
     if (
         side_text == "YES"
         and np.isfinite(cost)
@@ -1816,7 +1822,7 @@ class FamilyDecisionEngine:
                     d.route.side == "YES"
                     and bin_position == "modal"
                     and verdict.basis == "OOF_WILSON_95_POOLED_TAIL"
-                    and q_lcb_route >= LIVE_DIRECTION_WIN_RATE_FLOOR
+                    and q_lcb_route >= qkernel_center_yes_quality_floor()
                     and edge_lcb > 0.0
                 ):
                     # A pooled right-tail cell is same-claim evidence that the sparse

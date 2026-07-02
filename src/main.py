@@ -7211,7 +7211,7 @@ def _edli_refresh_continuous_money_path_families(
         try:
             from src.data.substrate_priority import mark_money_path_substrate_priority
 
-            mark_money_path_substrate_priority(
+            request = mark_money_path_substrate_priority(
                 reason="continuous_redecision_confirm_refresh",
                 ttl_seconds=35.0,
                 families=clean_families,
@@ -7227,18 +7227,91 @@ def _edli_refresh_continuous_money_path_families(
                 "families_requested": len(clean_families),
                 "reason": str(exc),
             }
+        request_id = ""
+        if isinstance(request, dict):
+            request_id = str(request.get("request_id") or "").strip()
+        receipt = _edli_wait_for_substrate_priority_receipt(
+            request_id=request_id,
+            now_utc=now_utc,
+        )
+        if isinstance(receipt, dict):
+            receipt_summary = dict(receipt.get("summary") or {})
+            return {
+                **receipt_summary,
+                "families_requested": len(clean_families),
+                "priority_condition_count": len(priority_conditions),
+                "priority_request_id": request_id,
+                "priority_receipt_serviced_at": str(receipt.get("serviced_at") or ""),
+                "priority_receipt_matched": True,
+            }
         return {
             "status": "priority_marked",
             "families_requested": len(clean_families),
             "priority_condition_count": len(priority_conditions),
             "executable_substrate_coverage_status": "READ_FILTER_REQUIRED",
             "marked_at": now_utc.astimezone(timezone.utc).isoformat(),
+            "priority_request_id": request_id,
+            "priority_receipt_matched": False,
         }
     finally:
         try:
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
             pass
+
+
+def _edli_redecision_confirm_receipt_wait_seconds() -> float:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "22.0")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 22.0
+    return max(0.0, min(value, 60.0))
+
+
+def _edli_redecision_confirm_receipt_poll_seconds() -> float:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.5")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.05, min(value, 2.0))
+
+
+def _edli_wait_for_substrate_priority_receipt(
+    *,
+    request_id: str,
+    now_utc: datetime,
+) -> dict | None:
+    request_id = str(request_id or "").strip()
+    wait_s = _edli_redecision_confirm_receipt_wait_seconds()
+    if not request_id or wait_s <= 0.0:
+        return None
+    poll_s = _edli_redecision_confirm_receipt_poll_seconds()
+    deadline = time.monotonic() + wait_s
+    max_age_s = wait_s + 10.0
+    from src.data.substrate_priority import money_path_substrate_priority_receipt
+
+    while True:
+        current = datetime.now(timezone.utc)
+        receipt = money_path_substrate_priority_receipt(
+            request_id=request_id,
+            now=current,
+            max_age_seconds=max_age_s,
+        )
+        if isinstance(receipt, dict):
+            return receipt
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            logger.info(
+                "edli_redecision_screen: sidecar priority receipt wait timed out "
+                "request_id=%s waited=%.3fs since=%s",
+                request_id,
+                wait_s,
+                now_utc.astimezone(timezone.utc).isoformat(),
+            )
+            return None
+        time.sleep(min(poll_s, remaining))
 
 
 def _edli_redecision_priority_condition_limit() -> int:

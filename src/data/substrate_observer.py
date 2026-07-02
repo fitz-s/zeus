@@ -2658,12 +2658,18 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         priority_families: list[tuple[str, str, str]] = []
         priority_family_seen: set[tuple[str, str, str]] = set()
         # Claim-order families are already live-money blocked reactor work, not broad backlog.
-        # Exact condition markers narrow ordinary refresh scope, but they must not hide stale
-        # executable-snapshot events that the reactor has requeued for the priority lane.
+        # Exact condition markers must remain exact.  Adding every marker family after resolving
+        # condition ids silently turns a scoped request back into a full-family topology sweep,
+        # which can burn the whole sidecar budget before any requested condition is captured.
+        marker_family_candidates = (
+            []
+            if marker_exact_condition_ids
+            else list(priority_marker_families)
+        )
         priority_family_candidates = (
             list(condition_priority_families)
             + list(claim_priority_families)
-            + list(priority_marker_families)
+            + marker_family_candidates
         )
         for family in priority_family_candidates:
             key = tuple(str(part or "").strip() for part in family)
@@ -2706,6 +2712,9 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             "held_position_priority_condition_ids": len(held_position_priority_condition_ids),
             "claim_order_priority_families": len(claim_priority_families),
             "claim_order_priority_read_failed": bool(claim_priority_read_failed),
+            "marker_family_scope_suppressed_by_exact_conditions": int(
+                bool(marker_exact_condition_ids)
+            ),
         }
         summary = _substrate_warm_business_summary(
             summary,

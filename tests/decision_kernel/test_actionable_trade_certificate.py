@@ -96,7 +96,7 @@ def test_actionable_rejects_q_lcb_above_q_live():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_below_live_win_rate_floor():
+def test_actionable_rejects_center_yes_below_quality_floor():
     parents, action = actionable_graph(
         action_payload={
             "q_live": 0.24833093804728934,
@@ -116,8 +116,34 @@ def test_actionable_rejects_below_live_win_rate_floor():
         }
     )
 
-    with pytest.raises(CertificateVerificationError, match="ADMISSION_WIN_RATE_FLOOR"):
+    with pytest.raises(
+        CertificateVerificationError,
+        match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
+    ):
         verify_actionable_trade(action, parents)
+
+
+def test_actionable_accepts_center_yes_below_binary_floor_when_quality_clear():
+    parents, action = actionable_graph(
+        action_payload={
+            "q_live": 0.28,
+            "q_lcb_5pct": 0.20,
+            "c_fee_adjusted": 0.12,
+            "c_cost_95pct": 0.12,
+            "trade_score": 0.08,
+            "action_score": 0.08,
+            "qkernel_execution_economics": {
+                **_action_payload()["qkernel_execution_economics"],
+                "payoff_q_point": 0.28,
+                "payoff_q_lcb": 0.20,
+                "cost": 0.12,
+                "edge_lcb": 0.08,
+                "selection_guard_q_safe": 0.20,
+            },
+        }
+    )
+
+    verify_actionable_trade(action, parents)
 
 
 def test_actionable_requires_qkernel_spine_selection_authority():

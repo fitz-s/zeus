@@ -4984,15 +4984,15 @@ def _build_event_bound_no_submit_receipt_core(
             selected_proof=proof,
             selected_token_id=selected_token_id,
         )
-        fdr = _qkernel_selected_route_fdr_proof(
+        fdr = _day0_selected_route_fdr_proof(
+            event_type=event.event_type,
             family_id=family.family_id,
             all_hypothesis_ids=all_hypothesis_ids,
             selected_hypothesis_id=hypothesis_id,
             selected_proof=proof,
         )
         if fdr is None:
-            fdr = _day0_selected_route_fdr_proof(
-                event_type=event.event_type,
+            fdr = _qkernel_selected_route_fdr_proof(
                 family_id=family.family_id,
                 all_hypothesis_ids=all_hypothesis_ids,
                 selected_hypothesis_id=hypothesis_id,
@@ -7056,10 +7056,16 @@ def _build_event_bound_taker_quality_proof(
     q_lcb_dec = Decimal(str(q_lcb))
     notional_dec = Decimal(str(max(float(notional), 0.0)))
     from src.strategy.live_inference.live_admission import (
-        live_win_rate_floor_rejection_reason,
+        live_entry_probability_quality_rejection_reason,
     )
 
-    live_win_rate_floor_reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    live_win_rate_floor_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=q_lcb,
+        direction=direction,
+        strategy_key=actionable_payload.get("strategy_key"),
+        selection_authority_applied=actionable_payload.get("selection_authority_applied"),
+        qkernel_execution_economics=actionable_payload.get("qkernel_execution_economics"),
+    )
     if live_win_rate_floor_reason is not None:
         return {
             "schema_version": 1,
@@ -8080,6 +8086,22 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         raw_cert = actionable_payload.get("qkernel_execution_economics")
         if raw_cert in (None, ""):
             raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
+        if isinstance(raw_cert, Mapping):
+            from src.strategy.live_inference.live_admission import (
+                live_entry_probability_quality_rejection_reason,
+            )
+
+            win_rate_reason = live_entry_probability_quality_rejection_reason(
+                q_lcb=raw_cert.get("payoff_q_lcb"),
+                direction=direction,
+                strategy_key=actionable_payload.get("strategy_key"),
+                selection_authority_applied=actionable_payload.get(
+                    "selection_authority_applied"
+                ),
+                qkernel_execution_economics=raw_cert,
+            )
+            if win_rate_reason is not None:
+                raise ValueError(win_rate_reason)
         raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID")
     cert_bin_id = str(cert.get("bin_id") or "").strip()
     if not cert_bin_id:
@@ -8114,10 +8136,16 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
     from src.strategy.live_inference.live_admission import (
-        live_win_rate_floor_rejection_reason,
+        live_entry_probability_quality_rejection_reason,
     )
 
-    win_rate_reason = live_win_rate_floor_rejection_reason(q_lcb=cert_q_lcb)
+    win_rate_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=cert_q_lcb,
+        direction=direction,
+        strategy_key=actionable_payload.get("strategy_key"),
+        selection_authority_applied=actionable_payload.get("selection_authority_applied"),
+        qkernel_execution_economics=cert,
+    )
     if win_rate_reason is not None:
         raise ValueError(win_rate_reason)
 
@@ -12610,6 +12638,32 @@ def _strategy_policy_has_selection_gate(sources: tuple[str, ...]) -> bool:
     return False
 
 
+def _proof_strategy_key_for_quality(
+    proof: _CandidateProof,
+    *,
+    strategy_policy_event_type: str | None,
+) -> str | None:
+    if not str(strategy_policy_event_type or "").strip():
+        return None
+    try:
+        return _event_bound_strategy_key(
+            event_type=strategy_policy_event_type or "",
+            direction=str(getattr(proof, "direction", "") or ""),
+            metric=str(
+                getattr(getattr(proof, "candidate", None), "metric", "")
+                or getattr(
+                    getattr(proof, "candidate", None),
+                    "temperature_metric",
+                    "",
+                )
+                or ""
+            ),
+            require_metric_live=False,
+        )
+    except Exception:  # noqa: BLE001 - quality gate falls back to ordinary binary floor.
+        return None
+
+
 def _live_selection_rejection_reason(
     proof: _CandidateProof,
     *,
@@ -12627,11 +12681,18 @@ def _live_selection_rejection_reason(
     """
     if enforce_win_rate_floor:
         from src.strategy.live_inference.live_admission import (
-            live_win_rate_floor_rejection_reason,
+            live_entry_probability_quality_rejection_reason,
         )
 
-        win_rate_reason = live_win_rate_floor_rejection_reason(
-            q_lcb=getattr(proof, "q_lcb_5pct", None)
+        win_rate_reason = live_entry_probability_quality_rejection_reason(
+            q_lcb=getattr(proof, "q_lcb_5pct", None),
+            direction=getattr(proof, "direction", None),
+            strategy_key=_proof_strategy_key_for_quality(
+                proof,
+                strategy_policy_event_type=strategy_policy_event_type,
+            ),
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics=getattr(proof, "qkernel_execution_economics", None),
         )
         if win_rate_reason is not None:
             return win_rate_reason
@@ -12690,10 +12751,19 @@ def _qkernel_final_submit_floor_rejection_reason(
         return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
 
     from src.strategy.live_inference.live_admission import (
-        live_win_rate_floor_rejection_reason,
+        live_entry_probability_quality_rejection_reason,
     )
 
-    win_rate_reason = live_win_rate_floor_rejection_reason(q_lcb=payoff_q_lcb)
+    win_rate_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=payoff_q_lcb,
+        direction=str(getattr(proof, "direction", "") or ""),
+        strategy_key=_proof_strategy_key_for_quality(
+            proof,
+            strategy_policy_event_type=strategy_policy_event_type,
+        ),
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=cert,
+    )
     if win_rate_reason is not None:
         return win_rate_reason
 
@@ -12990,6 +13060,10 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE", "buy_no_evidence"),
     ("ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", "buy_no_evidence"),
     ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "legacy_rounded_mu_direction"),
+    (
+        "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
+        "qkernel_center_yes_quality_floor",
+    ),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
     ("STRATEGY_POLICY_GATED", "strategy_policy"),

@@ -20,7 +20,7 @@ from src.decision.family_decision_engine import (
     roi_frontier_useful_values,
 )
 from src.strategy.live_inference.live_admission import (
-    live_win_rate_floor_rejection_reason,
+    live_entry_probability_quality_rejection_reason,
 )
 from src.events.day0_authority import (
     Day0AuthorityError,
@@ -532,6 +532,15 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
+    quality_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=payoff_q_lcb,
+        direction=payload.get("direction"),
+        strategy_key=payload.get("strategy_key"),
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        qkernel_execution_economics=economics,
+    )
+    if quality_reason is not None:
+        raise CertificateVerificationError(f"actionable {quality_reason}")
     if not roi_frontier_useful_values(
         side=qkernel_side,
         cost=cost,
@@ -1494,7 +1503,13 @@ def _verify_live_entry_win_rate_floor(
 ) -> None:
     if not _entry_floor_applies(payload):
         return
-    reason = live_win_rate_floor_rejection_reason(q_lcb=q_lcb)
+    reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=q_lcb,
+        direction=payload.get("direction"),
+        strategy_key=payload.get("strategy_key"),
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        qkernel_execution_economics=payload.get("qkernel_execution_economics"),
+    )
     if reason is not None:
         raise CertificateVerificationError(f"{label} {reason}")
 
