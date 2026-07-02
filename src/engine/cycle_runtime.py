@@ -4767,6 +4767,21 @@ def execute_monitoring_phase(
                         final_exit_reason=exit_decision.reason,
                         final_exit_trigger=exit_decision.trigger,
                     )
+                    if _position_state_value(pos) != "quarantined":
+                        from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
+
+                        mark_market_closed_hold_to_settlement(
+                            pos,
+                            reason=exit_decision.trigger,
+                            error=str(
+                                closed_market_info.get("source")
+                                or "market_closed_non_accepting_orders"
+                            ),
+                            conn=conn,
+                        )
+                        summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
+                            summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
+                        )
                     artifact.add_monitor_result(
                         deps.MonitorResult(
                             position_id=pos.trade_id,

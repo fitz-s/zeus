@@ -589,7 +589,7 @@ def test_pre_submit_allows_exact_strategy_entry_floor_for_day0_authority():
             current_best_bid=0.09,
             current_best_ask=0.11,
             qkernel_execution_economics={
-                **_pre_submit_payload()["qkernel_execution_economics"],
+                **_day0_qkernel_economics(),
                 "payoff_q_point": 0.50,
                 "payoff_q_lcb": 0.20,
                 "cost": 0.10,
@@ -869,6 +869,76 @@ def test_pre_submit_accepts_day0_observation_authority_with_qkernel():
     assert pre_submit.payload["event_type"] == "DAY0_EXTREME_UPDATED"
     assert pre_submit.payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
     assert pre_submit.payload["_edli_q_source"] == "day0_remaining_day"
+
+
+def test_pre_submit_rejects_degenerate_day0_remaining_window_probability():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="q_lcb must be strictly below q_live"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                q_live=0.60,
+                q_lcb_5pct=0.60,
+                qkernel_execution_economics={
+                    **_day0_qkernel_economics(),
+                    "payoff_q_point": 0.60,
+                    "payoff_q_lcb": 0.60,
+                    "cost": 0.40,
+                    "edge_lcb": 0.20,
+                    "selection_guard_q_safe": 0.60,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_day0_observed_boundary_guard_without_remaining_window():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="DAY0_OBSERVED_BOUNDARY"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                q_live=0.9614944294185659,
+                q_lcb_5pct=0.96,
+                limit_price=0.44,
+                expected_edge=0.2459479999235843,
+                current_best_bid=0.43,
+                current_best_ask=0.45,
+                qkernel_execution_economics={
+                    **_day0_qkernel_economics(),
+                    "payoff_q_point": 0.9614944294185659,
+                    "payoff_q_lcb": 0.96,
+                    "cost": 0.7140520000764157,
+                    "edge_lcb": 0.2459479999235843,
+                    "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                    "q_lcb_guard_cell_key": "day0_observed_boundary",
+                    "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                    "selection_guard_cell_key": "day0_observed_boundary",
+                    "selection_guard_q_safe": 0.96,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
 def test_pre_submit_rejects_day0_missing_remaining_window_probability_authority():
@@ -1244,9 +1314,13 @@ def _day0_probability_authority(condition_id: str = "condition-1", q_lcb: float 
 
 def _day0_pre_submit_payload(**overrides):
     condition_id = str(overrides.get("condition_id") or "condition-1")
+    q_live = float(overrides.get("q_live") or 0.70)
     q_lcb = float(overrides.get("q_lcb_5pct") or 0.60)
     day0_probability = _day0_probability_authority(condition_id, q_lcb)
     payload = _pre_submit_payload(
+        q_live=q_live,
+        q_lcb_5pct=q_lcb,
+        qkernel_execution_economics=_day0_qkernel_economics(q_live=q_live, q_lcb=q_lcb),
         event_type="DAY0_EXTREME_UPDATED",
         source_match_status="MATCH",
         local_date_status="MATCH",
@@ -1274,6 +1348,26 @@ def _day0_pre_submit_payload(**overrides):
     )
     payload.update(overrides)
     return payload
+
+
+def _day0_qkernel_economics(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dict:
+    economics = dict(_pre_submit_payload()["qkernel_execution_economics"])
+    economics.update(
+        {
+            "payoff_q_point": q_live,
+            "payoff_q_lcb": q_lcb,
+            "edge_lcb": q_lcb - float(economics["cost"]),
+            "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "selection_guard_abstained": False,
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_n": 0,
+            "selection_guard_q_safe": q_lcb,
+        }
+    )
+    return economics
 
 
 def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:

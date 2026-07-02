@@ -26,6 +26,7 @@ from src.events.day0_authority import (
     Day0AuthorityError,
     assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
+    assert_live_day0_qkernel_guard_authority,
 )
 
 FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
@@ -452,7 +453,12 @@ def _verify_actionable_probability_authority(
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(payload, label="actionable")
-        _verify_day0_probability_payload_authority(payload, q_lcb=q_lcb, label="actionable")
+        _verify_day0_probability_payload_authority(
+            payload,
+            q_live=q_live,
+            q_lcb=q_lcb,
+            label="actionable",
+        )
         _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
@@ -467,12 +473,19 @@ def _verify_day0_observation_payload_authority(payload: dict, *, label: str) -> 
         ) from None
 
 
-def _verify_day0_probability_payload_authority(payload: dict, *, q_lcb: float, label: str) -> None:
+def _verify_day0_probability_payload_authority(
+    payload: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+    label: str,
+) -> None:
     try:
         assert_live_day0_probability_authority(
             payload,
             direction=payload.get("direction"),
             condition_id=payload.get("condition_id"),
+            q_live=q_live,
             q_lcb=q_lcb,
         )
     except Day0AuthorityError as exc:
@@ -497,6 +510,13 @@ def _verify_actionable_qkernel_economics(
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
     _verify_qkernel_selection_guard(economics, label="actionable qkernel")
+    if str(payload.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
+        try:
+            assert_live_day0_qkernel_guard_authority(economics)
+        except Day0AuthorityError as exc:
+            raise CertificateVerificationError(
+                f"actionable day0 qkernel guard authority required:{exc}"
+            ) from None
     native_side = native_curve_side_for_direction(payload.get("direction"))
     qkernel_side = str(economics.get("side") or "").upper()
     if native_side is not None and qkernel_side != native_side:
@@ -891,7 +911,12 @@ def _verify_pre_submit_probability_authority(
     event_type = str(pre_submit.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
         _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
-        _verify_day0_probability_payload_authority(pre_submit, q_lcb=q_lcb, label="pre-submit")
+        _verify_day0_probability_payload_authority(
+            pre_submit,
+            q_live=q_live,
+            q_lcb=q_lcb,
+            label="pre-submit",
+        )
         _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
         return
     _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
@@ -1661,6 +1686,13 @@ def _verify_pre_submit_qkernel_economics(
     if explicit_non_direct:
         return
     _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
+    if str(pre_submit.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
+        try:
+            assert_live_day0_qkernel_guard_authority(economics)
+        except Day0AuthorityError as exc:
+            raise CertificateVerificationError(
+                f"pre-submit day0 qkernel guard authority required:{exc}"
+            ) from None
     route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
     native_side = native_curve_side_for_direction(pre_submit.get("direction"))
     qkernel_side = str(route.get("side") or economics.get("side") or "").upper()

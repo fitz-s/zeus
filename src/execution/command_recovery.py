@@ -3423,6 +3423,17 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
     qkernel_payload = actionable.get("qkernel_execution_economics")
     selection_authority = str(actionable.get("selection_authority_applied") or "").strip()
     qkernel_certified = selection_authority == "qkernel_spine" and isinstance(qkernel_payload, dict)
+    q_live = _positive_probability_or_none(actionable.get("q_live"))
+    q_lcb = _positive_probability_or_none(actionable.get("q_lcb_5pct"))
+    if isinstance(qkernel_payload, dict):
+        qkernel_point = _positive_probability_or_none(qkernel_payload.get("payoff_q_point"))
+        qkernel_lcb = _positive_probability_or_none(qkernel_payload.get("payoff_q_lcb"))
+        if qkernel_point is not None and qkernel_lcb is not None:
+            q_live = qkernel_point
+            q_lcb = qkernel_lcb
+    entry_ci_width = 0.0
+    if q_live is not None and q_lcb is not None and q_live > q_lcb:
+        entry_ci_width = min(1.0, max(0.0, 2.0 * float(q_live - q_lcb)))
     source_context = _json_mapping(final_intent.get("decision_source_context"))
     market_event = _market_event_identity_for_condition(
         conn,
@@ -3513,7 +3524,8 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         "edge_source": strategy_key,
         "discovery_mode": discovery_mode,
         "cluster": city,
-        "p_posterior": actionable.get("q_live") or 0.0,
+        "p_posterior": q_live or 0.0,
+        "entry_ci_width": entry_ci_width,
         "decision_snapshot_id": (
             actionable.get("causal_snapshot_id")
             or final_intent.get("causal_snapshot_id")
@@ -3665,6 +3677,7 @@ def _entry_recovery_position(
     if strategy_key not in _CANONICAL_STRATEGY_KEYS:
         raise ValueError(f"{kind} projection repair requires valid strategy_key")
     p_posterior = _decimal_or_none(trade_case.get("p_posterior")) or Decimal("0")
+    entry_ci_width = _decimal_or_none(trade_case.get("entry_ci_width")) or Decimal("0")
     edge_context = _json_mapping(trade_case.get("edge_context_json"))
     return SimpleNamespace(
         trade_id=position_id,
@@ -3701,6 +3714,7 @@ def _entry_recovery_position(
         ),
         entry_fill_verified=bool(filled and not partial_fill),
         p_posterior=float(p_posterior),
+        entry_ci_width=float(entry_ci_width),
         last_monitor_prob=None,
         last_monitor_edge=None,
         last_monitor_market_price=None,

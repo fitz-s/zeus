@@ -689,11 +689,13 @@ def _entry_economics_component(
     ]
     economics = getattr(intent, "qkernel_execution_economics", None)
     day0_authority_errors: tuple[str, ...] | None = None
+    is_day0_actionable = False
     if isinstance(actionable_payload, Mapping) and str(
         actionable_payload.get("event_type") or ""
     ).strip() == "DAY0_EXTREME_UPDATED":
         from src.events.day0_authority import day0_live_payload_authority_errors
 
+        is_day0_actionable = True
         day0_authority_errors = day0_live_payload_authority_errors(actionable_payload)
     if not isinstance(economics, Mapping):
         missing.append("qkernel_execution_economics")
@@ -818,6 +820,32 @@ def _entry_economics_component(
                 reason="day0_observation_authority_missing",
                 missing=",".join(day0_authority_errors),
             )
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_probability_authority,
+        )
+
+        try:
+            assert_live_day0_probability_authority(
+                actionable_payload or {},
+                direction=(actionable_payload or {}).get(
+                    "direction",
+                    getattr(intent, "direction", ""),
+                ),
+                condition_id=(actionable_payload or {}).get(
+                    "condition_id",
+                    getattr(intent, "condition_id", ""),
+                ),
+                q_live=q_live,
+                q_lcb=q_lcb,
+            )
+        except Day0AuthorityError as exc:
+            return _capability_component(
+                "entry_economics",
+                allowed=False,
+                reason="day0_probability_authority_missing",
+                error=str(exc),
+            )
     direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
@@ -836,6 +864,17 @@ def _entry_economics_component(
     selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
     selection_guard_abstained = _bool_field(economics.get("selection_guard_abstained"))
     selection_guard_q_safe = _float_field(economics.get("selection_guard_q_safe"))
+    day0_qkernel_guard_error = ""
+    if is_day0_actionable:
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_qkernel_guard_authority,
+        )
+
+        try:
+            assert_live_day0_qkernel_guard_authority(economics)
+        except Day0AuthorityError as exc:
+            day0_qkernel_guard_error = str(exc)
     from src.strategy.live_inference.live_admission import (
         live_entry_probability_quality_rejection_reason,
     )
@@ -867,6 +906,8 @@ def _entry_economics_component(
         reason = "qkernel_selection_guard_abstained"
     elif selection_guard_basis == "SIDE_NOT_ARMED":
         reason = "qkernel_selection_side_not_armed"
+    elif day0_qkernel_guard_error:
+        reason = "day0_qkernel_guard_authority_missing"
     elif selection_guard_q_safe is None or selection_guard_q_safe <= 0.0:
         reason = "qkernel_selection_q_safe_non_positive"
     elif expected_side and econ_side != expected_side:
@@ -951,6 +992,7 @@ def _entry_economics_component(
             qkernel_selection_guard_q_safe=(
                 selection_guard_q_safe if selection_guard_q_safe is not None else ""
             ),
+            day0_qkernel_guard_error=day0_qkernel_guard_error,
         )
     live_win_rate_floor_reason = live_probability_quality_reason
     if live_win_rate_floor_reason is not None:

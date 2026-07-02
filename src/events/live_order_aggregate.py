@@ -18,6 +18,7 @@ from src.events.day0_authority import (
     Day0AuthorityError,
     assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
+    assert_live_day0_qkernel_guard_authority,
 )
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
 
@@ -900,6 +901,7 @@ def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lc
             payload,
             direction=payload.get("direction"),
             condition_id=payload.get("condition_id"),
+            q_live=payload.get("q_live"),
             q_lcb=q_lcb,
         )
     except Day0AuthorityError as exc:
@@ -934,6 +936,14 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_basis blocks side")
     if economics.get("selection_guard_abstained") is not False:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_abstained must be false")
+    if str(payload.get("event_type") or "").strip() == _DAY0_EVENT_TYPE:
+        try:
+            assert_live_day0_qkernel_guard_authority(economics)
+        except Day0AuthorityError as exc:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated day0 qkernel guard authority required:"
+                + str(exc)
+            ) from None
     selection_guard_q_safe = _positive_number(
         economics.get("selection_guard_q_safe"),
         "qkernel_execution_economics.selection_guard_q_safe",

@@ -6846,6 +6846,7 @@ class TestRecoveryResolutionTable:
         assert trade_case["entry_method"] == "qkernel_spine"
         assert trade_case["discovery_mode"] == "update_reaction"
         assert trade_case["p_posterior"] == pytest.approx(0.81)
+        assert trade_case["entry_ci_width"] == pytest.approx(0.10)
 
     def test_edli_trade_case_recovers_from_live_order_events_without_certificates(
         self,
@@ -6939,6 +6940,7 @@ class TestRecoveryResolutionTable:
         assert trade_case["unit"] == "C"
         assert trade_case["entry_method"] == "qkernel_spine"
         assert trade_case["p_posterior"] == pytest.approx(0.91)
+        assert trade_case["entry_ci_width"] == pytest.approx(0.18)
 
     def test_edli_trade_case_marks_non_qkernel_actionable_as_venue_fact_recovery(
         self,
@@ -8664,7 +8666,7 @@ class TestRecoveryResolutionTable:
         current = conn.execute(
             """
             SELECT phase, city, target_date, direction, shares, entry_price,
-                   order_status, entry_method, strategy_key, p_posterior
+                   order_status, entry_method, strategy_key, p_posterior, entry_ci_width
               FROM position_current
              WHERE position_id = 'pos-001'
             """
@@ -8680,6 +8682,7 @@ class TestRecoveryResolutionTable:
             "entry_method": "qkernel_spine",
             "strategy_key": "day0_nowcast_entry",
             "p_posterior": pytest.approx(0.9614944294185659),
+            "entry_ci_width": pytest.approx(0.0029888588371318),
         }
         event_types = [
             row["event_type"]

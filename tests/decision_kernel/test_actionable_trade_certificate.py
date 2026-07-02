@@ -54,6 +54,7 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
             "_edli_day0_q_mode": "remaining_day",
             "_edli_day0_remaining_models": 3,
             "_edli_day0_lcb_transform": _day0_lcb_transform(),
+            "qkernel_execution_economics": _day0_qkernel_economics(),
         },
         extra_parent_payloads={
             claims.DAY0_AUTHORITY: {
@@ -68,6 +69,96 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
     )
 
     verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_degenerate_day0_remaining_window_q():
+    parents, action = actionable_graph(
+        action_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "raw_value": 20.0,
+            "rounded_value": 20,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "day0_probability_authority": _day0_probability_authority(),
+            "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_q_mode": "remaining_day",
+            "_edli_day0_remaining_models": 3,
+            "_edli_day0_lcb_transform": _day0_lcb_transform(),
+            "q_live": 0.6,
+            "q_lcb_5pct": 0.6,
+            "qkernel_execution_economics": {
+                **_day0_qkernel_economics(),
+                "payoff_q_point": 0.6,
+                "payoff_q_lcb": 0.6,
+            },
+        },
+        extra_parent_payloads={
+            claims.DAY0_AUTHORITY: {
+                "event_id": "event-1",
+                "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+            },
+            claims.ABSORBING_BOUNDARY: {
+                "event_id": "event-1",
+                "boundary": "day0_absorbing_hard_fact",
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="q_lcb must be strictly below q_live"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_day0_observed_boundary_as_entry_qkernel_guard():
+    parents, action = actionable_graph(
+        action_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "raw_value": 32.0,
+            "rounded_value": 32,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "day0_probability_authority": _day0_probability_authority(),
+            "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_q_mode": "remaining_day",
+            "_edli_day0_remaining_models": 3,
+            "_edli_day0_lcb_transform": _day0_lcb_transform(),
+            "qkernel_execution_economics": {
+                **_day0_qkernel_economics(),
+                "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                "q_lcb_guard_cell_key": "day0_observed_boundary",
+                "selection_guard_cell_key": "day0_observed_boundary",
+            },
+        },
+        extra_parent_payloads={
+            claims.DAY0_AUTHORITY: {
+                "event_id": "event-1",
+                "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+            },
+            claims.ABSORBING_BOUNDARY: {
+                "event_id": "event-1",
+                "boundary": "day0_absorbing_hard_fact",
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="DAY0_OBSERVED_BOUNDARY"):
+        verify_actionable_trade(action, parents)
 
 
 def _day0_lcb_transform():
@@ -96,6 +187,23 @@ def _day0_probability_authority():
         "observation_available_at": "2026-05-25T11:35:00+00:00",
         "lcb_transform": _day0_lcb_transform(),
     }
+
+
+def _day0_qkernel_economics() -> dict:
+    economics = dict(_action_payload()["qkernel_execution_economics"])
+    economics.update(
+        {
+            "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "selection_guard_abstained": False,
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_n": 0,
+            "selection_guard_q_safe": economics["payoff_q_lcb"],
+        }
+    )
+    return economics
 
 
 def test_actionable_requires_positive_action_score():

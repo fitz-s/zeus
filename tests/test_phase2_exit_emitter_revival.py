@@ -644,12 +644,29 @@ class TestDay0StaticClosedBehavioral:
 
         assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
         assert summary.get("day0_hard_fact_closed_market_monitors", 0) == 1
+        assert summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) == 1
         assert results and results[0].fresh_prob == pytest.approx(0.0)
         assert "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED" in results[0].exit_reason
         assert pos.last_monitor_prob == pytest.approx(0.0)
         assert pos.last_monitor_prob_is_fresh is True
         assert pos.last_monitor_market_price is None
         assert pos.last_monitor_market_price_is_fresh is False
+        hold_event = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND caused_by = 'market_closed_hold_to_settlement'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (pos.trade_id,),
+        ).fetchone()
+        assert hold_event is not None
+        assert json.loads(hold_event["payload_json"])["semantic_event"] == (
+            "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+        )
 
 
 # ---------------------------------------------------------------------------

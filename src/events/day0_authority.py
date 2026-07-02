@@ -27,6 +27,8 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
 DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
+DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
+DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
 
 
 def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNOWN") -> str:
@@ -124,6 +126,7 @@ def assert_live_day0_probability_authority(
     *,
     direction: object | None = None,
     condition_id: object | None = None,
+    q_live: float | None = None,
     q_lcb: float | None = None,
 ) -> None:
     """Fail closed unless Day0 entry probability is remaining-window qkernel evidence.
@@ -167,6 +170,18 @@ def assert_live_day0_probability_authority(
     transform = _day0_lcb_transform(payload, block)
     if q_lcb is None:
         return
+    if q_live is not None:
+        try:
+            q_live_value = float(q_live)
+            q_lcb_value = float(q_lcb)
+        except (TypeError, ValueError):
+            raise Day0AuthorityError("remaining_day q_live/q_lcb nonnumeric") from None
+        if not (math.isfinite(q_live_value) and math.isfinite(q_lcb_value)):
+            raise Day0AuthorityError("remaining_day q_live/q_lcb nonfinite")
+        if q_live_value < 0.0 or q_live_value > 1.0 or q_lcb_value < 0.0 or q_lcb_value > 1.0:
+            raise Day0AuthorityError("remaining_day q_live/q_lcb out of range")
+        if q_lcb_value >= q_live_value:
+            raise Day0AuthorityError("remaining_day q_lcb must be strictly below q_live")
     selected_condition = str(condition_id or payload.get("condition_id") or "").strip()
     if not selected_condition:
         raise Day0AuthorityError("selected_condition_id missing")
@@ -194,6 +209,29 @@ def assert_live_day0_probability_authority(
             f"condition_id={selected_condition}:q_lcb={float(q_lcb):.12g}:"
             f"transform_lcb={transform_lcb:.12g}"
         )
+
+
+def assert_live_day0_qkernel_guard_authority(economics: Mapping[str, object]) -> None:
+    """Fail closed unless Day0 entry qkernel evidence uses remaining-day guard law.
+
+    ``DAY0_OBSERVED_BOUNDARY`` is a hard-fact observation boundary. It can rule out
+    already-impossible outcomes, but it cannot by itself license an entry on a
+    finite bin that merely contains the current running extreme.
+    """
+
+    for field_name in ("q_lcb_guard_basis", "selection_guard_basis"):
+        basis = str(economics.get(field_name) or "").strip()
+        if not basis:
+            raise Day0AuthorityError(f"{field_name} missing")
+        if basis == DAY0_OBSERVED_BOUNDARY_GUARD_BASIS:
+            raise Day0AuthorityError(f"{field_name} cannot be DAY0_OBSERVED_BOUNDARY")
+        if basis != DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS:
+            raise Day0AuthorityError(
+                f"{field_name} must be {DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS}"
+            )
+    for field_name in ("q_lcb_guard_abstained", "selection_guard_abstained"):
+        if economics.get(field_name) is not False:
+            raise Day0AuthorityError(f"{field_name} must be false")
 
 
 @dataclass(frozen=True)
