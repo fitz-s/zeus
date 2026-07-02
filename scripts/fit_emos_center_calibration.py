@@ -435,7 +435,7 @@ def main() -> int:
         "model": "affine_ngr_center: mu' = a + b*mu_served (per-unit, empirical-Bayes shrink-to-identity, DATA-DERIVED, no kappa/clamp)",
         "validation": "per-city leave-one-GLOBAL-date-out; LAYER served only when NESTED selection portfolio lower-CI > 0",
         "selection_protocol": "nested global-date: reselect cities inside each outer held-date fold; enable if portfolio lcb95 > 0",
-        "support_guard": "apply_affine_in_support clamps mu to [x_lo,x_hi] (observed range) before the affine",
+        "support_guard": "apply_affine_in_support serves the affine only inside [x_lo,x_hi]; outside support it returns the raw center",
         "lead_guard": "served ONLY at served_lead; other leads return identity",
         "min_days": a.min_days,
         "source_commit": _source_commit(),

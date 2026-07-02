@@ -68,16 +68,25 @@ def test_apply_affine():
     assert apply_affine(20.0, 1.0, 1.05) == pytest.approx(22.0)
 
 
-def test_apply_affine_in_support_clamps_outside_range():
-    # b=0.6 line; inside [20,30] the affine applies, outside the delta is held flat at the endpoint.
+def test_apply_affine_in_support_returns_identity_outside_range():
+    # The affine is trained only inside [20,30]. Outside support, live serving must not
+    # extrapolate a boundary correction into an unobserved temperature regime.
     a, b, xlo, xhi = 8.0, 0.6, 20.0, 30.0
     assert apply_affine_in_support(25.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 25.0)  # in-range
-    # above support: input clamped to 30 -> correction frozen at the x_hi value
-    assert apply_affine_in_support(40.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 30.0)
-    # below support: input clamped to 20
-    assert apply_affine_in_support(5.0, a, b, xlo, xhi) == pytest.approx(8.0 + 0.6 * 20.0)
+    assert apply_affine_in_support(40.0, a, b, xlo, xhi) == pytest.approx(40.0)
+    assert apply_affine_in_support(5.0, a, b, xlo, xhi) == pytest.approx(5.0)
     # no range -> plain affine
     assert apply_affine_in_support(40.0, a, b, None, None) == pytest.approx(8.0 + 0.6 * 40.0)
+
+
+def test_apply_affine_in_support_buenos_low_support_regression():
+    # Buenos Aires 2026-07-02: raw runtime center was ~7.692C, below the fitted support floor
+    # 9.958C. The old boundary-held correction served 10.785C and created an 11C YES entry.
+    raw_center = 0.152 * 7.5 + 0.481 * 7.9 + 0.367 * 7.5
+    assert raw_center < 9.958
+    assert apply_affine_in_support(raw_center, 0.0477, 1.07827, 9.958, 16.927) == pytest.approx(
+        raw_center
+    )
 
 
 # ---- artifact lookup (fail-soft; returns (a, b, x_lo, x_hi); lead-gated) ---------------------

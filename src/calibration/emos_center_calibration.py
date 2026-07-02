@@ -108,14 +108,18 @@ def apply_affine(center: float, a: float, b: float) -> float:
 def apply_affine_in_support(
     center: float, a: float, b: float, x_lo: float | None, x_hi: float | None
 ) -> float:
-    """μ' = a + b·μ, but the temperature TILT is applied only WITHIN the training support: the input
-    is clamped to [x_lo, x_hi] before the affine, so the correction δ(μ)=a+(b−1)μ is held FLAT at its
-    endpoint value outside the observed range. Guards a strong slope (b far from 1) against unearned
-    extrapolation to temperatures the fit never saw — a DATA-DERIVED bound (the observed range), not a
-    hand-set clamp. x_lo/x_hi None (or identity a=0,b=1) => plain μ (byte-identical)."""
+    """μ' = a + b·μ, served only inside the fitted runtime-center support.
+
+    Outside [x_lo, x_hi], return the raw center. A boundary-held affine delta is still an
+    extrapolated correction in an unobserved temperature regime; live probability must not invent a
+    new center there. x_lo/x_hi None (or identity a=0,b=1) => plain affine.
+    """
     c = float(center)
     if x_lo is not None and x_hi is not None and x_lo <= x_hi:
-        c = min(float(x_hi), max(float(x_lo), c))
+        lo = float(x_lo)
+        hi = float(x_hi)
+        if c < lo or c > hi:
+            return c
     return float(a) + float(b) * c
 
 
