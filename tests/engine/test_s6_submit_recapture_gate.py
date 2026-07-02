@@ -1097,7 +1097,7 @@ def test_qkernel_selection_scopes_out_low_payoff_lcb_even_when_legacy_lcb_is_hig
     )
 
     assert proofs[0].missing_reason is not None
-    assert proofs[0].missing_reason.startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert proofs[0].missing_reason.startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
     assert era._selection_scoped_proofs(
         proofs=proofs,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",

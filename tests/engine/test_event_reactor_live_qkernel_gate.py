@@ -12,20 +12,26 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.engine.event_reactor_adapter as era
 from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
+    _candidate_bin_id_from_topology,
     _day0_live_submit_admission_rejection_reason,
     _day0_selected_route_fdr_proof,
     _event_bound_strategy_key,
     _fdr_rejection_reason,
     _final_intent_decision_source_context_payload,
     _pre_submit_revalidation_payload_from_final_intent,
+    _qkernel_economics_with_near_day0_consistency,
+    _qkernel_near_day0_cert_rejection_reason,
     _record_qkernel_selection_family_facts,
 )
+from src.events.candidate_binding import MarketTopologyCandidate
 from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
 from src.decision_kernel.certificate import build_certificate
+from src.types.market import Bin
 
 
 def _qkernel_cert() -> dict:
@@ -520,6 +526,141 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
                 "q_live": 0.24833093804728934,
                 "q_lcb_5pct": 0.0990451308919892,
                 "min_entry_price": 0.02,
+                "qkernel_execution_economics": cert,
+            }
+        )
+
+
+def test_near_day0_qkernel_consistency_rejects_raw_extrema_contradiction(monkeypatch):
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {
+            "Buenos Aires": SimpleNamespace(
+                timezone="America/Argentina/Buenos_Aires",
+                settlement_unit="C",
+            )
+        },
+    )
+    candidate = MarketTopologyCandidate(
+        city="Buenos Aires",
+        target_date="2026-07-02",
+        metric="high",
+        condition_id="ba-11c",
+        yes_token_id="yes-ba-11c",
+        no_token_id="no-ba-11c",
+        bin=Bin(low=11, high=11, unit="C", label="11°C"),
+    )
+    bin_id = _candidate_bin_id_from_topology(candidate)
+    cert = _qkernel_cert()
+    cert.update(
+        candidate_id=f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+        route_id=f"DIRECT_YES:{bin_id}@proof",
+        bin_id=bin_id,
+        side="YES",
+        cost=0.041,
+        payoff_q_lcb=0.20,
+        payoff_q_point=0.28,
+        edge_lcb=0.159,
+        selection_guard_q_safe=0.20,
+    )
+
+    annotated = _qkernel_economics_with_near_day0_consistency(
+        {(bin_id, "YES"): cert},
+        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+        family=SimpleNamespace(
+            city="Buenos Aires",
+            target_date="2026-07-02",
+            metric="high",
+            candidates=(candidate,),
+        ),
+        payload={
+            "_edli_spine_raw_members_native": [7.7, 7.8, 8.5],
+            "_edli_spine_source_cycle_time_utc": "2026-07-01T12:00:00+00:00",
+        },
+        decision_time=datetime(2026, 7, 1, 22, 17, tzinfo=timezone.utc),
+    )
+
+    reason = _qkernel_near_day0_cert_rejection_reason(annotated[(bin_id, "YES")])
+    assert reason is not None
+    assert reason.startswith("ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION")
+    assert "raw_max=8.500" in reason
+    assert "bin_low=11.000" in reason
+
+
+def test_near_day0_qkernel_consistency_allows_supported_center_yes(monkeypatch):
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {
+            "Buenos Aires": SimpleNamespace(
+                timezone="America/Argentina/Buenos_Aires",
+                settlement_unit="C",
+            )
+        },
+    )
+    candidate = MarketTopologyCandidate(
+        city="Buenos Aires",
+        target_date="2026-07-02",
+        metric="high",
+        condition_id="ba-8c",
+        yes_token_id="yes-ba-8c",
+        no_token_id="no-ba-8c",
+        bin=Bin(low=8, high=8, unit="C", label="8°C"),
+    )
+    bin_id = _candidate_bin_id_from_topology(candidate)
+    cert = _qkernel_cert()
+    cert.update(
+        candidate_id=f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+        route_id=f"DIRECT_YES:{bin_id}@proof",
+        bin_id=bin_id,
+        side="YES",
+        cost=0.12,
+        payoff_q_lcb=0.20,
+        payoff_q_point=0.28,
+        edge_lcb=0.08,
+        selection_guard_q_safe=0.20,
+    )
+
+    annotated = _qkernel_economics_with_near_day0_consistency(
+        {(bin_id, "YES"): cert},
+        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+        family=SimpleNamespace(
+            city="Buenos Aires",
+            target_date="2026-07-02",
+            metric="high",
+            candidates=(candidate,),
+        ),
+        payload={
+            "_edli_spine_raw_members_native": [7.7, 7.8, 8.5],
+            "_edli_spine_source_cycle_time_utc": "2026-07-01T12:00:00+00:00",
+        },
+        decision_time=datetime(2026, 7, 1, 22, 17, tzinfo=timezone.utc),
+    )
+
+    verdict = annotated[(bin_id, "YES")]["near_day0_raw_extrema_consistency"]
+    assert verdict["passed"] is True
+    assert _qkernel_near_day0_cert_rejection_reason(annotated[(bin_id, "YES")]) is None
+
+
+def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
+    cert = _qkernel_cert()
+    cert["near_day0_raw_extrema_consistency"] = {
+        "schema_version": 1,
+        "passed": False,
+        "reason": "ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION:lead_hours=4.717",
+    }
+
+    with pytest.raises(ValueError, match="ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.70,
+                "q_lcb_5pct": 0.60,
+                "strategy_key": "center_buy",
                 "qkernel_execution_economics": cert,
             }
         )

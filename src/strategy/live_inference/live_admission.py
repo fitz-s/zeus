@@ -27,6 +27,9 @@ from src.calibration.settlement_backward_coverage import (
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.15
+LIVE_NEAR_DAY0_FORECAST_ENTRY_LEAD_HOURS = 12.0
+LIVE_NEAR_DAY0_FORECAST_ENTRY_POST_START_HOURS = 24.0
+LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE = 1.0
 
 # A buy-NO on a single settlement bin is not a generic "not this exact value"
 # lottery when the model itself assigns material YES mass to that bin. The
@@ -126,6 +129,99 @@ def live_entry_probability_quality_rejection_reason(
             1,
         )
     return live_win_rate_floor_rejection_reason(q_lcb=q_lcb, floor=floor)
+
+
+def near_day0_raw_extrema_consistency_rejection_reason(
+    *,
+    event_type: object,
+    direction: object,
+    target_bin_low: float | int | None,
+    target_bin_high: float | int | None,
+    raw_member_min: float | int | None,
+    raw_member_max: float | int | None,
+    raw_member_count: int | None,
+    lead_hours_to_target_start: float | int | None,
+    source_cycle_time: object = None,
+    margin_native: float = LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE,
+    pre_start_window_hours: float = LIVE_NEAR_DAY0_FORECAST_ENTRY_LEAD_HOURS,
+    post_start_window_hours: float = LIVE_NEAR_DAY0_FORECAST_ENTRY_POST_START_HOURS,
+) -> str | None:
+    """Reject forecast-lane exact-bin YES entries that contradict near-Day0 raw extrema.
+
+    The q-kernel may buy a YES point/range with conservative probability below a
+    binary 51% floor, but close to the local target day the same raw-model extrema
+    that feed the spine must still support the selected bin. A daily posterior tail
+    widened by sigma cannot overrule a fresh short-horizon member envelope.
+
+    This predicate is intentionally one-way: it only guards forecast-lane buy-YES
+    entries. Day0 observation events have their own authority, and buy-NO receives
+    support from the selected-side NO bound rather than from overlap with the YES bin.
+    """
+
+    event_text = str(event_type or "").strip()
+    if event_text not in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
+        return None
+    direction_value = getattr(direction, "value", direction)
+    if str(direction_value or "").strip().lower() not in {"buy_yes", "yes", "direction.yes"}:
+        return None
+    try:
+        lead_hours = float(lead_hours_to_target_start)
+        pre_window = float(pre_start_window_hours)
+        post_window = float(post_start_window_hours)
+        margin = float(margin_native)
+    except (TypeError, ValueError):
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:lead_hours=missing"
+    if not all(math.isfinite(v) for v in (lead_hours, pre_window, post_window, margin)):
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:lead_hours=nonfinite"
+    if pre_window <= 0.0 or post_window <= 0.0 or margin < 0.0:
+        raise ValueError("near-Day0 raw-extrema windows and margin must be positive")
+    if lead_hours > pre_window or lead_hours < -post_window:
+        return None
+    if lead_hours <= 0.0:
+        return (
+            "ADMISSION_DAY0_FORECAST_ENTRY_REQUIRES_OBSERVATION_LANE:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    try:
+        count = int(raw_member_count or 0)
+        raw_min = float(raw_member_min)
+        raw_max = float(raw_member_max)
+    except (TypeError, ValueError):
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    if count <= 0 or not all(math.isfinite(v) for v in (raw_min, raw_max)):
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    if raw_min > raw_max:
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_INVALID:"
+            f"raw_min={raw_min:.3f}:raw_max={raw_max:.3f}:count={count}"
+        )
+    bin_low = None if target_bin_low is None else float(target_bin_low)
+    bin_high = None if target_bin_high is None else float(target_bin_high)
+    if bin_low is not None and not math.isfinite(bin_low):
+        bin_low = None
+    if bin_high is not None and not math.isfinite(bin_high):
+        bin_high = None
+    if bin_low is None and bin_high is None:
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_INVALID:bin_bounds=missing"
+
+    below_selected_bin = bin_low is not None and raw_max < (bin_low - margin)
+    above_selected_bin = bin_high is not None and raw_min > (bin_high + margin)
+    if not (below_selected_bin or above_selected_bin):
+        return None
+    cycle_text = str(source_cycle_time or "").strip() or "missing"
+    return (
+        "ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION:"
+        f"lead_hours={lead_hours:.3f}:raw_min={raw_min:.3f}:raw_max={raw_max:.3f}:"
+        f"bin_low={'open' if bin_low is None else f'{bin_low:.3f}'}:"
+        f"bin_high={'open' if bin_high is None else f'{bin_high:.3f}'}:"
+        f"margin={margin:.3f}:count={count}:cycle={cycle_text}"
+    )
 
 
 def live_lcb_consistency_rejection_reason(

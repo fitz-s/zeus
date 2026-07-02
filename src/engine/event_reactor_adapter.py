@@ -2155,6 +2155,18 @@ def _valid_qkernel_execution_economics_payload(
     return cert
 
 
+def _qkernel_near_day0_cert_rejection_reason(cert: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(cert, Mapping):
+        return None
+    verdict = cert.get("near_day0_raw_extrema_consistency")
+    if not isinstance(verdict, Mapping):
+        return None
+    if verdict.get("passed") is False:
+        reason = str(verdict.get("reason") or "").strip()
+        return reason or "ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONSISTENCY_FAILED"
+    return None
+
+
 def _qkernel_cert_direction_admitted(
     cert: Mapping[str, Any],
     *,
@@ -4542,6 +4554,31 @@ def _build_event_bound_no_submit_receipt_core(
                 _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                     _spine_result.decision
                 )
+                _spine_candidate_economics_by_key = (
+                    _qkernel_economics_with_near_day0_consistency(
+                        _spine_candidate_economics_by_key,
+                        event=event,
+                        family=family,
+                        payload=payload,
+                        decision_time=decision_time,
+                    )
+                )
+                proof = _proof_with_near_day0_qkernel_consistency(
+                    proof,
+                    qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
+                )
+                _near_day0_qkernel_reason = (
+                    _qkernel_near_day0_cert_rejection_reason(
+                        getattr(proof, "qkernel_execution_economics", None)
+                    )
+                    if proof is not None
+                    else None
+                )
+                if _near_day0_qkernel_reason is not None:
+                    proof = None
+                    _spine_fact_decision = None
+                    _spine_no_trade_reason = _near_day0_qkernel_reason
+                    break
                 _fill_up_unactionable_reason = None
                 if proof is not None and _selection_scope_allows_same_family_monitor_owned:
                     _fill_up_unactionable_reason = (
@@ -7004,6 +7041,19 @@ def _build_event_bound_taker_quality_proof(
                 "maker_expected_profit_usd": "0",
                 "incremental_expected_profit_usd": "0",
             }
+        near_day0_reason = _qkernel_near_day0_cert_rejection_reason(qkernel_cert)
+        if near_day0_reason is not None:
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": near_day0_reason,
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+                "q_lcb_source": q_lcb_source,
+            }
         q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
         payload_q_live = _optional_float(actionable_payload.get("q_live"))
@@ -8108,6 +8158,9 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             if win_rate_reason is not None:
                 raise ValueError(win_rate_reason)
         raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID")
+    near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
+    if near_day0_reason is not None:
+        raise ValueError(near_day0_reason)
     cert_bin_id = str(cert.get("bin_id") or "").strip()
     if not cert_bin_id:
         cert_candidate_id = str(cert.get("candidate_id") or "").strip()
@@ -12771,6 +12824,9 @@ def _qkernel_final_submit_floor_rejection_reason(
     )
     if win_rate_reason is not None:
         return win_rate_reason
+    near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
+    if near_day0_reason is not None:
+        return near_day0_reason
 
     if not str(strategy_policy_event_type or "").strip():
         return None
@@ -12954,6 +13010,13 @@ def _proofs_with_qkernel_candidate_economics(
                 "QKERNEL_STAKE_NON_POSITIVE:"
                 f"stake={optimal_stake_usd:.6f}:edge_lcb={edge_lcb:.6f}"
             )
+        final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
+            proof=proof,
+            cert=cert,
+            strategy_policy_event_type=strategy_policy_event_type,
+        )
+        if final_floor_reason is not None:
+            return final_floor_reason
         growth_density = roi_frontier_growth_density(
             cost=cost,
             edge_lcb=edge_lcb,
@@ -12979,13 +13042,6 @@ def _proofs_with_qkernel_candidate_economics(
                 f"profit_lcb_usd={profit_lcb_usd:.6f}:growth_density={growth_density:.9f}:"
                 f"edge_roi_lcb={roi_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}"
             )
-        final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
-            proof=proof,
-            cert=cert,
-            strategy_policy_event_type=strategy_policy_event_type,
-        )
-        if final_floor_reason is not None:
-            return final_floor_reason
         return None
 
     annotated: list[_CandidateProof] = []
@@ -13068,6 +13124,14 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     (
         "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
         "qkernel_center_yes_quality_floor",
+    ),
+    (
+        "ADMISSION_DAY0_FORECAST_ENTRY_REQUIRES_OBSERVATION_LANE",
+        "near_day0_observation_lane",
+    ),
+    (
+        "ADMISSION_NEAR_DAY0_RAW_EXTREMA",
+        "near_day0_raw_extrema",
     ),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
@@ -17789,6 +17853,173 @@ def _spine_multimodel_members_for_event(
         else:
             precision_by_index.append((str(_model), None, 0, _repr_native))
     return members_native, str(_causal_sct), precision_by_index
+
+
+def _candidate_bin_id_from_topology(candidate: MarketTopologyCandidate) -> str:
+    bin_obj = getattr(candidate, "bin", None)
+    return stable_hash(
+        {
+            "condition_id": str(getattr(candidate, "condition_id", "") or ""),
+            "bin_low": getattr(bin_obj, "low", None),
+            "bin_high": getattr(bin_obj, "high", None),
+            "bin_unit": getattr(bin_obj, "unit", None),
+            "bin_label": getattr(bin_obj, "label", None),
+        }
+    )
+
+
+def _near_day0_lead_hours_to_target_start(
+    family,
+    *,
+    decision_time: datetime,
+) -> float | None:
+    try:
+        from zoneinfo import ZoneInfo
+
+        city = runtime_cities_by_name().get(str(family.city))
+        tz_name = str(getattr(city, "timezone", "") or "")
+        if not tz_name:
+            return None
+        target = date.fromisoformat(str(family.target_date)[:10])
+        target_start = datetime.combine(
+            target,
+            time.min,
+            tzinfo=ZoneInfo(tz_name),
+        ).astimezone(UTC)
+        return (
+            target_start - decision_time.astimezone(UTC)
+        ).total_seconds() / 3600.0
+    except Exception:  # noqa: BLE001 - caller turns absence into a typed admission block
+        return None
+
+
+def _near_day0_raw_member_summary_from_payload(
+    payload: Mapping[str, Any],
+) -> tuple[float | None, float | None, int]:
+    raw_members = payload.get("_edli_spine_raw_members_native")
+    if raw_members is None:
+        raw_members = payload.get("_edli_spine_debiased_members_native")
+    try:
+        arr = np.asarray(raw_members, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return None, None, 0
+    if arr.size == 0:
+        return None, None, 0
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None, None, 0
+    return float(np.min(finite)), float(np.max(finite)), int(finite.size)
+
+
+def _near_day0_qkernel_consistency_verdict(
+    *,
+    event: OpportunityEvent,
+    family,
+    candidate: MarketTopologyCandidate | None,
+    side: str,
+    payload: Mapping[str, Any],
+    decision_time: datetime,
+) -> dict[str, Any] | None:
+    direction = "buy_yes" if str(side).upper() == "YES" else "buy_no"
+    lead_hours = _near_day0_lead_hours_to_target_start(
+        family,
+        decision_time=decision_time,
+    )
+    raw_min, raw_max, raw_count = _near_day0_raw_member_summary_from_payload(payload)
+    bin_obj = getattr(candidate, "bin", None)
+    bin_low = getattr(bin_obj, "low", None)
+    bin_high = getattr(bin_obj, "high", None)
+    from src.strategy.live_inference.live_admission import (
+        near_day0_raw_extrema_consistency_rejection_reason,
+    )
+
+    reason = near_day0_raw_extrema_consistency_rejection_reason(
+        event_type=getattr(event, "event_type", None),
+        direction=direction,
+        target_bin_low=bin_low,
+        target_bin_high=bin_high,
+        raw_member_min=raw_min,
+        raw_member_max=raw_max,
+        raw_member_count=raw_count,
+        lead_hours_to_target_start=lead_hours,
+        source_cycle_time=payload.get("_edli_spine_source_cycle_time_utc"),
+    )
+    active = False
+    if lead_hours is None:
+        active = (
+            getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES
+            and direction == "buy_yes"
+        )
+    else:
+        active = (
+            getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES
+            and direction == "buy_yes"
+            and -24.0 <= float(lead_hours) <= 12.0
+        )
+    if reason is None and not active:
+        return None
+    return {
+        "schema_version": 1,
+        "passed": reason is None,
+        "reason": reason or "passed",
+        "event_type": str(getattr(event, "event_type", "") or ""),
+        "direction": direction,
+        "lead_hours_to_target_start": lead_hours,
+        "raw_member_min": raw_min,
+        "raw_member_max": raw_max,
+        "raw_member_count": raw_count,
+        "source_cycle_time": payload.get("_edli_spine_source_cycle_time_utc"),
+        "bin_low": bin_low,
+        "bin_high": bin_high,
+    }
+
+
+def _qkernel_economics_with_near_day0_consistency(
+    qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]],
+    *,
+    event: OpportunityEvent,
+    family,
+    payload: Mapping[str, Any],
+    decision_time: datetime,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    if not qkernel_economics_by_bin_side:
+        return {}
+    candidate_by_bin_id = {
+        _candidate_bin_id_from_topology(candidate): candidate
+        for candidate in getattr(family, "candidates", ()) or ()
+    }
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, cert in qkernel_economics_by_bin_side.items():
+        bin_id, side = key
+        cert_payload = dict(cert)
+        verdict = _near_day0_qkernel_consistency_verdict(
+            event=event,
+            family=family,
+            candidate=candidate_by_bin_id.get(str(bin_id)),
+            side=str(side),
+            payload=payload,
+            decision_time=decision_time,
+        )
+        if verdict is not None:
+            cert_payload["near_day0_raw_extrema_consistency"] = verdict
+        out[(str(bin_id), str(side))] = cert_payload
+    return out
+
+
+def _proof_with_near_day0_qkernel_consistency(
+    proof: _CandidateProof | None,
+    *,
+    qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> _CandidateProof | None:
+    if proof is None or not qkernel_economics_by_bin_side:
+        return proof
+    side = _qkernel_side_for_direction(str(getattr(proof, "direction", "") or ""))
+    if side is None:
+        return proof
+    cert = qkernel_economics_by_bin_side.get((_candidate_bin_id(proof), side))
+    if not isinstance(cert, Mapping):
+        return proof
+    return dataclass_replace(proof, qkernel_execution_economics=dict(cert))
 
 
 _PRE_DAY0_LOW_MODEL_UNSET = object()
