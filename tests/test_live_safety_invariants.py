@@ -115,6 +115,108 @@ def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_back
         assert snippet in source, rel_path
 
 
+def test_monitor_selection_uses_canonical_live_rows_not_historical_quarantine():
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT,
+            last_monitor_market_price_is_fresh INTEGER
+        )
+        """
+    )
+    stale_quarantine = _make_position(
+        trade_id="old-entry-authority-quarantine",
+        state="quarantined",
+        city="Wellington",
+        target_date="2026-06-24",
+        direction="buy_no",
+        shares=2.4255,
+        chain_shares=2.4255,
+        chain_state="entry_authority_quarantined",
+    )
+    live_day0 = _make_position(
+        trade_id="live-day0-wellington",
+        state="day0_window",
+        city="Wellington",
+        target_date="2026-07-02",
+        direction="buy_yes",
+        shares=15.0,
+        chain_shares=15.0,
+        chain_state="synced",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at,
+            last_monitor_market_price_is_fresh
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("old-entry-authority-quarantine", "quarantined", 2.4255, 2.4255, "2026-07-02T12:00:00+00:00", 1),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at,
+            last_monitor_market_price_is_fresh
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("live-day0-wellington", "day0_window", 15.0, 15.0, "2026-07-02T12:37:25+00:00", 0),
+    )
+
+    selected = cycle_runtime._monitoring_phase_positions(
+        _make_portfolio(stale_quarantine, live_day0),
+        conn=conn,
+    )
+
+    assert selected == [live_day0]
+
+
+def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_canonical_db():
+    from src.engine import cycle_runtime
+    from src.state.portfolio import get_open_positions
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    pos = _make_position(
+        trade_id="local-only-confirmed-fill-not-yet-projected",
+        state="holding",
+        city="Buenos Aires",
+        target_date="2026-07-02",
+        direction="buy_yes",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        shares=69.34,
+        shares_filled=69.34,
+        size_usd=2.84294,
+        cost_basis_usd=2.84294,
+        filled_cost_basis_usd=2.84294,
+        entry_price=0.041,
+        chain_state="local_only",
+        chain_shares=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+
+    assert get_open_positions(portfolio) == []
+    assert cycle_runtime._monitoring_phase_positions(portfolio, conn=conn) == [pos]
+
+
 def _make_position(**overrides) -> Position:
     """Create a test position with sensible defaults."""
     defaults = dict(

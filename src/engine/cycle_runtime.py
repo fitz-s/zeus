@@ -3654,24 +3654,121 @@ def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
     return False
 
 
-def _monitoring_phase_positions(portfolio) -> list:
-    """Open positions plus quarantine rows that need explicit monitor receipts."""
+_CANONICAL_MONITOR_PHASE_PRIORITY = {
+    "pending_exit": 0,
+    "day0_window": 1,
+    "active": 2,
+}
+
+
+def _canonical_monitor_position_order(conn) -> list[str] | None:
+    """Return monitorable position ids from canonical position_current.
+
+    ``None`` means the canonical projection is unavailable and callers should use
+    the legacy portfolio-only fallback.  An empty list means the projection is
+    available and currently has no active monitor-risk rows.
+    """
+
+    if conn is None or not _table_exists_in_schema(conn, "main", "position_current"):
+        return None
+    columns = _table_columns_in_schema(conn, "main", "position_current")
+    required = {"position_id", "phase"}
+    if not required.issubset(columns):
+        return None
+    select_sql = ", ".join(
+        [
+            "position_id",
+            "phase",
+            _select_expr(columns, "shares", "shares", "0.0"),
+            _select_expr(columns, "chain_shares", "chain_shares", "0.0"),
+            _select_expr(columns, "updated_at", "updated_at", "''"),
+            _select_expr(
+                columns,
+                "last_monitor_market_price_is_fresh",
+                "last_monitor_market_price_is_fresh",
+                "0",
+            ),
+        ]
+    )
+    try:
+        rows = conn.execute(f"SELECT {select_sql} FROM position_current").fetchall()
+    except Exception:
+        return None
+
+    ordered: list[tuple[int, int, str, str]] = []
+    for row in rows:
+        position_id = str(_row_get(row, "position_id", "") or "").strip()
+        phase = str(_row_get(row, "phase", "") or "").strip().lower()
+        if not position_id or phase not in _CANONICAL_MONITOR_PHASE_PRIORITY:
+            continue
+        shares = _finite_positive_or_none(_row_get(row, "shares"))
+        chain_shares = _finite_positive_or_none(_row_get(row, "chain_shares"))
+        if shares is None and chain_shares is None:
+            continue
+        market_price_stale = 1
+        if int(_row_get(row, "last_monitor_market_price_is_fresh", 0) or 0) == 1:
+            market_price_stale = 0
+        ordered.append(
+            (
+                _CANONICAL_MONITOR_PHASE_PRIORITY[phase],
+                -market_price_stale,
+                str(_row_get(row, "updated_at", "") or ""),
+                position_id,
+            )
+        )
+    ordered.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return [position_id for *_unused, position_id in ordered]
+
+
+def _monitoring_phase_positions(portfolio, conn=None) -> list:
+    """Open positions requiring exit/hold redecision.
+
+    When canonical ``position_current`` is available, it owns the live monitor
+    set.  Legacy portfolio JSON can contain historical settled/quarantined rows
+    with positive compatibility shares; those rows must not consume the
+    second-level exit-monitor loop ahead of active/pending money-risk rows.
+    """
+
+    canonical_order = _canonical_monitor_position_order(conn)
 
     out = []
-    seen: set[int] = set()
+    seen: set[str] = set()
+    all_positions = list(getattr(portfolio, "positions", []) or [])
+    by_position_id = {
+        str(getattr(pos, "trade_id", "") or ""): pos
+        for pos in all_positions
+        if str(getattr(pos, "trade_id", "") or "")
+    }
+    if canonical_order is not None:
+        for position_id in canonical_order:
+            pos = by_position_id.get(position_id)
+            if pos is None:
+                continue
+            out.append(pos)
+            seen.add(position_id)
+        for pos in all_positions:
+            position_id = str(getattr(pos, "trade_id", "") or "")
+            if position_id in seen:
+                continue
+            if _venue_confirmed_local_fill_needs_monitor(pos):
+                out.append(pos)
+                seen.add(position_id)
+        return out
+
     for pos in list(get_open_positions(portfolio)):
         out.append(pos)
-        seen.add(id(pos))
-    for pos in list(getattr(portfolio, "positions", []) or []):
-        if id(pos) in seen:
+        seen.add(str(getattr(pos, "trade_id", "") or id(pos)))
+    for pos in all_positions:
+        position_id = str(getattr(pos, "trade_id", "") or id(pos))
+        if position_id in seen:
             continue
         if _venue_confirmed_local_fill_needs_monitor(pos):
             out.append(pos)
-            seen.add(id(pos))
+            seen.add(position_id)
             continue
         if _requires_quarantine_monitor_resolution(pos):
             out.append(pos)
-            seen.add(id(pos))
+            seen.add(position_id)
     return out
 
 
@@ -4277,7 +4374,7 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    for pos in _monitoring_phase_positions(portfolio):
+    for pos in _monitoring_phase_positions(portfolio, conn=conn):
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)
