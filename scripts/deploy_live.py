@@ -811,16 +811,22 @@ def cmd_restart(args: argparse.Namespace) -> int:
             )
         return rc_all
 
+    expected_live_sha = ""
+    launched_after: datetime | None = None
+    if includes_live_trading:
+        expected_live_sha = head_sha(short=False)
+        ok, detail = _stop_label(LIVE_TRADING_LABEL)
+        if ok:
+            print(detail)
+        else:
+            print(detail, file=sys.stderr)
+            return 1
+
     recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
     if not recovery_ok:
         print("REFUSING to restart — live restart recovery is not green:")
         print(recovery_detail)
-        if includes_live_trading and live_was_loaded_before:
-            print(
-                "live-trading was not stopped; fix restart recovery blockers before reloading it.",
-                file=sys.stderr,
-            )
-        elif includes_live_trading:
+        if includes_live_trading:
             print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
         return 1
     print(recovery_detail)
@@ -829,25 +835,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)
-        if includes_live_trading and live_was_loaded_before:
-            print(
-                "live-trading was not stopped; fix preflight blockers before reloading it.",
-                file=sys.stderr,
-            )
-        elif includes_live_trading:
+        if includes_live_trading:
             print("live-trading left stopped; fix preflight blockers before starting it.", file=sys.stderr)
         return 1
     print(preflight_detail)
 
     if includes_live_trading:
-        expected_live_sha = head_sha(short=False)
-        ok, detail = _stop_label(LIVE_TRADING_LABEL)
-        if ok:
-            print(detail)
-        else:
-            print(detail, file=sys.stderr)
-        if not ok:
-            return 1
         launched_after = datetime.now(timezone.utc)
         ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:

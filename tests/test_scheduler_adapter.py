@@ -249,12 +249,25 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "_enqueue_fusion_upgrade_reseeds_if_needed",
         lambda cfg: {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
     )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda cfg: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 2,
+            "advances_detected": 2,
+            "held_advances_detected": 1,
+            "freshest_materializable_cycle": "2026-07-02T12:00:00+00:00",
+        },
+    )
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert result["source_clock_updated_sources"] == ["icon_global"]
     assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["cycle_advance_seeds_enqueued"] == 2
+    assert result["cycle_advance_detail"]["held_advances_detected"] == 1
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
 

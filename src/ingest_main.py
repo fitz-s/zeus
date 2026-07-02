@@ -1082,6 +1082,7 @@ def _replacement_availability_poll_tick():
     """
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
+        _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
@@ -1119,6 +1120,24 @@ def _replacement_availability_poll_tick():
     if upgrade_report is not None:
         report["fusion_upgrade_status"] = upgrade_report.get("status")
         report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+    cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+    if cycle_advance_report is not None:
+        report["cycle_advance_status"] = cycle_advance_report.get("status")
+        report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
+        if cycle_advance_report.get("advances_detected"):
+            report["cycle_advance_detail"] = {
+                k: cycle_advance_report.get(k)
+                for k in (
+                    "freshest_materializable_cycle",
+                    "advances_detected",
+                    "held_advances_detected",
+                    "seeds_enqueued",
+                    "held_seeds_enqueued",
+                    "already_enqueued",
+                    "manifest_missing",
+                    "enqueued",
+                )
+            }
     if source_clock_scoped_download_allows_cursor_advance(report):
         report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
     else:

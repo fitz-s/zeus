@@ -3929,7 +3929,13 @@ def _quarantined_position_can_redecision(pos) -> bool:
 
 
 def _day0_hard_fact_position_eligible(pos) -> bool:
-    return _position_state_value(pos) == "day0_window" or _quarantined_position_can_redecision(pos)
+    # Active same-day fills must not wait for a successful DAY0_WINDOW_ENTERED
+    # projection before consuming settlement-grade observed-so-far facts.  The
+    # hard-fact evaluator is date/source-gated and returns None for non-Day0
+    # families, so admitting active/holding states here is fail-closed for
+    # future dates while preventing same-day positions from missing the only
+    # sellable window after an absorbing observation update.
+    return _position_state_value(pos) in {"active", "entered", "holding", "day0_window"} or _quarantined_position_can_redecision(pos)
 
 
 def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
@@ -4967,7 +4973,7 @@ def execute_monitoring_phase(
                     legacy_threshold_hours=6.0,
                 )
                 if (_enter_day0
-                        and _position_state_value(pos) in {"entered", "holding"}
+                        and _position_state_value(pos) in {"active", "entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
                     new_state = enter_day0_window_runtime_state(
                         pos.state,

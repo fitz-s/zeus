@@ -1113,9 +1113,9 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),
         ("preflight", tuple(expanded_labels)),
-        ("stop", dl.LIVE_TRADING_LABEL),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
         ("queue", "post-start"),
@@ -1171,12 +1171,13 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
 
     assert rc == 0
     assert calls[0][0] == "launch"
+    stop_index = calls.index(("stop", dl.LIVE_TRADING_LABEL))
     recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
+    assert stop_index < recovery_index
     assert recovery_index < preflight_index
-    assert calls.index(("stop", dl.LIVE_TRADING_LABEL)) > preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
-    assert live_launch_index > calls.index(("stop", dl.LIVE_TRADING_LABEL))
+    assert live_launch_index > preflight_index
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
@@ -1222,11 +1223,12 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
-    assert "live-trading was not stopped" in err
+    assert "live-trading left stopped" in err
 
 
 def test_deploy_live_unknown_daemon_rejected(capsys):

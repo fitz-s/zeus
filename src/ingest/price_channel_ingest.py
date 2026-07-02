@@ -2325,21 +2325,49 @@ def _edli_refresh_held_position_quote_evidence(
             "market_channel_held_quote_refresh_max_tokens_per_cycle",
             default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
         )
-        selected_held_token_ids = ordered_held_token_ids[:max_tokens]
-        token_metadata = active_weather_token_metadata_for_tokens(
-            trade_read,
-            token_ids=selected_held_token_ids,
-        )
+        selected_held_token_ids: list[str] = []
+        scanned_held_token_ids: list[str] = []
+        metadata_missing_token_ids: list[str] = []
+        token_metadata = {}
+        batch_size = max(1, max_tokens)
+        for offset in range(0, len(ordered_held_token_ids), batch_size):
+            batch = ordered_held_token_ids[offset : offset + batch_size]
+            if not batch:
+                continue
+            scanned_held_token_ids.extend(batch)
+            batch_metadata = active_weather_token_metadata_for_tokens(
+                trade_read,
+                token_ids=batch,
+            )
+            token_metadata.update(batch_metadata)
+            for token_id in batch:
+                if token_id in batch_metadata:
+                    selected_held_token_ids.append(token_id)
+                    if len(selected_held_token_ids) >= max_tokens:
+                        break
+                else:
+                    metadata_missing_token_ids.append(token_id)
+            if len(selected_held_token_ids) >= max_tokens:
+                break
     finally:
         trade_read.close()
+
+    if selected_held_token_ids:
+        token_metadata = {
+            token_id: token_metadata[token_id]
+            for token_id in selected_held_token_ids
+            if token_id in token_metadata
+        }
 
     if not token_metadata:
         return {
             "held_priority_token_ids": len(held_token_ids),
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
+            "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
             "held_quote_refresh_deferred_tokens": max(
                 0,
-                len(ordered_held_token_ids) - len(selected_held_token_ids),
+                len(ordered_held_token_ids) - len(scanned_held_token_ids),
             ),
             "held_quote_refresh_events": 0,
             "skipped": "no_held_token_metadata",
@@ -2421,9 +2449,11 @@ def _edli_refresh_held_position_quote_evidence(
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
+            "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
+            "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
             "held_quote_refresh_deferred_tokens": max(
                 0,
-                len(ordered_held_token_ids) - len(selected_held_token_ids),
+                len(ordered_held_token_ids) - len(scanned_held_token_ids),
             ),
             "held_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,

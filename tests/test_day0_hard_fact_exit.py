@@ -79,6 +79,11 @@ def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
         target_date="2026-06-10", bin_label="25C", direction="buy_yes",
         state="day0_window", shares=1.0,
     )
+    active = Position(
+        trade_id="active-pos", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="active", shares=1.0,
+    )
     quarantined_partial = Position(
         trade_id="q-pos", market_id="m", city="Lucknow", cluster="asia",
         target_date="2026-06-10", bin_label="35C or below", direction="buy_yes",
@@ -98,6 +103,7 @@ def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
     )
 
     assert cycle_runtime._day0_hard_fact_position_eligible(day0) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(active) is True
     assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_partial) is True
     assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is False
     assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is False

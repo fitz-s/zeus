@@ -892,6 +892,91 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
     assert result["budget_skipped_tokens"] == 2
 
 
+def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_holds(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = ["closed-old-1", "closed-old-2", "live-held-1", "live-held-2"]
+    seen: dict[str, list[list[str]] | list[str]] = {"metadata": []}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_held_quote_refresh_max_tokens_per_cycle": 2,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        batch = list(token_ids)
+        seen["metadata"].append(batch)
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in batch
+            if token_id.startswith("live-held")
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            seen["rest_seed"] = list(token_ids)
+            return len(token_ids)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+
+    assert seen["metadata"] == [["closed-old-1", "closed-old-2"], ["live-held-1", "live-held-2"]]
+    assert seen["rest_seed"] == ["live-held-1", "live-held-2"]
+    assert result["held_priority_token_ids"] == 4
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_selected_tokens"] == 2
+    assert result["held_quote_refresh_metadata_scanned_tokens"] == 4
+    assert result["held_quote_refresh_metadata_missing_tokens"] == 2
+    assert result["held_quote_refresh_events"] == 2
+
+
 def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(monkeypatch):
     from src.data import polymarket_client
     from src.events.triggers import market_channel_ingestor as market_ingestor
