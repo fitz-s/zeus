@@ -3858,13 +3858,119 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if is_exit_cooldown_active(position):
         return False  # Still cooling down
 
+    previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
+    previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
+    previous_error = str(getattr(position, "last_exit_error", "") or "")
+
     # Cooldown expired — position is eligible for exit re-evaluation
     position.exit_state = ""  # Reset to allow new exit attempt
+    position.next_exit_retry_at = ""
+    position.exit_retry_count = 0
+    if str(getattr(position, "order_status", "") or "") == "retry_pending":
+        position.order_status = "filled"
     _release_pending_exit(position)
     if conn is not None:
-        from src.state.db import log_exit_retry_released_event
-        log_exit_retry_released_event(conn, position)
+        _dual_write_exit_retry_released_if_available(
+            conn,
+            position,
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+        )
     return True
+
+
+def _dual_write_exit_retry_released_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    previous_next_retry_at: str,
+    previous_retry_count: int,
+    previous_error: str,
+) -> bool:
+    """Persist retry cooldown release and projection in one canonical write.
+
+    A released pending exit is still a live held position; it must immediately
+    re-enter normal monitor redecision. The release cannot be only an in-memory
+    mutation, because restart/chain-correction projection would reload the old
+    ``pending_exit/retry_pending`` state and strand the position again.
+    """
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.db import append_many_and_project
+        from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        phase_after = phase_for_runtime_position(
+            state=getattr(position, "state", ""),
+            exit_state=getattr(position, "exit_state", ""),
+            chain_state=getattr(position, "chain_state", ""),
+        ).value
+        if phase_after == LifecyclePhase.PENDING_EXIT.value:
+            return False
+        projection = build_position_current_projection(position)
+        projection["phase"] = phase_after
+        projection["updated_at"] = occurred_at
+        projection["order_status"] = "filled"
+        projection["next_exit_retry_at"] = ""
+        projection["exit_retry_count"] = 0
+        env = str(getattr(position, "env", "") or "live")
+        if env not in {"live", "test", "replay", "backtest"}:
+            env = "live"
+        payload = {
+            "status": "ready",
+            "exit_reason": getattr(position, "exit_reason", "") or "EXIT_RETRY_RELEASED",
+            "error": previous_error,
+            "previous_retry_count": previous_retry_count,
+            "retry_count": 0,
+            "previous_next_retry_at": previous_next_retry_at,
+            "next_retry_at": "",
+            "release_reason": "EXIT_RETRY_COOLDOWN_EXPIRED",
+        }
+        event = {
+            "event_id": f"{trade_id}:exit_retry_released:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": "EXIT_RETRY_RELEASED",
+            "occurred_at": occurred_at,
+            "phase_before": LifecyclePhase.PENDING_EXIT.value,
+            "phase_after": fold_lifecycle_phase(
+                LifecyclePhase.PENDING_EXIT.value,
+                phase_after,
+            ).value,
+            "strategy_key": str(
+                getattr(position, "strategy_key", "")
+                or getattr(position, "strategy", "")
+                or ""
+            ),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": "exit_retry_cooldown_expired",
+            "idempotency_key": f"{trade_id}:exit_retry_released:{sequence_no}",
+            "venue_status": "ready",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": env,
+            "payload_json": json.dumps(payload, default=str, sort_keys=True),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EXIT_RETRY_RELEASED canonical write failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
 
 
 def release_pending_exit_without_order_if_retryable(

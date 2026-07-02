@@ -3336,6 +3336,85 @@ def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     assert build_position_current_projection(pending_exit)["order_status"] == "backoff_exhausted"
 
 
+def test_check_pending_retries_persists_day0_redecision_release(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import check_pending_retries
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-day0-retry-release",
+        market_id="condition-test",
+        city="Wellington",
+        cluster="Wellington",
+        target_date="2026-07-02",
+        bin_label="12C",
+        direction="buy_yes",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-07-02T00:48:30+00:00",
+        chain_state="synced",
+        shares=15.0,
+        chain_shares=15.0,
+        cost_basis_usd=7.50,
+        chain_cost_basis_usd=7.50,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-07-02T00:11:43+00:00",
+        order_status="retry_pending",
+        exit_state="retry_pending",
+        exit_retry_count=1,
+        next_exit_retry_at="2026-07-02T02:22:35+00:00",
+        last_exit_error="exit_executable_snapshot_unavailable",
+        exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+
+    assert check_pending_retries(position, conn=conn) is True
+
+    assert getattr(position.state, "value", position.state) == "day0_window"
+    assert getattr(position.exit_state, "value", position.exit_state) == ""
+    assert position.exit_retry_count == 0
+    assert position.next_exit_retry_at == ""
+    assert position.order_status == "filled"
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "day0_window",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] == "ready"
+    assert payload["status"] == "ready"
+    assert payload["previous_retry_count"] == 1
+    assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
+
+
 def test_monitor_refreshed_projection_updated_at_tracks_event_time(monkeypatch):
     from src.engine import lifecycle_events
     from src.state.portfolio import Position

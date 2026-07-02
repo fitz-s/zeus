@@ -251,6 +251,9 @@ def _insert_status_position_event_for_view_test(
     status: str,
     occurred_at: str,
     sequence_no: int = 1,
+    phase_before: str | None = None,
+    phase_after: str | None = None,
+    payload: dict | None = None,
 ) -> None:
     conn.execute(
         """
@@ -258,7 +261,7 @@ def _insert_status_position_event_for_view_test(
             event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
-        ) VALUES (?, ?, 1, ?, ?, ?, NULL, NULL, 'center_buy', NULL, 'snap-fill', NULL,
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'center_buy', NULL, 'snap-fill', NULL,
                   NULL, 'test', ?, NULL, 'tests', 'test', ?)
         """,
         (
@@ -267,8 +270,10 @@ def _insert_status_position_event_for_view_test(
             sequence_no,
             event_type,
             occurred_at,
+            phase_before,
+            phase_after,
             f"{position_id}:{event_type}:{sequence_no}",
-            json.dumps({"status": status}),
+            json.dumps(payload or {"status": status}),
         ),
     )
 
@@ -1899,6 +1904,70 @@ def test_status_views_clear_exit_state_on_retry_release(tmp_path):
     assert status_view["positions"][0]["exit_state"] == "none"
     assert status_view["exit_state_counts"]["none"] == 1
     assert loader_view["positions"][0]["exit_state"] == ""
+
+
+def test_portfolio_loader_restores_day0_pending_exit_identity_over_chain_corrections(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "pending-exit-day0-loader.db")
+    init_schema(conn)
+    position_id = "pending-exit-day0-loader-pos"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+        order_status="retry_pending",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET exit_retry_count = 1,
+               next_exit_retry_at = '2026-07-02T02:22:35+00:00'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="DAY0_WINDOW_ENTERED",
+        status="entered",
+        occurred_at="2026-07-02T00:48:30+00:00",
+        sequence_no=1,
+        phase_before="active",
+        phase_after="day0_window",
+        payload={"day0_entered_at": "2026-07-02T00:48:30+00:00"},
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-07-02T02:17:35+00:00",
+        sequence_no=2,
+        phase_before="day0_window",
+        phase_after="pending_exit",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="CHAIN_SIZE_CORRECTED",
+        status="synced",
+        occurred_at="2026-07-02T07:54:00+00:00",
+        sequence_no=3,
+        phase_before="pending_exit",
+        phase_after="pending_exit",
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loaded = loader_view["positions"][0]
+    assert loaded["state"] == "pending_exit"
+    assert loaded["exit_state"] == "retry_pending"
+    assert loaded["day0_entered_at"] == "2026-07-02T00:48:30+00:00"
+    assert loaded["pre_exit_state"] == "day0_window"
 
 
 def test_position_current_views_do_not_cap_full_open_fill_cost_to_projection(tmp_path):

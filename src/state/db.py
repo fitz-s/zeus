@@ -10909,6 +10909,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "env": explicit_env,
                 "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
+                "pre_exit_state": str(hints.get("pre_exit_state") or ""),
                 "exit_state": exit_state_hint,
                 "exit_reason": str(row["exit_reason"] or ""),
                 "admin_exit_reason": str(row["admin_exit_reason"] or hints.get("admin_exit_reason") or ""),
@@ -11907,13 +11908,19 @@ def _query_transitional_position_hints(
             details = json.loads(row["payload"] or "{}")
         except Exception:
             details = {}
+        occurred_at = str(row["occurred_at"] or "")
         if "entry_fill_verified" not in bucket and "entry_fill_verified" in details:
             bucket["entry_fill_verified"] = bool(details.get("entry_fill_verified"))
         if "admin_exit_reason" not in bucket and details.get("admin_exit_reason"):
             bucket["admin_exit_reason"] = str(details.get("admin_exit_reason"))
         if "day0_entered_at" not in bucket and details.get("day0_entered_at"):
             bucket["day0_entered_at"] = str(details.get("day0_entered_at"))
-        occurred_at = str(row["occurred_at"] or "")
+        elif (
+            "day0_entered_at" not in bucket
+            and row["event_type"] == "DAY0_WINDOW_ENTERED"
+            and occurred_at
+        ):
+            bucket["day0_entered_at"] = occurred_at
         if (
             "order_posted_at" not in bucket
             and row["event_type"] in {"POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"}
@@ -11934,7 +11941,114 @@ def _query_transitional_position_hints(
             if exit_state:
                 bucket["exit_state"] = exit_state
         # Non-settlement lifecycle hints are env-filtered by their caller scope.
+    _hydrate_unbounded_day0_hints(conn, trade_ids, hints)
+    _hydrate_pending_exit_pre_state_hints(conn, trade_ids, hints)
     return hints
+
+
+def _hydrate_unbounded_day0_hints(
+    conn: sqlite3.Connection,
+    trade_ids: list[str],
+    hints: dict[str, dict],
+) -> None:
+    """Hydrate latest Day0 identity independently of the generic recent-row cap.
+
+    A restarted monitor must know that an old pending-exit position already
+    entered Day0 before it decides where retry cooldown should release. Day0
+    identity is durable lifecycle state, not a best-effort cache hint, so read
+    its latest event directly instead of relying only on the generic hint scan.
+    """
+
+    missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("day0_entered_at")]
+    if not missing:
+        return
+    placeholders = ", ".join("?" for _ in missing)
+    try:
+        rows = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT position_id,
+                       payload_json,
+                       occurred_at,
+                       sequence_no,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY position_id
+                           ORDER BY occurred_at DESC, sequence_no DESC
+                       ) AS rn
+                  FROM position_events
+                 WHERE position_id IN ({placeholders})
+                   AND event_type = 'DAY0_WINDOW_ENTERED'
+            )
+            SELECT position_id, payload_json, occurred_at
+              FROM ranked
+             WHERE rn = 1
+            """,
+            tuple(missing),
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        trade_id = str(row["position_id"] or "")
+        if not trade_id:
+            continue
+        try:
+            details = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            details = {}
+        day0_entered_at = str(details.get("day0_entered_at") or row["occurred_at"] or "")
+        if day0_entered_at:
+            hints.setdefault(trade_id, {})["day0_entered_at"] = day0_entered_at
+
+
+def _hydrate_pending_exit_pre_state_hints(
+    conn: sqlite3.Connection,
+    trade_ids: list[str],
+    hints: dict[str, dict],
+) -> None:
+    """Hydrate the phase a pending-exit retry should release back to.
+
+    ``pre_exit_state`` is runtime-only on Position, but the canonical event
+    spine records it as ``phase_before`` for exit-intent/reject events. Loader
+    recovery must not be polluted by later no-op ``pending_exit -> pending_exit``
+    events such as chain corrections.
+    """
+
+    missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("pre_exit_state")]
+    if not missing:
+        return
+    placeholders = ", ".join("?" for _ in missing)
+    try:
+        rows = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT position_id,
+                       phase_before,
+                       phase_after,
+                       occurred_at,
+                       sequence_no,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY position_id
+                           ORDER BY occurred_at DESC, sequence_no DESC
+                       ) AS rn
+                 FROM position_events
+                 WHERE position_id IN ({placeholders})
+                   AND phase_after = 'pending_exit'
+                   AND COALESCE(phase_before, '') != ''
+                   AND phase_before != phase_after
+            )
+            SELECT position_id, phase_before
+              FROM ranked
+             WHERE rn = 1
+            """,
+            tuple(missing),
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        trade_id = str(row["position_id"] or "")
+        phase_before = str(row["phase_before"] or "")
+        if trade_id and phase_before:
+            hints.setdefault(trade_id, {})["pre_exit_state"] = phase_before
 
 
 def _exit_state_hint_from_event(event_type: str, details: dict) -> str | None:
