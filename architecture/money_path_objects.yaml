@@ -1005,6 +1005,161 @@ state_machines:
     states:
       - ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED
 
+  live_db_backup_config_keys:
+    owner: scripts/source_contract_auto_convert.py
+    description: >
+      Explicit operator opt-in key for scripts that would otherwise copy or
+      inspect live DB material. Config key only; not a lifecycle, command, or
+      submit state. Registered so the semantic classifier treats the dry-run
+      backup guard as declared policy instead of an unknown money-path state.
+    states:
+      - ZEUS_ALLOW_LIVE_DB_BACKUP
+    invariant_tests:
+      - tests/test_market_scanner_provenance.py
+
+  substrate_runtime_config_keys:
+    owner: src/data/substrate_observer.py
+    description: >
+      Runtime environment knobs for the EDLI/redecision substrate warm path.
+      They bound background refresh and pre-submit recapture timing; they do
+      not encode order, venue, lifecycle, or settlement states.
+    states:
+      - ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS
+      - ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS
+      - ZEUS_RECAPTURE_EDGE_BACKOFF_SECONDS
+      - ZEUS_PRE_SUBMIT_JIT_OUTER_TIMEOUT_SECONDS
+    invariant_tests:
+      - tests/money_path/test_edli_market_substrate_warm_cycle.py
+      - tests/events/test_continuous_redecision_emit.py
+      - tests/engine/test_event_reactor_no_bypass.py
+
+  calibration_and_fixture_fallback_labels:
+    owner: src/calibration/forecast_calibration_domain.py
+    description: >
+      Calibration-domain and historical-fixture fallback labels. These labels
+      classify offline/backtest compatibility or legacy authority states and do
+      not authorize live settlement/source promotion.
+    states:
+      - COMPATIBLE_FALLBACK
+      - LIVE_BACKTEST_AUDIT_BOUNDARY
+      - EMPTY_FALLBACK
+      - BACKTEST
+      - RUNTIME_ONLY_FALLBACK
+    invariant_tests:
+      - tests/test_forecast_calibration_domain.py
+      - tests/test_market_scanner_provenance.py
+
+  canonical_lifecycle_semantic_labels:
+    owner: src/contracts/canonical_lifecycle.py
+    description: >
+      Canonical lifecycle and projection labels introduced by the canonical
+      lifecycle/projection layer. They are typed evidence/projection classes,
+      not raw venue truth; venue facts and command recovery remain the fill
+      authority.
+    states:
+      - SDK_SUBMIT_RESPONSE
+      - SELL_PARTIALLY_FILLED
+      - SELL_FILLED
+      - PARTIALLY_FILLED
+    invariant_tests:
+      - tests/test_canonical_lifecycle.py
+      - tests/test_canonical_projections.py
+      - tests/test_command_recovery.py
+
+  redecision_submit_rejection_reasons:
+    owner: src/contracts/rejection_reasons.py
+    description: >
+      Re-decision and final-submit rejection reason bases. These are first-class
+      no-submit/retry labels for why a candidate is not submitted or must be
+      re-ranked; they do not prove venue side effects or fills.
+    states:
+      - SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR
+      - SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR
+      - SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR
+      - FILL_UP_PRESUBMIT_REREAD_ABORT
+      - LIVE_AUTHORITY_GRAPH_REJECTED
+      - DIRECTION_LAW_REJECTED
+      - MARKET_COHERENCE_REJECTED
+      - QKERNEL_PREFILTER_REJECTED
+      - PRE_SUBMIT_BUY_BEST_ASK_REQUIRED
+      - PRE_SUBMIT_SELL_BEST_BID_REQUIRED
+      - QKERNEL_FINAL_SUBMIT_FLOOR
+      - DIRECTION_LAW_REJECTED_PROOF
+      - SELECTION_GUARD_ABSTAINED_UNKNOWN
+      - NO_SUBMIT_ADAPTER
+      - SOURCE_CLOCK_MARKET_REACTION_UNKNOWN
+    invariant_tests:
+      - tests/contracts/test_k2_rejection_reason_registry.py
+      - tests/engine/test_mode_flip_and_recapture_semantics.py
+      - tests/engine/test_event_reactor_live_qkernel_gate.py
+      - tests/strategy/live_inference/test_source_clock_vnext.py
+
+  command_recovery_and_exit_reason_labels:
+    owner: src/execution/command_recovery.py
+    description: >
+      Recovery, exit retry, and liquidation-route reason labels. They explain
+      how Zeus recovered or deferred local/venue parity after rechecking facts;
+      they are not fresh order acknowledgements and do not replace venue/user
+      channel/reconciliation truth.
+    states:
+      - EXIT_BACKOFF_EXHAUSTED
+      - BACKOFF_EXHAUSTED
+      - BACKOFF_EXHAUSTED_REDECISION_RELEASED
+      - EXIT_INTENT_RECOVERED
+      - REVIEW_REQUIRED_RECOVERY
+      - ACKED_NO_OPEN_FACT
+      - VENUE_COMMAND_REJECTED_NO_VENUE_EXPOSURE
+      - EXIT_SUBMIT_NO_VENUE_SIDE_EFFECT
+      - SUBMIT_TIMEOUT_UNKNOWN
+      - HOLD_TO_REDEEM
+    invariant_tests:
+      - tests/test_command_recovery.py
+      - tests/test_exit_safety.py
+      - tests/test_unknown_side_effect.py
+      - tests/execution/test_liquidation_value_engine.py
+
+  venue_submission_diagnostic_labels:
+    owner: src/venue/polymarket_v2_adapter.py
+    description: >
+      Venue submission-envelope diagnostics and SDK adapter error labels. These
+      labels fail closed before or around submit attempts; they are not command
+      lifecycle states and do not prove fill truth.
+    states:
+      - UNRESOLVED_PRE_SUBMIT_FUNDER
+      - V2_PRE_SUBMIT_EXCEPTION
+      - INTENT_RECORDED
+    invariant_tests:
+      - tests/test_v2_adapter.py
+      - tests/test_venue_envelope_live_bound.py
+      - tests/test_settlement_axes_a8_a9.py
+
+  event_store_recovery_diagnostics:
+    owner: src/events/event_store.py
+    description: >
+      Event-store and reactor retry diagnostics for misclassified presubmit
+      rejections and transient world-write contention. These are retry/recovery
+      reason labels, not venue states.
+    states:
+      - RECOVERED_MISCLASSIFIED_LOCAL_PRESUBMIT_REJECTION
+      - WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT
+      - WORLD_WRITE_LOCK_BUSY_POST_SUBMIT
+    invariant_tests:
+      - tests/events/test_continuous_redecision_emit.py
+      - tests/events/test_reactor.py
+
+  healthcheck_and_review_diagnostic_labels:
+    owner: scripts/healthcheck.py
+    description: >
+      Healthcheck and source-comment diagnostic labels that trip the conservative
+      state-token scanner. UNKNOWN_UNAVAILABLE is an operator-facing health
+      classification; REVIEW is a literal review marker and not a lifecycle,
+      submit, venue, or settlement state.
+    states:
+      - UNKNOWN_UNAVAILABLE
+      - REVIEW
+    invariant_tests:
+      - tests/test_run_mode_failure_surfaces.py
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
@@ -1192,6 +1347,21 @@ external_truth_sources:
     authority_tier: mainstream_forecast
     endpoint_patterns: [open-meteo, api.open-meteo.com]
     required_tests: [tests/test_mainstream_agreement_gate.py]
+  official_station_forecast:
+    # Config-routed official station/city forecast feeds used as forecast-skill
+    # inputs for source-clock fusion. They are forecast covariates only: not WU
+    # settlement truth, not Day0 observation authority, not venue truth.
+    authority_tier: station_forecast
+    endpoint_patterns:
+      - www.dwd.de
+      - weather.gc.ca/grib
+      - www.jma.go.jp
+      - meteofrance.com
+      - data.weather.gov.hk
+      - opendata.cwa.gov.tw
+    required_tests:
+      - tests/test_station_forecast_live_ingest_wiring.py
+      - tests/strategy/live_inference/test_source_clock_vnext.py
 
 side_effect_calls:
   submit_order:
