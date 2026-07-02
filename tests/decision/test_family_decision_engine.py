@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-30
+# Last reused or audited: 2026-07-02
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
@@ -1260,8 +1260,8 @@ def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
     assert engine._direction_admitted(nonmodal_yes) is True
 
 
-def test_day0_observed_boundary_uses_served_q_lcb_not_forecast_oof_guards(monkeypatch):
-    """Day0 active qkernel must not let forecast OOF guards zero observed-boundary alpha."""
+def test_day0_finite_boundary_yes_does_not_get_hard_fact_q_lcb(monkeypatch):
+    """Day0 finite-bin YES cannot treat "currently in bin" as a hard lower bound."""
 
     case = _case()
     space = _outcome_space(case)
@@ -1342,22 +1342,26 @@ def test_day0_observed_boundary_uses_served_q_lcb_not_forecast_oof_guards(monkey
         shares_for_routing=Decimal("100"),
     )
 
-    assert decision.no_trade_reason is None, decision.no_trade_reason
-    assert decision.selected is not None
+    assert decision.selected is None
+    assert decision.no_trade_reason in {
+        fde_mod.NO_TRADE_NO_POSITIVE_EDGE,
+        fde_mod.NO_TRADE_NO_POSITIVE_UTILITY,
+        fde_mod.NO_TRADE_NO_MIN_ORDER_UTILITY,
+    }
     selected_decision = next(
         d
         for d in decision.candidate_decisions
-        if d.economics.candidate_id == decision.selected.candidate_id
+        if d.route.side == "YES" and d.route.bin_id == "b25"
     )
     assert selected_decision.route.side == "YES"
     assert selected_decision.route.bin_id == "b25"
     assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
     assert selected_decision.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
     assert selected_decision.selection_guard_n == 0
-    assert selected_decision.selection_guard_q_safe == pytest.approx(
-        selected_decision.economics.payoff_q_lcb
-    )
-    assert selected_decision.economics.edge_lcb > 0.0
+    assert selected_decision.selection_guard_cell_key == "day0_finite_unsettled_no_hard_lower_bound"
+    assert selected_decision.selection_guard_q_safe == pytest.approx(0.0)
+    assert selected_decision.economics.payoff_q_lcb == pytest.approx(0.0)
+    assert selected_decision.economics.edge_lcb < 0.0
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():

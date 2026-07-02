@@ -3206,6 +3206,11 @@ def event_bound_live_adapter_from_trade_conn(
         # execution_mode_intent (REST-then-cross policy) is the SOLE mode
         # authority; the build chain no longer carries a force-taker override.
         _live_order_build_phase = "not_started"
+        command_certificates: tuple[DecisionCertificate, ...] = ()
+        command: DecisionCertificate | None = None
+        certificate_decision_time = decision_time.astimezone(UTC)
+        command_certificates_persisted = False
+        submit_result: EventBoundExecutorSubmitResult | None = None
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
@@ -3267,10 +3272,14 @@ def event_bound_live_adapter_from_trade_conn(
                     build_conn,
                     command_certificates,
                 )
+                command_certificates_persisted = True
+                _live_order_build_phase = "live_order_command_persisted"
                 assert executor_submit is not None
+                _live_order_build_phase = "calling_executor_submit"
                 submit_result = _normalize_event_bound_executor_submit_result(
                     executor_submit(final_intent, command)
                 )
+                _live_order_build_phase = "executor_submit_completed"
                 if submit_result.venue_call_started:
                     _append_venue_submit_attempted_aggregate_event(
                         live_cap_conn or trade_conn,
@@ -3354,6 +3363,7 @@ def event_bound_live_adapter_from_trade_conn(
                     submit_result=submit_result,
                     decision_time=certificate_decision_time,
                 )
+                _live_order_build_phase = "submit_terminal_appended"
                 transition_cert = _transition_live_cap_after_submit(
                     command_certificates,
                     live_cap_conn or trade_conn,
@@ -3452,6 +3462,75 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=_price_moved_abort,
                     proof_accepted=False,
                 )
+            if (
+                real_order_submit_enabled
+                and command_certificates_persisted
+                and command is not None
+                and _live_order_build_phase != "submit_terminal_appended"
+            ):
+                try:
+                    terminal_result = submit_result
+                    if terminal_result is None:
+                        terminal_result = _fallback_submit_result_after_live_command_failure(
+                            exc,
+                            phase=_live_order_build_phase,
+                            decision_time=certificate_decision_time,
+                        )
+                    if terminal_result.venue_call_started:
+                        _append_venue_submit_attempted_aggregate_event(
+                            live_cap_conn or trade_conn,
+                            command,
+                            decision_time=certificate_decision_time,
+                        )
+                    receipt_cert = build_execution_receipt_certificate(
+                        execution_command_cert=command,
+                        decision_time=certificate_decision_time,
+                        status=terminal_result.status,
+                        reason_code=terminal_result.reason_code,
+                        submit_started_at=terminal_result.submit_started_at,
+                        submit_finished_at=terminal_result.submit_finished_at,
+                        venue_order_id=terminal_result.venue_order_id,
+                        raw_response=terminal_result.raw_response,
+                        raw_response_hash=terminal_result.raw_response_hash,
+                        reconciliation_followup_required=terminal_result.reconciliation_followup_required,
+                        venue_call_started=terminal_result.venue_call_started,
+                        venue_ack_received=terminal_result.venue_ack_received,
+                        side_effect_known=terminal_result.side_effect_known,
+                    )
+                    _append_submit_terminal_aggregate_event(
+                        live_cap_conn or trade_conn,
+                        command,
+                        receipt_cert,
+                        submit_result=terminal_result,
+                        decision_time=certificate_decision_time,
+                    )
+                    transition_cert = _transition_live_cap_after_submit(
+                        command_certificates,
+                        live_cap_conn or trade_conn,
+                        command,
+                        receipt_cert,
+                        terminal_result,
+                        decision_time=certificate_decision_time,
+                    )
+                    return dataclass_replace(
+                        no_submit_receipt,
+                        submitted=terminal_result.status == "SUBMITTED",
+                        side_effect_status=terminal_result.status,
+                        reason=terminal_result.reason_code,
+                        proof_accepted=True,
+                        decision_proof_bundle=command_certificates + (receipt_cert, transition_cert),
+                    )
+                except Exception as terminal_exc:  # noqa: BLE001
+                    return dataclass_replace(
+                        no_submit_receipt,
+                        submitted=False,
+                        side_effect_status="NO_SUBMIT",
+                        reason=(
+                            "EDLI_LIVE_COMMAND_TERMINALIZATION_FAILED:"
+                            f"{type(terminal_exc).__name__}:{terminal_exc}"
+                        ),
+                        proof_accepted=False,
+                    )
             return dataclass_replace(
                 no_submit_receipt,
                 submitted=False,
@@ -6889,6 +6968,59 @@ def _build_submit_disabled_live_certificates(
         decision_time=certificate_decision_time,
     )
     return command_certificates + (receipt_cert, transition_cert)
+
+
+def _fallback_submit_result_after_live_command_failure(
+    exc: BaseException,
+    *,
+    phase: str,
+    decision_time: datetime,
+) -> EventBoundExecutorSubmitResult:
+    """Terminal submit-result fallback after ExecutionCommandCreated is durable.
+
+    If the adapter fails after the command proof is committed but before the
+    sanctioned executor returns a normalized result, the aggregate must still
+    receive a terminal side-effect event. Before the executor call starts there
+    is provably no venue side effect; during the executor call the side effect is
+    unknown unless the executor boundary returns its own typed result.
+    """
+
+    reason = (
+        "EDLI_LIVE_POST_COMMAND_SUBMIT_FAILURE:"
+        f"{str(phase or 'unknown')}:{type(exc).__name__}:{str(exc)[:180]}"
+    )
+    now_iso = datetime.now(UTC).isoformat()
+    if phase == "calling_executor_submit":
+        return EventBoundExecutorSubmitResult(
+            status="POST_SUBMIT_UNKNOWN",
+            reason_code=reason,
+            submit_started_at=decision_time.astimezone(UTC).isoformat(),
+            submit_finished_at=now_iso,
+            raw_response={
+                "phase": phase,
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+            reconciliation_followup_required=True,
+            venue_call_started=True,
+            venue_ack_received=False,
+            side_effect_known=False,
+        )
+    return EventBoundExecutorSubmitResult(
+        status="PRE_SUBMIT_ERROR",
+        reason_code=reason,
+        submit_started_at=None,
+        submit_finished_at=now_iso,
+        raw_response={
+            "phase": phase,
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+        },
+        reconciliation_followup_required=False,
+        venue_call_started=False,
+        venue_ack_received=False,
+        side_effect_known=True,
+    )
 
 
 def _normalize_event_bound_executor_submit_result(

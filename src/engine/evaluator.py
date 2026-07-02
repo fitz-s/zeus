@@ -204,6 +204,7 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     "noaa": frozenset({"ogimet_metar_ltfm", "ogimet_metar_uuww", "ogimet_metar_llbg"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
+DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
 NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION = "buy_no_native_quote_available"
 NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
@@ -944,6 +945,49 @@ def _day0_canonical_extrema_source(source: str) -> bool:
     )
 
 
+def _day0_hourly_publication_clock_is_fresh(
+    observation: "Day0ObservationContext",
+    *,
+    observation_source: str,
+    observation_age_seconds: float,
+    reference_time: datetime,
+) -> bool:
+    """Treat hourly settlement rows as fresh when their publication clock is fresh.
+
+    WU/Ogimet settlement rows are hourly observations with a material publication
+    delay. The value timestamp is expected to lag wall-clock time by one hourly
+    bucket plus source publication latency; the freshness question for executable
+    Day0 value is whether the latest available hourly row is itself recently
+    available, not whether its bucket boundary is less than 60 minutes old.
+    """
+
+    if not _day0_canonical_extrema_source(observation_source):
+        return False
+    max_observation_age_seconds = (
+        DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS
+        + DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS
+    ) * 3600.0
+    if observation_age_seconds > max_observation_age_seconds:
+        return False
+    available_at = _parse_day0_observation_time_utc(
+        _day0_observation_field(observation, "observation_available_at")
+    )
+    if available_at is None:
+        return False
+    available_age_seconds = (
+        reference_time - available_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if available_age_seconds < -DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS:
+        return False
+    return (
+        _freshness_registry.evaluate(
+            "day0_executable_observation",
+            max(0.0, available_age_seconds),
+        )
+        < FreshnessLevel.STALE
+    )
+
+
 def _parse_day0_observation_time_utc(value) -> datetime | None:
     if value is None:
         return None
@@ -1256,6 +1300,13 @@ def _day0_observation_quality_rejection_reason(
         )
     age_hours = max(0.0, age_seconds / 3600.0)
     if _freshness_registry.evaluate("day0_executable_observation", age_hours * 3600.0) >= FreshnessLevel.STALE:
+        if _day0_hourly_publication_clock_is_fresh(
+            observation,
+            observation_source=observation_source,
+            observation_age_seconds=age_seconds,
+            reference_time=reference_time,
+        ):
+            return None
         return (
             "Day0 observation is stale for executable probability generation: "
             f"city={city.name} age_hours={age_hours:.3f} "

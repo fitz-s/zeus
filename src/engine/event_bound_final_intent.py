@@ -397,6 +397,17 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
             "duplicate_entry_same_token:",
             "executable_snapshot_gate:",
             "pre_submit_collateral_reservation_failed:",
+            "pre_submit_collateral_refresh_failed:",
+            "risk_allocator_pre_submit_blocked:",
+            "entry_decision_identity:",
+            "corrected_execution_identity:",
+            "final_order_type_mismatch:",
+            "post_only_order_type_mismatch:",
+            "entry_taker_quality:",
+            "entry_actionable_certificate:",
+            "entry_economics:",
+            "invalid_submit_amount_precision:",
+            "decision_source_integrity:",
         )
     )
 

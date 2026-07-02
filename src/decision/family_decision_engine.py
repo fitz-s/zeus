@@ -953,12 +953,15 @@ class FamilyDecisionEngine:
             # Day0 is the same qkernel family decision with a stronger information
             # state: an observed running extreme has already conditioned the posterior.
             # The conservative lower bound consumed by edge/DeltaU is therefore the
-            # served Day0 observed-boundary q_lcb, not the offline forecast-selection
-            # OOF cells fitted before that observation existed. Applying those forecast
-            # OOF guards here zeroes near-deterministic Day0 modal bins and permanently
-            # starves the Day0 capital-flow lane.
+            # monotone hard-fact payoff lower bound implied by that running extreme:
+            # already-impossible finite bins and already-absorbed shoulders are valid
+            # hard facts; a finite point/range that merely contains the current running
+            # extreme is not settled and must not inherit a near-1 lower bound.
             guarded = self._apply_day0_observed_boundary_guard(
-                scored=pre_coherence_scored
+                scored=pre_coherence_scored,
+                case=case,
+                predictive=predictive,
+                omega=omega,
             )
         else:
             # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
@@ -1277,19 +1280,30 @@ class FamilyDecisionEngine:
         self,
         *,
         scored: tuple[CandidateDecision, ...],
+        case: ForecastCase,
+        predictive: PredictiveDistribution,
+        omega: OutcomeSpace,
     ) -> tuple[CandidateDecision, ...]:
-        """Stamp Day0 remaining-day lower-bound provenance without OOF deflation.
+        """Stamp Day0 monotone hard-fact lower-bound provenance.
 
-        Day0's probability surface is already conditioned on the observed running
-        extreme and the remaining-day member envelope.  This is not an empirical
-        OOF selection cell; recording it as a one-sample selection guard made the
-        live receipt look more statistically supported than it was.  The q_lcb
-        remains the served remaining-day payoff lower bound, while the selection
-        guard provenance records that no offline selection calibrator was applied.
+        A running HIGH max can only rise, and a running LOW min can only fall.
+        Therefore Day0 can prove hard lower bounds only for monotone facts:
+        an already-passed finite bin makes YES impossible / NO certain, and an
+        already-entered open shoulder makes YES certain / NO impossible. A finite
+        bin that currently contains the observed extreme is not a hard fact; the
+        day can still move out of that bin. Treating that state as a near-1 live
+        q_lcb created low-quality finite-bin Day0 YES entries.
         """
 
-        guarded: list[CandidateDecision] = []
-        for d in scored:
+        observed = getattr(getattr(predictive, "day0", None), "observed_extreme_native", None)
+        try:
+            observed_f = float(observed)
+        except (TypeError, ValueError):
+            observed_f = float("nan")
+        metric = str(getattr(case, "metric", "") or "").lower()
+        bin_by_id = {b.bin_id: b for b in omega.bins}
+
+        def _base_q_safe(d: CandidateDecision) -> float:
             try:
                 q_safe = (
                     float(d.economics.payoff_q_lcb)
@@ -1299,17 +1313,66 @@ class FamilyDecisionEngine:
             except Exception:  # noqa: BLE001
                 q_safe = 0.0
             if not math.isfinite(q_safe):
-                q_safe = 0.0
-            q_safe = min(max(float(q_safe), 0.0), 1.0)
+                return 0.0
+            return min(max(float(q_safe), 0.0), 1.0)
+
+        def _day0_hard_fact_payoff_lcb(d: CandidateDecision, fallback: float) -> tuple[float, str]:
+            b = bin_by_id.get(d.route.bin_id)
+            side = str(d.route.side or "").upper()
+            if b is None or side not in {"YES", "NO"} or metric not in {"high", "low"}:
+                return fallback, "day0_remaining_day_q_lcb"
+            if not math.isfinite(observed_f):
+                return 0.0, "day0_observed_extreme_missing"
+
+            lower = b.lower_native
+            upper = b.upper_native
+            yes_hard: float | None = None
+            if metric == "high":
+                if upper is not None and observed_f > float(upper):
+                    yes_hard = 0.0
+                elif upper is None and lower is not None and observed_f >= float(lower):
+                    yes_hard = 1.0
+            else:
+                if lower is not None and observed_f < float(lower):
+                    yes_hard = 0.0
+                elif lower is None and upper is not None and observed_f <= float(upper):
+                    yes_hard = 1.0
+
+            if yes_hard is None:
+                return 0.0, "day0_finite_unsettled_no_hard_lower_bound"
+            q_safe = yes_hard if side == "YES" else 1.0 - yes_hard
+            return min(max(float(q_safe), 0.0), 1.0), "day0_monotone_hard_fact_q_lcb"
+
+        def _blocked_economics(econ: CandidateEconomics, *, q_safe: float) -> CandidateEconomics:
+            edge_lcb = float(q_safe) - float(econ.cost.value)
+            return replace(
+                econ,
+                edge_lcb=edge_lcb,
+                payoff_q_lcb=float(q_safe),
+                chosen_stake_edge_lcb=edge_lcb,
+                delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
+                optimal_stake_usd=Decimal("0"),
+                optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
+        guarded: list[CandidateDecision] = []
+        for d in scored:
+            q_safe, cell_key = _day0_hard_fact_payoff_lcb(d, _base_q_safe(d))
+            economics = (
+                _blocked_economics(d.economics, q_safe=q_safe)
+                if q_safe <= 0.0
+                else d.economics
+            )
             guarded.append(
                 replace(
                     d,
+                    economics=economics,
                     q_lcb_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
                     q_lcb_guard_abstained=False,
-                    q_lcb_guard_cell_key="day0_remaining_day_q_lcb",
+                    q_lcb_guard_cell_key=cell_key,
                     selection_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
                     selection_guard_abstained=False,
-                    selection_guard_cell_key="day0_remaining_day_q_lcb",
+                    selection_guard_cell_key=cell_key,
                     selection_guard_n=0,
                     selection_guard_q_safe=q_safe,
                 )

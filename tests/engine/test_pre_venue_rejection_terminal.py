@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-07-02
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
@@ -155,6 +155,19 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
         "entry_cooldown:same_token_entry_cooling_down",
         "entries_paused:operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
         "duplicate_entry_same_token:open_position_same_token",
+        "executable_snapshot_gate:BOOK_WITNESS_STALE",
+        "pre_submit_collateral_reservation_failed:INSUFFICIENT_PUSD",
+        "pre_submit_collateral_refresh_failed:WALLET_READ_FAILED",
+        "risk_allocator_pre_submit_blocked:DAY_CAP_EXHAUSTED",
+        "entry_decision_identity:token_id mismatch",
+        "corrected_execution_identity:condition_id mismatch",
+        "final_order_type_mismatch:expected_maker_limit",
+        "post_only_order_type_mismatch:expected_post_only",
+        "entry_taker_quality:EV_NOT_STRONG_ENOUGH_AFTER_FEES",
+        "entry_actionable_certificate:missing proof",
+        "entry_economics:non_positive_edge",
+        "invalid_submit_amount_precision:rounded_to_zero",
+        "decision_source_integrity:source_run_after_decision_time",
     ],
 )
 def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(reason):

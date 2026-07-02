@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-07-02
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -2796,6 +2796,84 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
+def test_post_command_executor_exception_terminalizes_aggregate(monkeypatch, tmp_path):
+    """Regression: command-created live orders cannot disappear into NO_SUBMIT.
+
+    Once ExecutionCommandCreated is durable, an unexpected executor-boundary
+    exception must append a terminal aggregate event. During the executor call
+    side effect is unknown, so the correct terminal state is POST_SUBMIT_UNKNOWN
+    with pending reconcile, not a proof-failed NO_SUBMIT that leaves the command
+    aggregate stuck.
+    """
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            _accepted_receipt(event),
+            decision_time=decision_time,
+        ),
+    )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+
+    def _raising_submit(_final_intent, _command):
+        raise RuntimeError("socket closed before executor result was normalized")
+
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
+            executor_submit=_raising_submit,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+        receipt = submit(event, decision_time)
+
+        assert receipt.proof_accepted is True
+        assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+        assert receipt.reason.startswith("EDLI_LIVE_POST_COMMAND_SUBMIT_FAILURE:calling_executor_submit")
+        assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM edli_live_order_events ORDER BY event_sequence"
+            )
+        ]
+        assert event_types == [
+            "DecisionProofAccepted",
+            "SubmitPlanBuilt",
+            "PreSubmitRevalidated",
+            "LiveCapReserved",
+            "ExecutionCommandCreated",
+            "VenueSubmitAttempted",
+            "SubmitUnknown",
+            "CapTransitioned",
+        ]
+        assert conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage"
+        ).fetchone()["reservation_status"] == "RESERVED"
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection"
+        ).fetchone()
+        assert bool(projection["pending_reconcile"]) is True
+        assert projection["current_state"] in {"PENDING_RECONCILE", "CAP_TRANSITIONED"}
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
+
+
 def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
@@ -3600,6 +3678,7 @@ def _opportunity_book_with_qkernel_cert(qkernel_cert):
                 "token_id": "yes-1",
                 "direction": "buy_yes",
                 "live_decision_selected": True,
+                "live_selection_authority": "qkernel_spine",
                 "admitted": True,
                 "qkernel_execution_economics": qkernel_cert,
             }

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-01
+# Last reused or audited: 2026-07-02
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:
 #   zeus_trades.db position_events b5d966a9-990 (Seoul 2026-06-07T15:08Z,
@@ -783,6 +783,67 @@ def _make_position(**overrides) -> Position:
 
 
 class TestDay0TransitionMonotonicity:
+    def test_hourly_day0_observation_uses_publication_clock_for_freshness(self):
+        """Paris 15C regression: WU hourly settlement rows publish after the
+        hourly bucket. A just-published canonical row remains executable even
+        when its observation_time is slightly older than the base 1h window."""
+        from src.data.observation_client import Day0ObservationContext
+        from src.engine.evaluator import _day0_observation_quality_rejection_reason
+        from src.types.metric_identity import MetricIdentity
+
+        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
+        obs = Day0ObservationContext(
+            current_temp=22.0,
+            high_so_far=22.0,
+            low_so_far=15.0,
+            source="wu_icao_history",
+            observation_time="2026-07-02T11:00:00+00:00",
+            observation_available_at="2026-07-02T11:43:33.517275+00:00",
+            provider_reported_time="canonical_observation_instants",
+            unit="C",
+            coverage_status="OK",
+        )
+
+        assert (
+            _day0_observation_quality_rejection_reason(
+                SimpleNamespace(name="Paris"),
+                obs,
+                MetricIdentity.from_raw("low"),
+                decision_time=decision_time,
+                allow_incomplete_window_bound=True,
+            )
+            is None
+        )
+
+    def test_hourly_day0_observation_fails_when_publication_clock_is_stale(self):
+        from src.data.observation_client import Day0ObservationContext
+        from src.engine.evaluator import _day0_observation_quality_rejection_reason
+        from src.types.metric_identity import MetricIdentity
+
+        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
+        obs = Day0ObservationContext(
+            current_temp=22.0,
+            high_so_far=22.0,
+            low_so_far=15.0,
+            source="wu_icao_history",
+            observation_time="2026-07-02T11:00:00+00:00",
+            observation_available_at="2026-07-02T10:43:33.517275+00:00",
+            provider_reported_time="canonical_observation_instants",
+            unit="C",
+            coverage_status="OK",
+        )
+
+        reason = _day0_observation_quality_rejection_reason(
+            SimpleNamespace(name="Paris"),
+            obs,
+            MetricIdentity.from_raw("low"),
+            decision_time=decision_time,
+            allow_incomplete_window_bound=True,
+        )
+
+        assert reason is not None
+        assert "Day0 observation is stale" in reason
+
     def test_seoul_incident_replay_single_tick_reversal_holds(self):
         """Replay of position b5d966a9-990 (2026-06-07T15:08Z): buy_no Seoul 25C,
         day0 arrival at local midnight, posterior step 0.795->0.644 from the
@@ -924,6 +985,43 @@ class TestDay0TransitionMonotonicity:
         assert decision.should_exit is True
         assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
         assert "day0_zero_probability_sell_value_dominates" in decision.applied_validations
+
+    def test_day0_zero_probability_exit_bypasses_ci_overlap_hold(self):
+        """Paris 15C regression: an authoritative Day0 hard-fact that makes the
+        held side worthless is not an ordinary noisy model reversal. A wide CI
+        around the new point cannot block the sell-vs-hold EV exit."""
+        pos = _make_position(
+            direction="buy_no",
+            entry_price=0.49,
+            p_posterior=0.51,
+            entry_ci_width=0.40,
+            shares=10.91,
+            cost_basis_usd=5.35,
+            size_usd=5.35,
+        )
+        decision = pos.evaluate_exit(
+            ExitContext(
+                fresh_prob=0.0,
+                fresh_prob_is_fresh=True,
+                current_market_price=0.002,
+                current_market_price_is_fresh=True,
+                best_bid=0.002,
+                best_ask=0.012,
+                hours_to_settlement=6.0,
+                position_state="day0_window",
+                day0_active=True,
+                entry_posterior=0.51,
+                entry_ci=(0.20, 0.80),
+                current_ci=(0.0, 0.70),
+                belief_available=True,
+                day0_zero_probability_exit_authority=True,
+            )
+        )
+
+        assert decision.should_exit is True
+        assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+        assert "day0_zero_probability_sell_value_dominates" in decision.applied_validations
+        assert "ci_overlap_hold" not in decision.applied_validations
 
     def test_no_single_cycle_day0_reversal_sell_producer_in_source(self):
         """Static antibody: portfolio.py must not reconstruct the pre-2026-06-07

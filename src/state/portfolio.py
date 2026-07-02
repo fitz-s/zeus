@@ -1108,6 +1108,50 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
+            if float(exit_context.fresh_prob) <= 1e-9:
+                applied.append("day0_zero_probability_exit_authority_gate")
+                if not exit_context.day0_zero_probability_exit_authority:
+                    applied.append("day0_zero_probability_exit_authority_blocked")
+                else:
+                    sell_value_dominates = self._sell_value_exceeds_hold_value(
+                        current_p_posterior=float(exit_context.fresh_prob),
+                        best_bid=exit_context.best_bid,
+                        hours_to_settlement=exit_context.hours_to_settlement,
+                        applied=applied,
+                        portfolio_positions=exit_context.portfolio_positions,
+                        bankroll=exit_context.bankroll,
+                    )
+                    if sell_value_dominates is True:
+                        self.neg_edge_count = 0
+                        entry_prob_for_reason = (
+                            float(exit_context.entry_posterior)
+                            if ExitContext._is_finite(exit_context.entry_posterior)
+                            else float(self.p_posterior or 0.0)
+                        )
+                        applied.append("day0_zero_probability_sell_value_dominates")
+                        self.applied_validations = _dedupe_validations(applied)
+                        return ExitDecision(
+                            True,
+                            (
+                                "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES "
+                                f"(entry={entry_prob_for_reason:.4f}, "
+                                "current=0.0000)"
+                            ),
+                            selected_method=self.selected_method or self.entry_method,
+                            applied_validations=list(self.applied_validations),
+                            trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+                        )
+                    if sell_value_dominates is None:
+                        applied.append("day0_zero_probability_exit_context_incomplete_hold")
+                        self.applied_validations = _dedupe_validations(applied)
+                        return ExitDecision(
+                            False,
+                            "DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                            selected_method=self.selected_method or self.entry_method,
+                            applied_validations=list(self.applied_validations),
+                            trigger="DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                        )
+                    applied.append("day0_zero_probability_hold_value_dominates")
 
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
