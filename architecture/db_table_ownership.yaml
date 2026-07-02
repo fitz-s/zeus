@@ -1001,6 +1001,26 @@ tables:
       EDLI v1 dead-letter record for event processing failures. No SQLite FK is
       declared so cross-DB FK illusions cannot be introduced.
 
+  - name: market_channel_connectivity_events
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: event_id
+    required_columns:
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: channel, type: TEXT, nullable: false}
+      - {name: transition, type: TEXT, nullable: false}
+      - {name: occurred_at, type: TEXT, nullable: false}
+    notes: >
+      W0.2 blind-window metric (2026-07-02, order-engine rebuild). Durable
+      connect/disconnect/reconnect transition log for MarketChannelOnlineService
+      (src/events/triggers/market_channel_ingestor.py), replacing the previous
+      in-memory-only connected/gap_start dataclass fields that reset on every
+      daemon restart. Read via BLIND_WINDOW_QUERY in
+      src/state/schema/market_channel_connectivity_schema.py. Measure only —
+      no gate, no enforcement.
+
   - name: execution_feasibility_evidence
     db: trade
     schema_class: trade_class

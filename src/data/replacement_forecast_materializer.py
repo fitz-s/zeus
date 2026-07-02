@@ -29,6 +29,7 @@ from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
+from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
@@ -3574,7 +3575,21 @@ def _insert_posterior(
             "forecast_posteriors insert returned no row for posterior_identity_hash="
             f"{posterior_identity_hash}"
         )
-    return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+    new_posterior_id = int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+    # W0.2 input->q_version latency metric (measure only, no gate). Only the
+    # fresh-insert success path reaches here — the IntegrityError dedup branch
+    # above returns earlier and does not double-count an existing row's latency.
+    emit_materialization_latency(
+        family_id=family_id,
+        city=request.city,
+        target_date=target_date,
+        temperature_metric=metric,
+        source_cycle_time=source_cycle_time,
+        source_available_at=available_at,
+        computed_at=computed_at,
+        posterior_id=new_posterior_id,
+    )
+    return new_posterior_id
 
 
 def compute_replacement_posterior_readonly(

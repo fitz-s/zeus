@@ -875,6 +875,13 @@ class MarketChannelOnlineService:
         """
         self.connected = True
         self.gap_start = None
+        insert_market_channel_connectivity_event(
+            self.ingestor._feasibility_conn,
+            channel="market_channel",
+            transition="connected",
+            occurred_at=received_at,
+            schema=self.ingestor._feasibility_schema,
+        )
         if self.fetch_orderbook is None:
             return []
         return self.ingestor.seed_from_rest(
@@ -1057,6 +1064,13 @@ class MarketChannelOnlineService:
     def on_disconnect(self, *, gap_start: str) -> None:
         self.connected = False
         self.gap_start = gap_start
+        insert_market_channel_connectivity_event(
+            self.ingestor._feasibility_conn,
+            channel="market_channel",
+            transition="disconnected",
+            occurred_at=gap_start,
+            schema=self.ingestor._feasibility_schema,
+        )
 
     def on_reconnect(
         self,
@@ -1077,6 +1091,13 @@ class MarketChannelOnlineService:
         ``reconnect_gap_snapshot`` → ``seed_from_rest`` fallback branch).
         """
         self.connected = True
+        insert_market_channel_connectivity_event(
+            self.ingestor._feasibility_conn,
+            channel="market_channel",
+            transition="connected",
+            occurred_at=received_at,
+            schema=self.ingestor._feasibility_schema,
+        )
         if self.fetch_orderbook is None:
             self.gap_start = None
             return []
@@ -1486,6 +1507,51 @@ def insert_execution_feasibility_evidence(
     except sqlite3.OperationalError as exc:
         if "execution_feasibility_latest" not in str(exc):
             raise
+
+
+# W0.2 blind-window metric (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# §1 "input->q latency SLA (A2, 'THE metric')"). Same schema-routing allowlist discipline as
+# execution_feasibility_evidence: never interpolate a caller string into SQL.
+_CONNECTIVITY_EVENT_ALLOWED_SCHEMAS = {"", "trades", "main"}
+
+
+def insert_market_channel_connectivity_event(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    transition: str,
+    occurred_at: str,
+    schema: str = "",
+) -> None:
+    """Durably record a WS connect/disconnect/reconnect transition.
+
+    Measure-only (W0): no gate, no enforcement. Idempotent — event_id is a stable
+    hash of (channel, transition, occurred_at), so a retried call at the same
+    timestamp is a no-op rather than a duplicate row. See
+    src/state/schema/market_channel_connectivity_schema.py for BLIND_WINDOW_QUERY,
+    the dashboard read side.
+    """
+    if transition not in ("connected", "disconnected"):
+        raise ValueError(f"insert_market_channel_connectivity_event: bad transition {transition!r}")
+    if schema not in _CONNECTIVITY_EVENT_ALLOWED_SCHEMAS:
+        raise ValueError(f"insert_market_channel_connectivity_event: disallowed schema {schema!r}")
+    if schema:
+        table = f"{schema}.market_channel_connectivity_events"
+    else:
+        from src.state.owner_routed_write import owner_write_target
+        table = owner_write_target(conn, "market_channel_connectivity_events")
+        if table is None:
+            return
+    event_id = stable_event_id("market_channel_connectivity", channel, transition, occurred_at)
+    conn.execute(
+        f"""
+        INSERT INTO {table} (
+            event_id, channel, transition, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, 1)
+        ON CONFLICT(event_id) DO NOTHING
+        """,
+        (event_id, channel, transition, occurred_at, datetime.now(UTC).isoformat()),
+    )
 
 
 def feasibility_evidence_from_quote(
