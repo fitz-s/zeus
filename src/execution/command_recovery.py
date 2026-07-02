@@ -16033,6 +16033,18 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "terminal_order_facts",
             collect_continuations=True,
         )
+        _db_pass(
+            "closed_shift_bin_exit_leases",
+            release_closed_shift_bin_exit_leases,
+            "closed_shift_bin_exit_leases",
+            observed_at=started_at,
+        )
+        _db_pass(
+            "stale_rebalance_entry_leases",
+            release_stale_rebalance_entry_leases,
+            "stale_rebalance_entry_leases",
+            observed_at=started_at,
+        )
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
@@ -16184,18 +16196,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 "recorded_maker_fill_economics",
                 advanced_key="corrected",
                 fold_stayed=False,
-                observed_at=started_at,
-            )
-            _db_pass(
-                "closed_shift_bin_exit_leases",
-                release_closed_shift_bin_exit_leases,
-                "closed_shift_bin_exit_leases",
-                observed_at=started_at,
-            )
-            _db_pass(
-                "stale_rebalance_entry_leases",
-                release_stale_rebalance_entry_leases,
-                "stale_rebalance_entry_leases",
                 observed_at=started_at,
             )
         _client_pass("local_orphan_no_fill_findings",

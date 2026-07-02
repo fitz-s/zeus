@@ -1492,6 +1492,97 @@ def test_stale_rebalance_entry_release_reads_attached_world_table(tmp_path):
     trade_conn.close()
 
 
+def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypatch):
+    """Family redecision locks must clear before the slow venue snapshot phase."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    events: list[str] = []
+
+    class StopAfterCapture(RuntimeError):
+        pass
+
+    def empty_summary(label: str):
+        def _inner(*_args, **_kwargs):
+            events.append(label)
+            return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+        return _inner
+
+    class FakeTracked:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_run_db_only_pass(apply, *, conn_factory=None, label=None):
+        return apply(object())
+
+    def fake_run_three_phase(snapshot, network, apply, *, conn_factory=None, label=None):
+        snap = snapshot(object())
+        payload = network(snap)
+        return apply(object(), payload)
+
+    def fake_capture_venue_read_snapshot(*_args, **_kwargs):
+        events.append("capture_venue_snapshot")
+        raise StopAfterCapture("stop after ordering proof")
+
+    monkeypatch.setattr(venue_sync_contract, "run_db_only_pass", fake_run_db_only_pass)
+    monkeypatch.setattr(venue_sync_contract, "run_three_phase", fake_run_three_phase)
+    monkeypatch.setattr(venue_sync_contract, "open_tracked", lambda *_a, **_k: FakeTracked())
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        fake_capture_venue_read_snapshot,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_collect_recovery_priming_keys",
+        lambda *_a, **_k: {
+            "order_ids": set(),
+            "idempotency_keys": set(),
+            "condition_ids": set(),
+        },
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_edli_post_submit_unknown_absence_candidates",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_exit_mutex_releases",
+        empty_summary("review_required_exit_mutex_release"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_cancel_ack_terminal_no_fill_facts",
+        empty_summary("cancel_ack_terminal_no_fill_facts"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_terminal_order_facts",
+        empty_summary("terminal_order_facts"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "release_closed_shift_bin_exit_leases",
+        empty_summary("closed_shift_bin_exit_leases"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "release_stale_rebalance_entry_leases",
+        empty_summary("stale_rebalance_entry_leases"),
+    )
+
+    with pytest.raises(StopAfterCapture):
+        command_recovery.reconcile_unresolved_commands(client=object(), scope="live_tick")
+
+    assert events.index("closed_shift_bin_exit_leases") < events.index("capture_venue_snapshot")
+    assert events.index("stale_rebalance_entry_leases") < events.index("capture_venue_snapshot")
+
+
 def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monkeypatch, tmp_path):
     """Live cadence may defer heavy client sweeps, but must not leave confirmed
     cancel/no-fill pending-entry ghosts in the money path."""
