@@ -349,6 +349,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
         last_monitor_best_ask=0.56,
         last_monitor_market_vig=0.02,
         last_monitor_whale_toxicity=None,
+        _day0_zero_probability_exit_authority=True,
         chain_state="synced",
         state="open",
     )
@@ -369,6 +370,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
         "monitor_refresh set last_monitor_prob_is_fresh=True but ExitContext.fresh_prob_is_fresh "
         "is False — freshness flag dropped at the monitor→exit_context boundary."
     )
+    assert exit_ctx_fresh.day0_zero_probability_exit_authority is True
 
     # --- Case B: monitor_refresh fallback/failure → fresh_prob_is_fresh=False ---
     pos_stale = SimpleNamespace(
@@ -381,6 +383,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
         last_monitor_best_ask=None,
         last_monitor_market_vig=None,
         last_monitor_whale_toxicity=None,
+        _day0_zero_probability_exit_authority=False,
         chain_state="synced",
         state="open",
     )
@@ -401,6 +404,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
         "monitor_refresh fallback set last_monitor_prob_is_fresh=False but ExitContext sees True — "
         "stale exit trigger may fire on bad data."
     )
+    assert exit_ctx_stale.day0_zero_probability_exit_authority is False
 
 
 # ---------------------------------------------------------------------------

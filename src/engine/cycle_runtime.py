@@ -3969,6 +3969,9 @@ def _build_exit_context(
         hours_to_settlement=hours_to_settlement,
         position_state=position_state,
         day0_active=position_state == "day0_window",
+        day0_zero_probability_exit_authority=bool(
+            getattr(pos, "_day0_zero_probability_exit_authority", False)
+        ),
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),

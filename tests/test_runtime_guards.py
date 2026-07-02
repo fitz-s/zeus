@@ -7058,6 +7058,139 @@ def test_day0_monitor_refresh_uses_stale_observation_as_bound_before_forecast_ga
     assert any("stale" in item for item in applied)
 
 
+def test_day0_monitor_refresh_blocks_stale_immature_zero_probability_exit_authority(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="11°C",
+        unit="C",
+        market_id="m-buenos-aires-11c",
+        direction="buy_yes",
+        p_posterior=0.24833093804728934,
+        selected_method="day0_observation",
+        entry_method="day0_observation",
+    )
+    city = types.SimpleNamespace(
+        name="Buenos Aires",
+        lat=-34.6037,
+        timezone="America/Argentina/Buenos_Aires",
+        cluster="South America",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="SABE",
+    )
+    stale_reason = (
+        "Day0 observation is stale for executable probability generation: "
+        "city=Buenos Aires age_hours=1.334 max_age_hours=1.000"
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            high_so_far=6.0,
+            low_so_far=4.0,
+            current_temp=4.0,
+            source="wu_icao_history",
+            observation_time="2026-07-02T04:00:00+00:00",
+            observation_available_at="2026-07-02T04:18:47.818924+00:00",
+            coverage_status="LOW_COVERAGE",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_source_rejection_reason",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_quality_rejection_reason",
+        lambda *args, **kwargs: stale_reason,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_stale_day0_observation_can_remain_monitor_authority",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            daypart="pre_sunrise",
+            post_peak_confidence=0.048,
+            current_utc_timestamp=datetime(2026, 7, 2, 5, 20, tzinfo=timezone.utc),
+            solar_day=None,
+            current_local_hour=2.33,
+            daylight_progress=0.0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kwargs: None)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_read_day0_raw_model_extrema",
+        lambda **kwargs: {
+            "member_extrema": np.array([7.8]),
+            "source_id": "openmeteo_single_runs",
+            "forecast_source_role": "day0_remaining_window_live",
+            "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_local_hours_remaining",
+        lambda *args, **kwargs: 21.6666666667,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observed_extreme_from_canonical_surface",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_extreme_authority_rejection_reason",
+        lambda **kwargs: "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.048",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=7, high=7, label="7°C", unit="C"),
+                Bin(low=8, high=8, label="8°C", unit="C"),
+                Bin(low=9, high=9, label="9°C", unit="C"),
+                Bin(low=10, high=10, label="10°C", unit="C"),
+                Bin(low=11, high=11, label="11°C", unit="C"),
+            ],
+            4,
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh.Day0Router,
+        "route",
+        lambda inputs: types.SimpleNamespace(
+            p_vector=lambda bins, n_mc=None: np.array([0.2, 0.5, 0.3, 0.0, 0.0])
+        ),
+    )
+
+    posterior, applied = monitor_refresh._refresh_day0_observation(
+        position=position,
+        current_p_market=0.041,
+        conn=None,
+        city=city,
+        target_d=date(2026, 7, 2),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+    assert getattr(position, monitor_refresh._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is False
+    assert "day0_zero_probability_exit_authority_blocked" in applied
+    assert "day0_observation_stale_monitor_bound" in applied
+    assert "day0_extreme_not_absorbing" in applied
+    receipt = position._day0_monitor_probability_receipt
+    assert receipt["held_side_probability"] == pytest.approx(0.0)
+    assert receipt["zero_probability_exit_authority"] is False
+    assert receipt["zero_probability_exit_authority_reason"] == "stale_or_immature_day0_remaining_window"
+
+
 def test_stale_day0_bound_can_remain_monitor_authority_for_held_redecision():
     from src.engine import monitor_refresh
     from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN

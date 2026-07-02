@@ -918,6 +918,7 @@ class TestDay0TransitionMonotonicity:
                 entry_ci=(0.121802485107885, 0.121802485107885),
                 current_ci=(0.0, 0.0),
                 belief_available=True,
+                day0_zero_probability_exit_authority=True,
             )
         )
         assert decision.should_exit is True

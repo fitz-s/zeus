@@ -84,6 +84,7 @@ from src.calibration.ens_bias_repo import read_bias_model
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
+_DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -430,6 +431,10 @@ def _build_monitor_one_calibrator_q(
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+def _set_day0_zero_probability_exit_authority(position: Position, has_authority: bool) -> None:
+    setattr(position, _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR, has_authority)
 
 
 # K6 stage-1 belief-dead watchdog (2026-06-12). A fail-closed hold on missing
@@ -2801,6 +2806,18 @@ def _refresh_day0_observation(
         position.direction,
     )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
+    zero_probability_exit_authority = (
+        maturity_rejection is None
+        and "day0_observation_stale_monitor_bound" not in coverage_validations
+    )
+    zero_probability_exit_authority_reason = (
+        "mature_day0_extreme"
+        if zero_probability_exit_authority
+        else "stale_or_immature_day0_remaining_window"
+    )
+    held_probability_collapsed = current_p_posterior <= 1e-9
+    if held_probability_collapsed and not zero_probability_exit_authority:
+        applied.append("day0_zero_probability_exit_authority_blocked")
     setattr(
         position,
         "_day0_monitor_probability_receipt",
@@ -2814,6 +2831,8 @@ def _refresh_day0_observation(
             "held_direction": str(getattr(position, "direction", "") or ""),
             "held_yes_probability": _monitor_receipt_float(p_cal_yes),
             "held_side_probability": _monitor_receipt_float(current_p_posterior),
+            "zero_probability_exit_authority": bool(zero_probability_exit_authority),
+            "zero_probability_exit_authority_reason": zero_probability_exit_authority_reason,
             "bin_labels": [str(getattr(bin_, "label", bin_)) for bin_ in all_bins],
             "p_raw_vector": _monitor_receipt_vector(p_raw_vector),
             "p_cal_vector": _monitor_receipt_vector(p_cal_full),
@@ -2880,6 +2899,15 @@ def _refresh_day0_observation(
         position,
         metric=temperature_metric.temperature_metric,
     )
+    _set_day0_zero_probability_exit_authority(position, zero_probability_exit_authority)
+    if held_probability_collapsed and not zero_probability_exit_authority:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            *applied,
+            *_day0_remaining_window_belief_validations(
+                temperature_metric.temperature_metric,
+            ),
+        ]
     _set_monitor_probability_fresh(position, True)
 
     # T5 nowcast wiring (Phase 2 T5): gate on market_slug + hours_remaining.
@@ -3469,6 +3497,7 @@ def _day0_absorbing_hard_fact_overlay(
         "forecast_posteriors_dominated_by_day0_hard_fact",
     )
     _set_monitor_probability_fresh(hard_pos, True)
+    _set_day0_zero_probability_exit_authority(hard_pos, True)
     return float(belief.held_side_prob), hard_pos, True
 
 
@@ -3772,6 +3801,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
+    _set_day0_zero_probability_exit_authority(pos, False)
     try:
         delattr(pos, "_day0_monitor_probability_receipt")
     except AttributeError:
@@ -3810,6 +3840,16 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
         if _day0_receipt is not None:
             setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
+        _set_day0_zero_probability_exit_authority(
+            pos,
+            bool(
+                getattr(
+                    refresh_pos,
+                    _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+                    False,
+                )
+            ),
+        )
 
         # Persist monitor state on Position only when the producer explicitly
         # attests freshness. Stored entry-time posterior is not a current

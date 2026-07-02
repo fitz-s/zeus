@@ -584,6 +584,16 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.delenv("ZEUS_HARVESTER_LIVE_ENABLED", raising=False)
     monkeypatch.delenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", raising=False)
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+    monkeypatch.setattr(
+        preflight,
+        "_live_trading_launchagent_bootstrapable_check",
+        lambda: preflight.CheckResult(
+            "live_trading_launchagent_bootstrapable",
+            True,
+            "active live-trading LaunchAgent is enabled for restart",
+            {"test_stub": True},
+        ),
+    )
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
 
@@ -3305,6 +3315,64 @@ def test_live_trading_launchagent_installed_accepts_src_main_plist(monkeypatch, 
     assert result.ok is True
 
 
+def test_live_trading_launchagent_bootstrapable_blocks_disabled_launchd_service(monkeypatch):
+    def _fake_run(command, **kwargs):
+        assert command[:2] == ["launchctl", "print-disabled"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            '"com.zeus.live-trading" => disabled\n',
+            "",
+        )
+
+    monkeypatch.setattr(preflight.subprocess, "run", _fake_run)
+
+    result = preflight._live_trading_launchagent_bootstrapable_check()
+
+    assert result.ok is False
+    assert result.name == "live_trading_launchagent_bootstrapable"
+    assert "disabled" in result.detail
+    assert result.evidence["disabled_value"] == "disabled"
+
+
+def test_preflight_blocks_when_live_launchagent_plist_exists_but_is_disabled(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    monkeypatch.setattr(
+        preflight,
+        "_live_trading_launchagent_bootstrapable_check",
+        lambda: preflight.CheckResult(
+            "live_trading_launchagent_bootstrapable",
+            False,
+            "active live-trading LaunchAgent is disabled or cannot be inspected",
+            {"disabled_value": "disabled"},
+        ),
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    bootstrapable = next(c for c in result["checks"] if c["name"] == "live_trading_launchagent_bootstrapable")
+    assert bootstrapable["ok"] is False
+
+
 def _write_live_plist_with_env(path: Path, env: dict[str, str]) -> None:
     env_xml = b"".join(
         f"<key>{key}</key><string>{value}</string>".encode()
@@ -4951,7 +5019,7 @@ def test_day0_observation_unavailable_replacement_fallback_covers_held_belief(
             json.dumps(
                 {
                     "applied_validations": [
-                        "day0_observation_unavailable:replacement_posterior_fresh",
+                        "day0_observation_unavailable:replacement_posterior_available_not_exit_authority",
                         "belief_source=forecast_posteriors;basis=source_cycle_time;fresh",
                     ]
                 }
@@ -4986,6 +5054,84 @@ def test_day0_observation_unavailable_replacement_fallback_covers_held_belief(
     assert covered["position_id"] == "day0-fallback-pos"
     assert covered["freshness_basis"] == "day0_monitor_projection"
     assert covered["monitor_projection"]["source"] == "day0_monitor_replacement_fallback"
+
+
+def test_day0_stale_monitor_projection_uses_fresh_replacement_hold_boot_fallback(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Chicago be between 94-95°F on July 2?"
+    now = datetime.now(timezone.utc)
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'day0-stale-monitor-pos', 'day0_window', 'Chicago', '2026-07-02', 'high',
+            ?, 'buy_no', 8.51, 8.51, 'filled', NULL, 0, NULL,
+            0.81, 0, 0.60, 1, ?
+        )
+        """,
+        (label, now.isoformat()),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'day0-stale-monitor-pos', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            (now - timedelta(hours=2)).isoformat(),
+            json.dumps(
+                {
+                    "applied_validations": [
+                        "day0_observation_unavailable:replacement_posterior_available_not_exit_authority",
+                        "belief_source=forecast_posteriors;basis=source_cycle_time;fresh",
+                    ]
+                }
+            ),
+        ),
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Chicago', '2026-07-02', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            now.isoformat(),
+            now.isoformat(),
+            json.dumps({label: 0.19}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+    trade.close()
+    forecasts.close()
+
+    result = preflight._belief_check(rows)
+
+    assert result.ok is True
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "day0-stale-monitor-pos"
+    assert covered["freshness_basis"] == "day0_replacement_hold_boot_fallback"
+    assert covered["restart_resolution"] == "boot_hold_until_day0_observation_monitor_refresh"
+    assert covered["exit_authority"] is False
+    assert covered["held_side_prob"] == 0.81
 
 
 def test_preflight_allows_stale_belief_repairable_by_restart_reseed(

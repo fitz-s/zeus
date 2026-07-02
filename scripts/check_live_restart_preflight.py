@@ -300,6 +300,73 @@ def _live_trading_launchagent_installed_check() -> CheckResult:
     )
 
 
+def _live_trading_launchagent_bootstrapable_check() -> CheckResult:
+    """Require the live LaunchAgent to be enabled before restart.
+
+    The preflight is run before loading ``com.zeus.live-trading`` and also
+    requires ``src.main`` to be absent, so requiring the KeepAlive service to be
+    loaded here would make the preflight impossible to satisfy.  The actionable
+    launchd failure to catch before restart is a disabled override: the plist can
+    exist while ``kickstart``/``bootstrap`` still cannot start the service.
+    """
+
+    label = "com.zeus.live-trading"
+    target = f"gui/{os.getuid()}"
+    evidence: dict[str, Any] = {
+        "label": label,
+        "launchctl_target": f"{target}/{label}",
+        "launchctl_disabled_domain": target,
+    }
+    try:
+        completed = subprocess.run(
+            ["launchctl", "print-disabled", target],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            "live_trading_launchagent_bootstrapable",
+            False,
+            "launchctl is unavailable; cannot prove active live-trading LaunchAgent is enabled",
+            evidence,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "live_trading_launchagent_bootstrapable",
+            False,
+            "launchctl print-disabled timed out; cannot prove active live-trading LaunchAgent is enabled",
+            evidence,
+        )
+    disabled_value = None
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if label not in stripped or "=>" not in stripped:
+            continue
+        disabled_value = stripped.rsplit("=>", 1)[-1].strip().strip(";").strip().lower()
+        break
+    disabled = disabled_value in {"true", "disabled", "1", "yes"}
+    evidence.update(
+        {
+            "returncode": completed.returncode,
+            "disabled_value": disabled_value,
+            "stdout_tail": completed.stdout[-1000:],
+            "stderr_tail": completed.stderr[-1000:],
+        }
+    )
+    ok = completed.returncode == 0 and not disabled
+    return CheckResult(
+        "live_trading_launchagent_bootstrapable",
+        ok,
+        "active live-trading LaunchAgent is enabled for restart"
+        if ok
+        else "active live-trading LaunchAgent is disabled or cannot be inspected",
+        evidence,
+    )
+
+
 def _settings() -> dict[str, Any]:
     try:
         return json.loads(SETTINGS_PATH.read_text())
@@ -4935,11 +5002,11 @@ def _latest_monitor_projection_evidence(
 
     Non-Day0 held positions may refresh belief through the canonical replacement
     read-through path before the durable forecast_posteriors row is re-materialized.
-    Day0 positions are stricter, but the live monitor has a defined fallback when
-    the Day0 observation source is temporarily unavailable: a fresh replacement
-    posterior is acceptable only when the same monitor receipt explicitly records
-    ``day0_observation_unavailable:replacement_posterior_fresh``. A bare forecast
-    posterior does not satisfy a Day0 monitor belief.
+    Day0 positions are stricter, but the live monitor has a defined hold-only
+    fallback when the Day0 observation source is temporarily unavailable: a
+    fresh replacement posterior is acceptable only when the same monitor receipt
+    explicitly records the Day0-unavailable replacement fallback validation. A
+    bare forecast posterior does not satisfy a Day0 monitor belief.
     """
 
     now = datetime.now(timezone.utc)
@@ -4982,7 +5049,12 @@ def _latest_monitor_projection_evidence(
             for item in validations
         )
         accepted_replacement_fallback = (
-            "day0_observation_unavailable:replacement_posterior_fresh" in validations
+            (
+                "day0_observation_unavailable:replacement_posterior_available_not_exit_authority"
+                in validations
+                or "day0_observation_unavailable:replacement_posterior_fresh"
+                in validations
+            )
             and any(item.startswith("belief_source=forecast_posteriors") for item in validations)
         )
         if not (accepted_day0_observation or accepted_replacement_fallback):
@@ -5012,6 +5084,7 @@ def _latest_monitor_projection_evidence(
             if item == "replacement_posterior"
             or item == "day0_observation_remaining_window"
             or item == "day0_absorbing_hard_fact"
+            or item == "day0_observation_unavailable:replacement_posterior_available_not_exit_authority"
             or item == "day0_observation_unavailable:replacement_posterior_fresh"
             or item.startswith("belief_source=")
         ][:6],
@@ -5087,6 +5160,32 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                         "freshness_basis": "day0_canonical_observation_boot_redecision",
                         "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
                         "canonical_observation": canonical_evidence,
+                    }
+                )
+                continue
+            replacement_hold_belief = load_replacement_belief(
+                city=str(row["city"] or ""),
+                target_date=str(row["target_date"] or ""),
+                temperature_metric=str(row["temperature_metric"] or "high"),
+                bin_label=str(row["bin_label"] or ""),
+                direction=str(row["direction"] or ""),
+                max_age_hours=max_age,
+                db_path=str(FORECAST_DB),
+            )
+            if replacement_hold_belief is not None and replacement_hold_belief.fresh:
+                covered.append(
+                    {
+                        **item,
+                        "posterior_id": replacement_hold_belief.posterior_id,
+                        "computed_at": replacement_hold_belief.computed_at,
+                        "age_hours": replacement_hold_belief.age_hours,
+                        "source_cycle_age_hours": replacement_hold_belief.source_cycle_age_hours,
+                        "fresh": True,
+                        "held_side_prob": replacement_hold_belief.held_side_prob,
+                        "q_yes_bin": replacement_hold_belief.q_yes_bin,
+                        "freshness_basis": "day0_replacement_hold_boot_fallback",
+                        "restart_resolution": "boot_hold_until_day0_observation_monitor_refresh",
+                        "exit_authority": False,
                     }
                 )
                 continue
@@ -5288,6 +5387,7 @@ def evaluate() -> dict[str, Any]:
     submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
     checks = [
         _live_trading_launchagent_installed_check(),
+        _live_trading_launchagent_bootstrapable_check(),
         CheckResult(
             "live_trading_process_absent",
             not _live_main_processes(),
