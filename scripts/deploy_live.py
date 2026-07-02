@@ -776,16 +776,11 @@ def cmd_restart(args: argparse.Namespace) -> int:
 
     rc_all = 0
     includes_live_trading = LIVE_TRADING_LABEL in labels
-    live_was_stopped = False
-    if includes_live_trading:
-        ok, detail = _stop_label(LIVE_TRADING_LABEL)
-        if ok:
-            print(detail)
-        else:
-            print(detail, file=sys.stderr)
-        if not ok:
-            return 1
-        live_was_stopped = True
+    live_was_loaded_before = (
+        _launchctl_service_loaded(LIVE_TRADING_LABEL)
+        if includes_live_trading
+        else False
+    )
 
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
     for label in non_live_labels:
@@ -796,7 +791,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
             rc_all = 1
             print(detail, file=sys.stderr)
     if rc_all != 0:
-        if live_was_stopped:
+        if includes_live_trading and live_was_loaded_before:
+            print(
+                "live-trading was not stopped; fix prerequisite daemon restart blockers "
+                "before reloading it",
+                file=sys.stderr,
+            )
+        elif includes_live_trading:
             print(
                 "live-trading left stopped because a prerequisite daemon failed to restart",
                 file=sys.stderr,
@@ -807,7 +808,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if not recovery_ok:
         print("REFUSING to restart — live restart recovery is not green:")
         print(recovery_detail)
-        if live_was_stopped:
+        if includes_live_trading and live_was_loaded_before:
+            print(
+                "live-trading was not stopped; fix restart recovery blockers before reloading it.",
+                file=sys.stderr,
+            )
+        elif includes_live_trading:
             print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
         return 1
     print(recovery_detail)
@@ -816,13 +822,25 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)
-        if live_was_stopped:
+        if includes_live_trading and live_was_loaded_before:
+            print(
+                "live-trading was not stopped; fix preflight blockers before reloading it.",
+                file=sys.stderr,
+            )
+        elif includes_live_trading:
             print("live-trading left stopped; fix preflight blockers before starting it.", file=sys.stderr)
         return 1
     print(preflight_detail)
 
     if includes_live_trading:
         expected_live_sha = head_sha(short=False)
+        ok, detail = _stop_label(LIVE_TRADING_LABEL)
+        if ok:
+            print(detail)
+        else:
+            print(detail, file=sys.stderr)
+        if not ok:
+            return 1
         launched_after = datetime.now(timezone.utc)
         ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:

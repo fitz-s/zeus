@@ -1066,6 +1066,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
 
     def _stop(label):
         calls.append(("stop", label))
@@ -1108,10 +1109,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert rc == 0
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
-        ("stop", dl.LIVE_TRADING_LABEL),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
         ("preflight", tuple(expanded_labels)),
+        ("stop", dl.LIVE_TRADING_LABEL),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
         ("queue", "post-start"),
@@ -1126,6 +1127,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
         "_stop_label",
@@ -1165,17 +1167,18 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     rc = dl.main(["restart", "all"])
 
     assert rc == 0
-    assert calls[0] == ("stop", dl.LIVE_TRADING_LABEL)
+    assert calls[0][0] == "launch"
     recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
     assert recovery_index < preflight_index
+    assert calls.index(("stop", dl.LIVE_TRADING_LABEL)) > preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
-    assert live_launch_index > preflight_index
+    assert live_launch_index > calls.index(("stop", dl.LIVE_TRADING_LABEL))
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
     non_live_launches = [
-        call for call in calls[1:recovery_index]
+        call for call in calls[:recovery_index]
         if call[0] == "launch"
     ]
     assert {label for _, label in non_live_launches} == {
@@ -1188,6 +1191,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
         "_stop_label",
@@ -1214,13 +1218,12 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     assert rc == 1
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
-        ("stop", dl.LIVE_TRADING_LABEL),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
-    assert "live-trading left stopped" in err
+    assert "live-trading was not stopped" in err
 
 
 def test_deploy_live_unknown_daemon_rejected(capsys):

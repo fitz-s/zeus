@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -33,8 +34,20 @@ DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
 DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
 DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
+LIVE_TRADING_WATCHDOG_STATUS_FILENAME = "live-trading-launchd-watchdog.json"
+LIVE_TRADING_LABEL = "com.zeus.live-trading"
+DEFAULT_LIVE_TRADING_WATCHDOG_CHECK_SECONDS = 60
+DEFAULT_LIVE_TRADING_WATCHDOG_COOLDOWN_SECONDS = 300
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
+_LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
+    ("forecast-live", "forecast-live-heartbeat.json", 120.0),
+    ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
+    ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
+    ("post-trade-capital", "daemon-heartbeat-post-trade-capital.json", 180.0),
+)
+_LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC = 0.0
+_LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC = 0.0
 
 
 class HeartbeatHealth(str, Enum):
@@ -209,6 +222,375 @@ def heartbeat_keeper_status_path() -> Path:
     from src.config import state_path
 
     return state_path(HEARTBEAT_KEEPER_STATUS_FILENAME)
+
+
+def live_trading_watchdog_status_path() -> Path:
+    from src.config import state_path
+
+    return state_path(LIVE_TRADING_WATCHDOG_STATUS_FILENAME)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def live_trading_launchd_watchdog_enabled() -> bool:
+    """Return whether the venue-heartbeat sidecar should heal missing src.main.
+
+    The watchdog is a narrow launchd-liveness bridge. It never submits, cancels,
+    reconciles, or writes DB truth; it only bootstraps the active live-trading
+    plist when launchd has no loaded service and all required sidecars already
+    prove same-HEAD freshness.
+    """
+
+    default_enabled = str(os.environ.get("ZEUS_MODE") or "").lower() == "live"
+    return _env_bool("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_ENABLED", default_enabled)
+
+
+def _live_trading_watchdog_check_seconds() -> float:
+    raw = os.environ.get("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_CHECK_SECONDS")
+    try:
+        value = float(raw) if raw not in (None, "") else DEFAULT_LIVE_TRADING_WATCHDOG_CHECK_SECONDS
+    except ValueError as exc:
+        raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_CHECK_SECONDS must be numeric") from exc
+    if value <= 0:
+        raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_CHECK_SECONDS must be positive")
+    return value
+
+
+def _live_trading_watchdog_cooldown_seconds() -> float:
+    raw = os.environ.get("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_COOLDOWN_SECONDS")
+    try:
+        value = float(raw) if raw not in (None, "") else DEFAULT_LIVE_TRADING_WATCHDOG_COOLDOWN_SECONDS
+    except ValueError as exc:
+        raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_COOLDOWN_SECONDS must be numeric") from exc
+    if value < 0:
+        raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_COOLDOWN_SECONDS must be non-negative")
+    return value
+
+
+def _live_trading_watchdog_write_status(
+    payload: dict[str, Any],
+    *,
+    status_path: Path | None = None,
+) -> dict[str, Any]:
+    target = status_path or live_trading_watchdog_status_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    enriched = {
+        "schema_version": 1,
+        "owner": "zeus-venue-heartbeat",
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(enriched, sort_keys=True) + "\n")
+    tmp.replace(target)
+    return enriched
+
+
+def _launchd_gui_domain() -> str:
+    return os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"
+
+
+def _launchd_service_loaded(
+    label: str,
+    *,
+    run_cmd: Any = subprocess.run,
+) -> bool:
+    try:
+        res = run_cmd(
+            ["launchctl", "print", f"{_launchd_gui_domain()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+    return getattr(res, "returncode", 1) == 0
+
+
+def _launchd_service_disabled(
+    label: str,
+    *,
+    run_cmd: Any = subprocess.run,
+) -> tuple[bool | None, str]:
+    try:
+        res = run_cmd(
+            ["launchctl", "print-disabled", _launchd_gui_domain()],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        return None, f"launchctl print-disabled unavailable: {exc}"
+    output = f"{getattr(res, 'stdout', '')}\n{getattr(res, 'stderr', '')}"
+    needle = f'"{label}" => '
+    for line in output.splitlines():
+        if needle not in line:
+            continue
+        value = line.split("=>", 1)[1].strip().lower()
+        if value.startswith("disabled"):
+            return True, "disabled"
+        if value.startswith("enabled"):
+            return False, "enabled"
+    if getattr(res, "returncode", 1) != 0:
+        return None, f"launchctl print-disabled rc={getattr(res, 'returncode', '?')}"
+    return False, "not_listed"
+
+
+def _repo_root_from_config() -> Path:
+    from src.config import PROJECT_ROOT
+
+    return Path(PROJECT_ROOT)
+
+
+def _state_root_from_config() -> Path:
+    from src.config import STATE_DIR
+
+    return Path(STATE_DIR)
+
+
+def _live_trading_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LIVE_TRADING_LABEL}.plist"
+
+
+def _current_git_head(
+    repo_root: Path,
+    *,
+    run_cmd: Any = subprocess.run,
+) -> tuple[str | None, str | None]:
+    try:
+        res = run_cmd(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        return None, f"git rev-parse unavailable: {exc}"
+    if getattr(res, "returncode", 1) != 0:
+        detail = (getattr(res, "stderr", "") or getattr(res, "stdout", "") or "").strip()
+        return None, f"git rev-parse rc={getattr(res, 'returncode', '?')}: {detail}"
+    head = (getattr(res, "stdout", "") or "").strip()
+    if not head:
+        return None, "git rev-parse returned empty HEAD"
+    return head, None
+
+
+def _git_head_matches(expected: str, observed: str) -> bool:
+    expected = str(expected or "").strip()
+    observed = str(observed or "").strip()
+    return bool(expected and observed and (expected == observed or expected.startswith(observed)))
+
+
+def _live_trading_sidecars_ready(
+    *,
+    expected_sha: str,
+    state_root: Path,
+    now: datetime,
+) -> tuple[bool, list[str]]:
+    failures: list[str] = []
+    for name, filename, max_age_seconds in _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS:
+        path = state_root / filename
+        try:
+            payload = json.loads(path.read_text())
+        except FileNotFoundError:
+            failures.append(f"{name}:missing:{filename}")
+            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            failures.append(f"{name}:unreadable:{type(exc).__name__}")
+            continue
+        heartbeat_sha = str(payload.get("git_head") or "").strip()
+        if not _git_head_matches(expected_sha, heartbeat_sha):
+            failures.append(
+                f"{name}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
+                f"expected={expected_sha[:8]}"
+            )
+            continue
+        heartbeat_at = _parse_utc(
+            payload.get("alive_at") or payload.get("written_at") or payload.get("timestamp")
+        )
+        if heartbeat_at is None:
+            failures.append(f"{name}:timestamp_invalid")
+            continue
+        age_seconds = (now - heartbeat_at).total_seconds()
+        if age_seconds < -5.0 or age_seconds > max_age_seconds:
+            failures.append(
+                f"{name}:stale age_seconds={age_seconds:.1f} max={max_age_seconds:.1f}"
+            )
+    return not failures, failures
+
+
+def recover_missing_live_trading_launchd_if_needed(
+    *,
+    now: datetime | None = None,
+    run_cmd: Any = subprocess.run,
+    repo_root: Path | None = None,
+    state_root: Path | None = None,
+    plist_path: Path | None = None,
+    status_path: Path | None = None,
+) -> dict[str, Any]:
+    """Bootstrap missing live-trading only when the live prerequisites are proven.
+
+    This is intentionally narrower than ``scripts/deploy_live.py restart`` so it
+    can run inside the venue-heartbeat sidecar without restarting that sidecar
+    from underneath itself.
+    """
+
+    checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if not live_trading_launchd_watchdog_enabled():
+        return _live_trading_watchdog_write_status(
+            {"ok": True, "action": "none", "reason": "watchdog_disabled"},
+            status_path=status_path,
+        )
+    if _launchd_service_loaded(LIVE_TRADING_LABEL, run_cmd=run_cmd):
+        return _live_trading_watchdog_write_status(
+            {"ok": True, "action": "none", "reason": "service_loaded"},
+            status_path=status_path,
+        )
+
+    disabled, disabled_detail = _launchd_service_disabled(LIVE_TRADING_LABEL, run_cmd=run_cmd)
+    if disabled is True:
+        return _live_trading_watchdog_write_status(
+            {"ok": False, "action": "blocked", "reason": "service_disabled"},
+            status_path=status_path,
+        )
+    if disabled is None:
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "disabled_state_unproven",
+                "detail": disabled_detail,
+            },
+            status_path=status_path,
+        )
+
+    active_plist = plist_path or _live_trading_plist_path()
+    if not active_plist.exists():
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "active_plist_missing",
+                "plist": str(active_plist),
+            },
+            status_path=status_path,
+        )
+
+    root = repo_root or _repo_root_from_config()
+    expected_sha, git_error = _current_git_head(root, run_cmd=run_cmd)
+    if not expected_sha:
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "git_head_unproven",
+                "detail": git_error,
+            },
+            status_path=status_path,
+        )
+
+    sidecars_ok, sidecar_failures = _live_trading_sidecars_ready(
+        expected_sha=expected_sha,
+        state_root=state_root or _state_root_from_config(),
+        now=checked_at,
+    )
+    if not sidecars_ok:
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "sidecars_not_ready",
+                "expected_sha": expected_sha,
+                "failures": sidecar_failures,
+            },
+            status_path=status_path,
+        )
+
+    res = run_cmd(
+        ["launchctl", "bootstrap", _launchd_gui_domain(), str(active_plist)],
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+    )
+    output = " ".join(
+        piece.strip()
+        for piece in (getattr(res, "stdout", ""), getattr(res, "stderr", ""))
+        if piece and piece.strip()
+    )
+    if getattr(res, "returncode", 1) == 0:
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": True,
+                "action": "bootstrapped",
+                "reason": "service_missing",
+                "expected_sha": expected_sha,
+                "plist": str(active_plist),
+            },
+            status_path=status_path,
+        )
+    if "already" in output.lower() and "service" in output.lower():
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": True,
+                "action": "none",
+                "reason": "already_loaded_race",
+                "expected_sha": expected_sha,
+            },
+            status_path=status_path,
+        )
+    return _live_trading_watchdog_write_status(
+        {
+            "ok": False,
+            "action": "bootstrap_failed",
+            "reason": "launchctl_bootstrap_failed",
+            "expected_sha": expected_sha,
+            "returncode": getattr(res, "returncode", None),
+            "detail": output,
+        },
+        status_path=status_path,
+    )
+
+
+def maybe_recover_missing_live_trading_launchd(
+    *,
+    now: datetime | None = None,
+    run_cmd: Any = subprocess.run,
+    status_path: Path | None = None,
+) -> dict[str, Any] | None:
+    global _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC
+    global _LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC
+
+    monotonic_now = time.monotonic()
+    check_seconds = _live_trading_watchdog_check_seconds()
+    if monotonic_now - _LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC < check_seconds:
+        return None
+    _LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC = monotonic_now
+
+    if (
+        _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC
+        and monotonic_now - _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC
+        < _live_trading_watchdog_cooldown_seconds()
+        and not _launchd_service_loaded(LIVE_TRADING_LABEL, run_cmd=run_cmd)
+    ):
+        return _live_trading_watchdog_write_status(
+            {"ok": False, "action": "blocked", "reason": "cooldown"},
+            status_path=status_path,
+        )
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=run_cmd,
+        status_path=status_path,
+    )
+    if result.get("action") in {"bootstrapped", "bootstrap_failed"}:
+        _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC = monotonic_now
+    return result
 
 
 def _parse_utc(value: Any) -> datetime | None:
@@ -766,6 +1148,10 @@ def run_heartbeat_keeper(
         started = datetime.now(timezone.utc)
         status = asyncio.run(supervisor.run_once())
         write_heartbeat_keeper_status(status, path=status_path)
+        try:
+            maybe_recover_missing_live_trading_launchd(now=started)
+        except Exception as exc:  # noqa: BLE001 - watchdog must never stop heartbeat lease.
+            logger.warning("live-trading launchd watchdog failed: %s", exc, exc_info=True)
         ticks += 1
         if max_ticks is not None and ticks >= max_ticks:
             return

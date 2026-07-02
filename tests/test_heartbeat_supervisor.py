@@ -18,6 +18,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +38,7 @@ from src.control.heartbeat_supervisor import (
     heartbeat_http_timeout_seconds_from_env,
     heartbeat_required_for,
     install_dedicated_heartbeat_http_timeout,
+    recover_missing_live_trading_launchd_if_needed,
     run_heartbeat_keeper,
     write_heartbeat_keeper_status,
     _describe_heartbeat_exception,
@@ -80,6 +82,121 @@ def test_venue_heartbeat_launchd_artifact_has_explicit_clob_signature_type() -> 
     assert "src.control.heartbeat_supervisor" in parsed.get("ProgramArguments", [])
     env = parsed.get("EnvironmentVariables") or {}
     assert env.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE") == "2"
+
+
+def _write_sidecar_heartbeats(state_root: Path, *, sha: str, at: datetime) -> None:
+    rows = {
+        "forecast-live-heartbeat.json": {"git_head": sha, "written_at": at.isoformat()},
+        "daemon-heartbeat-substrate-observer.json": {"git_head": sha, "timestamp": at.isoformat()},
+        "daemon-heartbeat-price-channel-ingest.json": {"git_head": sha, "timestamp": at.isoformat()},
+        "daemon-heartbeat-post-trade-capital.json": {"git_head": sha, "timestamp": at.isoformat()},
+    }
+    for name, payload in rows.items():
+        (state_root / name).write_text(json.dumps(payload))
+
+
+def test_live_trading_launchd_watchdog_bootstraps_only_when_sidecars_match(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A missing src.main service is a liveness fault, not a passive alert.
+
+    The venue-heartbeat sidecar may bootstrap live-trading only after it proves
+    active launchd config, not-disabled state, current git HEAD, and fresh
+    same-HEAD sidecar heartbeats. It must not restart sidecars or touch DB truth.
+    """
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    sha = "a" * 40
+    now = datetime(2026, 7, 2, 19, 50, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(state_root, sha=sha, at=now)
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("<plist/>")
+    status_path = tmp_path / "watchdog.json"
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(returncode=3, stdout="", stderr="not found")
+        if cmd[:2] == ["launchctl", "print-disabled"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='"com.zeus.live-trading" => enabled\n',
+                stderr="",
+            )
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{sha}\n", stderr="")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        plist_path=plist,
+        status_path=status_path,
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "bootstrapped"
+    assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(plist)]
+    assert json.loads(status_path.read_text())["action"] == "bootstrapped"
+
+
+def test_live_trading_launchd_watchdog_blocks_when_sidecars_are_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    sha = "b" * 40
+    now = datetime(2026, 7, 2, 19, 50, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(
+        state_root,
+        sha=sha,
+        at=now - timedelta(minutes=10),
+    )
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("<plist/>")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(returncode=3, stdout="", stderr="not found")
+        if cmd[:2] == ["launchctl", "print-disabled"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='"com.zeus.live-trading" => enabled\n',
+                stderr="",
+            )
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{sha}\n", stderr="")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            raise AssertionError("stale sidecars must block bootstrap")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        plist_path=plist,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["ok"] is False
+    assert result["action"] == "blocked"
+    assert result["reason"] == "sidecars_not_ready"
+    assert not any(call[:2] == ["launchctl", "bootstrap"] for call in calls)
 
 
 def _intent() -> ExecutionIntent:
