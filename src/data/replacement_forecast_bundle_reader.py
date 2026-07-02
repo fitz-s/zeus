@@ -26,6 +26,7 @@ from src.data.replacement_forecast_readiness import (
     SOURCE_ID,
     ReplacementForecastReadinessDecision,
 )
+from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
@@ -461,8 +462,16 @@ def read_replacement_forecast_bundle(
     decision_time: datetime | str,
     require_baseline_bundle: bool = True,
     current_bin_topology_hash: str | None = None,
+    enforce_raw_input_hwm: bool = False,
 ) -> ReplacementForecastBundleReadResult:
-    """Read a derived replacement posterior only after B0 executable proof exists."""
+    """Read a derived replacement posterior only after B0 executable proof exists.
+
+    ``enforce_raw_input_hwm`` (W0.1, 2026-07-02, default False = every existing caller
+    byte-identical): when True, after the bundle is otherwise ready, reject it if a raw
+    model/artifact input newer than the served posterior's ``source_cycle_time`` already
+    exists (src.data.replacement_input_hwm.replacement_live_input_lag_reason) — fail
+    closed on a read-time-stale posterior instead of serving it.
+    """
 
     baseline_run_id = _baseline_source_run_id(baseline_bundle)
     if baseline_run_id is None and not require_baseline_bundle:
@@ -694,6 +703,19 @@ def read_replacement_forecast_bundle(
             **provenance,
             "staleness_violations": list(staleness_violations),
         }
+    if enforce_raw_input_hwm:
+        raw_lag_reason = replacement_live_input_lag_reason(
+            conn,
+            city=city,
+            target_date=target_date_text,
+            metric=metric,
+            decision_time=decision_utc,
+            posterior_source_cycle_time=row_map["source_cycle_time"],
+        )
+        if raw_lag_reason is not None:
+            return ReplacementForecastBundleReadResult(
+                "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{raw_lag_reason}"
+            )
     bundle = ReplacementForecastPosteriorBundle(
         posterior_id=int(row_map["posterior_id"]),
         city=str(row_map["city"]),
