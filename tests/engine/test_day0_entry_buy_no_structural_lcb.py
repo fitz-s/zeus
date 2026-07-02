@@ -77,7 +77,11 @@ def test_low_day0_nonabsorbing_bin_carries_remaining_day_buy_no_lcb() -> None:
     )
 
     q, lcb = _apply_day0_mask_to_generated_probabilities(
-        payload={"metric": "low", "rounded_value": 20.0},
+        payload={
+            "metric": "low",
+            "rounded_value": 20.0,
+            "_edli_q_source": "day0_remaining_day",
+        },
         family=family,
         q_by_condition={"low20": 0.20, "low19": 0.80},
         lcb_by_condition={
@@ -99,7 +103,11 @@ def test_high_day0_nonabsorbing_bin_carries_remaining_day_buy_no_lcb() -> None:
     )
 
     q, lcb = _apply_day0_mask_to_generated_probabilities(
-        payload={"metric": "high", "rounded_value": 29.0},
+        payload={
+            "metric": "high",
+            "rounded_value": 29.0,
+            "_edli_q_source": "day0_remaining_day",
+        },
         family=family,
         q_by_condition={"high31": 0.20, "high32": 0.80},
         lcb_by_condition={

@@ -668,6 +668,91 @@ class TestStaleObsBoundaryGuard:
         assert 0.0 < staleness_budget_minutes("Seoul") <= DEFAULT_STALENESS_BUDGET_MIN
 
 
+class TestDay0RemainingDayMaturityEntryGuard:
+    def test_immature_high_boundary_point_yes_has_no_submit_lcb(self):
+        fam = _seoul_high_family()
+        payload = _payload("high", 25.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_boundary_yes_suppressed_conditions"
+            ]
+            == ["cond2"]
+        )
+
+    def test_mature_high_boundary_point_yes_keeps_submit_lcb(self):
+        fam = _seoul_high_family()
+        payload = _payload("high", 25.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "mature"
+        payload["_edli_day0_exit_authority_reason"] = "day0_high_extreme_post_peak"
+
+        _q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_boundary_yes_suppressed_conditions"
+            ]
+            == []
+        )
+
+    def test_immature_low_boundary_point_yes_has_no_submit_lcb(self):
+        fam = _family(
+            "Seoul",
+            [_bin(None, 21.0), _bin(22.0, 22.0), _bin(23.0, 23.0), _bin(24.0, None)],
+            metric="low",
+        )
+        payload = _payload("low", 23.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_low_extreme_not_terminal:hours_remaining=12.0"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition={f"cond{i}": 0.25 for i in range(4)},
+            lcb_by_condition={
+                (f"cond{i}", d): 0.2
+                for i in range(4)
+                for d in ("buy_yes", "buy_no")
+            },
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_boundary_yes_suppressed_conditions"
+            ]
+            == ["cond2"]
+        )
+
+
 # ===========================================================================
 # R3 — transition monotonicity: the panic-sell category is dead
 # ===========================================================================

@@ -20277,6 +20277,43 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
         return True
 
 
+def _day0_immature_boundary_yes_suppressed(
+    *,
+    payload: dict[str, object],
+    metric: str,
+    rounded: float,
+    bin_value,
+) -> bool:
+    """Suppress live buy-YES LCB for Day0 point/range edges that are not mature.
+
+    A same-day running HIGH is a lower bound until the peak has passed; a same-day
+    running LOW is an upper bound until the terminal low window. If the running
+    extreme sits exactly on a finite survival edge, the bin can still be killed by
+    one further tick. That state can carry a point q, but it is not a lower-bound
+    submit license unless the remaining-day authority lane has stamped the bound
+    as mature/deterministic.
+    """
+    if str(payload.get("_edli_q_source") or "") != "day0_remaining_day":
+        return False
+    status = str(payload.get("_edli_day0_exit_authority_status") or "").strip().lower()
+    if status == "mature":
+        return False
+    try:
+        if metric == "high":
+            high = getattr(bin_value, "high", None)
+            if high is None:
+                return False
+            return math.isclose(float(high), float(rounded), rel_tol=0.0, abs_tol=1e-9)
+        if metric == "low":
+            low = getattr(bin_value, "low", None)
+            if low is None:
+                return False
+            return math.isclose(float(low), float(rounded), rel_tol=0.0, abs_tol=1e-9)
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
 # Wave-1 2026-06-12: the DAY0 per-family $25 notional cap (_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
 # + _day0_family_notional_cap_usd) is DELETED (operator no-caps law "不允许设置任何的cap").
 # Day0 sizing is governed by q_lcb + fractional Kelly + free-cash + concentration ONLY.
@@ -20440,6 +20477,7 @@ def _apply_day0_mask_to_generated_probabilities(
     if rounded is None:
         raise ValueError("Day0 event missing rounded_value")
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
+    is_remaining_day_q_source = str(payload.get("_edli_q_source") or "") == "day0_remaining_day"
     mask: list[float] = []
     absorbing_yes: list[bool] = []
     absorbing_no: list[bool] = []
@@ -20480,6 +20518,7 @@ def _apply_day0_mask_to_generated_probabilities(
     # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
     # unparseable obs time or unknown city => maximum margin / conservative budget.
     staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
+    immature_boundary_yes: list[bool] = [False] * len(list(family.candidates))
     _obs_age_min = _budget_min = _margin = None  # audit fields (PR#404 P1 lcb-transform)
     if _day0_stale_obs_boundary_guard_enabled():
         from src.signal.day0_obs_latency import (
@@ -20522,6 +20561,32 @@ def _apply_day0_mask_to_generated_probabilities(
                     "None" if _obs_age_min is None else f"{_obs_age_min:.1f}",
                     _budget_min, _margin, _unit, sum(staleness_uncertain), len(_bins),
                 )
+    for _index, _bin in enumerate([candidate.bin for candidate in family.candidates]):
+        if mask[_index] <= 0.0:
+            continue
+        immature_boundary_yes[_index] = _day0_immature_boundary_yes_suppressed(
+            payload=payload,
+            metric=metric,
+            rounded=float(rounded),
+            bin_value=_bin,
+        )
+    if any(immature_boundary_yes):
+        try:
+            import logging as _logging
+
+            _logging.getLogger("zeus.day0_maturity_guard").info(
+                "DAY0_IMMATURE_BOUNDARY_YES_LCB_SUPPRESSED city=%s metric=%s rounded=%s "
+                "status=%s reason=%s suppressed_bins=%d/%d",
+                getattr(family, "city", "?"),
+                metric,
+                rounded,
+                payload.get("_edli_day0_exit_authority_status"),
+                payload.get("_edli_day0_exit_authority_reason"),
+                sum(immature_boundary_yes),
+                len(immature_boundary_yes),
+            )
+        except Exception:  # noqa: BLE001 - audit logging only
+            pass
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -20565,7 +20630,7 @@ def _apply_day0_mask_to_generated_probabilities(
                 1.0
                 if absorbing_yes[index]
                 else 0.0
-                if (absorbing_no[index] or staleness_uncertain[index])
+                if (absorbing_no[index] or staleness_uncertain[index] or immature_boundary_yes[index])
                 else min(yes_lcb, q_value)
             ),
             source="FORECAST_BOOTSTRAP",
@@ -20573,6 +20638,8 @@ def _apply_day0_mask_to_generated_probabilities(
         if absorbing_no[index]:
             masked_no_lcb = 1.0
         elif absorbing_yes[index]:
+            masked_no_lcb = 0.0
+        elif not is_remaining_day_q_source:
             masked_no_lcb = 0.0
         else:
             masked_no_lcb = min(no_lcb, max(0.0, 1.0 - q_value))
@@ -20617,6 +20684,13 @@ def _apply_day0_mask_to_generated_probabilities(
             for index, candidate in enumerate(family.candidates)
             if staleness_uncertain[index]
         ],
+        "immature_boundary_yes_suppressed_conditions": [
+            str(candidate.condition_id or "")
+            for index, candidate in enumerate(family.candidates)
+            if immature_boundary_yes[index]
+        ],
+        "day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
+        "day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
         "obs_age_minutes": _obs_age_min,
         "staleness_budget_minutes": _budget_min,
         "staleness_margin": _margin,
