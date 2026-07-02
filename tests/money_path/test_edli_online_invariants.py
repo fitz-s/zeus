@@ -1063,6 +1063,9 @@ def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatc
         "refresh_executable_market_substrate_snapshots",
         lambda conn, **_kwargs: {"attempted": 0, "inserted": 0},
     )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     monkeypatch.setattr(db, "get_trade_connection", lambda *args, **kwargs: fake_conn)
     # P2: force STALE substrate so the producer-local staleness gate falls through to the
     # CLOB-construction path this test asserts on.
