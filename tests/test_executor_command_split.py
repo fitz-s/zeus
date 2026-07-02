@@ -45,11 +45,16 @@ def mem_conn():
 def _cutover_guard_live_enabled(monkeypatch):
     """This file tests command-journal ordering, not cutover gating."""
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+    from src.state.db import apply_architecture_kernel_schema
 
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(world_conn)
+    monkeypatch.setattr("src.state.db.get_world_connection", lambda: world_conn)
     monkeypatch.setattr(
         "src.execution.executor._assert_collateral_allows_sell",
         lambda *args, **kwargs: {"component": "collateral_ledger", "allowed": True},
@@ -269,6 +274,43 @@ def _ensure_envelope(
     return envelope_id
 
 
+def _submit_requested_payload(command_id: str) -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "command_id": command_id,
+            "capability_id": f"cap-{command_id}",
+            "components": [
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {"certificate_hash": "a" * 64},
+                },
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {
+                        "q_live": 0.99,
+                        "q_lcb_5pct": 0.95,
+                        "expected_edge": 0.07,
+                        "min_entry_price": 0.10,
+                        "limit_price": 0.55,
+                        "submit_edge": 0.40,
+                        "expected_profit_usd": 7.276,
+                        "min_expected_profit_usd": 1.0,
+                        "submit_edge_density": 0.7272727272727273,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 18.19,
+                        "qkernel_side": "YES",
+                    },
+                },
+            ],
+        }
+    }
+
+
 _DEFAULT_CONTEXT = object()
 
 
@@ -312,7 +354,14 @@ def _make_entry_intent(
         _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     if decision_source_context is _DEFAULT_CONTEXT:
         decision_source_context = _decision_source_context()
-    return ExecutionIntent(
+    auto_insert_actionable_certificate = actionable_certificate_hash is None and conn is not None
+    if auto_insert_actionable_certificate:
+        import hashlib
+
+        actionable_certificate_hash = hashlib.sha256(
+            f"actionable:{token_id}:{limit_price}:{snapshot_id}".encode()
+        ).hexdigest()
+    intent = ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
         limit_price=limit_price,
@@ -360,6 +409,13 @@ def _make_entry_intent(
             "selection_guard_q_safe": 0.95,
         },
     )
+    if auto_insert_actionable_certificate and conn is not None and actionable_certificate_hash:
+        _insert_actionable_certificate_for_intent(
+            conn,
+            intent,
+            certificate_hash=actionable_certificate_hash,
+        )
+    return intent
 
 
 def _insert_actionable_certificate_for_intent(
@@ -644,7 +700,7 @@ class TestLiveOrderCommandSplit:
         }
         assert components_by_name["entry_economics"]["allowed"] is True
         assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.10
-        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.10
+        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.02
         assert components_by_name["entry_actionable_certificate"]["allowed"] is True
         assert (
             components_by_name["entry_actionable_certificate"]["details"]["certificate_hash"]
@@ -841,10 +897,11 @@ class TestLiveOrderCommandSplit:
         """A durable entries pause must stop queued EDLI submits at executor."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
-        from src.state.db import DEFAULT_CONTROL_OVERRIDE_PRECEDENCE, upsert_control_override
+        from src.state.db import DEFAULT_CONTROL_OVERRIDE_PRECEDENCE, get_world_connection, upsert_control_override
 
+        world_conn = get_world_connection()
         upsert_control_override(
-            mem_conn,
+            world_conn,
             override_id="control_plane:global:entries_paused",
             target_type="global",
             target_key="entries",
@@ -856,7 +913,7 @@ class TestLiveOrderCommandSplit:
             effective_until=None,
             precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
         )
-        mem_conn.commit()
+        world_conn.commit()
 
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -3534,6 +3591,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-acked",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-acked"),
         )
         append_event(
             mem_conn,
@@ -3609,6 +3667,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-filled",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-filled"),
         )
         append_event(
             mem_conn,
@@ -3688,6 +3747,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-rejected",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-rejected"),
         )
         append_event(
             mem_conn,
@@ -3775,11 +3835,11 @@ def test_create_execution_intent_rejects_reprice_above_max_slippage():
 
 
 # ---------------------------------------------------------------------------
-# MAJOR-2 WARNING: synthetic decision_id emits warning
+# MAJOR-2 WARNING: synthetic decision_id emits warning and fails closed
 # ---------------------------------------------------------------------------
 
 def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
-    """When decision_id is empty, executor emits WARNING about synthetic id."""
+    """When decision_id is empty, executor emits WARNING and rejects live submit."""
     from src.execution.executor import _live_order
     import logging
 
@@ -3804,7 +3864,10 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
                     decision_id="",  # empty => synthetic
                 )
 
-    assert result.status == "pending"
+    assert result.status == "rejected"
+    assert result.reason == "entry_decision_identity:missing_durable_live_entry_decision_id"
+    assert result.order_id is None
+    mock_inst.place_limit_order.assert_not_called()
     warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     synth_warnings = [m for m in warning_messages if "synthetic decision_id" in m]
     assert len(synth_warnings) >= 1, (

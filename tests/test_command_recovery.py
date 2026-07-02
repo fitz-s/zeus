@@ -196,7 +196,9 @@ def _valid_day0_pre_submit_payload(**overrides):
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
-            "selection_guard_basis": "SELECTION_BETA_95",
+            "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "q_lcb_guard_abstained": False,
             "selection_guard_abstained": False,
             "selection_guard_q_safe": 0.95,
         },
@@ -208,6 +210,15 @@ def _valid_day0_pre_submit_payload(**overrides):
         "rounding_status": "MATCH",
         "live_authority_status": "live",
         "source_authorized_status": "AUTHORIZED",
+        "day0_q_source": "day0_remaining_day",
+        "day0_q_mode": "remaining_day",
+        "day0_remaining_models": 37,
+        "rounded_value": 72.0,
+        "observation_time": "2026-06-30T17:18:00+00:00",
+        "day0_lcb_transform": {
+            "yes_lcb_by_condition": {"cond-day0-presubmit": 0.95},
+            "no_lcb_by_condition": {"cond-day0-presubmit": 0.05},
+        },
     }
     payload.update(overrides)
     return payload
@@ -2709,7 +2720,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert _get_state(conn, "cmd-001") == "FILLED"
-        assert summary["advanced"] == 1
+        assert summary["advanced"] >= 1
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])

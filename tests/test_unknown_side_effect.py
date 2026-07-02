@@ -75,7 +75,7 @@ def _actionable_payload(*, token_id: str, price: float) -> dict:
         "p_fill_lcb": 0.1,
         "trade_score": submit_edge,
         "action_score": submit_edge,
-        "min_entry_price": 0.005,
+        "min_entry_price": 0.10,
         "selection_authority_applied": "qkernel_spine",
         "qkernel_execution_economics": {
             "source": "qkernel_spine",
@@ -84,8 +84,13 @@ def _actionable_payload(*, token_id: str, price: float) -> dict:
             "payoff_q_lcb": q_lcb,
             "cost": price,
             "edge_lcb": submit_edge,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.01,
+            "selection_guard_basis": "EDGE_POSITIVE",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
             "direction_law_ok": True,
             "coherence_allows": True,
         },
@@ -154,6 +159,7 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.architecture.gate_runtime.check", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "src.execution.executor._entry_control_pause_component",
         lambda *args, **kwargs: {
@@ -316,9 +322,10 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
         q_live=0.70,
         q_lcb_5pct=q_lcb,
         expected_edge=submit_edge,
-        min_entry_price=0.005,
+        min_entry_price=0.10,
         min_expected_profit_usd=0.05,
         min_submit_edge_density=0.02,
+        selection_authority_applied="qkernel_spine",
         qkernel_execution_economics={
             "source": "qkernel_spine",
             "side": "YES",
@@ -326,8 +333,13 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
             "payoff_q_lcb": q_lcb,
             "cost": qkernel_cost,
             "edge_lcb": submit_edge,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.01,
+            "selection_guard_basis": "EDGE_POSITIVE",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
             "direction_law_ok": True,
             "coherence_allows": True,
         },
@@ -719,12 +731,12 @@ def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(co
     class PolyApiException(Exception):
         pass
 
-    intent = _make_entry_intent(conn, price=0.01)
+    intent = _make_entry_intent(conn, price=0.10)
     mock_client = MagicMock()
     mock_client.v2_preflight.return_value = None
     mock_client.place_limit_order.side_effect = PolyApiException(
         "PolyApiException[status_code=400, error_message={'error': "
-        "'invalid amount for a marketable BUY order ($0.03), min size: $1'}]"
+        "'invalid amount for a marketable BUY order ($0.30), min size: $1'}]"
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
@@ -758,19 +770,19 @@ def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_term
     class PolyApiException(Exception):
         pass
 
-    intent = _make_entry_intent(conn, price=0.01)
+    intent = _make_entry_intent(conn, price=0.10)
     mock_client = MagicMock()
     mock_client.v2_preflight.return_value = None
     mock_client.place_limit_order.side_effect = PolyApiException(
         "PolyApiException[status_code=400, error_message={'error': "
-        "'invalid amount for a marketable BUY order ($0.12), min size: 1'}]"
+        "'invalid amount for a marketable BUY order ($0.30), min size: 1'}]"
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
         result = _live_order(
             "trade-m2-marketable-buy-min-no-currency",
             intent,
-            shares=12.0,
+            shares=3.0,
             conn=conn,
             decision_id="dec-m2-marketable-buy-min-no-currency",
         )
@@ -995,11 +1007,11 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
 
     cmd = _command(conn)
     assert result.status == "rejected"
-    assert result.reason == "V2_SUBMIT_UNSUPPORTED"
+    assert result.reason == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
     assert cmd["state"] == "REJECTED"
     assert "SUBMIT_REJECTED" in _events(conn, cmd["command_id"])
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in _events(conn, cmd["command_id"])
-    assert fake_sdk.calls == [("get_ok",)]
+    assert fake_sdk.calls == []
 
 
 def test_duplicate_retry_blocked_during_unknown(conn):

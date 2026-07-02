@@ -1,5 +1,5 @@
 # Created: 2026-05-26
-# Last reused/audited: 2026-06-21
+# Last reused/audited: 2026-07-02
 # Authority basis: PR332 EDLI live profit-audit promotion package; q-provenance stamping (lifecycle-alpha mission).
 from __future__ import annotations
 
@@ -547,7 +547,7 @@ def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
     ).fetchone()
 
     assert row["promotion_eligible"] == 0
-    assert ledger.get_projection("event-1:intent-1").current_state == "CAP_TRANSITIONED"
+    assert ledger.get_projection("event-1:intent-1").current_state == "USER_TRADE_OBSERVED"
 
 
 def test_q_provenance_stamped_from_expected_edge_certificate():
@@ -888,7 +888,33 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "size": 10.0,
         "q_live": 0.45,
+        "q_lcb_5pct": 0.43,
+        "expected_edge": 0.005,
+        "min_entry_price": 0.40,
+        "min_expected_profit_usd": 0.01,
+        "min_submit_edge_density": 0.001,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:condition-1",
+            "route_type": "direct",
+            "side": "YES",
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "EDGE_POSITIVE",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.43,
+            "payoff_q_point": 0.45,
+            "payoff_q_lcb": 0.43,
+            "cost": 0.42,
+            "edge_lcb": 0.01,
+            "delta_u_at_min": 0.001,
+            "optimal_stake_usd": 100.0,
+            "optimal_delta_u": 0.001,
+            "false_edge_rate": 0.001,
+        },
         # Phase 3 W1 (2026-06-20): the live PreSubmitRevalidated event does NOT
         # carry ``expected_cost_basis`` (0/734 on the live DB); the realized cost
         # basis is derived from the CostModelCertificate's ``c_fee_adjusted`` by

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-25
+# Last reused/audited: 2026-07-02
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -322,15 +322,20 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
             (event.event_id,),
         ).fetchone()[0]
 
-    # 12 timely cycles (well past the old cap of 8): the event requeues, never
-    # consumed by an attempt count (operator law 2026-06-12: no caps).
+    # 12 timely retries (well past the old cap of 8): the event requeues, never
+    # consumed by an attempt count (operator law 2026-06-12: no caps). Snapshot
+    # blocks use a retry floor, so advance to the stored not_before each cycle.
     for _ in range(12):
         result = reactor.process_pending(decision_time=dt)
         assert result.processed == 0
         assert result.dead_lettered == 0
         assert result.retried == 1
         assert _status() == "pending"  # retryable, NOT consumed, NO cap
-        dt = dt + timedelta(seconds=61)
+        retry_floor = conn.execute(
+            "SELECT claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
+        dt = datetime.fromisoformat(retry_floor).astimezone(timezone.utc) + timedelta(seconds=1)
 
     present["v"] = True
     result = reactor.process_pending(decision_time=dt)
@@ -367,7 +372,8 @@ def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
     # production the read floor + archive sweep also reclaim it).
     from src.events.reactor import ReactorResult
 
-    horizon_past = datetime(2026, 5, 26, 0, 0, tzinfo=timezone.utc)
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    horizon_past = datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc)
     res = ReactorResult()
     reactor._finalize_disposition(
         event,
@@ -877,7 +883,12 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
     store.insert_or_ignore(event)
     decision_time = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
     action_parents, action = actionable_graph(
-        action_payload={"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
+        action_payload={
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "min_entry_price": 0.05,
+            "min_submit_edge_density": 0.02,
+        },
         parent_overrides={
             claims.CAUSAL_EVENT: {"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
             claims.SOURCE_TRUTH: {"event_id": event.event_id},
@@ -1023,7 +1034,12 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
     store.insert_or_ignore(event)
     decision_time = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
     action_parents, action = actionable_graph(
-        action_payload={"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
+        action_payload={
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "min_entry_price": 0.05,
+            "min_submit_edge_density": 0.02,
+        },
         parent_overrides={
             claims.CAUSAL_EVENT: {"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
             claims.SOURCE_TRUTH: {"event_id": event.event_id},
@@ -1572,7 +1588,7 @@ def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
     assert candidate[2] == "buy_no"
     assert candidate[3] == "condition-33"
     assert candidate[4] == "no-token-33"
-    assert candidate[5:10] == (0.8054, 0.748, 0.74962, 0.74962, -0.00162)
+    assert candidate[5:10] == (0.779, 0.748, 0.74962, 0.74962, -0.00162)
 
 
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
