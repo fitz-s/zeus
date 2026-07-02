@@ -6039,6 +6039,64 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
 
 
+def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'pos-1', 'pending_exit', 'Manila', '2026-07-02', 'high',
+            'Will the highest temperature in Manila be 32°C on July 2?',
+            'buy_yes', 10.0, 10.0, 'retry_pending',
+            'DAY0_HARD_FACT_BIN_DEAD', 1, ?,
+            0.0, 1, 0.0, 1, ?
+        )
+        """,
+        ((now + timedelta(minutes=5)).isoformat(), now.isoformat()),
+    )
+    _insert_monitor_events(
+        conn,
+        monitor_at=now - timedelta(minutes=20),
+        chain_at=now,
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at, payload_json
+        ) VALUES (
+            'evt-exit-rejected', 'pos-1', 3, 'EXIT_ORDER_REJECTED', ?, '{}'
+        )
+        """,
+        ((now - timedelta(seconds=20)).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["fresh_position_count"] == 1
+    assert result.evidence["stale_or_missing_position_count"] == 0
+
+
 def test_monitor_cadence_restart_evidence_is_per_position_not_global_latest(
     monkeypatch, tmp_path
 ):

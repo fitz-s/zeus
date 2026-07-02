@@ -16,6 +16,8 @@ from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 MONITOR_CADENCE_EXPOSURE_EPS = 0.01
 MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
 NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
+EXIT_REDECISION_EVENT_TYPES = frozenset({"EXIT_ORDER_REJECTED", "EXIT_RETRY_RELEASED"})
+EXIT_REDECISION_PHASES = frozenset({"day0_window", "pending_exit"})
 
 
 def collect_monitor_cadence_evidence(
@@ -57,7 +59,23 @@ def collect_monitor_cadence_evidence(
             "phase": position["phase"],
             "chain_state": position["chain_state"],
         }
+        exit_event = _latest_exit_redecision_event(
+            conn,
+            str(position["position_id"]),
+            event_columns,
+        )
         if not occurred_at:
+            if _exit_redecision_event_is_fresh(
+                position,
+                exit_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+                continue
             stale_or_missing.append(
                 {**position_evidence, "last_monitor_refreshed_at": None}
             )
@@ -74,9 +92,31 @@ def collect_monitor_cadence_evidence(
         if age_seconds < 0.0:
             future_events.append(position_evidence)
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
-            stale_or_missing.append(position_evidence)
+            if _exit_redecision_event_is_fresh(
+                position,
+                exit_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+            else:
+                stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
-            stale_or_missing.append(position_evidence)
+            if _exit_redecision_event_is_fresh(
+                position,
+                exit_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+            else:
+                stale_or_missing.append(position_evidence)
         else:
             fresh_count += 1
     open_count = len(monitored_rows)
@@ -108,7 +148,7 @@ def _monitor_cadence_position_rows(
     if "position_id" not in position_columns:
         return []
     optional_selects = []
-    for column in ("phase", "shares", "chain_shares", "chain_state"):
+    for column in ("phase", "shares", "chain_shares", "chain_state", "order_status", "exit_reason"):
         optional_selects.append(column if column in position_columns else f"NULL AS {column}")
     rows = conn.execute(
         f"""
@@ -137,6 +177,8 @@ def _monitor_cadence_position_rows(
                     "position_id": position_id,
                     "phase": phase,
                     "chain_state": chain_state,
+                    "order_status": str(row["order_status"] or "").strip().lower(),
+                    "exit_reason": str(row["exit_reason"] or "").strip(),
                 }
             )
     return monitored
@@ -200,6 +242,74 @@ def _latest_monitor_refreshed_at(
         (position_id,),
     ).fetchone()
     return None if row is None else str(row["occurred_at"] or "")
+
+
+def _latest_exit_redecision_event(
+    conn: sqlite3.Connection,
+    position_id: str,
+    event_columns: set[str],
+) -> tuple[str, str] | None:
+    if "event_type" not in event_columns or "occurred_at" not in event_columns:
+        return None
+    order_by = "datetime(occurred_at) DESC"
+    if "sequence_no" in event_columns:
+        order_by += ", sequence_no DESC"
+    placeholders = ", ".join("?" for _ in EXIT_REDECISION_EVENT_TYPES)
+    row = conn.execute(
+        f"""
+        SELECT event_type, occurred_at
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type IN ({placeholders})
+         ORDER BY {order_by}
+         LIMIT 1
+        """,
+        (position_id, *tuple(sorted(EXIT_REDECISION_EVENT_TYPES))),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["event_type"] or ""), str(row["occurred_at"] or "")
+
+
+def _exit_redecision_event_is_fresh(
+    position: dict[str, object],
+    exit_event: tuple[str, str] | None,
+    *,
+    now_utc: datetime,
+    max_age_seconds: float | None,
+    min_occurred_utc: datetime | None,
+    position_evidence: dict[str, Any],
+    future_events: list[dict[str, Any]],
+) -> bool:
+    phase = str(position.get("phase") or "").strip().lower()
+    order_status = str(position.get("order_status") or "").strip().lower()
+    exit_reason = str(position.get("exit_reason") or "").strip()
+    if phase not in EXIT_REDECISION_PHASES:
+        return False
+    if not exit_reason and order_status not in {"retry_pending", "exit_intent"}:
+        return False
+    if exit_event is None:
+        return False
+    event_type, occurred_at = exit_event
+    occurred_dt = _parse_iso_utc(occurred_at)
+    enriched = {
+        **position_evidence,
+        "cadence_source": event_type,
+        "latest_exit_redecision_at": occurred_at,
+    }
+    if occurred_dt is None:
+        return False
+    age_seconds = (now_utc - occurred_dt).total_seconds()
+    enriched["exit_redecision_age_seconds"] = round(age_seconds, 1)
+    if age_seconds < 0.0:
+        future_events.append(enriched)
+        return False
+    if min_occurred_utc is not None and occurred_dt < min_occurred_utc:
+        return False
+    if max_age_seconds is not None and age_seconds > float(max_age_seconds):
+        return False
+    position_evidence.update(enriched)
+    return True
 
 
 def _parse_iso_utc(value: str) -> datetime | None:
