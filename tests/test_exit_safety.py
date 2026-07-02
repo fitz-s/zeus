@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-18
-# Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Last reused/audited: 2026-07-02
+# Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -3016,6 +3016,34 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     assert event["phase_after"] == "pending_exit"
     assert event["venue_status"] == "retry_pending"
     assert json.loads(event["payload_json"])["error"] == "exit_no_executable_bid"
+
+
+def test_exit_no_bid_classification_uses_snapshot_bid_truth():
+    from src.execution.exit_lifecycle import ExitIntent, _exit_no_executable_bid_error
+
+    intent = ExitIntent(
+        trade_id="pos-no-bid-snapshot",
+        reason="DAY0_HARD_FACT_BIN_DEAD",
+        token_id="yes-token",
+        shares=10.0,
+        current_market_price=0.001,
+        best_bid=0.001,
+    )
+
+    assert (
+        _exit_no_executable_bid_error(
+            intent,
+            {"executable_snapshot_orderbook_top_bid": "ABSENT"},
+        )
+        == "exit_no_executable_bid"
+    )
+    assert (
+        _exit_no_executable_bid_error(
+            intent,
+            {"executable_snapshot_orderbook_top_bid": "0.001"},
+        )
+        == ""
+    )
 
 
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):

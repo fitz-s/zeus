@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Protect cross-module invariants where one module output becomes another module input.
 # Reuse: Run for finality, lifecycle, replay, truth-surface, and relationship-boundary changes.
-# Last reused/audited: 2026-05-06
+# Last reused/audited: 2026-07-02
 # Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30; Wave17 outcome_fact non-authority repair 2026-05-06
 """Cross-module relationship tests.
 
@@ -342,6 +342,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
     pos_fresh = SimpleNamespace(
         trade_id="test-fresh",
         p_posterior=0.55,
+        last_monitor_prob=0.0,
         last_monitor_prob_is_fresh=True,
         last_monitor_market_price=0.55,
         last_monitor_market_price_is_fresh=True,
@@ -369,6 +370,11 @@ def test_monitor_refresh_updates_exit_context_freshness():
     assert exit_ctx_fresh.fresh_prob_is_fresh is True, (
         "monitor_refresh set last_monitor_prob_is_fresh=True but ExitContext.fresh_prob_is_fresh "
         "is False — freshness flag dropped at the monitor→exit_context boundary."
+    )
+    assert exit_ctx_fresh.fresh_prob == 0.0, (
+        "ExitContext must consume the monitor-certified held-side probability from the "
+        "Position surface, including exact zero; using edge_ctx.p_posterior can split "
+        "receipts from the exit decision."
     )
     assert exit_ctx_fresh.day0_zero_probability_exit_authority is True
 

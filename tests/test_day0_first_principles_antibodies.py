@@ -690,12 +690,42 @@ class TestDay0RemainingDayMaturityEntryGuard:
         assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
-                "immature_boundary_yes_suppressed_conditions"
+                "immature_finite_yes_suppressed_conditions"
             ]
-            == ["cond2"]
+            == ["cond2", "cond3"]
         )
 
-    def test_mature_high_boundary_point_yes_keeps_submit_lcb(self):
+    def test_immature_high_non_boundary_point_yes_has_no_submit_lcb(self):
+        """Manila/Wellington class: an immature finite YES above the current
+        running high is still killable by a later higher reading, so it cannot
+        receive a live submit LCB just because the remaining-window point q is high."""
+        fam = _seoul_high_family()
+        payload = _payload("high", 24.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond3", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_finite_yes_suppressed_conditions"
+            ]
+            == ["cond1", "cond2", "cond3"]
+        )
+
+    def test_mature_high_finite_point_yes_keeps_submit_lcb(self):
         fam = _seoul_high_family()
         payload = _payload("high", 25.0, obs_age_minutes=10.0)
         payload["_edli_q_source"] = "day0_remaining_day"
@@ -713,7 +743,7 @@ class TestDay0RemainingDayMaturityEntryGuard:
         assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
-                "immature_boundary_yes_suppressed_conditions"
+                "immature_finite_yes_suppressed_conditions"
             ]
             == []
         )
@@ -744,12 +774,13 @@ class TestDay0RemainingDayMaturityEntryGuard:
         )
 
         assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond1", "buy_yes")]) == 0.0
         assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
-                "immature_boundary_yes_suppressed_conditions"
+                "immature_finite_yes_suppressed_conditions"
             ]
-            == ["cond2"]
+            == ["cond1", "cond2"]
         )
 
 

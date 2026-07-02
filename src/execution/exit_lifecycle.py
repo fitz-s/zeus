@@ -2124,9 +2124,12 @@ def _exit_no_executable_bid_error(
     """Classify one-sided/no-bid sell attempts as liquidity blocked."""
 
     best_bid = _positive_decimal(exit_intent.best_bid)
-    if best_bid is not None:
-        return ""
-    return "exit_no_executable_bid"
+    snapshot_bid = _positive_decimal(
+        snapshot_context.get("executable_snapshot_orderbook_top_bid")
+    )
+    if best_bid is None or snapshot_bid is None:
+        return "exit_no_executable_bid"
+    return ""
 
 
 def _dual_write_canonical_pending_exit_if_available(
@@ -2881,7 +2884,8 @@ def _latest_exit_snapshot_context(
         )
         row = conn.execute(
             f"""
-            SELECT snapshot_id, min_tick_size, min_order_size, neg_risk
+            SELECT snapshot_id, min_tick_size, min_order_size, neg_risk,
+                   orderbook_top_bid, orderbook_top_ask
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
                AND selected_outcome_token_id = ?
@@ -2908,6 +2912,8 @@ def _latest_exit_snapshot_context(
         "executable_snapshot_min_tick_size": str(row["min_tick_size"]),
         "executable_snapshot_min_order_size": str(row["min_order_size"]),
         "executable_snapshot_neg_risk": bool(row["neg_risk"]),
+        "executable_snapshot_orderbook_top_bid": str(row["orderbook_top_bid"]),
+        "executable_snapshot_orderbook_top_ask": str(row["orderbook_top_ask"]),
     }
 
 

@@ -4086,8 +4086,19 @@ def _build_exit_context(
         # Shift edge-space band → belief space by adding the held-side price back.
         _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
 
+    # The monitor refresh writes the authoritative held-side probability onto
+    # the position and stamps its freshness. Use that single surface at the
+    # exit boundary so receipts, projections, and evaluate_exit cannot split
+    # on two same-cycle probability values.
+    _fresh_prob_source = (
+        getattr(pos, "last_monitor_prob", None)
+        if bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+        else getattr(edge_ctx, "p_posterior", None)
+    )
+    _fresh_prob = _finite_float_or_none(_fresh_prob_source)
+
     return ExitContext(
-        fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
+        fresh_prob=_fresh_prob,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
         current_market_price=p_market,
         current_market_price_is_fresh=bool(getattr(pos, "last_monitor_market_price_is_fresh", False)),
