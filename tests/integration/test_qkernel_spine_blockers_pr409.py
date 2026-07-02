@@ -2002,13 +2002,13 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
         "route_id": "DIRECT_YES:b24@proof",
         "side": "YES",
         "bin_id": "b24",
-        "payoff_q_point": 0.20,
-        "payoff_q_lcb": 0.137,
-        "edge_lcb": 0.132,
-        "delta_u_at_min": 0.001,
-        "optimal_stake_usd": "1.50",
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": 0.60,
+        "edge_lcb": 0.20,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "5.00",
         "optimal_delta_u": 0.02,
-        "cost": 0.005,
+        "cost": 0.40,
         "false_edge_rate": 0.05,
         "q_lcb_guard_basis": "OOF_WILSON_95",
         "q_lcb_guard_abstained": False,
@@ -2017,7 +2017,7 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
         "selection_guard_abstained": False,
         "selection_guard_cell_key": "YES|L2_3|modal|pb2",
         "selection_guard_n": 80,
-        "selection_guard_q_safe": 0.137,
+        "selection_guard_q_safe": 0.60,
         "direction_law_ok": False,
         "coherence_allows": True,
     }
@@ -2287,6 +2287,46 @@ def test_overlay_uses_guarded_false_edge_rate_when_guard_authors_edge():
     assert new_proof.p_value == pytest.approx(0.05)
     assert new_proof.passed_prefilter is True
     assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.05)
+
+
+def test_candidate_economics_selection_cert_carries_false_edge_rate():
+    """Every qkernel candidate cert consumed by live selection must satisfy the validator."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30
+    )
+    candidate_decision = SimpleNamespace(
+        economics=economics,
+        route=SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0])),
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.60,
+        robust_trade_score=0.20,
+    )
+    decision = SimpleNamespace(
+        decision_id="decision-selection-cert",
+        receipt_hash="receipt-selection-cert",
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.70], [0.70], [0.70]])),
+        candidate_decisions=(candidate_decision,),
+    )
+
+    payload = bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "NO")]
+
+    assert payload["false_edge_rate"] == pytest.approx(0.05)
+    assert era._valid_qkernel_execution_economics_payload(
+        payload,
+        direction="buy_no",
+    ) is not None
 
 
 def test_fdr_maps_consume_selected_qkernel_overlay_authority():

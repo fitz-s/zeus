@@ -2010,6 +2010,9 @@ def _candidate_qkernel_execution_economics_payload(
                     ),
                 }
             )
+        false_edge_rate = _qkernel_false_edge_rate(decision, candidate_decision)
+        if false_edge_rate is not None:
+            payload["false_edge_rate"] = false_edge_rate
     except (TypeError, ValueError, AttributeError):
         return None
     return payload
