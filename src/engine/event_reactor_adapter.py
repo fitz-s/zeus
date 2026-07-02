@@ -2157,6 +2157,181 @@ def _valid_qkernel_execution_economics_payload(
     return cert
 
 
+def _qkernel_selection_economics_rejection_reason(
+    cert: Any,
+    *,
+    direction: str | None = None,
+) -> str:
+    """Classify why a qkernel economics certificate is not selectable.
+
+    This mirrors ``_valid_qkernel_execution_economics_payload`` without relaxing
+    it.  A candidate with an honest negative/zero robust edge is different from
+    malformed execution evidence, and the live regret surface must preserve that
+    distinction for redecision/debugging.
+    """
+
+    if not isinstance(cert, Mapping):
+        return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
+    missing = sorted(_QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS.difference(cert.keys()))
+    if missing:
+        return "QKERNEL_EXECUTION_ECONOMICS_MISSING_FIELDS:fields=" + ",".join(missing)
+    if str(cert.get("source") or "") != "qkernel_spine":
+        return "QKERNEL_EXECUTION_ECONOMICS_INVALID_SOURCE"
+    if not str(cert.get("candidate_id") or "").strip():
+        return "QKERNEL_EXECUTION_ECONOMICS_MISSING_CANDIDATE_ID"
+    route_id = str(cert.get("route_id") or "").strip()
+    if not route_id:
+        return "QKERNEL_EXECUTION_ECONOMICS_MISSING_ROUTE_ID"
+    side = str(cert.get("side") or "").strip().upper()
+    native_side = _native_curve_side_for_direction(str(direction or ""))
+    if side not in {"YES", "NO"}:
+        return f"QKERNEL_EXECUTION_ECONOMICS_INVALID_SIDE:side={side or 'UNKNOWN'}"
+    if native_side is not None and side != native_side:
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_SIDE_MISMATCH:"
+            f"side={side}:direction={direction or 'UNKNOWN'}"
+        )
+    if route_id.startswith("DIRECT_YES:") and native_side not in {None, "YES"}:
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_ROUTE_SIDE_MISMATCH:"
+            f"route_side=YES:direction={direction or 'UNKNOWN'}"
+        )
+    if route_id.startswith("DIRECT_NO:") and native_side not in {None, "NO"}:
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_ROUTE_SIDE_MISMATCH:"
+            f"route_side=NO:direction={direction or 'UNKNOWN'}"
+        )
+    if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
+        return f"QKERNEL_EXECUTION_ECONOMICS_INVALID_ROUTE:route_id={route_id}"
+
+    numeric: dict[str, float] = {}
+    for key in (
+        "payoff_q_point",
+        "payoff_q_lcb",
+        "edge_lcb",
+        "delta_u_at_min",
+        "optimal_delta_u",
+        "cost",
+        "optimal_stake_usd",
+        "false_edge_rate",
+    ):
+        try:
+            value = float(cert.get(key))
+        except (TypeError, ValueError):
+            return f"QKERNEL_EXECUTION_ECONOMICS_NON_NUMERIC:key={key}"
+        if not math.isfinite(value):
+            return f"QKERNEL_EXECUTION_ECONOMICS_NONFINITE:key={key}"
+        numeric[key] = value
+
+    false_edge_rate = numeric["false_edge_rate"]
+    if not (0.0 < false_edge_rate <= 1.0):
+        return f"QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_INVALID:value={false_edge_rate:.6f}"
+    payoff_q_point = numeric["payoff_q_point"]
+    payoff_q_lcb = numeric["payoff_q_lcb"]
+    cost = numeric["cost"]
+    edge_lcb = numeric["edge_lcb"]
+    delta_u_at_min = numeric["delta_u_at_min"]
+    optimal_delta_u = numeric["optimal_delta_u"]
+    optimal_stake = numeric["optimal_stake_usd"]
+    if not (0.0 <= payoff_q_point <= 1.0):
+        return f"QKERNEL_EXECUTION_ECONOMICS_Q_POINT_BOUNDS:value={payoff_q_point:.6f}"
+    if not (0.0 <= payoff_q_lcb <= 1.0):
+        return f"QKERNEL_EXECUTION_ECONOMICS_Q_LCB_BOUNDS:value={payoff_q_lcb:.6f}"
+    if payoff_q_lcb > payoff_q_point:
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_Q_LCB_EXCEEDS_POINT:"
+            f"payoff_q_lcb={payoff_q_lcb:.6f}:payoff_q_point={payoff_q_point:.6f}"
+        )
+    if "q_dot_payoff" in cert:
+        try:
+            q_dot_payoff = float(cert.get("q_dot_payoff"))
+        except (TypeError, ValueError):
+            return "QKERNEL_EXECUTION_ECONOMICS_NON_NUMERIC:key=q_dot_payoff"
+        if not math.isfinite(q_dot_payoff):
+            return "QKERNEL_EXECUTION_ECONOMICS_NONFINITE:key=q_dot_payoff"
+        if not math.isclose(
+            q_dot_payoff,
+            payoff_q_point,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return (
+                "QKERNEL_EXECUTION_ECONOMICS_Q_DOT_PAYOFF_MISMATCH:"
+                f"q_dot_payoff={q_dot_payoff:.6f}:payoff_q_point={payoff_q_point:.6f}"
+            )
+    if not (0.0 < cost < 1.0):
+        return f"QKERNEL_EXECUTION_ECONOMICS_COST_BOUNDS:cost={cost:.6f}"
+    if edge_lcb <= 0.0:
+        return (
+            "QKERNEL_EDGE_LCB_NON_POSITIVE:"
+            f"edge_lcb={edge_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}"
+        )
+    if optimal_delta_u <= 0.0:
+        return (
+            "QKERNEL_DELTA_U_NON_POSITIVE:"
+            f"optimal_delta_u={optimal_delta_u:.9f}:edge_lcb={edge_lcb:.6f}:"
+            f"stake={optimal_stake:.6f}"
+        )
+    if delta_u_at_min <= 0.0:
+        return (
+            "QKERNEL_DELTA_U_AT_MIN_NON_POSITIVE:"
+            f"delta_u_at_min={delta_u_at_min:.9f}:edge_lcb={edge_lcb:.6f}:"
+            f"stake={optimal_stake:.6f}"
+        )
+    if optimal_stake <= 0.0:
+        return f"QKERNEL_STAKE_NON_POSITIVE:stake={optimal_stake:.6f}:edge_lcb={edge_lcb:.6f}"
+    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_EDGE_IDENTITY_MISMATCH:"
+            f"payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}:edge_lcb={edge_lcb:.6f}"
+        )
+    if not _qkernel_cert_direction_admitted(cert, direction=direction):
+        return f"QKERNEL_DIRECTION_LAW_REJECTED:side={side or 'UNKNOWN'}"
+    if cert.get("coherence_allows") is not True:
+        return f"QKERNEL_MARKET_COHERENCE_BLOCKED:side={side or 'UNKNOWN'}"
+    selection_guard_basis = str(cert.get("selection_guard_basis") or "").strip()
+    if not selection_guard_basis:
+        return "QKERNEL_SELECTION_GUARD_MISSING"
+    if selection_guard_basis == "SIDE_NOT_ARMED":
+        return f"QKERNEL_SELECTION_SIDE_NOT_ARMED:side={side or 'UNKNOWN'}"
+    raw_selection_guard_abstained = cert.get("selection_guard_abstained")
+    if isinstance(raw_selection_guard_abstained, bool):
+        selection_guard_abstained = raw_selection_guard_abstained
+    else:
+        raw_text = str(raw_selection_guard_abstained).strip().lower()
+        if raw_text in {"0", "false", "no"}:
+            selection_guard_abstained = False
+        elif raw_text in {"1", "true", "yes"}:
+            selection_guard_abstained = True
+        else:
+            return "QKERNEL_SELECTION_GUARD_ABSTAINED_INVALID"
+    if selection_guard_abstained:
+        return "QKERNEL_SELECTION_GUARD_ABSTAINED"
+    try:
+        selection_guard_q_safe = float(cert.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return "QKERNEL_EXECUTION_ECONOMICS_NON_NUMERIC:key=selection_guard_q_safe"
+    if not (math.isfinite(selection_guard_q_safe) and selection_guard_q_safe > 0.0):
+        return (
+            "QKERNEL_SELECTION_GUARD_Q_SAFE_INVALID:"
+            f"selection_guard_q_safe={selection_guard_q_safe:.6f}"
+        )
+    if not _qkernel_roi_frontier_useful_cert(
+        side=side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        return (
+            "QKERNEL_EXECUTION_ECONOMICS_ROI_FRONTIER_NOT_USEFUL:"
+            f"edge_lcb={edge_lcb:.6f}:stake={optimal_stake:.6f}:"
+            f"delta_u_at_min={delta_u_at_min:.9f}"
+        )
+    return "QKERNEL_EXECUTION_ECONOMICS_INVALID_FOR_SELECTION"
+
+
 def _qkernel_near_day0_cert_rejection_reason(cert: Mapping[str, Any] | None) -> str | None:
     if not isinstance(cert, Mapping):
         return None
@@ -12777,7 +12952,10 @@ def _live_selection_rejection_reason(
         cert,
         direction=str(getattr(proof, "direction", "") or ""),
     ) is None:
-        return "QKERNEL_EXECUTION_ECONOMICS_INVALID_FOR_SELECTION"
+        return _qkernel_selection_economics_rejection_reason(
+            cert,
+            direction=str(getattr(proof, "direction", "") or ""),
+        )
     final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
         proof=proof,
         cert=cert,

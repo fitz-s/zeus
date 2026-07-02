@@ -539,6 +539,39 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
         )
 
 
+def test_qkernel_selection_rejection_names_no_positive_edge_not_generic_invalid():
+    cert = _qkernel_cert()
+    cert.update(
+        candidate_id="NO:bin-1:DIRECT_NO:bin-1@proof",
+        route_id="DIRECT_NO:bin-1@proof",
+        side="NO",
+        payoff_q_point=0.88849,
+        payoff_q_lcb=0.8053585,
+        cost=0.98,
+        edge_lcb=-0.1746415,
+        delta_u_at_min=-0.0007298,
+        optimal_delta_u=-0.0007298,
+        optimal_stake_usd="0",
+        selection_guard_q_safe=0.8053585,
+    )
+
+    reason = era._live_selection_rejection_reason(
+        SimpleNamespace(
+            direction="buy_no",
+            q_lcb_5pct=0.8053585,
+            qkernel_execution_economics=cert,
+        ),
+        strategy_policy_event_type="EDLI_REDECISION_PENDING",
+        enforce_win_rate_floor=False,
+    )
+
+    assert reason is not None
+    assert reason.startswith("QKERNEL_EDGE_LCB_NON_POSITIVE:")
+    assert "payoff_q_lcb=0.805358" in reason
+    assert "cost=0.980000" in reason
+    assert "INVALID_FOR_SELECTION" not in reason
+
+
 def test_near_day0_qkernel_consistency_rejects_raw_extrema_contradiction(monkeypatch):
     monkeypatch.setattr(
         era,
