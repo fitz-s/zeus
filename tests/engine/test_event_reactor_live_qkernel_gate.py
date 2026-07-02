@@ -841,6 +841,44 @@ def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
     )
 
 
+def test_day0_fresh_submit_mode_remains_maker_even_when_policy_would_cross():
+    mode = era._fresh_rest_then_cross_mode(
+        actionable_payload=_day0_payload(
+            direction="buy_yes",
+            q_lcb_5pct=1.0,
+            c_fee_adjusted=0.97,
+            rest_then_cross_policy="TAKER_FLEETING_EDGE",
+        ),
+        executable_snapshot=SimpleNamespace(
+            payload={"market_end_at": "2026-07-02T23:59:59+00:00"}
+        ),
+        fresh_best_bid=0.96,
+        fresh_best_ask=0.97,
+        tick_size=0.001,
+        decision_time=datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert mode == "MAKER"
+
+
+def test_day0_order_mode_remains_maker_even_with_taker_policy():
+    mode = era._select_edli_order_mode(
+        actionable_payload=_day0_payload(
+            direction="buy_yes",
+            rest_then_cross_policy="TAKER_FLEETING_EDGE",
+            c_fee_adjusted=0.97,
+        ),
+        quote_payload={},
+        best_bid=0.96,
+        best_ask=0.97,
+        executable_snapshot=SimpleNamespace(payload={}),
+        fresh_best_bid=0.96,
+        fresh_best_ask=0.97,
+    )
+
+    assert mode == "MAKER"
+
+
 def test_live_entry_day0_gate_rejects_missing_qkernel_economics():
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED"):
         _assert_live_entry_submit_authority(

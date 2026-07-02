@@ -1060,6 +1060,45 @@ def test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes():
     assert scoped == (high_confidence_proof,)
 
 
+def test_qkernel_selection_rescores_legacy_win_rate_floor_rejection_for_yes():
+    """Qkernel production scoping must not let the old binary floor hide center YES."""
+
+    row = _snapshot_row(
+        yes_asks=(("0.12", "1000000"),),
+        condition_id="cond-center-yes",
+        yes_token_id="yes-center",
+        no_token_id="no-center",
+        snapshot_id="snap-center-yes",
+    )
+    center_yes = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-center",
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        bin_obj=_BIN_X,
+    )
+    legacy_rejected = dataclass_replace(
+        center_yes,
+        missing_reason="ADMISSION_WIN_RATE_FLOOR:q_lcb=0.2000:min=0.5100",
+        passed_prefilter=False,
+        trade_score=0.0,
+    )
+
+    assert (
+        era._selection_scoped_proofs(
+            proofs=(legacy_rejected,),
+            honor_admission_rejections=False,
+        )
+        == ()
+    )
+    assert era._selection_scoped_proofs(
+        proofs=(legacy_rejected,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    ) == (legacy_rejected,)
+
+
 def test_qkernel_selection_scopes_out_low_payoff_lcb_even_when_legacy_lcb_is_high():
     row = _snapshot_row(
         yes_asks=(("0.041", "1000000"),),

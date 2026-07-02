@@ -1839,8 +1839,8 @@ def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_sa
 
     assert annotated.passed_prefilter is False
     assert annotated.trade_score == 0.0
-    assert annotated.missing_reason.startswith("QKERNEL_ROI_FRONTIER_NOT_USEFUL:")
-    assert "payoff_q_lcb=0.060526" in annotated.missing_reason
+    assert annotated.missing_reason.startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert "q_lcb=0.0605" in annotated.missing_reason
 
 
 def test_qkernel_receipt_annotation_rejects_nonpositive_min_order_utility():
@@ -2144,6 +2144,27 @@ def test_overlay_clears_center_buy_ultra_low_legacy_blocker():
     assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
+def test_overlay_clears_legacy_win_rate_floor_for_qkernel_yes():
+    """Exact-bin YES can be ROI-valid below the old binary 51% win-rate floor."""
+
+    economics = _selected_economics(
+        edge_lcb=0.08, cost=0.12, q_dot_payoff=0.20, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="ADMISSION_WIN_RATE_FLOOR:q_lcb=0.2000:min=0.5100",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.passed_prefilter is True
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.q_lcb_5pct == pytest.approx(0.20)
+
+
 def test_overlay_allows_center_buy_yes_below_strategy_floor_without_legacy_blocker():
     """Qkernel selection does not hide cheap YES before submit authority sees it."""
     economics = _selected_economics(
@@ -2368,11 +2389,11 @@ def test_qkernel_selected_route_fdr_is_not_legacy_bh_denominator():
     from src.events.money_path_adapters import evaluate_fdr_full_family
 
     economics = _selected_economics(
-        edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
+        edge_lcb=0.30, cost=0.30, q_dot_payoff=0.70, point_ev=0.40
     )
     selected = _overlay_proof(
-        q_posterior=0.09,
-        q_lcb_5pct=0.07,
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
         economics=economics,
     )
     assert selected is not None
@@ -2425,11 +2446,11 @@ def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
     from dataclasses import replace
 
     economics = _selected_economics(
-        edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
+        edge_lcb=0.30, cost=0.30, q_dot_payoff=0.70, point_ev=0.40
     )
     selected = _overlay_proof(
-        q_posterior=0.09,
-        q_lcb_5pct=0.07,
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
         economics=economics,
     )
     assert selected is not None

@@ -303,6 +303,18 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # running extreme). Module-level so qkernel can feed the observed boundary into the
 # same family optimizer while the live adapter still applies Day0 authority guards.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+_DAY0_MAKER_ONLY_REST_POLICY = "REST_DAY0_MAKER_ONLY"
+_DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON = "DAY0_MAKER_ONLY"
+
+
+def _is_day0_lane_event_type(event_type: object) -> bool:
+    return str(event_type or "").strip() in _DAY0_LANE_EVENT_TYPES
+
+
+def _day0_maker_only_required(actionable_payload: Mapping[str, object]) -> bool:
+    """Current live Day0 entries are maker-only; the proof path must rank that reality."""
+
+    return _is_day0_lane_event_type(actionable_payload.get("event_type"))
 
 
 def _event_allows_same_family_monitor_owned(event_type: object) -> bool:
@@ -4697,6 +4709,7 @@ def _build_event_bound_no_submit_receipt_core(
             decision_time=decision_time,
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
+            enforce_win_rate_floor=False,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:
@@ -4835,6 +4848,7 @@ def _build_event_bound_no_submit_receipt_core(
         allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
         selection_exposure_by_outcome=_selection_exposure,
+        enforce_win_rate_floor=not (_spine_flag_on and _spine_eligible_event),
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -5064,6 +5078,7 @@ def _build_event_bound_no_submit_receipt_core(
                     allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
                     qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
                     selection_exposure_by_outcome=_selection_exposure,
+                    enforce_win_rate_floor=not (_spine_flag_on and _spine_eligible_event),
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -6971,6 +6986,9 @@ def _fresh_rest_then_cross_mode(
         POLICY_TAKER_ESCALATED_AFTER_REST,
         select_rest_then_cross_mode,
     )
+
+    if _day0_maker_only_required(actionable_payload):
+        return "MAKER"
 
     proof_policy = str(actionable_payload.get("rest_then_cross_policy") or "").strip()
     escalated_after_rest = proof_policy == POLICY_TAKER_ESCALATED_AFTER_REST
@@ -9758,6 +9776,9 @@ def _select_edli_order_mode(
     """
     side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    if _day0_maker_only_required(actionable_payload):
+        return "MAKER"
 
     # --- 0. RELATIVE-SPREAD PARTICIPATION GUARD (FIX C; incident
     # 0b5c305e26524042: 56% relative spread crossed as an instant FOK taker).
@@ -12744,6 +12765,7 @@ def _selection_scoped_proofs(
             (
                 "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
                 "ADMISSION_CAPITAL_EFFICIENCY",
+                "ADMISSION_WIN_RATE_FLOOR",
                 "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
             )
         )
@@ -12992,13 +13014,21 @@ def _qkernel_final_submit_floor_rejection_reason(
         live_entry_probability_quality_rejection_reason,
     )
 
+    strategy_key_for_quality = _proof_strategy_key_for_quality(
+        proof,
+        strategy_policy_event_type=strategy_policy_event_type,
+    )
+    if (
+        strategy_key_for_quality is None
+        and str(getattr(proof, "direction", "") or "").strip() == "buy_yes"
+        and str(cert.get("source") or "").strip() == "qkernel_spine"
+    ):
+        strategy_key_for_quality = "forecast_qkernel_entry"
+
     win_rate_reason = live_entry_probability_quality_rejection_reason(
         q_lcb=payoff_q_lcb,
         direction=str(getattr(proof, "direction", "") or ""),
-        strategy_key=_proof_strategy_key_for_quality(
-            proof,
-            strategy_policy_event_type=strategy_policy_event_type,
-        ),
+        strategy_key=strategy_key_for_quality,
         selection_authority_applied="qkernel_spine",
         qkernel_execution_economics=cert,
     )
@@ -13065,6 +13095,7 @@ def _opportunity_book_proofs_with_selection_rejections(
     strategy_policy_event_type: str | None = None,
     decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
+    enforce_win_rate_floor: bool = True,
 ) -> tuple[_CandidateProof, ...]:
     excluded_by_id: dict[str, str] = {}
     selected_ids = {
@@ -13077,6 +13108,7 @@ def _opportunity_book_proofs_with_selection_rejections(
             strategy_policy_event_type=strategy_policy_event_type,
             decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            enforce_win_rate_floor=enforce_win_rate_floor,
         )
     }
     for proof in proofs:
@@ -13090,6 +13122,7 @@ def _opportunity_book_proofs_with_selection_rejections(
             strategy_policy_conn=strategy_policy_conn,
             strategy_policy_event_type=strategy_policy_event_type,
             decision_time=decision_time,
+            enforce_win_rate_floor=enforce_win_rate_floor,
         )
         if reason is None:
             reason = _candidate_limit_price_untradeable_reason(proof)
@@ -13433,6 +13466,7 @@ def _opportunity_book_from_proofs(
     allow_same_family_monitor_owned: bool = False,
     qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
     selection_exposure_by_outcome: Mapping[str, float] | None = None,
+    enforce_win_rate_floor: bool = True,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
@@ -13463,6 +13497,7 @@ def _opportunity_book_from_proofs(
             strategy_policy_event_type=strategy_policy_event_type,
             decision_time=decision_time,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            enforce_win_rate_floor=enforce_win_rate_floor,
         )
     )
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
@@ -13894,6 +13929,7 @@ def _generate_candidate_proofs(
     _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
         trade_conn, family=family, decision_time=decision_time
     )
+    _day0_proof_maker_only = _is_day0_lane_event_type(getattr(event, "event_type", None))
     # Twin-authority reconciliation #7 (2026-06-11, selected-leg repair 2026-06-30):
     # replacement coverage verdicts are keyed by (condition_id, direction). The
     # selected proof's own leg controls both buy-NO admission and the calibration
@@ -14029,7 +14065,14 @@ def _generate_candidate_proofs(
                 escalated_after_rest=_rtc_escalated,
             )
             if mode_ev is not None:
-                score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
+                if _day0_proof_maker_only:
+                    try:
+                        maker_ev = float(mode_ev.ev_maker)
+                    except (TypeError, ValueError):
+                        maker_ev = 0.0
+                    score = maker_ev if math.isfinite(maker_ev) else 0.0
+                else:
+                    score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
             else:
                 score = _robust_trade_score_from_generated_inputs(
                     q_posterior=q_value,
@@ -14128,6 +14171,18 @@ def _generate_candidate_proofs(
                 or direction_law_reason is not None
             ):
                 passed_prefilter = False
+            proof_execution_mode_intent = (
+                mode_ev.chosen_mode if mode_ev is not None else None
+            )
+            proof_taker_forbidden_reason = (
+                mode_ev.taker_forbidden_reason if mode_ev is not None else None
+            )
+            proof_rest_then_cross_policy = mode_ev.policy if mode_ev is not None else None
+            if _day0_proof_maker_only and mode_ev is not None:
+                proof_execution_mode_intent = "MAKER"
+                proof_rest_then_cross_policy = _DAY0_MAKER_ONLY_REST_POLICY
+                if not proof_taker_forbidden_reason:
+                    proof_taker_forbidden_reason = _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON
             proofs.append(
                 _CandidateProof(
                     candidate=candidate,
@@ -14167,18 +14222,18 @@ def _generate_candidate_proofs(
                     probability_authority=probability_evidence.get("probability_authority"),
                     # FIX C: the mode decision + BOTH EVs ride the proof to the
                     # receipt (settlement-loop recalibration provenance).
-                    execution_mode_intent=(mode_ev.chosen_mode if mode_ev is not None else None),
+                    execution_mode_intent=proof_execution_mode_intent,
                     ev_taker=(mode_ev.ev_taker if mode_ev is not None else None),
                     ev_maker=(mode_ev.ev_maker if mode_ev is not None else None),
                     maker_limit_price=(mode_ev.maker_limit_price if mode_ev is not None else None),
                     relative_spread_at_eval=(mode_ev.relative_spread if mode_ev is not None else None),
-                    taker_forbidden_reason=(mode_ev.taker_forbidden_reason if mode_ev is not None else None),
+                    taker_forbidden_reason=proof_taker_forbidden_reason,
                     maker_fill_probability=(mode_ev.maker_fill_probability if mode_ev is not None else None),
                     maker_fill_probability_source=(
                         mode_ev.maker_fill_probability_source if mode_ev is not None else None
                     ),
                     # K4.0: the policy verdict + escalation deadline travel with the proof.
-                    rest_then_cross_policy=(mode_ev.policy if mode_ev is not None else None),
+                    rest_then_cross_policy=proof_rest_then_cross_policy,
                     rest_escalation_deadline_minutes=(
                         mode_ev.escalation_deadline_minutes if mode_ev is not None else None
                     ),
@@ -15616,6 +15671,7 @@ def _family_rank_reversed_at_recapture(
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            enforce_win_rate_floor=False,
         )
         ranked: list[tuple[tuple[float, float, float, float, float, float], _CandidateProof]] = []
         for proof in scoped:
