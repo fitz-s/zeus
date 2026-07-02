@@ -198,6 +198,7 @@ modules:
       - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
+      - tests/data/test_source_run_arrived_event.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   data:
@@ -259,6 +260,7 @@ modules:
       - tests/test_v2_adapter.py
       - tests/test_release_calendar.py
       - tests/data/test_openmeteo_model_updates.py
+      - tests/data/test_source_run_arrived_event.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   execution:

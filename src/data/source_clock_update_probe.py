@@ -18,6 +18,8 @@ from src.data.openmeteo_model_updates import (
 from src.data.bayes_precision_fusion_download import (
     source_clock_metadata_run_is_single_runs_served,
 )
+from src.events.event_writer import EventWriter
+from src.events.opportunity_event import SourceRunArrivedPayload, make_source_run_arrived_event
 from src.strategy.live_inference.source_clock_city_weights import (
     affected_cities_for_source_updates,
     all_configured_source_ids,
@@ -45,6 +47,7 @@ class SourceClockUpdateProbeReport:
     model_updates_path: str
     cursor_path: str
     error: str | None = None
+    emitted_event_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +58,7 @@ class SourceClockUpdateProbeReport:
             "model_updates_path": self.model_updates_path,
             "cursor_path": self.cursor_path,
             "error": self.error,
+            "emitted_event_ids": list(self.emitted_event_ids),
         }
 
 
@@ -87,6 +91,7 @@ def probe_openmeteo_source_clock_updates(
     endpoint_url: str | None = None,
     use_network: bool = True,
     advance_cursor: bool = True,
+    event_writer: EventWriter | None = None,
 ) -> SourceClockUpdateProbeReport:
     models = all_configured_source_ids()
     updates_path = Path(model_updates_path)
@@ -129,6 +134,14 @@ def probe_openmeteo_source_clock_updates(
         for model in usable_changed:
             next_cursor[model] = new[model]
         _write_cursor(cursor, next_cursor)
+    emitted_event_ids: tuple[str, ...] = ()
+    if usable_changed and event_writer is not None:
+        emitted_event_ids = _emit_source_run_arrived_events(
+            usable_changed,
+            update_by_model=update_by_model,
+            event_writer=event_writer,
+            received_at=now,
+        )
     return SourceClockUpdateProbeReport(
         status=(
             "SOURCE_CLOCK_UPDATES_CHANGED"
@@ -141,7 +154,49 @@ def probe_openmeteo_source_clock_updates(
         model_updates_path=str(updates_path),
         cursor_path=str(cursor),
         error=None,
+        emitted_event_ids=emitted_event_ids,
     )
+
+
+def _emit_source_run_arrived_events(
+    usable_changed: list[str],
+    *,
+    update_by_model: Mapping[str, OpenMeteoModelUpdate],
+    event_writer: EventWriter,
+    received_at: datetime,
+) -> tuple[str, ...]:
+    """Emit one SOURCE_RUN_ARRIVED event per newly-usable model run.
+
+    ``available_at`` is the run's own publicly-usable time (not this call's wall
+    clock), and ``entity_key`` encodes the run's own cycle time. Re-polling the SAME
+    undelivered run (this function can be called again before the cursor commits —
+    see ``advance_cursor=False`` callers) reproduces an identical idempotency key, so
+    ``EventWriter.write`` no-ops on the replay instead of stacking duplicate rows.
+    """
+
+    event_ids: list[str] = []
+    for model in usable_changed:
+        update = update_by_model[model]
+        run = update.to_source_run_clock()
+        source_cycle_time = update.last_run_initialisation_time.astimezone(UTC).isoformat()
+        detected_at = source_publicly_usable_at(run).isoformat()
+        payload = SourceRunArrivedPayload(
+            source=model,
+            affected_cities=list(affected_cities_for_source_updates([model])),
+            source_cycle_time=source_cycle_time,
+            detected_at=detected_at,
+        )
+        event = make_source_run_arrived_event(
+            entity_key=f"{model}|{source_cycle_time}",
+            source=model,
+            observed_at=source_cycle_time,
+            available_at=detected_at,
+            received_at=received_at.isoformat(),
+            payload=payload,
+        )
+        result = event_writer.write(event)
+        event_ids.append(result.event_id)
+    return tuple(event_ids)
 
 
 def source_clock_scoped_download_allows_cursor_advance(report: Mapping[str, object] | None) -> bool:

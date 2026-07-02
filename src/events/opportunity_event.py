@@ -19,6 +19,7 @@ EventType = Literal[
     "BOOK_SNAPSHOT",
     "BEST_BID_ASK_CHANGED",
     "NEW_MARKET_DISCOVERED",
+    "SOURCE_RUN_ARRIVED",
 ]
 
 SCHEMA_VERSION = 1
@@ -76,6 +77,14 @@ class Day0ExtremeUpdatedPayload:
     rounding_status: str = "UNKNOWN"
     source_authorized_status: str = "UNKNOWN"
     live_authority_status: str = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class SourceRunArrivedPayload:
+    source: str
+    affected_cities: list[str]
+    source_cycle_time: str
+    detected_at: str
 
 
 @dataclass(frozen=True)
@@ -197,6 +206,37 @@ def make_opportunity_event(
         payload_json=payload_json,
         schema_version=SCHEMA_VERSION,
         created_at=created_at or received_at,
+    )
+
+
+def make_source_run_arrived_event(
+    *,
+    entity_key: str,
+    source: str,
+    observed_at: str,
+    available_at: str,
+    received_at: str,
+    payload: SourceRunArrivedPayload,
+    priority: int = 0,
+) -> OpportunityEvent:
+    """Create a SOURCE_RUN_ARRIVED event.
+
+    ``available_at`` must be the source run's own publicly-usable time (not probe
+    wall-clock), and ``entity_key`` must encode the run identity (source + its own
+    cycle time), so repeated probe polls of the SAME undelivered run reproduce an
+    identical idempotency key and INSERT OR IGNORE no-ops instead of stacking
+    duplicate rows.
+    """
+
+    return make_opportunity_event(
+        event_type="SOURCE_RUN_ARRIVED",
+        entity_key=entity_key,
+        source=source,
+        observed_at=observed_at,
+        available_at=available_at,
+        received_at=received_at,
+        payload=payload,
+        priority=priority,
     )
 
 
