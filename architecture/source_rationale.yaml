@@ -717,6 +717,16 @@ files:
     - VENUS_CONTROL_ONLY
     downstream:
     - src/engine/cycle_runner.py
+  src/control/runtime_code_plane.py:
+    zone: K1_governance
+    authority_role: deployment_runtime_code_guard
+    why: Shared runtime-code-plane diff classifier for deployment freshness, submit gate, and live-health surfaces so test/docs-only commits do not auto-pause live money while executable runtime changes still fail closed.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/main.py
+    - src/architecture/gate_runtime.py
+    - src/control/live_health.py
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard

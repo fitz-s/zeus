@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-02
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -27,6 +27,7 @@ import pytest
 
 from src.engine import event_reactor_adapter as era
 from src.state.schema.family_rebalance_intents_schema import ensure_table
+from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
 from src.strategy import shift_bin_wiring as sbw
 
@@ -40,12 +41,26 @@ CREATE TABLE position_current (
     shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
 )
 """
+_LIVE_CAP_DDL = """
+CREATE TABLE edli_live_cap_usage (
+    usage_id TEXT, event_id TEXT, final_intent_id TEXT,
+    execution_command_id TEXT, reserved_notional_usd REAL,
+    reservation_status TEXT
+)
+"""
+_LIVE_ORDER_EVENTS_DDL = """
+CREATE TABLE edli_live_order_events (
+    aggregate_id TEXT, event_type TEXT, payload_json TEXT
+)
+"""
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(_POSITION_CURRENT_DDL)
+    conn.execute(_LIVE_CAP_DDL)
+    conn.execute(_LIVE_ORDER_EVENTS_DDL)
     ensure_table(conn)
     return conn
 
@@ -326,6 +341,57 @@ def test_blocking_unowned_exposure_aborts_no_exit_no_entry():
     )
     assert plan.kind == "ABORT"
     assert plan.allow_entry is False
+
+
+def test_shift_bin_family_pending_guard_counts_third_sibling():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(4.25)
+
+
+def test_shift_bin_unknown_counter_entry_keeps_family_lease_active():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    sbw.record_entry_unknown(
+        conn,
+        lease,
+        now_iso="t1",
+        new_entry_command_id="cmd-entry",
+        reason="POST_SUBMIT_UNKNOWN",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-entry"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 
 def test_two_concurrent_shift_events_one_lease_one_exit():

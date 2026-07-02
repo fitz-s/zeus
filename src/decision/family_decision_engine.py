@@ -964,6 +964,12 @@ class FamilyDecisionEngine:
                 case=case,
                 predictive=predictive,
                 omega=omega,
+                joint_q=joint_q,
+                band=band,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
             )
         else:
             # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
@@ -1285,6 +1291,12 @@ class FamilyDecisionEngine:
         case: ForecastCase,
         predictive: PredictiveDistribution,
         omega: OutcomeSpace,
+        joint_q: JointQ,
+        band: JointQBand,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
+        max_stake_usd: Optional[Decimal],
     ) -> tuple[CandidateDecision, ...]:
         """Stamp Day0 monotone hard-fact lower-bound provenance.
 
@@ -1293,8 +1305,8 @@ class FamilyDecisionEngine:
         an already-passed finite bin makes YES impossible / NO certain, and an
         already-entered open shoulder makes YES certain / NO impossible. A finite
         bin that currently contains the observed extreme is not a hard fact; the
-        day can still move out of that bin. Treating that state as a near-1 live
-        q_lcb created low-quality finite-bin Day0 YES entries.
+        day can still move out of that bin. That state keeps the remaining-day
+        qLCB rather than inheriting a near-1 hard-fact lower bound.
         """
 
         observed = getattr(getattr(predictive, "day0", None), "observed_extreme_native", None)
@@ -1318,13 +1330,15 @@ class FamilyDecisionEngine:
                 return 0.0
             return min(max(float(q_safe), 0.0), 1.0)
 
-        def _day0_hard_fact_payoff_lcb(d: CandidateDecision, fallback: float) -> tuple[float, str]:
+        def _day0_hard_fact_payoff_lcb(
+            d: CandidateDecision, fallback: float
+        ) -> tuple[float, str, bool]:
             b = bin_by_id.get(d.route.bin_id)
             side = str(d.route.side or "").upper()
             if b is None or side not in {"YES", "NO"} or metric not in {"high", "low"}:
-                return fallback, "day0_remaining_day_q_lcb"
+                return fallback, "day0_remaining_day_q_lcb", False
             if not math.isfinite(observed_f):
-                return 0.0, "day0_observed_extreme_missing"
+                return 0.0, "day0_observed_extreme_missing", True
 
             lower = b.lower_native
             upper = b.upper_native
@@ -1341,9 +1355,13 @@ class FamilyDecisionEngine:
                     yes_hard = 1.0
 
             if yes_hard is None:
-                return 0.0, "day0_finite_unsettled_no_hard_lower_bound"
+                return fallback, "day0_remaining_day_q_lcb", False
             q_safe = yes_hard if side == "YES" else 1.0 - yes_hard
-            return min(max(float(q_safe), 0.0), 1.0), "day0_monotone_hard_fact_q_lcb"
+            return (
+                min(max(float(q_safe), 0.0), 1.0),
+                "day0_monotone_hard_fact_q_lcb",
+                True,
+            )
 
         def _blocked_economics(econ: CandidateEconomics, *, q_safe: float) -> CandidateEconomics:
             edge_lcb = float(q_safe) - float(econ.cost.value)
@@ -1357,14 +1375,52 @@ class FamilyDecisionEngine:
                 optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
             )
 
+        def _recomputed_hard_fact_economics(
+            d: CandidateDecision, *, q_safe: float
+        ) -> CandidateEconomics:
+            sizing = sizing_candidates.get((d.route.bin_id, d.route.side))
+            if sizing is None or not sizing.is_tradeable:
+                return _blocked_economics(d.economics, q_safe=q_safe)
+
+            economics = compute_candidate_economics(
+                d.route,
+                joint_q=joint_q,
+                band=band,
+                sizing_candidate=sizing,
+                matrix=matrix,
+                exposure=exposure,
+                max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=float(q_safe),
+            )
+            cost = float(economics.cost.value)
+            chosen_cost = (
+                float(economics.chosen_stake_cost.value)
+                if economics.chosen_stake_cost is not None
+                else None
+            )
+            return replace(
+                economics,
+                point_ev=float(q_safe) - cost,
+                edge_lcb=float(q_safe) - cost,
+                q_dot_payoff=float(q_safe),
+                payoff_q_lcb=float(q_safe),
+                chosen_stake_point_ev=(
+                    float(q_safe) - chosen_cost if chosen_cost is not None else None
+                ),
+                chosen_stake_edge_lcb=(
+                    float(q_safe) - chosen_cost if chosen_cost is not None else None
+                ),
+            )
+
         guarded: list[CandidateDecision] = []
         for d in scored:
-            q_safe, cell_key = _day0_hard_fact_payoff_lcb(d, _base_q_safe(d))
-            economics = (
-                _blocked_economics(d.economics, q_safe=q_safe)
-                if q_safe <= 0.0
-                else d.economics
-            )
+            q_safe, cell_key, is_hard_fact = _day0_hard_fact_payoff_lcb(d, _base_q_safe(d))
+            if q_safe <= 0.0:
+                economics = _blocked_economics(d.economics, q_safe=q_safe)
+            elif is_hard_fact:
+                economics = _recomputed_hard_fact_economics(d, q_safe=q_safe)
+            else:
+                economics = d.economics
             guarded.append(
                 replace(
                     d,

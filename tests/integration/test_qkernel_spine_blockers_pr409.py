@@ -1729,6 +1729,65 @@ def test_qkernel_receipt_annotation_uses_direct_no_qkernel_probability():
     )
 
 
+def test_qkernel_receipt_annotation_rejects_not_actionable_rest_then_cross_policy():
+    """A no-trade-like rest policy cannot be revived by positive qkernel edge."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-qk-rest-policy-no",
+        yes_token="yes-qk-rest-policy-no",
+        no_token="no-qk-rest-policy-no",
+        yes_ask=0.36,
+        no_ask=0.65,
+        snapshot_id="snap-qk-rest-policy-no",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-qk-rest-policy-no",
+        q_posterior=0.9154395759428866,
+        q_lcb_5pct=0.90,
+        bin_obj=Bin(low=29.0, high=29.0, unit="C", label="29C"),
+    )
+    proof = replace(proof, rest_then_cross_policy="MAKER_TAKER_FORBIDDEN")
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-rest-policy-no",
+        "receipt_hash": "receipt-qk-rest-policy-no",
+        "candidate_id": "NO:b29:DIRECT_NO:b29@proof",
+        "route_id": "DIRECT_NO:b29@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.9154395759428866,
+        "payoff_q_lcb": 0.8722649958749307,
+        "edge_lcb": 0.22226499587493073,
+        "point_ev": 0.26543957594288655,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "20.0",
+        "optimal_delta_u": 0.012,
+        "q_dot_payoff": 0.9154395759428866,
+        "cost": 0.65,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb8|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason == (
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+    )
+    assert annotated.selection_authority_applied is None
+
+
 def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_candidate():
     """Receipt annotation must not preserve the removed 5% direct-ROI hard hurdle.
 

@@ -3308,6 +3308,7 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            command_id=existing.command_id,
             zeus_submit_intent_time=submit_time,
             venue_ack_time=ack_time,
         )
@@ -3324,6 +3325,7 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            command_id=existing.command_id,
             zeus_submit_intent_time=submit_time,
             venue_ack_time=ack_time,
         )
@@ -3340,6 +3342,7 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            command_id=existing.command_id,
         )
     if s in (CommandState.SUBMITTING, CommandState.UNKNOWN):
         return OrderResult(
@@ -3352,6 +3355,7 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            command_id=existing.command_id,
         )
     if s in (CommandState.REJECTED, CommandState.CANCELLED, CommandState.EXPIRED):
         return OrderResult(
@@ -3365,6 +3369,7 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            command_id=existing.command_id,
         )
     # REVIEW_REQUIRED, INTENT_CREATED, or any future state
     return OrderResult(
@@ -3377,6 +3382,7 @@ def _orderresult_from_existing(
         idempotency_key=idem_value,
         intent_id=intent_id,
         command_state=s.value,
+        command_id=existing.command_id,
     )
 
 
@@ -3405,6 +3411,7 @@ def _orderresult_from_economic_unknown(
         idempotency_key=idem_value,
         intent_id=intent_id,
         command_state=existing.state.value,
+        command_id=existing.command_id,
     )
 
 
@@ -4551,6 +4558,7 @@ def execute_exit_order(
                 order_role="exit",
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         except sqlite3.IntegrityError as exc:
@@ -4680,6 +4688,7 @@ def execute_exit_order(
                 order_role="exit",
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
@@ -4744,6 +4753,7 @@ def execute_exit_order(
                     order_role="exit",
                     intent_id=intent.intent_id,
                     idempotency_key=idem.value,
+                    command_id=command_id,
                     command_state="REJECTED",
                 )
             return OrderResult(
@@ -4753,10 +4763,11 @@ def execute_exit_order(
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
-                intent_id=intent.intent_id,
-                idempotency_key=idem.value,
-                command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
-            )
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
+                )
 
         # -----------------------------------------------------------------------
         # ack phase — durable journal record of outcome
@@ -5295,6 +5306,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         corrected_identity_component = _corrected_entry_identity_component(conn, intent)
@@ -5373,6 +5385,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         (
@@ -5404,6 +5417,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         entry_economics_component = _entry_economics_component(
@@ -5429,6 +5443,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
@@ -5781,6 +5796,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         except CollateralInsufficient as exc:
@@ -5833,6 +5849,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         except sqlite3.IntegrityError as exc:
@@ -5961,6 +5978,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
         try:
@@ -6034,6 +6052,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REJECTED",
             )
 
@@ -6132,6 +6151,7 @@ def _live_order(
                     shares=shares,
                     order_role="entry",
                     idempotency_key=idem.value,
+                    command_id=command_id,
                     command_state="REJECTED",
                     zeus_submit_intent_time=zeus_submit_intent_time,
                 )
@@ -6143,6 +6163,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
                 zeus_submit_intent_time=zeus_submit_intent_time,
             )

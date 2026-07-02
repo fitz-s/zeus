@@ -1410,6 +1410,107 @@ def _family_pending_entry_usd(
     return total
 
 
+@dataclass(frozen=True)
+class _FamilyPendingEntryTruth:
+    has_pending_or_unknown: bool
+    pending_usd: float
+    truth_available: bool
+    sources: tuple[str, ...] = ()
+
+
+def _family_candidate_token_ids(family: object, selected_token_id: str | None = None) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for attr in ("yes_token_ids", "no_token_ids"):
+        values = getattr(family, attr, ()) or ()
+        for token in values:
+            text = str(token or "").strip()
+            if text:
+                tokens.append(text)
+    selected = str(selected_token_id or "").strip()
+    if selected:
+        tokens.append(selected)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _family_pending_entry_truth(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate_token_ids: Iterable[str],
+    trade_conn: sqlite3.Connection | None = None,
+) -> _FamilyPendingEntryTruth:
+    tokens = {str(token or "").strip() for token in candidate_token_ids}
+    tokens.discard("")
+    if conn is None or not tokens:
+        return _FamilyPendingEntryTruth(
+            has_pending_or_unknown=True,
+            pending_usd=0.0,
+            truth_available=False,
+            sources=("family_pending_truth_unavailable",),
+        )
+    sources: list[str] = []
+    try:
+        pending_usd = _family_pending_entry_usd(
+            conn,
+            candidate_token_ids=tokens,
+            trade_conn=trade_conn,
+        )
+        if pending_usd > 0.0:
+            sources.append("family_pending_notional")
+
+        command_conn = trade_conn or conn
+        if command_conn is not None and _adapter_table_exists(command_conn, "venue_commands"):
+            placeholders = ",".join("?" for _ in tokens)
+            row = command_conn.execute(
+                f"""
+                SELECT 1
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND token_id IN ({placeholders})
+                   AND state IN ('INTENT_CREATED', 'SNAPSHOT_BOUND', 'SIGNED_PERSISTED',
+                                 'SUBMITTING', 'POSTING', 'ACKED', 'POST_ACKED',
+                                 'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT',
+                                 'REVIEW_REQUIRED', 'PARTIAL', 'PARTIALLY_FILLED')
+                 LIMIT 1
+                """,
+                tuple(sorted(tokens)),
+            ).fetchone()
+            if row is not None and "venue_commands" not in sources:
+                sources.append("venue_commands")
+
+        if _adapter_table_exists(conn, "edli_live_order_projection"):
+            rows = conn.execute(
+                """
+                SELECT final_intent_id, current_state, pending_reconcile
+                  FROM edli_live_order_projection
+                 WHERE current_state IN ('PENDING_RECONCILE', 'VENUE_SUBMIT_ATTEMPTED',
+                                         'VENUE_SUBMIT_ACKED', 'UNKNOWN',
+                                         'EXECUTION_COMMAND_CREATED')
+                    OR pending_reconcile = 1
+                """
+            ).fetchall()
+            for row in rows:
+                final_intent_id = str(
+                    row[0] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or ""
+                )
+                if _durable_live_cap_final_intent_token(final_intent_id) in tokens:
+                    sources.append("edli_live_order_projection")
+                    break
+    except sqlite3.Error:
+        return _FamilyPendingEntryTruth(
+            has_pending_or_unknown=True,
+            pending_usd=0.0,
+            truth_available=False,
+            sources=("family_pending_truth_query_failed",),
+        )
+
+    return _FamilyPendingEntryTruth(
+        has_pending_or_unknown=bool(sources),
+        pending_usd=float(pending_usd),
+        truth_available=True,
+        sources=tuple(dict.fromkeys(sources)),
+    )
+
+
 def _read_old_leg_exit_inputs(
     conn: sqlite3.Connection | None,
     *,
@@ -3512,14 +3613,29 @@ def event_bound_live_adapter_from_trade_conn(
                     _now_iso = certificate_decision_time.isoformat() if hasattr(
                         certificate_decision_time, "isoformat"
                     ) else decision_time.astimezone(UTC).isoformat()
-                    if submit_result.venue_ack_received:
+                    _entry_command_id = _execution_command_id_from_command_certificate(command)
+                    if submit_result.venue_ack_received and _entry_command_id:
                         _fill_up_wiring.complete_fill_up_lease(
                             trade_conn,
                             _fill_up_lease.get("intent_id"),
                             now_iso=_now_iso,
-                            new_entry_command_id=str(
-                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
-                            ),
+                            new_entry_command_id=_entry_command_id,
+                        )
+                    elif submit_result.venue_ack_received and not _entry_command_id:
+                        _fill_up_wiring.record_fill_up_entry_unknown(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=_now_iso,
+                            new_entry_command_id=None,
+                            reason="fill_up_entry_ack_missing_durable_command_id",
+                        )
+                    elif _submit_result_requires_reconcile(submit_result):
+                        _fill_up_wiring.record_fill_up_entry_unknown(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=_now_iso,
+                            new_entry_command_id=_entry_command_id or None,
+                            reason=f"FILL_UP_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
                         )
                     else:
                         _fill_up_wiring.abort_fill_up_lease(
@@ -3540,14 +3656,29 @@ def event_bound_live_adapter_from_trade_conn(
                     _now_iso_sb = certificate_decision_time.isoformat() if hasattr(
                         certificate_decision_time, "isoformat"
                     ) else decision_time.astimezone(UTC).isoformat()
-                    if submit_result.venue_ack_received:
+                    _entry_command_id_sb = _execution_command_id_from_command_certificate(command)
+                    if submit_result.venue_ack_received and _entry_command_id_sb:
                         _shift_bin_wiring.complete_shift_bin_lease(
                             trade_conn,
                             _shift_entry_lease.get("intent_id"),
                             now_iso=_now_iso_sb,
-                            new_entry_command_id=str(
-                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
-                            ),
+                            new_entry_command_id=_entry_command_id_sb,
+                        )
+                    elif submit_result.venue_ack_received and not _entry_command_id_sb:
+                        _shift_bin_wiring.record_entry_unknown(
+                            trade_conn,
+                            _shift_entry_lease.get("intent_id"),
+                            now_iso=_now_iso_sb,
+                            new_entry_command_id=None,
+                            reason="shift_bin_entry_ack_missing_durable_command_id",
+                        )
+                    elif _submit_result_requires_reconcile(submit_result):
+                        _shift_bin_wiring.record_entry_unknown(
+                            trade_conn,
+                            _shift_entry_lease.get("intent_id"),
+                            now_iso=_now_iso_sb,
+                            new_entry_command_id=_entry_command_id_sb or None,
+                            reason=f"SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
                         )
                     else:
                         _shift_bin_wiring.abort_shift_bin_lease(
@@ -6029,6 +6160,14 @@ def _build_event_bound_no_submit_receipt_core(
                     token_id=str(selected_token_id or ""),
                     trade_conn=trade_conn,
                 )
+                _family_pending_truth = _family_pending_entry_truth(
+                    locked_opportunity_conn,
+                    candidate_token_ids=_family_candidate_token_ids(
+                        family,
+                        selected_token_id=str(selected_token_id or ""),
+                    ),
+                    trade_conn=trade_conn,
+                )
                 _fill_up_plan = _fill_up_wiring.plan_fill_up(
                     trade_conn,
                     is_redecision_event=True,
@@ -6042,6 +6181,9 @@ def _build_event_bound_no_submit_receipt_core(
                     target_total_exposure_usd=float(_robust_stake_usd),
                     same_token_pending_entry_usd=float(_same_token_pending),
                     venue_min_increment_usd=float(_venue_min_usd),
+                    has_unowned_pending_or_unknown_entry=bool(
+                        _family_pending_truth.has_pending_or_unknown
+                    ),
                     now_iso=decision_time.isoformat(),
                 )
                 if _fill_up_plan.kind == "ABORT":
@@ -6165,11 +6307,11 @@ def _build_event_bound_no_submit_receipt_core(
                     # shift closed (reuse the SAME pending-entry truth D1 uses; >0 means
                     # an in-flight same-token-or-sibling entry that is not yet position
                     # truth — ambiguous family exposure).
-                    _family_pending_usd = _family_pending_entry_usd(
+                    _family_pending_truth = _family_pending_entry_truth(
                         locked_opportunity_conn,
-                        candidate_token_ids=(
-                            _held_sibling.token_id,
-                            str(selected_token_id or ""),
+                        candidate_token_ids=_family_candidate_token_ids(
+                            family,
+                            selected_token_id=str(selected_token_id or ""),
                         ),
                         trade_conn=trade_conn,
                     )
@@ -6223,7 +6365,9 @@ def _build_event_bound_no_submit_receipt_core(
                             if _old_leg_residual.usd is not None
                             else float(_dust_floor_usd if _old_leg_live else 0.0)
                         ),
-                        has_unowned_pending_or_unknown_entry=bool(_family_pending_usd > 0.0),
+                        has_unowned_pending_or_unknown_entry=bool(
+                            _family_pending_truth.has_pending_or_unknown
+                        ),
                         now_iso=decision_time.isoformat(),
                         old_leg_dust_floor_usd=float(_dust_floor_usd),
                     )
@@ -7302,6 +7446,24 @@ def _normalize_event_bound_executor_submit_result(
         reconciliation_followup_required=reconciliation_followup_required,
         side_effect_known=side_effect_known,
     )
+
+
+def _submit_result_requires_reconcile(result: EventBoundExecutorSubmitResult) -> bool:
+    return bool(
+        result.venue_call_started
+        and (
+            result.reconciliation_followup_required
+            or not result.side_effect_known
+            or str(result.status or "").upper() in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}
+        )
+    )
+
+
+def _execution_command_id_from_command_certificate(command: DecisionCertificate) -> str:
+    payload = getattr(command, "payload", {}) or {}
+    if isinstance(payload, Mapping):
+        return str(payload.get("execution_command_id") or "").strip()
+    return ""
 
 
 # Sentinel prefix the caller (process_pending submit body) recognizes to map a
@@ -13941,6 +14103,13 @@ def _proofs_with_qkernel_candidate_economics(
         proof: _CandidateProof,
         cert: Mapping[str, Any],
     ) -> str | None:
+        rest_policy = str(
+            getattr(proof, "rest_then_cross_policy", None)
+            or cert.get("rest_then_cross_policy")
+            or ""
+        ).strip().upper()
+        if rest_policy in {"MAKER_TAKER_FORBIDDEN", "HOLD_REST_IN_PROGRESS"}:
+            return f"QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy={rest_policy}"
         try:
             side = str(cert.get("side") or "").strip().upper()
             cost = float(cert.get("cost"))
@@ -14091,6 +14260,10 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     (
         "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
         "qkernel_center_yes_quality_floor",
+    ),
+    (
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+        "rest_then_cross_not_actionable",
     ),
     (
         "ADMISSION_DAY0_FORECAST_ENTRY_REQUIRES_OBSERVATION_LANE",
@@ -14683,6 +14856,12 @@ def _generate_candidate_proofs(
     _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
         trade_conn, family=family, decision_time=decision_time
     )
+    payload_rest_policy = str(payload.get("rest_then_cross_policy") or "").strip().upper()
+    payload_escalated_after_rest = payload_rest_policy == "TAKER_ESCALATED_AFTER_REST" or str(
+        payload.get("rest_then_cross_escalated_after_rest") or ""
+    ).strip().lower() in {"1", "true", "yes"}
+    if payload_escalated_after_rest and not _rtc_unexpired_rest:
+        _rtc_escalated = True
     _day0_proof_maker_only = _is_day0_lane_event_type(getattr(event, "event_type", None))
     # Twin-authority reconciliation #7 (2026-06-11, selected-leg repair 2026-06-30):
     # replacement coverage verdicts are keyed by (condition_id, direction). The
@@ -19568,12 +19747,57 @@ def _day0_process_sigma_native(
         margin = stale_extreme_uncertainty_margin(
             unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
         )
-        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
+        unseen_peak_sigma = 0.0
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric == "high":
+            post_peak_confidence = _optional_float(payload.get("_edli_day0_post_peak_confidence"))
+            if post_peak_confidence is not None:
+                peak = min(1.0, max(0.0, float(post_peak_confidence)))
+                precision = _optional_float(payload.get("members_precision") or payload.get("precision"))
+                if precision is None or precision <= 0.0:
+                    precision = 1.0
+                unseen_peak_sigma = (1.0 - peak) * 3.0 * float(precision)
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2 + unseen_peak_sigma ** 2))
+        if unseen_peak_sigma > 0.0:
+            payload["_edli_day0_unseen_peak_sigma_native"] = float(unseen_peak_sigma)
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
     return sigma
+
+
+def _day0_extra_member_sigma_native(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+) -> float:
+    """Extra member-space sigma for Day0 point q integration.
+
+    ``p_raw_vector_from_maxes`` already adds instrument sigma.  The Day0 process
+    seam includes instrument + staleness + unseen-peak uncertainty because the
+    q_lcb bootstrap samples raw member values directly.  For point q, pass only
+    the extra part so instrument noise is not double-counted.
+    """
+
+    sigma = _day0_process_sigma_native(
+        payload=payload,
+        family=family,
+        unit=unit,
+        decision_time=decision_time,
+    )
+    if sigma is None:
+        return 0.0
+    try:
+        from src.signal.forecast_uncertainty import sigma_instrument
+
+        base_sigma = float(sigma_instrument(unit).value)
+        extra = float(np.sqrt(max(float(sigma) ** 2 - base_sigma ** 2, 0.0)))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 
 def _make_day0_bootstrap_sampler(
@@ -19892,9 +20116,20 @@ def _market_analysis_from_event_snapshot(
             if _bias_corrected
             else 0.0
         )
+        day0_extra_member_sigma = 0.0
+        if _day0_rd_members is not None:
+            day0_extra_member_sigma = _day0_extra_member_sigma_native(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+            )
+            if day0_extra_member_sigma > 0.0:
+                payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
         p_raw = _snapshot_p_raw(
             snapshot, family=family, bins=bins, members=members, payload=payload,
             members_already_corrected=True,
+            extra_member_sigma=day0_extra_member_sigma,
         )
         if _day0_rd_members is not None:
             # remaining-day mode: identity calibration (see block comment above)
@@ -21192,6 +21427,7 @@ def _snapshot_p_raw(
     members: np.ndarray,
     payload: dict[str, object],
     members_already_corrected: bool = False,
+    extra_member_sigma: float = 0.0,
 ) -> np.ndarray:
     city = runtime_cities_by_name().get(family.city)
     if city is None:
@@ -21210,7 +21446,13 @@ def _snapshot_p_raw(
         )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
-    arr = p_raw_vector_from_maxes(members, city, semantics, bins)
+    arr = p_raw_vector_from_maxes(
+        members,
+        city,
+        semantics,
+        bins,
+        extra_member_sigma=extra_member_sigma,
+    )
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
     total = float(arr.sum())

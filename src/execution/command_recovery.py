@@ -6697,12 +6697,18 @@ def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
 def _redecision_event_with_terminal_no_fill_origin(event, *, command_id: str):
     try:
         from src.events.opportunity_event import make_opportunity_event
+        from src.strategy.live_inference.mode_consistent_ev import (
+            POLICY_TAKER_ESCALATED_AFTER_REST,
+        )
 
         payload = json.loads(str(event.payload_json or "{}"))
         if not isinstance(payload, dict):
             return event
         payload["redecision_origin"] = "terminal_no_fill"
         payload["terminal_no_fill_command_id"] = str(command_id or "")
+        payload.setdefault("rest_then_cross_policy", POLICY_TAKER_ESCALATED_AFTER_REST)
+        payload["rest_then_cross_escalated_after_rest"] = True
+        payload["rest_then_cross_escalation_source"] = "terminal_no_fill"
         return make_opportunity_event(
             event_type=event.event_type,
             entity_key=event.entity_key,

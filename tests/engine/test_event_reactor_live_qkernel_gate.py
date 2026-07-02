@@ -520,13 +520,13 @@ def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_qual
     cert = _qkernel_cert()
     cert.update(
         cost=0.12,
-        payoff_q_lcb=0.20,
-        payoff_q_point=0.28,
-        edge_lcb=0.08,
+        payoff_q_lcb=0.30,
+        payoff_q_point=0.36,
+        edge_lcb=0.18,
         delta_u_at_min=0.01,
         optimal_stake_usd=10.0,
         optimal_delta_u=0.02,
-        selection_guard_q_safe=0.20,
+        selection_guard_q_safe=0.30,
     )
 
     _assert_live_entry_submit_authority(
@@ -536,8 +536,8 @@ def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_qual
             "direction": "buy_yes",
             "strategy_key": "center_buy",
             "candidate_bin_id": "bin-1",
-            "q_live": 0.28,
-            "q_lcb_5pct": 0.20,
+            "q_live": 0.36,
+            "q_lcb_5pct": 0.30,
             "min_entry_price": 0.02,
             "qkernel_execution_economics": cert,
         }
@@ -786,10 +786,10 @@ def test_near_day0_qkernel_consistency_allows_supported_center_yes(monkeypatch):
         bin_id=bin_id,
         side="YES",
         cost=0.12,
-        payoff_q_lcb=0.20,
-        payoff_q_point=0.28,
-        edge_lcb=0.08,
-        selection_guard_q_safe=0.20,
+        payoff_q_lcb=0.30,
+        payoff_q_point=0.36,
+        edge_lcb=0.18,
+        selection_guard_q_safe=0.30,
     )
 
     annotated = _qkernel_economics_with_near_day0_consistency(

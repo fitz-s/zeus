@@ -578,12 +578,14 @@ modules:
       - src/control/heartbeat_supervisor.py
       - src/control/ws_gap_guard.py
       - src/control/gate_decision.py
+      - src/control/runtime_code_plane.py
     public_entry_files:
       - src/control/control_plane.py
       - src/control/cutover_guard.py
       - src/control/heartbeat_supervisor.py
       - src/control/ws_gap_guard.py
       - src/control/gate_decision.py
+      - src/control/runtime_code_plane.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md

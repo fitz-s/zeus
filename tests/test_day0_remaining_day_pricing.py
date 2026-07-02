@@ -57,6 +57,7 @@ PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
+        settlement_source_type="wu_icao", wu_station="LFPG",
         lat=48.8566, lon=2.3522,
     )
 
@@ -384,6 +385,49 @@ class TestRemainingDayMembers:
         # every member clamped UP to the running max (absorbing physical law)
         assert np.all(members == 25.0)
         assert payload["_edli_day0_remaining_models"] == 2
+
+    def test_entry_point_q_keeps_unseen_peak_tail_for_nonfinal_post_peak(self, monkeypatch):
+        import src.engine.event_reactor_adapter as era
+
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        bins = [
+            Bin(None, 11, "C", "11C or below"),
+            Bin(12, 12, "C", "12C"),
+            Bin(13, None, "C", "13C or above"),
+        ]
+        payload = {
+            "metric": "high",
+            "rounded_value": 12.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "_edli_day0_post_peak_confidence": 0.7301587,
+        }
+        family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+        decision_time = datetime(2026, 6, 10, 13, 5, tzinfo=UTC)
+        extra_sigma = era._day0_extra_member_sigma_native(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=decision_time,
+        )
+        p_raw = era._snapshot_p_raw(
+            {
+                "settlement_unit": "C",
+                "temperature_metric": "high",
+                "members_precision": 1.0,
+            },
+            family=family,
+            bins=bins,
+            members=np.array([12.0, 12.0, 12.0], dtype=float),
+            payload=payload,
+            members_already_corrected=True,
+            extra_member_sigma=extra_sigma,
+        )
+
+        assert extra_sigma > 0.0
+        assert payload["_edli_day0_unseen_peak_sigma_native"] > 0.0
+        assert p_raw[1] < 0.86
+        assert p_raw[2] > 0.12
+        assert p_raw.sum() == pytest.approx(1.0)
 
     def test_excursion_still_possible_keeps_above_floor_members(self, monkeypatch):
         vectors = [

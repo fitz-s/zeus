@@ -3115,6 +3115,22 @@ def _check_deployment_freshness(
 
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
     df_path = state_path("deployment_freshness.json")
+    try:
+        from src.control.runtime_code_plane import runtime_code_plane_diff
+
+        code_plane = runtime_code_plane_diff(
+            _repo_root,
+            boot_sha=_boot_sha,
+            current_sha=current_sha,
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        code_plane = None
+        logger.warning(
+            "deployment_freshness: runtime code-plane classification failed (%s); "
+            "treating SHA drift as executable",
+            exc,
+        )
 
     def _write_deployment_freshness_state(payload: dict[str, object]) -> None:
         try:
@@ -3135,14 +3151,39 @@ def _check_deployment_freshness(
                     "detected_at": _now.isoformat(),
                     "pause_reason": None,
                     "status": "fresh",
+                    "code_plane_status": "same_sha",
+                    "runtime_code_changed": False,
                 }
             )
         return  # No divergence.
 
+    if code_plane is not None and not code_plane.runtime_code_changed:
+        _write_deployment_freshness_state(
+            {
+                "boot_sha": _boot_sha,
+                "current_sha": current_sha,
+                "uptime_hours": round(uptime_hours, 2),
+                "detected_at": _now.isoformat(),
+                "pause_reason": None,
+                "status": "fresh",
+                "code_plane_status": code_plane.status,
+                "runtime_code_changed": False,
+                "changed_paths_sample": list(code_plane.changed_paths[:20]),
+            }
+        )
+        logger.info(
+            "deployment_freshness: HEAD drift is non-runtime-only; "
+            "not pausing entries (boot_sha=%s current_sha=%s paths=%s)",
+            _boot_sha[:8],
+            current_sha[:8],
+            list(code_plane.changed_paths[:5]),
+        )
+        return
+
     if uptime_hours >= 24.0:
         import signal as _signal
         logger.critical(
-            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has %s for >%.1fh. "
+            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh. "
             "Signaling SIGTERM to escape APScheduler exception boundary.",
             _boot_sha[:8], current_sha[:8], uptime_hours,
         )
@@ -3174,6 +3215,13 @@ def _check_deployment_freshness(
                 "detected_at": _now.isoformat(),
                 "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
                 "status": "mismatch",
+                "code_plane_status": (
+                    code_plane.status if code_plane is not None else "classification_failed"
+                ),
+                "runtime_code_changed": True,
+                "changed_paths_sample": (
+                    list(code_plane.changed_paths[:20]) if code_plane is not None else []
+                ),
             }
         )
         # Pause new entries immediately. Exit submits are also protected at the
@@ -3258,11 +3306,28 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 exc,
             )
             return
-        if current_sha != boot_sha:
+        try:
+            from src.control.runtime_code_plane import runtime_code_plane_diff
+
+            code_plane = runtime_code_plane_diff(
+                PROJECT_ROOT,
+                boot_sha=boot_sha,
+                current_sha=current_sha,
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "deployment_freshness_auto_resume: runtime code-plane classification failed "
+                "(%s); cannot verify SHA match",
+                exc,
+            )
+            return
+        if current_sha != boot_sha and code_plane.runtime_code_changed:
             logger.warning(
                 "deployment_freshness_auto_resume: SHA still mismatched at boot "
-                "(boot=%s current=%s) — NOT auto-resuming; operator must investigate",
+                "(boot=%s current=%s code_plane=%s) — NOT auto-resuming; operator must investigate",
                 boot_sha[:8], current_sha[:8],
+                code_plane.status,
             )
             return
         try:
@@ -3282,6 +3347,9 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 "detected_at": detected_at.isoformat(),
                 "pause_reason": None,
                 "status": "fresh",
+                "code_plane_status": code_plane.status,
+                "runtime_code_changed": False,
+                "changed_paths_sample": list(code_plane.changed_paths[:20]),
             }
             tmp_path = str(df_path) + ".tmp"
             with open(tmp_path, "w") as f:
@@ -7574,11 +7642,19 @@ def _redecision_event_with_origin(event: Any, origin: str) -> Any:
 
     try:
         from src.events.opportunity_event import make_opportunity_event
+        from src.strategy.live_inference.mode_consistent_ev import (
+            POLICY_TAKER_ESCALATED_AFTER_REST,
+        )
 
         payload = json.loads(str(event.payload_json or "{}"))
         if not isinstance(payload, dict):
             return event
-        payload["redecision_origin"] = str(origin)
+        origin_text = str(origin)
+        payload["redecision_origin"] = origin_text
+        if origin_text in {"terminal_no_fill", "rest_pull"}:
+            payload.setdefault("rest_then_cross_policy", POLICY_TAKER_ESCALATED_AFTER_REST)
+            payload["rest_then_cross_escalated_after_rest"] = True
+            payload["rest_then_cross_escalation_source"] = origin_text
         return make_opportunity_event(
             event_type=event.event_type,
             entity_key=event.entity_key,

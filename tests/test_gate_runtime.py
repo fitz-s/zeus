@@ -117,13 +117,19 @@ class TestGateRuntimeAllClear:
         monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
 
         from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
 
         monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
         monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return b"src/main.py\n"
+            return ("b" * 40).encode()
+
         monkeypatch.setattr(
-            gate_runtime.subprocess,
+            runtime_code_plane.subprocess,
             "check_output",
-            lambda *_, **__: ("b" * 40).encode(),
+            _fake_git,
         )
 
         with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
@@ -139,14 +145,38 @@ class TestGateRuntimeAllClear:
         monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", sha)
 
         from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
 
         monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
         monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
         monkeypatch.setattr(
-            gate_runtime.subprocess,
+            runtime_code_plane.subprocess,
             "check_output",
             lambda *_, **__: sha.encode(),
         )
+
+        gate_runtime.check("live_venue_submit")
+
+    def test_deployment_freshness_non_runtime_diff_allows_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return b"tests/test_only.py\n"
+            return ("b" * 40).encode()
+
+        monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
 
         gate_runtime.check("live_venue_submit")
 

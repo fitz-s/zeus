@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last audited: 2026-07-02
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D1 fill-up reactor wiring. These tests pin the ADDITIVE integration
 #   points in src/engine/event_reactor_adapter.py:
@@ -22,6 +22,7 @@ import pytest
 
 from src.engine import event_reactor_adapter as era
 from src.state.schema.family_rebalance_intents_schema import ensure_table
+from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
 
 
@@ -47,6 +48,14 @@ CREATE TABLE edli_live_order_events (
     aggregate_id TEXT, event_type TEXT, payload_json TEXT
 )
 """
+_LIVE_ORDER_PROJECTION_DDL = """
+CREATE TABLE edli_live_order_projection (
+    aggregate_id TEXT, event_id TEXT, final_intent_id TEXT,
+    current_state TEXT, last_sequence INTEGER, last_event_type TEXT,
+    last_event_hash TEXT, pending_reconcile INTEGER, venue_order_id TEXT,
+    updated_at TEXT, schema_version INTEGER
+)
+"""
 
 
 def _conn() -> sqlite3.Connection:
@@ -55,6 +64,7 @@ def _conn() -> sqlite3.Connection:
     conn.execute(_POSITION_CURRENT_DDL)
     conn.execute(_LIVE_CAP_DDL)
     conn.execute(_LIVE_ORDER_EVENTS_DDL)
+    conn.execute(_LIVE_ORDER_PROJECTION_DDL)
     ensure_table(conn)
     return conn
 
@@ -127,6 +137,62 @@ def test_family_pending_counts_selected_sibling_token_live_cap():
     )
 
     assert pending == pytest.approx(6.5)
+
+
+def test_family_pending_truth_blocks_third_sibling_pending_reconcile():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection VALUES (
+            'agg-C', 'event-1', 'edli_intent:event-1:tok-C',
+            'PENDING_RECONCILE', 4, 'SubmitUnknown', 'hash',
+            1, NULL, '2026-07-02T00:00:00+00:00', 1
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert "edli_live_order_projection" in truth.sources
+
+
+def test_fill_up_unknown_entry_keeps_family_lease_active():
+    conn = _conn()
+    lease = fuw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="FILL_UP",
+        now_iso="t0",
+        held_position_id="p1",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-A",
+        selected_bin_id="60-61F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    fuw.record_fill_up_entry_unknown(
+        conn,
+        lease,
+        now_iso="t1",
+        new_entry_command_id="cmd-entry",
+        reason="POST_SUBMIT_UNKNOWN",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-entry"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 
 # ---------------------------------------------------------------------------

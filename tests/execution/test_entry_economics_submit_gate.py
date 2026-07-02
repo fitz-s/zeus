@@ -359,23 +359,23 @@ def test_entry_economics_allows_center_buy_yes_below_binary_floor_when_quality_c
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.12,
-            q_live=0.28,
-            q_lcb_5pct=0.20,
-            expected_edge=0.08,
+            q_live=0.36,
+            q_lcb_5pct=0.30,
+            expected_edge=0.18,
             min_entry_price=0.02,
             min_expected_profit_usd=0.05,
             min_submit_edge_density=0.02,
             selection_authority_applied="qkernel_spine",
             qkernel_execution_economics=_econ(
-                payoff_q_point=0.28,
-                payoff_q_lcb=0.20,
+                payoff_q_point=0.36,
+                payoff_q_lcb=0.30,
                 cost=0.12,
-                edge_lcb=0.08,
+                edge_lcb=0.18,
                 delta_u_at_min=0.01,
                 optimal_stake_usd=10.0,
                 optimal_delta_u=0.02,
                 false_edge_rate=0.01,
-                selection_guard_q_safe=0.20,
+                selection_guard_q_safe=0.30,
             ),
         ),
         shares=10.0,
@@ -386,7 +386,7 @@ def test_entry_economics_allows_center_buy_yes_below_binary_floor_when_quality_c
     )
 
     assert verdict["allowed"] is True
-    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.20)
+    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.30)
 
 
 def test_entry_economics_blocks_low_price_yes_below_center_yes_quality_floor():
