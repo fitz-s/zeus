@@ -3585,6 +3585,7 @@ def _insert_posterior(
         target_date=target_date,
         temperature_metric=metric,
         source_cycle_time=source_cycle_time,
+        source_available_at=available_at,
         computed_at=computed_at,
         posterior_id=new_posterior_id,
     )

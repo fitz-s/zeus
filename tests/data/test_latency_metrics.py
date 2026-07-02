@@ -2,11 +2,14 @@
 # Last reused/audited: 2026-07-02
 # Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
 #   §1 "input->q latency SLA (A2, 'THE metric')" — W0.2 packet (measure only, no gate).
-"""Tests for src.data.latency_metrics: input->q_version wall-clock latency.
+"""Tests for src.data.latency_metrics: input->q_version wall-clock latency, two variants.
 
-Latency = computed_at - source_cycle_time, using the columns forecast_posteriors
-already persists per row (no new table). See src/data/latency_metrics.py module
-docstring for the full design rationale and the dashboard query.
+latency_from_issue_seconds   = computed_at - source_cycle_time (provider-issued clock)
+latency_from_arrival_seconds = computed_at - source_available_at (Zeus possession clock,
+                                the A2 SLA target — excludes provider publication delay)
+
+Both read straight off columns forecast_posteriors already persists per row (no new
+table). See src/data/latency_metrics.py module docstring for the full rationale.
 """
 from __future__ import annotations
 
@@ -17,7 +20,8 @@ import pytest
 
 from src.data.latency_metrics import (
     LATENCY_QUERY,
-    compute_latency_seconds,
+    compute_arrival_latency_seconds,
+    compute_issue_latency_seconds,
     emit_materialization_latency,
     fetch_recent_latencies,
 )
@@ -71,50 +75,96 @@ def _insert_posterior(
     conn.commit()
 
 
-def test_compute_latency_seconds_correct_arithmetic():
+def test_compute_issue_latency_seconds_correct_arithmetic():
     source_cycle_time = "2026-07-02T00:00:00+00:00"
     computed_at = "2026-07-02T00:07:30+00:00"
 
-    latency = compute_latency_seconds(
+    latency = compute_issue_latency_seconds(
         source_cycle_time=source_cycle_time, computed_at=computed_at
     )
 
     assert latency == 450.0
 
 
-def test_compute_latency_seconds_rejects_negative():
+def test_compute_issue_latency_seconds_rejects_negative():
     # computed_at BEFORE source_cycle_time is unconstructable (the posterior
     # cannot be written before its own input existed) — surface it loudly
     # rather than silently returning a negative number a dashboard would plot.
     source_cycle_time = "2026-07-02T00:10:00+00:00"
     computed_at = "2026-07-02T00:00:00+00:00"
 
-    import pytest
-
     with pytest.raises(ValueError):
-        compute_latency_seconds(
+        compute_issue_latency_seconds(
             source_cycle_time=source_cycle_time, computed_at=computed_at
         )
 
 
-def test_emit_materialization_latency_logs_and_returns_seconds(caplog):
+def test_compute_arrival_latency_seconds_correct_arithmetic():
+    source_available_at = "2026-07-02T00:03:00+00:00"
+    computed_at = "2026-07-02T00:07:30+00:00"
+
+    latency = compute_arrival_latency_seconds(
+        source_available_at=source_available_at, computed_at=computed_at
+    )
+
+    assert latency == 270.0
+
+
+def test_compute_arrival_latency_seconds_rejects_negative():
+    source_available_at = "2026-07-02T00:10:00+00:00"
+    computed_at = "2026-07-02T00:00:00+00:00"
+
+    with pytest.raises(ValueError):
+        compute_arrival_latency_seconds(
+            source_available_at=source_available_at, computed_at=computed_at
+        )
+
+
+def test_arrival_latency_is_shorter_than_issue_latency_when_source_available_at_is_later():
+    # source_available_at (Zeus possession) is always >= source_cycle_time
+    # (provider issue) in honest data — issue happens first, then Zeus fetches.
+    # So latency_from_arrival must be <= latency_from_issue for the same
+    # computed_at, never the reverse.
+    source_cycle_time = "2026-07-02T00:00:00+00:00"
+    source_available_at = "2026-07-02T00:05:00+00:00"
+    computed_at = "2026-07-02T00:10:00+00:00"
+
+    issue_latency = compute_issue_latency_seconds(
+        source_cycle_time=source_cycle_time, computed_at=computed_at
+    )
+    arrival_latency = compute_arrival_latency_seconds(
+        source_available_at=source_available_at, computed_at=computed_at
+    )
+
+    assert arrival_latency < issue_latency
+    assert issue_latency == 600.0
+    assert arrival_latency == 300.0
+
+
+def test_emit_materialization_latency_logs_and_returns_both_variants(caplog):
     import logging
 
     caplog.set_level(logging.INFO, logger="zeus.q_version_latency")
 
-    latency = emit_materialization_latency(
+    latencies = emit_materialization_latency(
         family_id="fam-shanghai-high",
         city="Shanghai",
         target_date="2026-07-02",
         temperature_metric="high",
         source_cycle_time="2026-07-02T00:00:00+00:00",
+        source_available_at="2026-07-02T00:02:00+00:00",
         computed_at="2026-07-02T00:05:00+00:00",
         posterior_id=42,
     )
 
-    assert latency == 300.0
+    assert latencies == {
+        "latency_from_issue_seconds": 300.0,
+        "latency_from_arrival_seconds": 180.0,
+    }
     assert any(
-        "fam-shanghai-high" in record.message and "300" in record.message
+        "fam-shanghai-high" in record.message
+        and "latency_from_issue_seconds=300" in record.message
+        and "latency_from_arrival_seconds=180" in record.message
         for record in caplog.records
     )
 
@@ -137,10 +187,11 @@ def test_latency_query_matches_manual_arithmetic_from_persisted_row():
     assert len(rows) == 1
     row = rows[0]
     assert row["family_id"] == "fam-shanghai-high"
-    assert row["latency_seconds"] == pytest.approx(450.0)
+    assert row["latency_from_issue_seconds"] == pytest.approx(450.0)
+    assert row["latency_from_arrival_seconds"] == pytest.approx(390.0)
 
 
-def test_fetch_recent_latencies_tags_by_family():
+def test_fetch_recent_latencies_tags_by_family_both_variants():
     conn = _conn()
     _insert_posterior(
         conn,
@@ -149,7 +200,7 @@ def test_fetch_recent_latencies_tags_by_family():
         metric="high",
         family_id="fam-a",
         source_cycle_time="2026-07-02T00:00:00+00:00",
-        source_available_at="2026-07-02T00:01:00+00:00",
+        source_available_at="2026-07-02T00:00:30+00:00",
         computed_at="2026-07-02T00:02:00+00:00",
     )
     _insert_posterior(
@@ -159,12 +210,14 @@ def test_fetch_recent_latencies_tags_by_family():
         metric="low",
         family_id="fam-b",
         source_cycle_time="2026-07-02T00:00:00+00:00",
-        source_available_at="2026-07-02T00:01:00+00:00",
+        source_available_at="2026-07-02T00:15:00+00:00",
         computed_at="2026-07-02T00:20:00+00:00",
     )
 
     results = fetch_recent_latencies(conn)
 
-    by_family = {row["family_id"]: row["latency_seconds"] for row in results}
-    assert by_family["fam-a"] == pytest.approx(120.0)
-    assert by_family["fam-b"] == pytest.approx(1200.0)
+    by_family = {row["family_id"]: row for row in results}
+    assert by_family["fam-a"]["latency_from_issue_seconds"] == pytest.approx(120.0)
+    assert by_family["fam-a"]["latency_from_arrival_seconds"] == pytest.approx(90.0)
+    assert by_family["fam-b"]["latency_from_issue_seconds"] == pytest.approx(1200.0)
+    assert by_family["fam-b"]["latency_from_arrival_seconds"] == pytest.approx(300.0)
