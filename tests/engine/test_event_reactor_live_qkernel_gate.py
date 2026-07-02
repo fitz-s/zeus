@@ -583,6 +583,41 @@ def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
     assert "floor=1.000000" in reason
 
 
+def test_qkernel_actual_submit_floor_rejects_invalid_qkernel_evidence():
+    cert = _qkernel_cert()
+    cert.update(
+        route_id="DIRECT_YES:bin-1@proof",
+        candidate_id="YES:bin-1:DIRECT_YES:bin-1@proof",
+        side="YES",
+        payoff_q_point=0.24833093804728934,
+        payoff_q_lcb=0.0990451308919892,
+        cost=0.053828064525010946,
+        edge_lcb=0.04521706636697825,
+        optimal_stake_usd=23.69,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.0002,
+        selection_guard_q_safe=0.0990451308919892,
+    )
+    proof = SimpleNamespace(
+        direction="buy_yes",
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    reason = era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=5.46,
+        actual_cost=0.053828064525010946,
+    )
+
+    assert reason is not None
+    assert reason.startswith(
+        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+        "QKERNEL_EXECUTION_ECONOMICS_ROI_FRONTIER_NOT_USEFUL:"
+    )
+
+
 def test_qkernel_selection_rejection_names_no_positive_edge_not_generic_invalid():
     cert = _qkernel_cert()
     cert.update(

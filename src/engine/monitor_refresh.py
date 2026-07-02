@@ -2963,8 +2963,9 @@ def _day0_extreme_authority_rejection_reason(
 
     if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
         return "day0_extreme_maturity_unavailable:no_intraday_extreme"
-    if classification == BoundClassification.DETERMINISTIC:
-        return None
+    # A deterministic remaining-window forecast is still forecast evidence, not a
+    # settlement hard fact. The observed high/low may only sponsor live exit
+    # authority once the same temporal maturity law below is satisfied.
 
     if temperature_metric.is_high():
         daypart = str(getattr(temporal_context, "daypart", "") or "")

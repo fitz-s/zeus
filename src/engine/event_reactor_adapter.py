@@ -13289,11 +13289,21 @@ def _qkernel_actual_submit_quality_rejection_reason(
     notional and limit price that will actually be submitted.
     """
 
+    raw_cert = getattr(proof, "qkernel_execution_economics", None)
     cert = _valid_qkernel_execution_economics_payload(
-        getattr(proof, "qkernel_execution_economics", None),
+        raw_cert,
         direction=str(getattr(proof, "direction", "") or ""),
     )
     if cert is None:
+        if (
+            isinstance(raw_cert, Mapping)
+            and str(raw_cert.get("source") or "").strip() == "qkernel_spine"
+        ):
+            detail = _qkernel_selection_economics_rejection_reason(
+                raw_cert,
+                direction=str(getattr(proof, "direction", "") or ""),
+            )
+            return f"QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:{detail}"
         return None
     try:
         stake = float(actual_stake_usd)
@@ -13315,6 +13325,41 @@ def _qkernel_actual_submit_quality_rejection_reason(
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_edge_non_positive:"
             f"payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}"
         )
+
+    from src.strategy.live_inference.live_admission import (
+        live_entry_probability_quality_rejection_reason,
+    )
+
+    strategy_key_for_quality: str | None = None
+    if str(strategy_policy_event_type or "").strip():
+        try:
+            strategy_key_for_quality = _event_bound_strategy_key(
+                event_type=str(strategy_policy_event_type or ""),
+                direction=str(getattr(proof, "direction", "") or ""),
+                metric=str(
+                    getattr(getattr(proof, "candidate", None), "metric", "")
+                    or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
+                    or ""
+                ),
+                require_metric_live=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR_UNAVAILABLE:{type(exc).__name__}"
+    elif (
+        str(getattr(proof, "direction", "") or "").strip() == "buy_yes"
+        and str(cert.get("source") or "").strip() == "qkernel_spine"
+    ):
+        strategy_key_for_quality = "forecast_qkernel_entry"
+
+    win_rate_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=payoff_q_lcb,
+        direction=str(getattr(proof, "direction", "") or ""),
+        strategy_key=strategy_key_for_quality,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=cert,
+    )
+    if win_rate_reason is not None:
+        return f"QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:{win_rate_reason}"
 
     if not str(strategy_policy_event_type or "").strip():
         return None
@@ -21027,9 +21072,10 @@ def _record_day0_remaining_day_exit_authority(
             payload[reason_key] = "day0_extreme_maturity_unavailable:no_intraday_extreme"
             return
         if classification == BoundClassification.DETERMINISTIC:
-            payload[status_key] = "mature"
-            payload[reason_key] = "day0_extreme_deterministic"
-            return
+            payload["_edli_day0_model_bound_classification"] = "deterministic"
+            payload["_edli_day0_model_bound_classification_role"] = (
+                "forecast_remaining_window_evidence_only"
+            )
 
         city_obj = runtime_cities_by_name().get(str(family.city))
         timezone_name = str(getattr(city_obj, "timezone", "") or "")

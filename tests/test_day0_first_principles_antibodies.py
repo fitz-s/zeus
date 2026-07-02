@@ -1235,15 +1235,14 @@ class TestDay0MaturityAuthority:
         )
         assert reason is None
 
-    def test_deterministic_bound_is_authority_at_any_daypart(self):
-        """Hard fact: obs already exceeds every remaining member -> authority
-        even pre-peak (the absorbing boundary is calendar-independent)."""
+    def test_deterministic_remaining_forecast_does_not_bypass_maturity(self):
+        """A remaining-window forecast can be deterministic without being a settlement hard fact."""
         reason = self._gate(
             observed_extreme_so_far=30.0,
             member_extrema_remaining=[25.0, 26.0, 27.0],
             temporal_context=SimpleNamespace(daypart="morning", post_peak_confidence=0.0),
         )
-        assert reason is None
+        assert reason is not None and "not_mature" in reason
 
     def test_no_observation_yet_is_never_authority(self):
         reason = self._gate(observed_extreme_so_far=None)
@@ -1262,12 +1261,13 @@ class TestDay0MaturityAuthority:
             metric="low", hours_remaining=3.0,
             observed_extreme_so_far=24.0, member_extrema_remaining=[22.0, 23.0],
         ) is None
-        # DETERMINISTIC low (obs already undercuts every remaining member) is
-        # authority at any hour — hard fact, calendar-independent.
-        assert self._gate(
+        # A deterministic remaining-window LOW forecast is still not terminal
+        # observation authority while most of the local day remains.
+        reason = self._gate(
             metric="low", hours_remaining=20.0,
             observed_extreme_so_far=18.0, member_extrema_remaining=[19.0, 20.0],
-        ) is None
+        )
+        assert reason is not None and "not_terminal" in reason
 
 
 # ===========================================================================

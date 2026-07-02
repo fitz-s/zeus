@@ -6842,27 +6842,30 @@ def test_day0_low_nonterminal_observation_is_not_exit_authority():
     assert reason == "day0_low_extreme_not_terminal:hours_remaining=18.0"
 
 
-def test_day0_deterministic_extreme_can_remain_exit_authority():
-    """Observed extreme may be authority when it already determines the local-day outcome."""
+def test_day0_deterministic_remaining_forecast_does_not_bypass_maturity():
+    """Forecast remaining-window determinism is not settlement hard-fact authority."""
     from src.engine import monitor_refresh
     from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
     temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
 
-    assert monitor_refresh._day0_extreme_authority_rejection_reason(
+    high_reason = monitor_refresh._day0_extreme_authority_rejection_reason(
         temperature_metric=HIGH_LOCALDAY_MAX,
         temporal_context=temporal_context,
         hours_remaining=23.0,
         observed_extreme_so_far=35.0,
         member_extrema_remaining=np.array([24.0, 25.0, 26.0]),
-    ) is None
-    assert monitor_refresh._day0_extreme_authority_rejection_reason(
+    )
+    assert high_reason is not None and "not_mature" in high_reason
+
+    low_reason = monitor_refresh._day0_extreme_authority_rejection_reason(
         temperature_metric=LOW_LOCALDAY_MIN,
         temporal_context=temporal_context,
         hours_remaining=18.0,
         observed_extreme_so_far=5.0,
         member_extrema_remaining=np.array([17.0, 16.5, 18.5]),
-    ) is None
+    )
+    assert low_reason == "day0_low_extreme_not_terminal:hours_remaining=18.0"
 
 
 def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):

@@ -174,7 +174,7 @@ def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     assert plan.old_token_id == "tok-A"
 
 
-def test_day0_remaining_day_exit_authority_stamps_deterministic_mature():
+def test_day0_remaining_day_forecast_determinism_does_not_mature_exit_authority(monkeypatch):
     payload = {
         "metric": "high",
         "rounded_value": 31,
@@ -182,6 +182,14 @@ def test_day0_remaining_day_exit_authority_stamps_deterministic_mature():
         "observation_time": "2026-06-30T14:00:00+02:00",
     }
     family = SimpleNamespace(city="Munich", target_date="2026-06-30")
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: SimpleNamespace(
+            daypart="morning",
+            post_peak_confidence=0.0,
+            current_local_timestamp=datetime(2026, 6, 30, 14, tzinfo=timezone.utc),
+        ),
+    )
 
     era._record_day0_remaining_day_exit_authority(
         payload=payload,
@@ -191,9 +199,14 @@ def test_day0_remaining_day_exit_authority_stamps_deterministic_mature():
         decision_time=datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
     )
 
-    assert payload["_edli_day0_exit_authority_status"] == "mature"
-    assert payload["_edli_day0_exit_authority_reason"] == "day0_extreme_deterministic"
+    assert payload["_edli_day0_exit_authority_status"] == "immature"
+    assert payload["_edli_day0_exit_authority_reason"] == (
+        "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+    )
     assert payload["_edli_day0_bound_classification"] == "DETERMINISTIC"
+    assert payload["_edli_day0_model_bound_classification_role"] == (
+        "forecast_remaining_window_evidence_only"
+    )
 
 
 def test_day0_immature_remaining_day_blocks_shift_exit_before_lease():
