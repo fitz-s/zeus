@@ -2858,11 +2858,18 @@ def _emit_monitor_refreshed_canonical_if_available(
             (getattr(pos, "trade_id", ""),),
         ).fetchone()
         next_seq = int((row[0] if row else 0) or 0) + 1
+        monitor_occurred_at = (
+            deps._utcnow().isoformat()
+            if hasattr(deps, "_utcnow")
+            else datetime.now(timezone.utc).isoformat()
+        )
+        pos.last_monitor_at = monitor_occurred_at
         events, projection = build_monitor_refreshed_canonical_write(
             pos,
             sequence_no=next_seq,
             phase_after=_monitor_refreshed_phase_for_position(pos),
             source_module="src.engine.cycle_runtime",
+            occurred_at=monitor_occurred_at,
             exit_decision=exit_decision,
             final_should_exit=final_should_exit,
             final_exit_reason=final_exit_reason,

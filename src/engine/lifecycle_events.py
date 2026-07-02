@@ -596,6 +596,7 @@ def build_monitor_refreshed_canonical_write(
     sequence_no: int,
     phase_after: str,
     source_module: str = "src.engine.cycle_runtime",
+    occurred_at: str | None = None,
     exit_decision: Any | None = None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
@@ -606,16 +607,17 @@ def build_monitor_refreshed_canonical_write(
         raise ValueError(
             "monitor refreshed canonical builder requires phase_after in "
             f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}}, got {phase_after!r}"
-        )
+    )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
-    occurred_at = _non_empty(
+    event_occurred_at = _non_empty(
+        occurred_at,
         getattr(position, "last_monitor_at", ""),
         projection["updated_at"],
     )
     projection["updated_at"] = _max_iso_chronological(
         str(projection["updated_at"] or ""),
-        occurred_at,
+        event_occurred_at,
     )
     trade_id = str(getattr(position, "trade_id"))
     slug = f"monitor_refreshed:{sequence_no}"
@@ -695,7 +697,7 @@ def build_monitor_refreshed_canonical_write(
         "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "MONITOR_REFRESHED",
-        "occurred_at": occurred_at,
+        "occurred_at": event_occurred_at,
         "phase_before": phase_after,
         "phase_after": fold_lifecycle_phase(phase_after, phase_after).value,
         "strategy_key": _strategy_key(position),

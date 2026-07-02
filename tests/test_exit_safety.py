@@ -3695,6 +3695,45 @@ def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     assert build_position_current_projection(pending_exit)["order_status"] == "backoff_exhausted"
 
 
+def test_monitor_refreshed_explicit_time_overrides_stale_position_monitor_time():
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="pos-monitor-explicit-time",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="quarantined",
+        chain_state="entry_authority_quarantined",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        last_monitor_at="2026-06-24T10:05:00+00:00",
+    )
+
+    events, projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=9,
+        phase_after="quarantined",
+        source_module="test",
+        occurred_at="2026-07-02T20:10:00+00:00",
+    )
+
+    assert events[0]["occurred_at"] == "2026-07-02T20:10:00+00:00"
+    assert projection["updated_at"] == "2026-07-02T20:10:00+00:00"
+
+
 def test_check_pending_retries_persists_day0_redecision_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_retries
