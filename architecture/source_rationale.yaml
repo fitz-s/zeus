@@ -231,6 +231,19 @@ package_defaults:
     authority_role: external_data_boundary
     gates:
     - pytest -q tests/test_ensemble_client.py tests/test_observation_contract.py
+  src/decision:
+    zone: K2_K3_coordination
+    authority_role: decision_logic
+    gates:
+    - pytest -q tests/decision/test_family_decision_engine.py tests/decision/test_qlcb_reliability_guard.py
+    note: |
+      Mixed package: family_decision_engine.py/decision_receipt.py/market_coherence.py/
+      payoff_vector.py/city_skill_gate.py are K2_runtime (live admission/sizing chain);
+      qlcb_reliability_guard.py/selection_calibrator.py/selection_curse_bound.py/
+      selection_curse_bound_loader.py are K3_extension (probability-shading math). Sat
+      unregistered until W0.4 backfill (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      §3: "do not repeat"). family_decision_engine.py is a W3 BUILD-swap target
+      (qkernel_spine_bridge.py:1332); the selection machinery is a W5 deletion target.
   src/ingest:
     zone: K2_runtime
     authority_role: external_event_ingest_boundary
@@ -1347,6 +1360,134 @@ files:
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_calibration_transfer_policy.py
+  src/decision/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Decision package rules and registry; see docs/rebuild/order_engine_implementation_architecture_2026-07-02.md for the W3/W5 disposition of individual files.
+  src/decision/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks decision namespace.
+  src/decision/family_decision_engine.py:
+    zone: K2_runtime
+    authority_role: decision_runtime_engine
+    why: >
+      Live filter-then-rank top-1 decision engine (decide()/_select()): candidate filter
+      chain direction_law_ok -> coherence_allows -> (edge_lcb>0 & optimal_delta_u>0) ->
+      selected = max total robust utility, with no_trade_reason + receipt_hash on every
+      exit. Per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §1: this
+      is NOT a solver and is a BUILD-swap target at W3 — a new src/solve/ module replaces it
+      at the qkernel_spine_bridge.py:1332 seam. Reusable pieces (payoff_vector's ΔU shape)
+      survive the swap; the engine itself does not.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/qkernel_spine_bridge.py
+    - src/execution/executor.py
+    - src/events/live_order_aggregate.py
+    - src/decision_kernel/verifier.py
+  src/decision/decision_receipt.py:
+    zone: K2_runtime
+    authority_role: typed_decision_carrier
+    why: >
+      Carrier type for decision results with provenance and settlement guidance; reconstructs
+      forecast -> q -> route -> size for every live candidate (the one rebuild invariant).
+      Not named individually in the W3/W5 disposition tables, but receipts remain a required
+      W3 solve output (receipts stamp correlation_rail=caps per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §3 point 4) — the
+      concept survives the family_decision_engine.py swap even if this file is touched.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+  src/decision/market_coherence.py:
+    zone: K2_runtime
+    authority_role: market_validator
+    why: >
+      Model-vs-market coherence veto: de-frictioned implied-q + simplex projection +
+      depth/spread gating, 3 call sites in decide(). Per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §4 decision 1
+      (RESOLVED 2026-07-02): the veto is DELETED and INVERTED into a re-decision router —
+      dies with W3, not W5. assess_market_coherence/MarketCoherenceReport survive REUSED as
+      (a) a typed divergence event into opportunity_events and (b) the re-decision priority
+      key (divergence x staleness ranks which family gets re-solved first).
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/decision/payoff_vector.py:
+    zone: K2_runtime
+    authority_role: payoff_calculator
+    why: >
+      Computes payoff vectors for entry/exit decisions: edge = q @ payoff - route.avg_cost,
+      sizing via robust_delta_u argmax over the FamilyPayoffMatrix. Anchors all decision edge
+      calculations. Per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      §1: REUSE-grade — optimize_vector_stake's log-utility ΔU shape (right shape, 1-D) is
+      generalized into the W3 solve's joint multi-asset math; this file's math survives the
+      family_decision_engine.py swap even though the engine does not.
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/decision/qlcb_reliability_guard.py:
+    zone: K3_extension
+    authority_role: confidence_bound_validator
+    why: >
+      Price-blind OOF empirical reliability guard: serves q_safe = min(band.q_lcb, L_g) on
+      known deep OOF cells, abstains (q_safe=0) on thin/missing cells. Predecessor to
+      selection_calibrator.py (which is price/selection-aware; this guard cannot see
+      price-conditioned adverse selection). Part of the "selection machinery" W5 deletion
+      target per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3
+      (contained, 1 main call site in family_decision_engine.py; dies with the engine swap).
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/decision/selection_calibrator.py:
+    zone: K3_extension
+    authority_role: calibration_adapter
+    why: >
+      Selection-aware settlement q_lcb calibrator: maps pre-trade features (side, lead
+      bucket, bin class, raw side prob, admission margin) to a monotone conservative lower
+      bound on realized settlement hit-rate, fit walk-forward on settled rows only. Successor
+      to qlcb_reliability_guard.py (price/selection-aware vs price-blind). Part of the
+      "selection machinery" W5 deletion target per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    downstream:
+    - src/decision/family_decision_engine.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/selection_curse_bound.py:
+    zone: K3_extension
+    authority_role: decision_curse_bound
+    why: >
+      Estimator for selection-curse adjustment on realized market rates: deflates mid-price
+      buy_no toward its settlement-evidenced realized rate (monotone-in-price isotonic LCB);
+      identity when absent/unarmed/out-of-support, only ever tightens. Per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2: "selection_curse_bound
+      + calibrator + loaders" — contained, 1 main call site in family_decision_engine.py —
+      dies with the engine swap; also enumerated under the §3 W5 selection-machinery deletion
+      order.
+    downstream:
+    - src/decision/selection_curse_bound_loader.py
+    - src/engine/event_reactor_adapter.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/selection_curse_bound_loader.py:
+    zone: K3_extension
+    authority_role: artifact_loader
+    why: >
+      Fail-soft loader for selection_curse_bound.py artifacts; returns None on
+      missing/malformed/inconsistent input to preserve live gate identity. Same disposition
+      as selection_curse_bound.py: dies with the W3 engine swap / W5 selection-machinery
+      deletion per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/city_skill_gate.py:
+    zone: K2_runtime
+    authority_role: skill_validator
+    why: >
+      Per-city historical settlement-skill gate: admits a city only when its prior
+      Brier-vs-market settlement skill is reliably positive (learned threshold + minimum
+      track-record length), fails closed on missing/inconsistent skill data. Pairs with
+      selection_calibrator.py (skill gate decides WHICH cities trade; the calibrator blocks
+      the adversely-selected toxic tail within them). Not named individually in
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md's component map or
+      deletion list (created 2026-06-22, same consult batch as selection_calibrator.py) —
+      shares the calibrator's admission-gate role but its W3/W5 disposition is not confirmed
+      in that doc; do not assume it survives the engine swap without re-checking.
+    downstream:
+    - src/strategy/live_inference/live_admission.py
   src/engine/AGENTS.md:
     zone: docs
     authority_role: registry

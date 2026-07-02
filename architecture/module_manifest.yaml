@@ -268,6 +268,57 @@ modules:
       - tests/data/test_source_run_arrived_event.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  decision:
+    path: src/decision
+    scoped_agents: src/decision/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional (not "stable") — live money-path admission/sizing chain, but
+    # family_decision_engine.py is a BUILD target at W3 (new src/solve/ module swaps in at
+    # qkernel_spine_bridge.py:1332) and the selection machinery (curse bound + calibrator +
+    # qlcb guard) is a W5 deletion target, per
+    # docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    maturity: provisional
+    zone: source
+    authority_role: decision_logic
+    high_risk_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/market_coherence.py
+      - src/decision/payoff_vector.py
+      - src/decision/qlcb_reliability_guard.py
+      - src/decision/selection_calibrator.py
+      - src/decision/selection_curse_bound.py
+      - src/decision/city_skill_gate.py
+    public_entry_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/decision_receipt.py
+      - src/decision/market_coherence.py
+      - src/decision/payoff_vector.py
+      - src/decision/qlcb_reliability_guard.py
+      - src/decision/selection_calibrator.py
+      - src/decision/selection_curse_bound.py
+      - src/decision/selection_curse_bound_loader.py
+      - src/decision/city_skill_gate.py
+    law_dependencies:
+      - AGENTS.md
+      - architecture/invariants.yaml
+      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/decision/test_family_decision_engine.py
+      - tests/decision/test_market_coherence.py
+      - tests/decision/test_payoff_vector_edge.py
+      - tests/decision/test_vector_sizing_authority.py
+      - tests/decision/test_qlcb_reliability_guard.py
+      - tests/decision/test_qlcb_guard_decision_integration.py
+      - tests/decision/test_selection_calibrator.py
+      - tests/decision/test_selection_calibrator_eb.py
+      - tests/decision/test_selection_curse_bound.py
+      - tests/decision/test_selection_curse_bound_loader.py
+      - tests/decision/test_city_skill_gate.py
+      - tests/decision/test_live_receipt_contract.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md
