@@ -186,6 +186,21 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert probe_kwargs == [{"advance_cursor": False}]
 
 
+def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
+    """Default materialization capacity must not under-drain the default seed burst."""
+    import src.data.replacement_forecast_production as prod
+
+    source = prod.settings._data if hasattr(prod.settings, "_data") else prod.settings
+    monkeypatch.setitem(source, "replacement_forecast_live", {})
+
+    cfg = prod._replacement_forecast_live_materialization_queue_config()
+
+    assert cfg["seed_discovery_limit"] == 80
+    assert cfg["seed_limit"] == 80
+    assert cfg["limit"] == 80
+    assert cfg["limit"] >= cfg["seed_limit"]
+
+
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
     """A detected public run change must drive the heavy path with the same probe report."""
     import src.ingest_main as ingest_main

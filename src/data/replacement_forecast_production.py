@@ -113,7 +113,7 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
         "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
         "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
-        "limit": int(cfg.get("materialization_limit_per_cycle") or 40),
+        "limit": int(cfg.get("materialization_limit_per_cycle") or 80),
         "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
         "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
