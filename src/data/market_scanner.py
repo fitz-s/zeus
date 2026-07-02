@@ -4543,10 +4543,6 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         bids = []
     if not isinstance(asks, list):
         asks = []
-    if not bids and row.get("best_bid_before") not in (None, ""):
-        bids = [{"price": str(row.get("best_bid_before")), "size": "1"}]
-    if not asks and row.get("best_ask_before") not in (None, ""):
-        asks = [{"price": str(row.get("best_ask_before")), "size": "1"}]
     if not asks:
         return None
     gamma_market_raw = outcome.get("gamma_market_raw")
@@ -4568,22 +4564,20 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
     neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
     if neg_risk is None:
         neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
-    if tick_size is not None:
-        try:
-            tick_dec = Decimal(str(tick_size))
-            if tick_dec.is_finite() and tick_dec > Decimal("0"):
-                book["tick_size"] = str(tick_dec)
-        except (InvalidOperation, TypeError, ValueError):
-            pass
-    if min_order_size is not None:
-        try:
-            min_order_dec = Decimal(str(min_order_size))
-            if min_order_dec.is_finite() and min_order_dec > Decimal("0"):
-                book["min_order_size"] = str(min_order_dec)
-        except (InvalidOperation, TypeError, ValueError):
-            pass
-    if neg_risk is not None:
-        book["neg_risk"] = bool(neg_risk)
+    if tick_size is None or min_order_size is None or neg_risk is None:
+        return None
+    try:
+        tick_dec = Decimal(str(tick_size))
+        min_order_dec = Decimal(str(min_order_size))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
+        return None
+    if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
+        return None
+    book["tick_size"] = str(tick_dec)
+    book["min_order_size"] = str(min_order_dec)
+    book["neg_risk"] = bool(neg_risk)
     return book
 
 

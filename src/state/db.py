@@ -9622,6 +9622,40 @@ def log_outcome_fact(
     )
     return {"status": "written", "table": "outcome_fact"}
 
+_LEGACY_POSITION_EVENTS_COLUMNS = frozenset(
+    {
+        "runtime_trade_id",
+        "position_state",
+        "strategy",
+        "source",
+        "details_json",
+        "timestamp",
+        "env",
+    }
+)
+
+
+def _guard_legacy_position_events_schema(conn: sqlite3.Connection) -> None:
+    """Preserve loud failure for malformed legacy telemetry schemas.
+
+    Canonical ``position_events`` is append/projection owned. These legacy
+    telemetry helpers intentionally do not write to it, but tests still rely on
+    them failing loudly when pointed at a malformed legacy runtime table instead
+    of silently degrading.
+    """
+
+    if not _table_exists(conn, "position_events"):
+        return
+    columns = _table_columns(conn, "position_events")
+    legacy_overlap = (_LEGACY_POSITION_EVENTS_COLUMNS - {"env"}) & columns
+    if _table_exists(conn, "position_current"):
+        if legacy_overlap:
+            raise RuntimeError("hybrid position_events schema")
+        return
+    if not _LEGACY_POSITION_EVENTS_COLUMNS.issubset(columns):
+        raise RuntimeError("legacy runtime position_events schema not installed")
+
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction.
 
@@ -9630,12 +9664,14 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     truth lives in position_events / position_current.
     """
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    _guard_legacy_position_events_schema(conn)
 
 
 
 
 def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: str | None = None) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
+    _guard_legacy_position_events_schema(conn)
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
@@ -9745,6 +9781,7 @@ def log_settlement_event(
     exited_at_override: str | None = None,
 ) -> None:
     """Append a durable settlement event for learning/risk consumers."""
+    _guard_legacy_position_events_schema(conn)
     settled_at = getattr(pos, "last_exit_at", None)
     entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
     log_outcome_fact(
@@ -9762,6 +9799,24 @@ def log_settlement_event(
         monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
         chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
     )
+
+
+def log_reconciled_entry_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    timestamp: str,
+    details: dict | None = None,
+) -> None:
+    """Legacy reconciliation telemetry shim.
+
+    Reconciled entry truth now flows through canonical lifecycle events. Keep
+    this compatibility entry point as a schema guard plus no-op so old callers
+    cannot silently write malformed legacy rows.
+    """
+
+    _ = (pos, timestamp, details)
+    _guard_legacy_position_events_schema(conn)
 
 
 

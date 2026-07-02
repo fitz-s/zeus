@@ -499,7 +499,12 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     conn.row_factory = sqlite3.Row
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    accepted = _accepted_receipt(event)
+    accepted = _accepted_receipt(
+        event,
+        execution_mode_intent="MAKER",
+        maker_limit_price=0.38,
+        rest_then_cross_policy="REST_DEFAULT",
+    )
     accepted = replace(
         accepted,
         decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
@@ -1536,7 +1541,12 @@ def test_live_execution_command_day0_actionable_has_observation_source_parents()
     conn.row_factory = sqlite3.Row
     event = _day0_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    accepted = _accepted_receipt(event)
+    accepted = _accepted_receipt(
+        event,
+        execution_mode_intent="MAKER",
+        maker_limit_price=0.38,
+        rest_then_cross_policy="REST_DEFAULT",
+    )
     accepted = replace(
         accepted,
         decision_proof_bundle=build_test_no_submit_proof_bundle(
@@ -1551,7 +1561,10 @@ def test_live_execution_command_day0_actionable_has_observation_source_parents()
         receipt=accepted,
         decision_time=decision_time,
         live_cap_conn=conn,
-        pre_submit_authority_provider=_pre_submit_authority_provider,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.41,
+        ),
     )
     actionable = _required_cert(certificates, claims.ACTIONABLE_TRADE)
     parent_types = {edge.certificate_type for edge in actionable.header.parent_edges}
@@ -2037,9 +2050,9 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
             "candidate_id": "DIRECT_YES:bin-1",
             "direction": "buy_yes",
             "q_live": 0.72,
-            "q_lcb_5pct": 0.30,
+            "q_lcb_5pct": 0.52,
             "qkernel_execution_economics": _qkernel_execution_cert(
-                payoff_q_lcb=0.30,
+                payoff_q_lcb=0.52,
                 cost=0.20,
             ),
             "live_cap_reserved_notional_usd": 10.0,
@@ -2048,7 +2061,7 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
         },
         order_mode="TAKER",
         fresh_best_bid=0.49,
-        fresh_best_ask=0.50,
+        fresh_best_ask=0.55,
     )
 
     assert proof is not None
@@ -3604,11 +3617,26 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         )
     from src.events.reactor import EventSubmissionReceipt
 
+    is_day0_event = getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
     qkernel_cert = _qkernel_execution_cert(
         payoff_q_point=0.7,
         payoff_q_lcb=0.6,
         cost=0.4,
     )
+    day0_probability_authority = None
+    q_source = "emos"
+    if is_day0_event:
+        q_source = "day0_remaining_day"
+        day0_probability_authority = _day0_probability_authority()
+        qkernel_cert.update(
+            {
+                "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+                "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+                "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+                "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+                "selection_guard_q_safe": qkernel_cert["payoff_q_lcb"],
+            }
+        )
     return EventSubmissionReceipt(
         submitted=False,
         proof_accepted=True,
@@ -3648,16 +3676,51 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         kelly_decision_id="kelly-1",
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
-        q_source="emos",
+        q_source=q_source,
         selection_authority_applied="qkernel_spine",
         candidate_bin_id="bin-1",
         qkernel_execution_economics=qkernel_cert,
+        day0_probability_authority=day0_probability_authority,
         execution_mode_intent=execution_mode_intent,
         rest_then_cross_policy=rest_then_cross_policy,
         maker_limit_price=maker_limit_price,
         opportunity_book=_opportunity_book_with_qkernel_cert(qkernel_cert),
         decision_proof_bundle=object(),
     )
+
+
+def _day0_lcb_transform() -> dict[str, object]:
+    return {
+        "yes_lcb_by_condition": {"condition-1": 0.6},
+        "no_lcb_by_condition": {"condition-1": 0.2},
+        "mask": [1.0],
+        "absorbing_yes_conditions": [],
+        "absorbing_no_conditions": [],
+        "staleness_suppressed_conditions": [],
+        "immature_finite_yes_suppressed_conditions": [],
+        "day0_exit_authority_status": "mature",
+        "day0_exit_authority_reason": "day0_high_extreme_post_peak",
+        "rounded_extreme": 80.0,
+        "metric": "high",
+    }
+
+
+def _day0_probability_authority() -> dict[str, object]:
+    return {
+        "q_source": "day0_remaining_day",
+        "q_mode": "remaining_day",
+        "remaining_models": 3,
+        "remaining_model_names": ["ecmwf", "gfs", "icon"],
+        "remaining_source_cycle_time_utc": "2026-05-24T12:00:00+00:00",
+        "remaining_capture_times_utc": ["2026-05-24T18:00:00+00:00"],
+        "exit_authority_status": "mature",
+        "exit_authority_reason": "day0_high_extreme_post_peak",
+        "observed_extreme_native": 80.0,
+        "rounded_value": 80,
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "lcb_transform": _day0_lcb_transform(),
+    }
 
 
 def _qkernel_execution_cert(**overrides):

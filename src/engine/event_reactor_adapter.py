@@ -2673,11 +2673,13 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     try:
         from src.state.db import get_world_connection, query_control_override_state
 
-        world_conn = get_world_connection()
-        try:
-            state = query_control_override_state(world_conn)
-        finally:
-            world_conn.close()
+        state = query_control_override_state(conn) if conn is not None else None
+        if state is None or state.get("status") == "missing_table":
+            world_conn = get_world_connection()
+            try:
+                state = query_control_override_state(world_conn)
+            finally:
+                world_conn.close()
     except Exception as exc:  # noqa: BLE001
         return f"entries_pause_control_unreadable:{type(exc).__name__}"
     if state.get("status") != "ok":
@@ -16676,6 +16678,14 @@ def _family_existing_exposure_for_selection_by_bin_id(
         try:
             columns = _position_current_columns(held_position_conn)
             if "condition_id" not in columns:
+                try:
+                    row_count = held_position_conn.execute(
+                        "SELECT COUNT(*) FROM position_current"
+                    ).fetchone()
+                except Exception:
+                    return {}
+                if int(row_count[0] or 0) == 0:
+                    return {}
                 raise RuntimeError("position_current.condition_id missing")
             phase_sql, phase_params = _position_phase_or_positive_chain_clause(
                 columns,

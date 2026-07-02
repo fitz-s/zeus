@@ -307,6 +307,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return False
         return row is not None
 
+    def _runtime_trade_fact_schema_available() -> bool:
+        if conn is None:
+            return False
+        try:
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(venue_trade_facts)").fetchall()
+            }
+        except Exception:
+            return False
+        return {"state", "source", "filled_size", "fill_price"}.issubset(columns)
+
+    def _guard_position_events_schema() -> None:
+        if conn is None:
+            return
+        from src.state.db import _guard_legacy_position_events_schema
+
+        _guard_legacy_position_events_schema(conn)
+
     def _canonical_rescue_baseline_available(position_id: str) -> bool:
         if conn is None:
             return False
@@ -382,6 +401,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     def _position_has_linked_fill_fact(position: Position) -> bool:
         if conn is None:
             return False
+        try:
+            vtf_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(venue_trade_facts)").fetchall()
+            }
+            vc_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+            }
+        except Exception as exc:
+            raise RuntimeError("venue fill fact schema lookup failed") from exc
+        if not {"state", "source", "filled_size", "fill_price"}.issubset(vtf_columns):
+            return False
+        can_join_commands = "command_id" in vtf_columns and "command_id" in vc_columns
         position_id = str(getattr(position, "trade_id", "") or "").strip()
         order_ids = {
             str(value).strip()
@@ -401,30 +434,53 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         }
         predicates: list[str] = []
         params: list[str] = []
-        if position_id:
+        if position_id and can_join_commands and "position_id" in vc_columns:
             predicates.append("vc.position_id = ?")
             params.append(position_id)
         if order_ids:
+            order_predicates: list[str] = []
             placeholders = ", ".join(["?"] * len(order_ids))
-            predicates.append(f"(vtf.venue_order_id IN ({placeholders}) OR vc.venue_order_id IN ({placeholders}))")
-            params.extend(order_ids)
-            params.extend(order_ids)
+            if "venue_order_id" in vtf_columns:
+                order_predicates.append(f"vtf.venue_order_id IN ({placeholders})")
+                params.extend(order_ids)
+            if can_join_commands and "venue_order_id" in vc_columns:
+                order_predicates.append(f"vc.venue_order_id IN ({placeholders})")
+                params.extend(order_ids)
+            if order_predicates:
+                predicates.append(f"({' OR '.join(order_predicates)})")
         if command_ids:
+            command_predicates: list[str] = []
             placeholders = ", ".join(["?"] * len(command_ids))
-            predicates.append(f"(vtf.command_id IN ({placeholders}) OR vc.command_id IN ({placeholders}))")
-            params.extend(command_ids)
-            params.extend(command_ids)
+            if "command_id" in vtf_columns:
+                command_predicates.append(f"vtf.command_id IN ({placeholders})")
+                params.extend(command_ids)
+            if can_join_commands and "command_id" in vc_columns:
+                command_predicates.append(f"vc.command_id IN ({placeholders})")
+                params.extend(command_ids)
+            if command_predicates:
+                predicates.append(f"({' OR '.join(command_predicates)})")
         if not predicates:
             return False
+        join_clause = ""
+        if can_join_commands:
+            join_clause = """
+                  LEFT JOIN venue_commands vc
+                    ON vc.command_id = vtf.command_id
+            """
+        order_terms = []
+        if "observed_at" in vtf_columns:
+            order_terms.append("vtf.observed_at DESC")
+        if "local_sequence" in vtf_columns:
+            order_terms.append("vtf.local_sequence DESC")
+        order_clause = f"ORDER BY {', '.join(order_terms)}" if order_terms else ""
         try:
             rows = conn.execute(
                 f"""
                 SELECT vtf.state, vtf.source, vtf.filled_size, vtf.fill_price
                   FROM venue_trade_facts vtf
-                  LEFT JOIN venue_commands vc
-                    ON vc.command_id = vtf.command_id
+                  {join_clause}
                  WHERE {" OR ".join(f"({predicate})" for predicate in predicates)}
-                 ORDER BY vtf.observed_at DESC, vtf.local_sequence DESC
+                 {order_clause}
                 """,
                 tuple(params),
             ).fetchall()
@@ -1720,8 +1776,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
+            _guard_position_events_schema()
             canonical_rescue_baseline_available = _canonical_rescue_baseline_available(getattr(pos, "trade_id", ""))
-            if not canonical_rescue_baseline_available:
+            legacy_runtime_rescue_available = (
+                not canonical_rescue_baseline_available
+                and _runtime_trade_fact_schema_available()
+            )
+            if not canonical_rescue_baseline_available and not legacy_runtime_rescue_available:
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
                 continue
@@ -1844,7 +1905,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     rescued.entered_at_authority = "verified_entry_fill"
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
-            _sync_reconciled_trade_lifecycle(rescued)
+                _sync_reconciled_trade_lifecycle(rescued)
             # B064: when entered_at is the fabrication sentinel, the rescue
             # event's display timestamp must be the reconcile `now`, not the
             # sentinel string.
@@ -2000,6 +2061,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 )
             elif abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
+                _guard_position_events_schema()
                 if not _size_mismatch_eligible:
                     corrected.shares = chain.size
                 else:

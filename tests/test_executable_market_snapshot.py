@@ -73,11 +73,15 @@ class FakeClobFacts:
         orderbook: dict | None = None,
         fee_rate=30,
     ):
-        self.market_info = market_info if market_info is not None else {
+        self.market_info = dict(market_info) if market_info is not None else {
             "condition_id": "condition-1",
             "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
             "feesEnabled": True,
+            "archived": False,
+            "enable_order_book": True,
         }
+        self.market_info.setdefault("archived", False)
+        self.market_info.setdefault("enable_order_book", True)
         self.orderbook = orderbook if orderbook is not None else {
             "asset_id": "yes-token",
             "tick_size": "0.01",

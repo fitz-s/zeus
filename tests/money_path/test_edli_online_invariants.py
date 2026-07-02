@@ -1139,6 +1139,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
     monkeypatch.setattr(main, "_startup_data_health_check", lambda _conn: None)
     monkeypatch.setattr(main, "_startup_freshness_check", lambda: None)
+    monkeypatch.setattr(main, "_startup_required_sidecar_head_check", lambda **_kwargs: None)
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
     monkeypatch.setattr(main, "_startup_wallet_check", lambda clob=None, bankroll_record=None: None)

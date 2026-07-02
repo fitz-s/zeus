@@ -257,6 +257,43 @@ def _source_context() -> DecisionSourceContext:
     )
 
 
+def _entry_submit_payload() -> dict[str, object]:
+    return {
+        "pre_side_effect": True,
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {"component": "cutover_guard", "allowed": True, "reason": "allowed"},
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {
+                        "q_live": 0.57,
+                        "q_lcb_5pct": 0.53,
+                        "expected_edge": 0.04,
+                        "limit_price": 0.42,
+                        "submit_edge": 0.04,
+                        "expected_profit_usd": 0.40,
+                        "min_entry_price": 0.05,
+                        "min_expected_profit_usd": 0.05,
+                        "submit_edge_density": 0.095,
+                        "min_submit_edge_density": 0.04,
+                        "shares": 10.0,
+                        "qkernel_side": "YES",
+                    },
+                },
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {"certificate_hash": "a" * 64},
+                },
+            ],
+        },
+    }
+
+
 def _seed_entry_command(conn: sqlite3.Connection) -> None:
     insert_command(
         conn,
@@ -370,7 +407,7 @@ def test_money_path_lifecycle_replay_converges_across_crash_boundaries(tmp_path:
             command_id="cmd-entry",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-05-21T12:00:02Z",
-            payload={"pre_side_effect": True},
+            payload=_entry_submit_payload(),
         )
         append_event(
             replay.conn,

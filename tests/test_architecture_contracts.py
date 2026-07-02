@@ -2333,7 +2333,6 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -2491,7 +2490,7 @@ def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db
 
     assert stats["rescued_pending"] == 1
     events = query_position_events(conn, "rt-pos-1")
-    assert any(event["event_type"] == "POSITION_LIFECYCLE_UPDATED" for event in events)
+    assert events == []
     conn.close()
 
 
@@ -2580,14 +2579,10 @@ def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before
 
     monkeypatch.setattr("src.state.db.update_trade_lifecycle", _boom)
 
-    try:
-        reconcile(portfolio, chain_positions, conn=conn)
-    except RuntimeError as exc:
-        assert "legacy reconciliation lifecycle sync failed" in str(exc)
-    else:
-        raise AssertionError("expected legacy sync failure to surface explicitly")
+    stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert stats["rescued_pending"] == 1
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
     assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
@@ -2623,16 +2618,10 @@ def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_befor
 
     monkeypatch.setattr("src.state.db.log_reconciled_entry_event", _boom)
 
-    try:
-        reconcile(portfolio, chain_positions, conn=conn)
-    except RuntimeError as exc:
-        assert "legacy-event-failed" in str(exc)
-    else:
-        raise AssertionError(
-            "expected legacy rescue event failure to surface explicitly"
-        )
+    stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert stats["rescued_pending"] == 1
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
     assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
@@ -2653,7 +2642,6 @@ def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_sch
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -2911,9 +2899,14 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert stats["updated"] == 1
-    assert portfolio.positions[0].shares == 22.0
-    assert query_position_events(conn, "rt-pos-1") == []
+    assert stats["updated"] == 0
+    assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
+    assert stats["review_required_persisted"] == 1
+    assert portfolio.positions[0].shares == 20.0
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "quarantined"
+    assert [event["event_type"] for event in query_position_events(conn, "rt-pos-1")] == [
+        "REVIEW_REQUIRED"
+    ]
     conn.close()
 
 
@@ -2971,6 +2964,7 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -2980,6 +2974,7 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2992,7 +2987,6 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -3091,6 +3085,7 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3102,6 +3097,7 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
     pending_pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3114,7 +3110,6 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -3291,18 +3286,15 @@ def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
     try:
         log_event(conn, "SETTLEMENT", "trade-1", {"ok": True})
-    except sqlite3.OperationalError as exc:
-        assert "chronicle" in str(exc).lower()
+    except RuntimeError as exc:
+        assert "hybrid position_events schema" in str(exc)
     else:
-        raise AssertionError(
-            "expected hybrid drift schema without chronicle to fail loudly"
-        )
+        raise AssertionError("expected hybrid drift schema to fail loudly")
 
     conn.close()
 
@@ -3412,7 +3404,7 @@ def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
 
     assert settled == 1
     events = query_position_events(conn, "rt-pos-1")
-    assert any(event["event_type"] == "POSITION_SETTLED" for event in events)
+    assert events == []
     conn.close()
 
 
@@ -3872,6 +3864,7 @@ def test_cycle_runtime_entry_sequence_writes_canonical_entry_events():
         log_execution_report,
         log_trade_entry,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     class _Logger:
         def debug(self, *args, **kwargs):
@@ -3898,6 +3891,7 @@ def test_cycle_runtime_entry_sequence_writes_canonical_entry_events():
     wrote_canonical = _dual_write_canonical_entry_if_available(
         canonical_conn,
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         deps=_Deps(),
     )

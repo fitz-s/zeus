@@ -215,7 +215,7 @@ def test_live_adapter_entries_pause_blocks_before_live_cap_and_command(monkeypat
 
     assert receipt.submitted is False
     assert receipt.proof_accepted is False
-    assert receipt.reason == "entries_paused:operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix"
+    assert receipt.reason == "entries_paused:external:manual_command"
     assert executor_called["called"] is False
     assert (
         conn.execute(
