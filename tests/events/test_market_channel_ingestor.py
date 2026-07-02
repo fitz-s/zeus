@@ -37,6 +37,10 @@ def _conn_writer():
     # test_market_channel_can_write_feasibility_to_trade_connection.
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
     ensure_table(conn)
+    from src.state.schema.market_channel_connectivity_schema import (
+        ensure_table as ensure_connectivity_table,
+    )
+    ensure_connectivity_table(conn)
     return conn, EventWriter(conn)
 
 
@@ -1741,3 +1745,93 @@ def test_on_reconnect_empty_pre_captured_under_world_mutex_raises_not_fetches():
         "fetch_orderbook was called under the world mutex in on_reconnect"
     )
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# W0.2 blind-window metric: on_connect/on_disconnect/on_reconnect must persist
+# a durable connectivity transition (the in-memory connected/gap_start fields
+# alone do not survive a daemon restart — see
+# src/state/schema/market_channel_connectivity_schema.py for the query that
+# derives blind-window intervals from these rows).
+# ---------------------------------------------------------------------------
+
+
+def test_on_disconnect_persists_durable_transition_row():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_disconnect(gap_start="2026-07-02T10:00:00+00:00")
+
+    rows = conn.execute(
+        "SELECT channel, transition, occurred_at FROM market_channel_connectivity_events"
+    ).fetchall()
+    assert rows == [("market_channel", "disconnected", "2026-07-02T10:00:00+00:00")]
+
+
+def test_on_connect_persists_durable_transition_row():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_connect(received_at="2026-07-02T10:00:00+00:00")
+
+    rows = conn.execute(
+        "SELECT channel, transition, occurred_at FROM market_channel_connectivity_events"
+    ).fetchall()
+    assert rows == [("market_channel", "connected", "2026-07-02T10:00:00+00:00")]
+
+
+def test_simulated_disconnect_reconnect_produces_queryable_blind_window():
+    """(b) from the W0.2 TDD acceptance: a simulated WS disconnect/reconnect
+    produces a blind-window interval, read back via BLIND_WINDOW_QUERY."""
+    from src.state.schema.market_channel_connectivity_schema import BLIND_WINDOW_QUERY
+
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_connect(received_at="2026-07-02T10:00:00+00:00")
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+    service.on_reconnect(received_at="2026-07-02T10:05:45+00:00", token_ids=[])
+
+    rows = conn.execute(BLIND_WINDOW_QUERY).fetchall()
+
+    assert len(rows) == 1
+    channel, blind_window_start, blind_window_end, blind_window_seconds = rows[0]
+    assert channel == "market_channel"
+    assert blind_window_start == "2026-07-02T10:05:00+00:00"
+    assert blind_window_end == "2026-07-02T10:05:45+00:00"
+    assert blind_window_seconds == pytest.approx(45.0)
+
+
+def test_disconnect_reconnect_idempotent_on_repeated_calls():
+    """Re-emitting the same transition at the same timestamp (e.g. a retried
+    call) must not fabricate extra blind-window rows."""
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0]
+    assert count == 1

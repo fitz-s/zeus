@@ -1118,6 +1118,12 @@ files:
     - src/data/forecasts_append.py
     - src/data/hourly_instants_append.py
     - src/data/solar_append.py
+  src/data/latency_metrics.py:
+    zone: K2_runtime
+    authority_role: input_to_posterior_latency_metric
+    why: "W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only input->q_version wall-clock latency. No new table: computes/reads latency_seconds from columns forecast_posteriors already persists (source_cycle_time, computed_at, family_id). emit_materialization_latency() is called from replacement_forecast_materializer.py's _insert_posterior on the fresh-INSERT success path only (not the IntegrityError dedup branch) to log a structured line per materialization event; LATENCY_QUERY/fetch_recent_latencies are the read side for a dashboard. No gate, no enforcement — measurement only."
+    downstream:
+    - src/data/replacement_forecast_materializer.py
   src/data/openmeteo_model_updates.py:
     zone: K2_runtime
     authority_role: forecast_source_clock_metadata
@@ -2249,6 +2255,13 @@ files:
     - src/state/db.py
     - src/events/triggers/market_channel_ingestor.py
     - src/ingest/price_channel_ingest.py
+  src/state/schema/market_channel_connectivity_schema.py:
+    zone: K2_runtime
+    authority_role: market_channel_connectivity_schema_owner
+    why: "W0.2 (2026-07-02) trade DB DDL owner for market_channel_connectivity_events — the durable WS connect/disconnect/reconnect transition log that replaces MarketChannelOnlineService's in-memory-only connected/gap_start fields, which reset on every daemon restart. BLIND_WINDOW_QUERY derives closed blind-window intervals via LEAD() over consecutive disconnected->connected pairs. ensure_table wired into db.py init_schema_trade_only; producers wired at market_channel_ingestor.py on_connect/on_disconnect/on_reconnect."
+    downstream:
+    - src/state/db.py
+    - src/events/triggers/market_channel_ingestor.py
   src/state/schema/no_trade_events_schema.py:
     zone: K2_runtime
     authority_role: no_trade_events_schema_owner

@@ -73,6 +73,9 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "executable_market_snapshot_invalidations",
     "executable_market_snapshot_latest",
     "executable_market_snapshots",
+    # W0.2 2026-07-02: blind-window metric transition log (ensure_table wired
+    # into init_schema_trade_only via market_channel_connectivity_schema.py).
+    "market_channel_connectivity_events",
     "position_current",
     "position_events",
     "position_lots",

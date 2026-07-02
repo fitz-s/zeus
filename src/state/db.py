@@ -5815,6 +5815,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_book_hash_transitions_table(conn)
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
     _ensure_execution_feasibility_evidence_table(conn)
+    # W0.2 blind-window metric (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+    # §1 A2): durable WS connect/disconnect/reconnect transition log. Trade DB owner.
+    from src.state.schema.market_channel_connectivity_schema import ensure_table as _ensure_market_channel_connectivity_table
+    _ensure_market_channel_connectivity_table(conn)
     # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
     from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
     _ensure_decision_integrity_quarantine_table(conn)
