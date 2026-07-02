@@ -3658,6 +3658,7 @@ _CANONICAL_MONITOR_PHASE_PRIORITY = {
     "pending_exit": 0,
     "day0_window": 1,
     "active": 2,
+    "quarantined": 3,
 }
 
 
@@ -3682,6 +3683,8 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
             _select_expr(columns, "shares", "shares", "0.0"),
             _select_expr(columns, "chain_shares", "chain_shares", "0.0"),
             _select_expr(columns, "updated_at", "updated_at", "''"),
+            _select_expr(columns, "chain_state", "chain_state", "''"),
+            _select_expr(columns, "direction", "direction", "''"),
             _select_expr(
                 columns,
                 "last_monitor_market_price_is_fresh",
@@ -3701,6 +3704,13 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
         phase = str(_row_get(row, "phase", "") or "").strip().lower()
         if not position_id or phase not in _CANONICAL_MONITOR_PHASE_PRIORITY:
             continue
+        if phase == "quarantined":
+            chain_state = str(_row_get(row, "chain_state", "") or "").strip()
+            direction = str(_row_get(row, "direction", "") or "").strip()
+            if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
+                continue
+            if direction not in {"buy_yes", "buy_no"}:
+                continue
         shares = _finite_positive_or_none(_row_get(row, "shares"))
         chain_shares = _finite_positive_or_none(_row_get(row, "chain_shares"))
         if shares is None and chain_shares is None:

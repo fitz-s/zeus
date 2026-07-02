@@ -4156,7 +4156,7 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
             chain_shares = float(row["chain_shares"] or 0.0)
         except (TypeError, ValueError):
             chain_shares = 0.0
-        legacy_monitor_only = phase in {"quarantined", "voided"} and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
+        terminal_chain_exposure = phase in {"quarantined", "voided"} and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
         position_id = str(row["position_id"] or "")
         item = {
             "position_id": position_id,
@@ -4174,19 +4174,12 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         }
         terminal = terminal_by_position.get(position_id)
         if terminal is not None:
-            if legacy_monitor_only:
-                covered.append(
-                    {
-                        **item,
-                        "restart_resolution": "legacy_chain_exposure_monitor_only_terminal_projection",
-                        "terminal_event": terminal,
-                    }
-                )
-                continue
             risky.append(
                 {
                     **item,
-                    "risk": "open_position_after_hard_terminal_event",
+                    "risk": "terminal_position_with_positive_chain_exposure"
+                    if terminal_chain_exposure
+                    else "open_position_after_hard_terminal_event",
                     "terminal_event": terminal,
                 }
             )
@@ -4200,16 +4193,6 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         except (TypeError, ValueError):
             p_posterior = None
         if decision_id.startswith("edli_exec_cmd:") and entry_method != "qkernel_spine":
-            if legacy_monitor_only:
-                covered.append(
-                    {
-                        **item,
-                        "restart_resolution": "legacy_chain_exposure_monitor_only_non_qkernel_entry",
-                        "entry_command": latest_entry,
-                        "required_entry_method": "qkernel_spine",
-                    }
-                )
-                continue
             risky.append(
                 {
                     **item,
@@ -4222,15 +4205,6 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         if decision_id.startswith("edli_exec_cmd:") and (
             p_posterior is None or p_posterior <= 0.0
         ):
-            if legacy_monitor_only:
-                covered.append(
-                    {
-                        **item,
-                        "restart_resolution": "legacy_chain_exposure_monitor_only_zero_probability_projection",
-                        "entry_command": latest_entry,
-                    }
-                )
-                continue
             risky.append(
                 {
                     **item,
@@ -5348,10 +5322,13 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
             evidence,
         )
     if not cadence["stale_or_missing_position_count"]:
+        settlement_recoverable_count = int(cadence.get("settlement_recoverable_position_count") or 0)
         return CheckResult(
             "monitor_cadence_restart_evidence",
             True,
-            "all held-position monitor cadence evidence is fresh",
+            "all held-position monitor cadence evidence is fresh or settlement-recoverable"
+            if settlement_recoverable_count
+            else "all held-position monitor cadence evidence is fresh",
             evidence,
         )
     evidence["restart_recovery_obligation"] = (

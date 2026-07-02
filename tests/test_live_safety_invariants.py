@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-02
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -3326,6 +3326,62 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
     assert monitor_results[0].fresh_edge == 0.22
     assert monitor_results[0].should_exit is False
     assert monitor_results[0].exit_reason == "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD"
+
+
+def test_canonical_monitor_order_includes_entry_authority_quarantined_exposure():
+    """Canonical DB ordering must not drop chain-backed quarantine before monitor."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT,
+            chain_state TEXT,
+            direction TEXT,
+            last_monitor_market_price_is_fresh INTEGER
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares, updated_at,
+            chain_state, direction, last_monitor_market_price_is_fresh
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "entry-authority-quarantine-position",
+                "quarantined",
+                19.88,
+                19.88,
+                "2026-06-28T08:00:00+00:00",
+                "entry_authority_quarantined",
+                "buy_no",
+                0,
+            ),
+            (
+                "chain-absence-quarantine-position",
+                "quarantined",
+                12.7,
+                12.7,
+                "2026-06-28T08:00:00+00:00",
+                "chain_absent_confirmed_position_unattributed",
+                "buy_yes",
+                0,
+            ),
+        ],
+    )
+
+    assert cycle_runtime._canonical_monitor_position_order(conn) == [
+        "entry-authority-quarantine-position"
+    ]
 
 
 def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):

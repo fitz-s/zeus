@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-06-28
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-07-02
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -66,8 +66,10 @@ def _insert_monitor_events(
     position_id: str = "pos-1",
     monitor_at: datetime,
     chain_at: datetime | None = None,
+    payload: dict[str, object] | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
+    payload_json = json.dumps(payload or {})
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS position_events (
@@ -84,9 +86,9 @@ def _insert_monitor_events(
         """
         INSERT INTO position_events (
             event_id, position_id, sequence_no, event_type, occurred_at, payload_json
-        ) VALUES (?, ?, 1, 'MONITOR_REFRESHED', ?, '{}')
+        ) VALUES (?, ?, 1, 'MONITOR_REFRESHED', ?, ?)
         """,
-        (f"evt-monitor-{position_id}", position_id, monitor_at.isoformat()),
+        (f"evt-monitor-{position_id}", position_id, monitor_at.isoformat(), payload_json),
     )
     conn.execute(
         """
@@ -1400,7 +1402,7 @@ def test_live_actionable_certificate_semantics_allows_boot_invalid_open_entry_au
     assert result.evidence["historical_risky_count"] == 0
     assert result.evidence["auto_recoverable_invalid_open_entry_authority_count"] == 1
     recovered = result.evidence["auto_recoverable_invalid_open_entry_authorities"][0]
-    assert "ADMISSION_WIN_RATE_FLOOR" in recovered["reason"]
+    assert "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR" in recovered["reason"]
     assert recovered["restart_recovery"] == (
         "boot_invalid_open_entry_authority_review_before_reactor"
     )
@@ -2104,7 +2106,7 @@ def test_position_projection_integrity_blocks_hard_terminal_reactivation(
     assert result.evidence["risky"][0]["terminal_event"]["event_type"] == "ADMIN_VOIDED"
 
 
-def test_position_projection_integrity_allows_legacy_terminal_chain_exposure_monitor_only(
+def test_position_projection_integrity_blocks_terminal_chain_exposure_projection(
     monkeypatch, tmp_path
 ):
     trade_db = tmp_path / "zeus_trades.db"
@@ -2167,13 +2169,10 @@ def test_position_projection_integrity_allows_legacy_terminal_chain_exposure_mon
         preflight._open_positions()
     )
 
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["covered_count"] == 1
-    assert (
-        result.evidence["covered"][0]["restart_resolution"]
-        == "legacy_chain_exposure_monitor_only_terminal_projection"
-    )
+    assert result.ok is False
+    assert result.evidence["covered_count"] == 0
+    assert result.evidence["risky"][0]["risk"] == "terminal_position_with_positive_chain_exposure"
+    assert result.evidence["risky"][0]["chain_shares"] == 9.0
 
 
 def test_position_projection_integrity_allows_superseded_phantom_void_recovery(
@@ -6037,6 +6036,99 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.ok is False
     assert result.detail == "src.main is running but held-position monitor cadence is stale"
     assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
+
+
+def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recovery(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'pos-1', 'day0_window', 'Wellington', '2026-07-02', 'high',
+            'Will the highest temperature in Wellington be 12°C on July 2?',
+            'buy_yes', 15.0, 15.0, 'filled', NULL, 0, NULL,
+            0.0, 1, NULL, 0, ?
+        )
+        """,
+        (now.isoformat(),),
+    )
+    _insert_monitor_events(
+        conn,
+        monitor_at=now - timedelta(minutes=20),
+        payload={"applied_validations": ["day0_hard_fact_bin_dead_closed_market"]},
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.detail == "all held-position monitor cadence evidence is fresh or settlement-recoverable"
+    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.evidence["settlement_recoverable_position_count"] == 1
+    assert result.evidence["settlement_recoverable_positions"][0]["position_id"] == "pos-1"
+
+
+def test_monitor_cadence_restart_evidence_blocks_unmonitored_entry_authority_quarantine(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    conn.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at, chain_state
+        ) VALUES (
+            'pos-1', 'quarantined', 'Manila', '2026-07-02', 'high',
+            'Will the highest temperature in Manila be 32°C on July 2?',
+            'buy_yes', 10.0, 10.0, 'filled', NULL, 0, NULL,
+            0.0, 1, NULL, 0, ?, 'entry_authority_quarantined'
+        )
+        """,
+        (now.isoformat(),),
+    )
+    _insert_monitor_events(conn, monitor_at=now - timedelta(minutes=20))
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is False
+    assert result.detail == "src.main is running but held-position monitor cadence is stale"
+    assert result.evidence["stale_or_missing_position_count"] == 1
+    assert result.evidence["stale_or_missing_positions"][0]["position_id"] == "pos-1"
+    assert result.evidence["non_monitor_chain_risk_position_count"] == 0
 
 
 def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(

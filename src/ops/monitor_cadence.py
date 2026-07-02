@@ -6,11 +6,15 @@ events; it does not use projection timestamps and never writes runtime state.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+)
 
 
 MONITOR_CADENCE_EXPOSURE_EPS = 0.01
@@ -18,6 +22,12 @@ MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_e
 NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
 EXIT_REDECISION_EVENT_TYPES = frozenset({"EXIT_ORDER_REJECTED", "EXIT_RETRY_RELEASED"})
 EXIT_REDECISION_PHASES = frozenset({"day0_window", "pending_exit"})
+CLOSED_MARKET_PENDING_SETTLEMENT_VALIDATIONS = frozenset(
+    {
+        "day0_hard_fact_bin_dead_closed_market",
+        "market_closed_non_accepting_orders",
+    }
+)
 
 
 def collect_monitor_cadence_evidence(
@@ -47,13 +57,15 @@ def collect_monitor_cadence_evidence(
     min_occurred_utc = _ensure_utc(min_occurred_at) if min_occurred_at else None
     stale_or_missing: list[dict[str, Any]] = []
     future_events: list[dict[str, Any]] = []
+    settlement_recoverable: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
-        occurred_at = _latest_monitor_refreshed_at(
+        monitor_event = _latest_monitor_refreshed_event(
             conn,
             str(position["position_id"]),
             event_columns,
         )
+        occurred_at = None if monitor_event is None else str(monitor_event.get("occurred_at") or "")
         position_evidence = {
             "position_id": position["position_id"],
             "phase": position["phase"],
@@ -103,7 +115,13 @@ def collect_monitor_cadence_evidence(
             ):
                 fresh_count += 1
             else:
-                stale_or_missing.append(position_evidence)
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
             if _exit_redecision_event_is_fresh(
                 position,
@@ -116,7 +134,13 @@ def collect_monitor_cadence_evidence(
             ):
                 fresh_count += 1
             else:
-                stale_or_missing.append(position_evidence)
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(position_evidence)
         else:
             fresh_count += 1
     open_count = len(monitored_rows)
@@ -126,6 +150,8 @@ def collect_monitor_cadence_evidence(
         "fresh_position_count": fresh_count,
         "stale_or_missing_position_count": len(stale_or_missing),
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
+        "settlement_recoverable_position_count": len(settlement_recoverable),
+        "settlement_recoverable_positions": settlement_recoverable[:sample_limit],
         "future_monitor_event_count": len(future_events),
         "future_monitor_events": future_events[:sample_limit],
         "non_monitor_chain_risk_position_count": len(non_monitor_chain_risk_rows),
@@ -167,11 +193,11 @@ def _monitor_cadence_position_rows(
             shares > MONITOR_CADENCE_EXPOSURE_EPS
             or chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
         )
-        if phase:
-            should_monitor = phase in MONITOR_CADENCE_POSITION_PHASES and exposure_positive
-        else:
-            should_monitor = exposure_positive
-        if should_monitor:
+        if _position_requires_monitor_cadence(
+            phase=phase,
+            chain_state=chain_state,
+            exposure_positive=exposure_positive,
+        ):
             monitored.append(
                 {
                     "position_id": position_id,
@@ -182,6 +208,24 @@ def _monitor_cadence_position_rows(
                 }
             )
     return monitored
+
+
+def _position_requires_monitor_cadence(
+    *,
+    phase: str,
+    chain_state: str,
+    exposure_positive: bool,
+) -> bool:
+    if not exposure_positive:
+        return False
+    if not phase:
+        return True
+    if phase in MONITOR_CADENCE_POSITION_PHASES:
+        return True
+    return (
+        phase == "quarantined"
+        and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
+    )
 
 
 def _non_monitor_chain_risk_position_rows(
@@ -210,6 +254,12 @@ def _non_monitor_chain_risk_position_rows(
             continue
         if chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES:
             continue
+        if _position_requires_monitor_cadence(
+            phase=phase,
+            chain_state=chain_state,
+            exposure_positive=True,
+        ):
+            continue
         chain_risk_rows.append(
             {
                 "position_id": str(row["position_id"] or ""),
@@ -222,17 +272,18 @@ def _non_monitor_chain_risk_position_rows(
     return chain_risk_rows
 
 
-def _latest_monitor_refreshed_at(
+def _latest_monitor_refreshed_event(
     conn: sqlite3.Connection,
     position_id: str,
     event_columns: set[str],
-) -> str | None:
+) -> dict[str, str] | None:
     order_by = "datetime(occurred_at) DESC"
     if "sequence_no" in event_columns:
         order_by += ", sequence_no DESC"
+    payload_select = "payload_json" if "payload_json" in event_columns else "NULL AS payload_json"
     row = conn.execute(
         f"""
-        SELECT occurred_at
+        SELECT occurred_at, {payload_select}
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'MONITOR_REFRESHED'
@@ -241,7 +292,39 @@ def _latest_monitor_refreshed_at(
         """,
         (position_id,),
     ).fetchone()
-    return None if row is None else str(row["occurred_at"] or "")
+    if row is None:
+        return None
+    return {
+        "occurred_at": str(row["occurred_at"] or ""),
+        "payload_json": str(row["payload_json"] or ""),
+    }
+
+
+def _monitor_event_closed_market_pending_settlement(
+    position_evidence: dict[str, Any],
+    monitor_event: dict[str, str] | None,
+) -> bool:
+    if monitor_event is None:
+        return False
+    try:
+        payload = json.loads(monitor_event.get("payload_json") or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    validations_raw = payload.get("applied_validations")
+    validations = {str(item) for item in validations_raw} if isinstance(validations_raw, list) else set()
+    matched = sorted(validations & CLOSED_MARKET_PENDING_SETTLEMENT_VALIDATIONS)
+    if not matched:
+        return False
+    position_evidence.update(
+        {
+            "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            "closed_market_validation": matched[0],
+            "restart_resolution": "settlement_harvester_or_market_reopen_recovery",
+        }
+    )
+    return True
 
 
 def _latest_exit_redecision_event(
