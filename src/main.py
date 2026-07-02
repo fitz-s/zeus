@@ -7261,11 +7261,11 @@ def _edli_refresh_continuous_money_path_families(
 
 
 def _edli_redecision_confirm_receipt_wait_seconds() -> float:
-    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "22.0")
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "45.0")
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        value = 22.0
+        value = 45.0
     return max(0.0, min(value, 60.0))
 
 

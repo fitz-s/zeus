@@ -1814,7 +1814,12 @@ def _event_bound_strategy_key(
 ) -> str:
     """Classify the EDLI event-bound entry strategy without mixing live lanes."""
 
-    normalized_direction = str(direction or "").strip().lower()
+    direction_value = getattr(direction, "value", direction)
+    normalized_direction = str(direction_value or "").strip().lower()
+    if normalized_direction in {"yes", "direction.yes"}:
+        normalized_direction = "buy_yes"
+    elif normalized_direction in {"no", "direction.no"}:
+        normalized_direction = "buy_no"
     normalized_metric = str(metric or "").strip().lower()
     if event_type == "DAY0_EXTREME_UPDATED":
         if normalized_direction == "buy_no":

@@ -17,6 +17,7 @@ from src.engine.event_reactor_adapter import (
     _assert_live_entry_submit_authority,
     _day0_live_submit_admission_rejection_reason,
     _day0_selected_route_fdr_proof,
+    _event_bound_strategy_key,
     _fdr_rejection_reason,
     _final_intent_decision_source_context_payload,
     _pre_submit_revalidation_payload_from_final_intent,
@@ -484,6 +485,17 @@ def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_qual
             "min_entry_price": 0.02,
             "qkernel_execution_economics": cert,
         }
+    )
+
+
+def test_event_bound_strategy_key_treats_native_yes_as_center_buy():
+    assert (
+        _event_bound_strategy_key(
+            event_type="FORECAST_SNAPSHOT_READY",
+            direction="YES",
+            metric="high",
+        )
+        == "center_buy"
     )
 
 

@@ -103,10 +103,11 @@ def live_entry_probability_quality_rejection_reason(
 
     direction_value = getattr(direction, "value", direction)
     direction_text = str(direction_value or "").strip().lower()
+    direction_is_buy_yes = direction_text in {"buy_yes", "yes", "direction.yes"}
     strategy_text = str(strategy_key or "").strip()
     authority_text = str(selection_authority_applied or "").strip()
     is_qkernel_center_yes = (
-        direction_text == "buy_yes"
+        direction_is_buy_yes
         and strategy_text == "center_buy"
         and authority_text == "qkernel_spine"
         and isinstance(qkernel_execution_economics, Mapping)
