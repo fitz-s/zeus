@@ -42,7 +42,7 @@ from __future__ import annotations
 import inspect
 import json as _json
 from dataclasses import replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -1341,6 +1341,107 @@ def test_redecision_scope_can_rank_same_family_without_allowing_same_token_dupli
         held_position_conn=conn,
         allow_same_family_monitor_owned=True,
     ) is False
+
+
+def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope():
+    import sqlite3
+
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B",
+                          yes_token_id="yes-B", no_token_id="no-B", snapshot_id="snapB")
+    a = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_X)
+    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            updated_at TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, token_id, no_token_id, updated_at, exit_reason
+        ) VALUES (?, 'economically_closed', ?, '', ?, ?)
+        """,
+        (
+            "pos-just-exited",
+            "yes-B",
+            datetime.now(timezone.utc).isoformat(),
+            "shift_bin_exit",
+        ),
+    )
+
+    scoped = era._selection_scoped_proofs(proofs=(a, b), held_position_conn=conn)
+    assert scoped == (a,)
+
+    redecision_scoped = era._selection_scoped_proofs(
+        proofs=(a, b),
+        held_position_conn=conn,
+        allow_same_family_monitor_owned=True,
+    )
+    assert redecision_scoped == (a,)
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(a, b),
+        selected_proof=a,
+        held_position_conn=conn,
+        allow_same_family_monitor_owned=True,
+    )
+    reason = next(ev.missing_reason for ev in book.evaluations if ev.token_id == "yes-B")
+    assert str(reason).startswith("RECENT_EXIT_SAME_TOKEN_COOLDOWN:")
+    assert "position_id=pos-just-exited" in str(reason)
+
+
+def test_recent_same_token_exit_cooldown_expires_without_permanent_token_ban():
+    import sqlite3
+
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B",
+                          yes_token_id="yes-B", no_token_id="no-B", snapshot_id="snapB")
+    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            updated_at TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    old_updated_at = datetime.now(timezone.utc) - timedelta(
+        seconds=era._ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS + 60
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, token_id, no_token_id, updated_at, exit_reason
+        ) VALUES (?, 'economically_closed', ?, '', ?, ?)
+        """,
+        (
+            "pos-old-exit",
+            "yes-B",
+            old_updated_at.isoformat(),
+            "shift_bin_exit",
+        ),
+    )
+
+    assert era._selection_scoped_proofs(proofs=(b,), held_position_conn=conn) == (b,)
 
 
 def test_same_family_monitor_owned_scope_is_management_lane_only():

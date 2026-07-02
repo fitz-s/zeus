@@ -419,8 +419,8 @@ def test_single_selection_path_always_uses_marginal_utility_ranker(monkeypatch):
     assert book["proposed_selected_candidate_id"] == expected_id
 
 
-def test_opportunity_book_marks_qkernel_selected_candidate_without_rewriting_admission():
-    """Actual qkernel selections keep selection authority separate from admission."""
+def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
+    """Actual qkernel selections are the live admission authority."""
     bin_b = Bin(low=62.0, high=63.0, unit="F", label="62-63F")
     row_b = _row(condition_id="cond-B", yes_token="yesB", no_token="noB",
                  yes_asks=(("0.20", "100000"),), snapshot_id="snap-B")
@@ -430,6 +430,9 @@ def test_opportunity_book_marks_qkernel_selected_candidate_without_rewriting_adm
         "source": "qkernel_spine",
         "candidate_id": "DIRECT_YES:bin-B",
         "route_id": "DIRECT_YES:bin-B@proof",
+        "side": "YES",
+        "direction_law_ok": True,
+        "coherence_allows": True,
         "payoff_q_point": 0.65,
         "payoff_q_lcb": 0.30,
         "edge_lcb": 0.10,
@@ -438,6 +441,9 @@ def test_opportunity_book_marks_qkernel_selected_candidate_without_rewriting_adm
         "optimal_delta_u": 0.02,
         "cost": 0.20,
         "false_edge_rate": 0.02,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.30,
     }
     selected = replace(
         proof_b,
@@ -454,13 +460,13 @@ def test_opportunity_book_marks_qkernel_selected_candidate_without_rewriting_adm
     selected_id = era._candidate_evaluation_id(proof_b)
     rec = next(c for c in book["candidates"] if c["candidate_id"] == selected_id)
 
-    assert book["admitted_count"] == 0
+    assert book["admitted_count"] == 1
     assert book["selection_authority"] == "qkernel_spine"
     assert book["selected_qkernel_execution_economics"] == qkernel_cert
-    assert rec["legacy_admitted"] is False
-    assert rec["admitted"] is False
+    assert rec["admitted"] is True
     assert rec["live_decision_selected"] is True
     assert rec["live_selection_authority"] == "qkernel_spine"
+    assert rec["live_admission_authority"] == "qkernel_spine"
     assert rec["qkernel_execution_economics"] == qkernel_cert
 
 

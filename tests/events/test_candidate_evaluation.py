@@ -200,14 +200,13 @@ def test_opportunity_book_keeps_admission_separate_from_live_selection():
     receipt = book["candidates"][0]
 
     assert evaluation.admitted is False
-    assert receipt["legacy_admitted"] is False
     assert receipt["admitted"] is False
     assert receipt["live_decision_selected"] is False
     assert book["admitted_count"] == 0
 
 
-def test_opportunity_book_does_not_relabel_qkernel_selected_as_admitted():
-    """A qkernel-selected candidate must not rewrite the admission verdict."""
+def test_opportunity_book_counts_qkernel_selected_candidate_as_live_admitted():
+    """The live book must not serialize qkernel selected as unadmitted."""
 
     evaluation = CandidateEvaluation(
         candidate_id="ba-tail-yes",
@@ -237,7 +236,11 @@ def test_opportunity_book_does_not_relabel_qkernel_selected_as_admitted():
             "selection_authority": "qkernel_spine",
             "selected_qkernel_execution_economics": {
                 "source": "qkernel_spine",
-                "direction": "buy_yes",
+                "candidate_id": "DIRECT_YES:bin-11c",
+                "route_id": "DIRECT_YES:bin-11c@proof",
+                "side": "YES",
+                "direction_law_ok": True,
+                "coherence_allows": True,
                 "cost": 0.041,
                 "edge_lcb": 0.0580451308919892,
                 "payoff_q_point": 0.24833093804728934,
@@ -245,17 +248,22 @@ def test_opportunity_book_does_not_relabel_qkernel_selected_as_admitted():
                 "optimal_stake_usd": 1.0,
                 "optimal_delta_u": 0.01,
                 "delta_u_at_min": 0.01,
+                "false_edge_rate": 0.05,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.0990451308919892,
             },
         },
     ).to_receipt_dict()
     receipt = book["candidates"][0]
 
     assert evaluation.admitted is False
-    assert receipt["legacy_admitted"] is False
-    assert receipt["admitted"] is False
+    assert receipt["admitted"] is True
     assert receipt["live_decision_selected"] is True
     assert receipt["live_selection_authority"] == "qkernel_spine"
-    assert book["admitted_count"] == 0
+    assert receipt["live_admission_authority"] == "qkernel_spine"
+    assert book["admitted_count"] == 1
+    assert book["selected_objective"]["authority"] == "qkernel_spine"
 
 
 def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():
