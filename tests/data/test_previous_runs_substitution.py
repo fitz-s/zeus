@@ -543,3 +543,61 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
     assert sidecar["reason_codes"] == [
         "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
     ]
+
+
+def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "Shanghai",
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-Shanghai-high-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    older = {**base_request, "computed_at": "2026-07-02T08:19:11+00:00"}
+    newer = {**base_request, "computed_at": "2026-07-02T08:31:11+00:00"}
+    older_path = request_dir / "Shanghai.2026-07-02.high.20260702T081911Z.json"
+    newer_path = request_dir / "Shanghai.2026-07-02.high.20260702T083111Z.json"
+    older_path.write_text(json.dumps(older), encoding="utf-8")
+    newer_path.write_text(json.dumps(newer), encoding="utf-8")
+    spawned: list[str] = []
+
+    def _successful_runner(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_successful_runner,
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.failed_count == 0
+    assert report.processed_count == 2
+    assert report.skipped_count == 0
+    assert spawned == [newer_path.name]
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE" in report.reason_codes
+    assert not older_path.exists()
+    assert not newer_path.exists()
+    receipts = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in processed_dir.glob("*.receipt.json")
+    ]
+    superseded = [receipt for receipt in receipts if receipt.get("status") == "SKIPPED_SUPERSEDED_REQUEST"]
+    assert len(superseded) == 1
+    assert superseded[0]["subprocess_spawned"] is False
+    assert superseded[0]["superseded_by"] == newer_path.name
