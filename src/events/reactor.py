@@ -1532,26 +1532,28 @@ class OpportunityEventReactor:
                 "rotation; basis=position_current", len(held),
             )
         # SHARED per-cycle drain deadline (monotonic). None => budget disabled (legacy unbounded
-        # drain). The snapshot bucket (held-first within it) drains BEFORE the cycle-advance bucket,
-        # both against the SAME deadline, so the budget never starves a held family's snapshot.
+        # drain). Day0 hourly vectors drain BEFORE executable snapshots: a DAY0 event that has
+        # already proven its weather-carrier gap must not wait behind CLOB snapshot refresh I/O
+        # before it can re-price the observed local day. Held families are still first within each
+        # bucket.
         drain_budget = _drain_budget_seconds()
         drain_deadline = (time.monotonic() + drain_budget) if drain_budget is not None else None
-        self._drain_one_bucket(
-            self._pending_snapshot_refreshes,
-            refresher=self._family_snapshot_refresher,
-            last_at=self._family_refresh_last_at,
-            counter_attr="snapshot_refreshes",
-            label="snapshot",
-            result=result,
-            held=held,
-            deadline=drain_deadline,
-        )
         self._drain_one_bucket(
             self._pending_day0_hourly_refreshes,
             refresher=self._day0_hourly_refresher,
             last_at=self._family_day0_hourly_last_at,
             counter_attr="day0_hourly_refreshes",
             label="day0-hourly",
+            result=result,
+            held=held,
+            deadline=drain_deadline,
+        )
+        self._drain_one_bucket(
+            self._pending_snapshot_refreshes,
+            refresher=self._family_snapshot_refresher,
+            last_at=self._family_refresh_last_at,
+            counter_attr="snapshot_refreshes",
+            label="snapshot",
             result=result,
             held=held,
             deadline=drain_deadline,

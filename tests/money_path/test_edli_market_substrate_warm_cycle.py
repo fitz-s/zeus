@@ -460,6 +460,118 @@ def test_pending_family_refresh_orders_money_path_urgency_before_target_date():
         assert redecision_pos < target_pos
 
 
+def test_pending_family_refresh_includes_processing_day0_hourly_blocks():
+    """A claimed Day0 row blocked on remaining-day vectors is still refresh demand."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+
+    def insert_event(
+        event_id: str,
+        city: str,
+        *,
+        status: str,
+        last_error: str | None,
+        available_at: str,
+    ) -> None:
+        payload = {"city": city, "target_date": "2026-07-02", "metric": "high"}
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source, observed_at, available_at,
+                received_at, payload_hash, idempotency_key, priority, payload_json,
+                schema_version, created_at
+            ) VALUES (?, 'DAY0_EXTREME_UPDATED', ?, 'test', ?, ?, ?, ?, ?, 100, ?, 1, ?)
+            """,
+            (
+                event_id,
+                event_id,
+                available_at,
+                available_at,
+                available_at,
+                event_id,
+                event_id,
+                json.dumps(payload),
+                available_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, claimed_at, last_error, updated_at
+            ) VALUES ('edli_reactor_v1', ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                status,
+                "2026-07-02T05:44:00+00:00" if status == "processing" else None,
+                last_error,
+                available_at,
+            ),
+        )
+
+    insert_event(
+        "processing-day0-hourly",
+        "Hong Kong",
+        status="processing",
+        last_error="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        available_at="2026-07-02T05:44:00+00:00",
+    )
+    insert_event(
+        "pending-day0",
+        "Chengdu",
+        status="pending",
+        last_error=None,
+        available_at="2026-07-02T05:43:00+00:00",
+    )
+
+    decision_time = datetime(2026, 7, 2, 5, 45, 0, tzinfo=timezone.utc)
+    for module in (main_module, substrate_observer):
+        rows = module._pending_family_rows_for_refresh(
+            conn,
+            consumer_name="edli_reactor_v1",
+            now_utc=decision_time,
+        )
+        families = [(row[0], row[1], row[2]) for row in rows]
+        assert families[:2] == [
+            ("Hong Kong", "2026-07-02", "high"),
+            ("Chengdu", "2026-07-02", "high"),
+        ]
+
+
 def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
     """Candidate selection cap and direct /book prefetch threshold serve different purposes."""
 

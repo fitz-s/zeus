@@ -2606,10 +2606,18 @@ def _pending_family_rows_for_refresh(
     rows = world_conn.execute(
         """
         WITH pending AS (
-            SELECT p.event_id
+            SELECT p.event_id,
+                   p.last_error
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
             JOIN opportunity_events e ON e.event_id = p.event_id
-            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+            WHERE p.consumer_name = ?
+              AND (
+                    p.processing_status = 'pending'
+                    OR (
+                        p.processing_status = 'processing'
+                        AND COALESCE(p.last_error, '') <> ''
+                    )
+                  )
               AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
               AND (
                     e.event_type NOT IN (
@@ -2632,7 +2640,12 @@ def _pending_family_rows_for_refresh(
                   WHEN 'EDLI_REDECISION_PENDING' THEN 3
                   WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
                   ELSE 1
-                END) AS refresh_urgency
+                END) AS refresh_urgency,
+            MAX(CASE
+                  WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND COALESCE(p.last_error, '') LIKE '%DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE%'
+                  THEN 1 ELSE 0
+                END) AS day0_hourly_blocked
         FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
         GROUP BY city, target_date, metric
@@ -2647,6 +2660,11 @@ def _pending_family_rows_for_refresh(
                   WHEN 'EDLI_REDECISION_PENDING' THEN 3
                   WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
                   ELSE 1
+                END) DESC,
+            MAX(CASE
+                  WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND COALESCE(p.last_error, '') LIKE '%DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE%'
+                  THEN 1 ELSE 0
                 END) DESC,
             MAX(e.priority) DESC,
             MAX(e.available_at) DESC,

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from decimal import Decimal
 from collections.abc import Mapping
@@ -406,6 +407,7 @@ def build_execution_command_certificate_from_final_intent(
         "submitted": False,
         "venue_order_id": None,
     }
+    payload.update(_runtime_identity_payload())
     return _build_cert(
         claims.EXECUTION_COMMAND,
         f"execution_command:{payload['event_id']}:{payload['execution_command_id']}",
@@ -453,6 +455,7 @@ def build_execution_receipt_certificate(
         "idempotency_key": command["idempotency_key"],
         "reason_code": reason_code,
     }
+    payload.update(_runtime_identity_payload())
     if reconciliation_followup_required is not None:
         payload["reconciliation_followup_required"] = reconciliation_followup_required
     if venue_call_started is not None:
@@ -560,6 +563,24 @@ def _build_cert(
         algorithm_id="edli.event_bound_execution_certificate_builder",
         algorithm_version="v1",
     )
+
+
+def _runtime_identity_payload() -> dict[str, str]:
+    """Runtime identity stamped on live venue-bound certificates.
+
+    ``ZEUS_PROCESS_BOOT_SHA`` is set by the managed live daemon at startup. It
+    identifies the code loaded by this process; do not run git here or infer a
+    mutable worktree HEAD during certificate construction.
+    """
+
+    boot_sha = str(os.environ.get("ZEUS_PROCESS_BOOT_SHA") or "").strip()
+    if len(boot_sha) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in boot_sha):
+        return {}
+    normalized = boot_sha.lower()
+    return {
+        "process_boot_sha": normalized,
+        "runtime_sha": normalized,
+    }
 
 
 def _require_live_parent_certificates(

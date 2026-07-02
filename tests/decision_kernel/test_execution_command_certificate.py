@@ -680,6 +680,33 @@ def test_execution_command_builder_preserves_event_token_condition_direction():
     verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
 
 
+def test_execution_command_and_receipt_stamp_process_boot_sha(monkeypatch):
+    boot_sha = "a" * 40
+    monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", boot_sha)
+    actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
+
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=actionable,
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
+        decision_time=NOW,
+    )
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+    )
+
+    assert command.payload["process_boot_sha"] == boot_sha
+    assert command.payload["runtime_sha"] == boot_sha
+    assert receipt.payload["process_boot_sha"] == boot_sha
+    assert receipt.payload["runtime_sha"] == boot_sha
+    verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
+    verify_execution_receipt(receipt, (command,))
+
+
 def test_execution_command_rejects_command_price_drift_from_final_intent():
     parents, command = execution_graph(
         command_payload={

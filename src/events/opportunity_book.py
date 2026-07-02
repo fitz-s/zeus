@@ -52,22 +52,19 @@ class OpportunityBook:
         ]
         live_selected_candidate_id = actual_selected_candidate_id or self.selected_candidate_id
         for candidate in candidate_receipts:
-            legacy_admitted = bool(candidate.get("admitted"))
+            candidate_admitted = bool(candidate.get("admitted"))
             live_selected = bool(
                 live_selected_candidate_id
                 and str(candidate.get("candidate_id") or "") == str(live_selected_candidate_id)
             )
-            # ``CandidateEvaluation.admitted`` is the retired scalar/admission
-            # view. The receipt is a live-money surface: once a downstream live
-            # selection authority chooses a candidate, the selected candidate is
-            # live-admitted by that authority or the submit path must fail closed.
-            # Keep the old value only as explicit legacy provenance.
-            live_admitted = legacy_admitted or live_selected
-            candidate["legacy_admitted"] = legacy_admitted
-            candidate["admitted"] = live_admitted
-            if live_selected and not legacy_admitted:
-                candidate["admission_authority"] = selection_authority or "live_selection"
+            # Keep admission and live selection as separate facts. A selected qkernel
+            # candidate is proven by live_decision_selected + live_selection_authority
+            # + qkernel_execution_economics; rewriting ``admitted`` here turns a
+            # rejected scalar/admission view into false evidence.
+            candidate["legacy_admitted"] = candidate_admitted
             candidate["live_decision_selected"] = live_selected
+            if live_selected and selection_authority is not None:
+                candidate["live_selection_authority"] = selection_authority
         if actual_selected_candidate_id:
             for candidate in candidate_receipts:
                 if str(candidate.get("candidate_id") or "") != str(actual_selected_candidate_id):

@@ -2204,8 +2204,8 @@ def _assert_receipt_qkernel_execution_economics(
         raise ValueError("EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_MISSING")
     if selected_candidate.get("live_decision_selected") is not True:
         raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_LIVE_DECISION")
-    if selected_candidate.get("admitted") is not True:
-        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_ADMITTED")
+    if str(selected_candidate.get("live_selection_authority") or "").strip() != "qkernel_spine":
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_QKERNEL_AUTHORITY")
     book_cert = _valid_qkernel_execution_economics_payload(
         selected_candidate.get("qkernel_execution_economics"),
         direction=receipt.direction,

@@ -206,6 +206,58 @@ def test_opportunity_book_keeps_admission_separate_from_live_selection():
     assert book["admitted_count"] == 0
 
 
+def test_opportunity_book_does_not_relabel_qkernel_selected_as_admitted():
+    """A qkernel-selected candidate must not rewrite the admission verdict."""
+
+    evaluation = CandidateEvaluation(
+        candidate_id="ba-tail-yes",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_yes",
+        bin_label="11C",
+        execution_price=0.041,
+        q_posterior=0.24833093804728934,
+        q_lcb_5pct=0.0990451308919892,
+        c_cost_95pct=0.041,
+        p_fill_lcb=0.9997,
+        trade_score=0.058,
+        p_value=0.05,
+        passed_prefilter=True,
+        native_quote_available=True,
+    )
+
+    book = build_family_opportunity_book(
+        family_id="family-1",
+        evaluations=(evaluation,),
+        event_id="event-1",
+        decided_candidate_id="ba-tail-yes",
+        cache_summary={
+            "actual_receipt_selected_candidate_id": "ba-tail-yes",
+            "selection_authority": "qkernel_spine",
+            "selected_qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "direction": "buy_yes",
+                "cost": 0.041,
+                "edge_lcb": 0.0580451308919892,
+                "payoff_q_point": 0.24833093804728934,
+                "payoff_q_lcb": 0.0990451308919892,
+                "optimal_stake_usd": 1.0,
+                "optimal_delta_u": 0.01,
+                "delta_u_at_min": 0.01,
+            },
+        },
+    ).to_receipt_dict()
+    receipt = book["candidates"][0]
+
+    assert evaluation.admitted is False
+    assert receipt["legacy_admitted"] is False
+    assert receipt["admitted"] is False
+    assert receipt["live_decision_selected"] is True
+    assert receipt["live_selection_authority"] == "qkernel_spine"
+    assert book["admitted_count"] == 0
+
+
 def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():
     evaluation = CandidateEvaluation(
         candidate_id="cand-1",
