@@ -476,7 +476,7 @@ def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
         _day0_payload(
             selection_authority_applied="qkernel_spine",
             direction="buy_yes",
-            strategy_key="center_buy",
+            strategy_key="day0_nowcast_entry",
             candidate_bin_id="bin-1",
             q_live=0.70,
             q_lcb_5pct=0.60,
@@ -538,7 +538,7 @@ def test_day0_pre_submit_payload_preserves_observation_authority_and_qkernel():
             "event_id": "event-1",
             "event_type": "DAY0_EXTREME_UPDATED",
             "final_intent_id": "intent-1",
-            "strategy_key": "center_buy",
+            "strategy_key": "day0_nowcast_entry",
             "condition_id": "condition-1",
             "token_id": "token-yes",
             "side": "BUY",

@@ -176,7 +176,7 @@ def _latest_raw_single_runs_cycle(
             WHERE {' AND '.join(predicates)}
               AND datetime(source_cycle_time) <= datetime(?)
             GROUP BY source_cycle_time
-            HAVING COUNT(DISTINCT model) >= 3
+            HAVING COUNT(DISTINCT model) >= 2
                AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
             ORDER BY datetime(source_cycle_time) DESC
             LIMIT 1

@@ -119,6 +119,7 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "opening_inertia",
         "center_buy",
         "settlement_capture",
+        "day0_nowcast_entry",
         # shoulder_sell removed: D6 (2026-05-22) set live_status=blocked (REFUTED)
         "imminent_open_capture",  # added 2026-05-19
     })
@@ -133,6 +134,7 @@ def test_live_allowed_keys_match_pre_A4__LIVE_ALLOWED_STRATEGIES():
         "settlement_capture",
         "center_buy",
         "opening_inertia",
+        "day0_nowcast_entry",
         "imminent_open_capture",  # added 2026-05-19
     })
 
@@ -292,6 +294,7 @@ def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
 
     expected_min_entry_prices = {
         "settlement_capture": 0.10,
+        "day0_nowcast_entry": 0.10,
         "center_buy": 0.02,
         "opening_inertia": 0.10,
         "imminent_open_capture": 0.10,
@@ -301,6 +304,7 @@ def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
         assert profile.min_entry_price == pytest.approx(expected_min_entry_price)
         assert profile.min_submit_edge_density == pytest.approx(0.05)
     assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("day0_nowcast_entry").min_expected_profit_usd == pytest.approx(1.0)
     assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
     assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
 

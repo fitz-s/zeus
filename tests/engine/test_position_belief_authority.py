@@ -376,7 +376,7 @@ class TestLoadReplacementBelief:
         )
         conn = sqlite3.connect(forecasts_db)
         conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
-        for model in ("ecmwf_ifs", "gfs", "icon"):
+        for model in ("ecmwf_ifs", "icon"):
             conn.execute(
                 """
                 INSERT INTO raw_model_forecasts (

@@ -141,22 +141,22 @@ day0_nowcast_entry:
   thesis: >
     Day-0 forecast-upside entry: enter a settlement-day bin whose edge source
     is the ensemble forecast rather than the locked intraday observation.
-    Fires only when the HIGH observed-so-far value has NOT yet confirmed the
-    target bin (i.e., not observation-locked). Alpha is forecast-speed, decays
-    as the observation window narrows. Complements settlement_capture, which
-    requires observation confirmation.
-  live_status: blocked
-  evidence_tier: REPLAY_PASS
+    Fires only when the settlement-day observed-so-far bound has NOT yet locked
+    the target bin (i.e., not observation-locked). Alpha is forecast-speed,
+    decays as the observation window narrows. Complements settlement_capture,
+    which owns observation-confirmed capture.
+  live_status: live
+  evidence_tier: LIVE_NORMAL
   evidence_tier_required_for_live: LIVE_PILOT_TINY
-  promotion_blockers: [P0_FORECAST_EXTREMA_AUTHORITY_REPAIR_PENDING]
+  promotion_blockers: []
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
   cycle_axis_dispatch_mode: null
   allowed_directions: [buy_yes]
   allowed_bin_topology: [point, finite_range]
   metric_support:
-    high: blocked
-    low: blocked
+    high: live
+    low: live
   kelly_default_multiplier: 0.5
   kelly_phase_overrides:
     pre_trading: 0.0

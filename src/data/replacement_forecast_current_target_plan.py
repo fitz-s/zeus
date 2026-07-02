@@ -164,6 +164,19 @@ def _openmeteo_source_run_id(metadata: Mapping[str, object]) -> str | None:
     return str(value).strip()
 
 
+def _cycle_at_or_after(candidate: str, floor: str | None) -> bool:
+    if floor is None or not str(floor).strip():
+        return True
+    if not str(candidate or "").strip():
+        return False
+    try:
+        candidate_dt = datetime.fromisoformat(str(candidate).replace("Z", "+00:00")).astimezone(timezone.utc)
+        floor_dt = datetime.fromisoformat(str(floor).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return str(candidate) >= str(floor)
+    return candidate_dt >= floor_dt
+
+
 def _path_from_metadata_path(
     path_text: object,
     *,
@@ -238,6 +251,7 @@ def _openmeteo_manifest_coverage(
     target_date: str,
     city_timezone: str | None = None,
     required_source_cycle_time: str | None = None,
+    minimum_source_cycle_time: str | None = None,
 ) -> tuple[int, str | None]:
     if metadata_column is None:
         return 0, None
@@ -313,6 +327,8 @@ def _openmeteo_manifest_coverage(
             or metadata.get("source_cycle_time")
             or ""
         )
+        if not _cycle_at_or_after(source_cycle_time, minimum_source_cycle_time):
+            continue
         source_available_at = str(
             _row_value(manifest, "source_available_at")
             or metadata.get("source_available_at")
@@ -599,6 +615,8 @@ def build_replacement_forecast_current_target_plan(
             ):
                 raise ValueError("raw_forecast_artifacts schema lacks manifest metadata columns")
         source_run_targets = _supports_source_run_targets(conn)
+        if "source_run_coverage" in tables and not source_run_targets:
+            return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")
         posterior_source_run_clause = ""
         readiness_source_run_clause = ""
         readiness_status_clause = ""
@@ -809,9 +827,7 @@ def build_replacement_forecast_current_target_plan(
             target_date = str(row["target_date"])
             baseline_source_run_id = row["baseline_source_run_id"]
             baseline_source_cycle_time = row["baseline_source_cycle_time"]
-            required_openmeteo_cycle_for_row = str(
-                baseline_source_cycle_time or required_openmeteo_cycle_iso or ""
-            ).strip() or None
+            required_openmeteo_cycle_for_row = str(required_openmeteo_cycle_iso or "").strip() or None
             day0_observed_extreme_required = _day0_observed_extreme_required(
                 city=city,
                 target_date=target_date,
@@ -831,6 +847,9 @@ def build_replacement_forecast_current_target_plan(
                     target_date=target_date,
                     city_timezone=timezone_by_city.get(city),
                     required_source_cycle_time=required_openmeteo_cycle_for_row,
+                    minimum_source_cycle_time=(
+                        None if required_openmeteo_cycle_for_row else baseline_source_cycle_time
+                    ),
                 )
             elif not require_raw_artifacts:
                 openmeteo_count = 1

@@ -5467,12 +5467,7 @@ CREATE INDEX IF NOT EXISTS idx_settlement_day_obs_authority_city_target
 -- 18 rows confirmed on zeus_trades.db (0 on zeus-world.db) per probe-ownership.md.
 CREATE TABLE IF NOT EXISTS outcome_fact (
     position_id TEXT PRIMARY KEY,
-    strategy_key TEXT CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT,
     entered_at TEXT,
     exited_at TEXT,
     settled_at TEXT,
@@ -5640,12 +5635,7 @@ CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_update
         END;
 CREATE TABLE IF NOT EXISTS risk_actions (
     action_id TEXT PRIMARY KEY,
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     action_type TEXT NOT NULL CHECK (action_type IN (
         'gate',
         'allocation_multiplier',

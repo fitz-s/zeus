@@ -208,6 +208,8 @@ REPLACEMENT_HEARTBEAT_JOBS = (
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
 )
+REPLACEMENT_POSTERIOR_SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
+RAW_POSTERIOR_ALIGNMENT_SAMPLE_LIMIT = 25
 
 
 @dataclass
@@ -3527,6 +3529,281 @@ def _posterior_summary() -> CheckResult:
     )
 
 
+def _live_input_posterior_cycle_alignment_check() -> CheckResult:
+    """Fail restart when current raw live inputs are newer than live posteriors.
+
+    A latest posterior can still be inside the wall-clock freshness window while a
+    newer source cycle has already landed in ``raw_model_forecasts``. Restarting
+    the trader in that state lets entry and monitor lanes use an obsolete belief.
+    """
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    evidence: dict[str, Any] = {
+        "forecast_db": str(FORECAST_DB),
+        "posterior_source_id": REPLACEMENT_POSTERIOR_SOURCE_ID,
+        "raw_basis": "raw_model_forecasts.single_runs.ecmwf_anchor_plus_one_model",
+        "sample_limit": RAW_POSTERIOR_ALIGNMENT_SAMPLE_LIMIT,
+    }
+    if not FORECAST_DB.exists():
+        return CheckResult(
+            "live_input_posterior_cycle_alignment",
+            False,
+            "forecast DB is missing; cannot prove raw/posterior cycle alignment",
+            evidence,
+        )
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{FORECAST_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        evidence["tables_present"] = sorted(tables)
+        if "raw_model_forecasts" not in tables:
+            return CheckResult(
+                "live_input_posterior_cycle_alignment",
+                True,
+                "raw_model_forecasts table absent; no raw live-input cycle to compare",
+                evidence,
+            )
+        if "forecast_posteriors" not in tables:
+            return CheckResult(
+                "live_input_posterior_cycle_alignment",
+                False,
+                "forecast_posteriors table missing while raw live inputs exist",
+                evidence,
+            )
+
+        raw_columns = _table_columns(conn, "main", "raw_model_forecasts")
+        posterior_columns = _table_columns(conn, "main", "forecast_posteriors")
+        evidence["raw_model_forecasts_columns"] = sorted(raw_columns)
+        evidence["forecast_posteriors_columns"] = sorted(posterior_columns)
+        required_raw = {"model", "city", "target_date", "metric", "source_cycle_time"}
+        required_posterior = {
+            "city",
+            "target_date",
+            "temperature_metric",
+            "source_cycle_time",
+        }
+        if not required_raw.issubset(raw_columns):
+            return CheckResult(
+                "live_input_posterior_cycle_alignment",
+                False,
+                "raw_model_forecasts schema cannot prove live-input cycle alignment",
+                evidence,
+            )
+        if not required_posterior.issubset(posterior_columns):
+            return CheckResult(
+                "live_input_posterior_cycle_alignment",
+                False,
+                "forecast_posteriors schema cannot prove live-input cycle alignment",
+                evidence,
+            )
+
+        raw_predicates = [
+            "city IS NOT NULL",
+            "target_date IS NOT NULL",
+            "metric IS NOT NULL",
+            "source_cycle_time IS NOT NULL",
+            "date(target_date) >= date(?)",
+            "datetime(source_cycle_time) <= datetime(?)",
+        ]
+        raw_params: list[object] = [now_iso, now_iso]
+        evidence["active_target_floor_date"] = now.date().isoformat()
+        if "endpoint" in raw_columns:
+            raw_predicates.append("endpoint = 'single_runs'")
+        if "coverage_status" in raw_columns:
+            raw_predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
+        if "captured_at" in raw_columns:
+            raw_predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
+            raw_params.append(now_iso)
+        if "source_available_at" in raw_columns:
+            raw_predicates.append(
+                "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
+            )
+            raw_params.append(now_iso)
+
+        anchor_terms = ["model = 'ecmwf_ifs'"]
+        if "source_id" in raw_columns:
+            anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
+        if "product_id" in raw_columns:
+            anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
+        anchor_expr = " OR ".join(anchor_terms)
+
+        posterior_predicates = [
+            "source_cycle_time IS NOT NULL",
+            "datetime(source_cycle_time) <= datetime(?)",
+        ]
+        posterior_params: list[object] = [now_iso]
+        if "runtime_layer" in posterior_columns:
+            posterior_predicates.append("runtime_layer = 'live'")
+        if "training_allowed" in posterior_columns:
+            posterior_predicates.append("training_allowed = 0")
+        if "source_id" in posterior_columns:
+            posterior_predicates.append("source_id = ?")
+            posterior_params.append(REPLACEMENT_POSTERIOR_SOURCE_ID)
+        if "computed_at" in posterior_columns:
+            posterior_predicates.append("datetime(computed_at) <= datetime(?)")
+            posterior_params.append(now_iso)
+        posterior_computed_select = (
+            "computed_at" if "computed_at" in posterior_columns else "NULL AS computed_at"
+        )
+        posterior_id_select = (
+            "posterior_id" if "posterior_id" in posterior_columns else "NULL AS posterior_id"
+        )
+
+        market_filter_sql = ""
+        market_columns = _table_columns(conn, "main", "market_events")
+        if {"city", "target_date", "temperature_metric"}.issubset(market_columns):
+            extra_market_predicates = []
+            if "token_id" in market_columns:
+                extra_market_predicates.append("m.token_id IS NOT NULL AND m.token_id != ''")
+            if "range_label" in market_columns:
+                extra_market_predicates.append("m.range_label IS NOT NULL AND m.range_label != ''")
+            extra_market_sql = (
+                " AND " + " AND ".join(extra_market_predicates)
+                if extra_market_predicates
+                else ""
+            )
+            market_filter_sql = f"""
+              AND EXISTS (
+                  SELECT 1
+                    FROM market_events m
+                   WHERE m.city = raw.city
+                     AND m.target_date = raw.target_date
+                     AND m.temperature_metric = raw.temperature_metric
+                     {extra_market_sql}
+              )
+            """
+            evidence["market_filter"] = "market_events"
+        else:
+            evidence["market_filter"] = "absent"
+
+        sql = f"""
+            WITH raw_cycles AS (
+                SELECT
+                    city,
+                    target_date,
+                    metric AS temperature_metric,
+                    source_cycle_time,
+                    COUNT(DISTINCT model) AS model_count,
+                    SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) AS anchor_count
+                  FROM raw_model_forecasts
+                 WHERE {' AND '.join(raw_predicates)}
+                 GROUP BY city, target_date, metric, source_cycle_time
+                HAVING model_count >= 2
+                   AND anchor_count > 0
+            ),
+            raw AS (
+                SELECT city, target_date, temperature_metric, source_cycle_time AS raw_cycle
+                  FROM (
+                    SELECT
+                        raw_cycles.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city, target_date, temperature_metric
+                            ORDER BY datetime(source_cycle_time) DESC, source_cycle_time DESC
+                        ) AS rn
+                      FROM raw_cycles
+                  )
+                 WHERE rn = 1
+            ),
+            posterior_ranked AS (
+                SELECT
+                    city,
+                    target_date,
+                    temperature_metric,
+                    source_cycle_time AS posterior_cycle,
+                    {posterior_id_select},
+                    {posterior_computed_select},
+                    ROW_NUMBER() OVER (
+                        PARTITION BY city, target_date, temperature_metric
+                        ORDER BY datetime(source_cycle_time) DESC, source_cycle_time DESC
+                    ) AS rn
+                  FROM forecast_posteriors
+                 WHERE {' AND '.join(posterior_predicates)}
+            ),
+            posterior AS (
+                SELECT *
+                  FROM posterior_ranked
+                 WHERE rn = 1
+            ),
+            lagged AS (
+                SELECT
+                    raw.city,
+                    raw.target_date,
+                    raw.temperature_metric,
+                    raw.raw_cycle,
+                    posterior.posterior_cycle,
+                    posterior.posterior_id,
+                    posterior.computed_at,
+                    CASE
+                        WHEN posterior.posterior_cycle IS NULL THEN NULL
+                        ELSE ROUND((julianday(raw.raw_cycle) - julianday(posterior.posterior_cycle)) * 24.0, 2)
+                    END AS lag_hours,
+                    CASE
+                        WHEN posterior.posterior_cycle IS NULL THEN 'missing_live_posterior'
+                        ELSE 'live_posterior_cycle_lag'
+                    END AS risk
+                  FROM raw
+                  LEFT JOIN posterior
+                    ON posterior.city = raw.city
+                   AND posterior.target_date = raw.target_date
+                   AND posterior.temperature_metric = raw.temperature_metric
+                 WHERE (
+                    posterior.posterior_cycle IS NULL
+                    OR datetime(raw.raw_cycle) > datetime(posterior.posterior_cycle)
+                 )
+                 {market_filter_sql}
+            )
+            SELECT lagged.*, COUNT(*) OVER () AS total_count
+              FROM lagged
+             ORDER BY datetime(raw_cycle) DESC, city, target_date, temperature_metric
+             LIMIT ?
+        """
+        rows = conn.execute(
+            sql,
+            tuple(
+                [
+                    *raw_params,
+                    *posterior_params,
+                    RAW_POSTERIOR_ALIGNMENT_SAMPLE_LIMIT,
+                ]
+            ),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_input_posterior_cycle_alignment",
+            False,
+            "could not inspect raw/posterior cycle alignment",
+            evidence,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    samples = [dict(row) for row in rows]
+    lagged_count = int(samples[0].get("total_count") or 0) if samples else 0
+    for sample in samples:
+        sample.pop("total_count", None)
+    evidence["lagged_or_missing_count"] = lagged_count
+    evidence["samples"] = samples
+    ok = lagged_count == 0
+    return CheckResult(
+        "live_input_posterior_cycle_alignment",
+        ok,
+        "live posteriors are aligned with current raw live-input cycles"
+        if ok
+        else "raw live-input cycles are newer than, or missing from, live posteriors",
+        evidence,
+    )
+
+
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
 _RESTART_REDECISION_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
@@ -5042,6 +5319,7 @@ def evaluate() -> dict[str, Any]:
         _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),
         _posterior_summary(),
+        _live_input_posterior_cycle_alignment_check(),
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),

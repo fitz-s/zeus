@@ -212,8 +212,8 @@ def build_replacement_forecast_materialization_seed(
     baseline_source_cycle_time = baseline_coverage.get("source_cycle_time")
     if baseline_source_cycle_time is not None and str(baseline_source_cycle_time).strip():
         baseline_cycle = _dt(baseline_source_cycle_time, field_name="baseline_source_cycle_time")
-        if openmeteo_manifest.source_cycle_time.astimezone(UTC) != baseline_cycle:
-            reasons.append("REPLACEMENT_MATERIALIZATION_SEED_BASELINE_OM9_CYCLE_MISMATCH")
+        if openmeteo_manifest.source_cycle_time.astimezone(UTC) < baseline_cycle:
+            reasons.append("REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE")
     if reasons:
         return ReplacementForecastMaterializationSeedResult(status="BLOCKED", reason_codes=tuple(reasons), seed=None)
 

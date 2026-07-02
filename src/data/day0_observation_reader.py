@@ -170,7 +170,7 @@ _CURRENT_TEMP_SQL = """
 """
 
 _LATEST_CONTEXT_SQL = """
-    SELECT temp_current, running_max, running_min, station_id, temp_unit, imported_at
+    SELECT temp_current, running_max, running_min, station_id, temp_unit, imported_at, source_role
     FROM observation_instants
     WHERE city = ?
       AND target_date = ?
@@ -395,29 +395,71 @@ def read_day0_observation_context_from_instants(
     )
     auth_ph = _auth_placeholders()
     latest_sql = _LATEST_CONTEXT_SQL.format(auth_placeholders=auth_ph)
-    latest = conn.execute(
-        latest_sql,
-        (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
-    ).fetchone()
+    try:
+        latest = conn.execute(
+            latest_sql,
+            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        latest = conn.execute(
+            """
+            SELECT temp_current, running_max, running_min, source_role
+            FROM observation_instants
+            WHERE city = ?
+              AND target_date = ?
+              AND source = ?
+              AND datetime(utc_timestamp) <= datetime(?)
+              AND authority IN ({auth_placeholders})
+              AND COALESCE(causality_status, '') = 'OK'
+              AND (
+                    (
+                        COALESCE(source_role, '') = 'historical_hourly'
+                        AND COALESCE(training_allowed, 0) = 1
+                    )
+                    OR (
+                        COALESCE(source_role, '') = 'runtime_monitoring'
+                        AND COALESCE(training_allowed, 0) = 0
+                    )
+              )
+            ORDER BY datetime(utc_timestamp) DESC
+            LIMIT 1
+            """.format(auth_placeholders=auth_ph),
+            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+        ).fetchone()
     latest_current = latest_hi = latest_low = None
     station_id = ""
     observed_unit = unit
     available_at = result.decision_time_utc
+    latest_source_role = ""
     if latest is not None:
         latest_current = latest[0]
         latest_hi = latest[1]
         latest_low = latest[2]
-        station_id = str(latest[3] or "").strip().upper()
-        observed_unit = str(latest[4] or unit or "C")
-        available_at = str(latest[5] or result.decision_time_utc)
+        if len(latest) > 3:
+            if len(latest) == 4:
+                latest_source_role = str(latest[3] or "").strip()
+            else:
+                station_id = str(latest[3] or "").strip().upper()
+        if len(latest) > 4:
+            observed_unit = str(latest[4] or unit or "C")
+        if len(latest) > 5:
+            available_at = str(latest[5] or result.decision_time_utc)
+        if len(latest) > 6:
+            latest_source_role = str(latest[6] or "").strip()
 
-    current_temp = _diagnostic_current_temp(
-        latest_current,
-        latest_hi,
-        latest_low,
-        fallback_high=result.high_so_far,
-        fallback_low=result.low_so_far,
-    )
+    if (
+        latest_source_role == "runtime_monitoring"
+        and _finite_float(latest_current) is None
+    ):
+        current_temp = float("nan")
+    else:
+        current_temp = _diagnostic_current_temp(
+            latest_current,
+            latest_hi,
+            latest_low,
+            fallback_high=result.high_so_far,
+            fallback_low=result.low_so_far,
+        )
     return Day0ObservationContext(
         current_temp=current_temp,
         high_so_far=float(result.high_so_far),

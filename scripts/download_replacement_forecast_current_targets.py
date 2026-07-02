@@ -403,7 +403,10 @@ def download_current_target_raw_inputs(
     # ``include_covered=True`` (passed by the production wrapper when the available cycle is
     # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
     # downloads raw inputs for ALL current targets at the requested cycle.
-    plan = build_replacement_forecast_current_target_plan(forecast_db)
+    plan = build_replacement_forecast_current_target_plan(
+        forecast_db,
+        required_openmeteo_source_cycle_time=cycle,
+    )
     _rows = list(plan.rows) if include_covered else [row for row in plan.rows if not row.covered]
     targets = _rows[:limit] if limit else _rows
     output_dir.mkdir(parents=True, exist_ok=True)

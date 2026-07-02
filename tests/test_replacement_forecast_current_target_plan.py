@@ -67,6 +67,14 @@ def _create_db(path) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE source_run (
+                source_run_id TEXT PRIMARY KEY,
+                source_cycle_time TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE source_run_coverage (
                 coverage_id TEXT PRIMARY KEY,
                 source_run_id TEXT NOT NULL,
@@ -95,6 +103,15 @@ def _create_db(path) -> None:
             """
         )
         for city in ("Madrid", "London", "Paris"):
+            conn.execute(
+                """
+                INSERT INTO source_run VALUES (
+                    ?,
+                    '2026-06-07T06:00:00+00:00'
+                )
+                """,
+                (f"baseline-current-{city}",),
+            )
             conn.execute(
                 """
                 INSERT INTO market_events (
@@ -217,6 +234,7 @@ def _create_db(path) -> None:
                             "cities": [city],
                             "target_date": "2026-06-09",
                             "target_dates": ["2026-06-09"],
+                            "source_cycle_time": "2026-06-07T06:00:00+00:00",
                             "source_run_id": f"openmeteo-current-{city}",
                         }
                     ),
@@ -256,7 +274,7 @@ def test_current_target_plan_can_require_openmeteo_manifest_cycle(tmp_path) -> N
     plan = build_replacement_forecast_current_target_plan(
         db,
         now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
-        required_openmeteo_source_cycle_time="2026-06-07T06:00:00+00:00",
+        required_openmeteo_source_cycle_time="2026-06-07T12:00:00+00:00",
     )
     london = next(row for row in plan.rows if row.city == "London")
     paris = next(row for row in plan.rows if row.city == "Paris")
@@ -276,18 +294,9 @@ def test_current_target_plan_requires_openmeteo_cycle_matching_each_baseline_sou
     try:
         conn.execute(
             """
-            CREATE TABLE source_run (
-                source_run_id TEXT PRIMARY KEY,
-                source_cycle_time TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO source_run VALUES (
-                'baseline-current-London',
-                '2026-06-07T12:00:00+00:00'
-            )
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-07T12:00:00+00:00'
+            WHERE source_run_id = 'baseline-current-London'
             """
         )
         conn.execute(
@@ -326,6 +335,54 @@ def test_current_target_plan_requires_openmeteo_cycle_matching_each_baseline_sou
     assert "London" in [row["city"] for row in download_plan["openmeteo_download_targets"]]
 
 
+def test_current_target_plan_explicit_cycle_currency_overrides_stale_baseline_cycle(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-07T12:00:00+00:00'
+            WHERE source_run_id = 'baseline-current-London'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "source_cycle_time": "2026-06-07T12:00:00+00:00",
+                        "source_run_id": "openmeteo-12z-London",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 18, 30, tzinfo=timezone.utc),
+        required_openmeteo_source_cycle_time="2026-06-07T18:00:00+00:00",
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.baseline_source_cycle_time == "2026-06-07T12:00:00+00:00"
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
+
+
 def test_current_target_plan_rejects_openmeteo_manifest_without_target_day_samples(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
@@ -361,6 +418,7 @@ def test_current_target_plan_rejects_openmeteo_manifest_without_target_day_sampl
                         "target_date": "2026-06-09",
                         "target_dates": ["2026-06-09"],
                         "forecast_hours": 120,
+                        "source_cycle_time": "2026-06-07T06:00:00+00:00",
                         "source_run_id": "openmeteo-current-London",
                         "openmeteo_payload_json": str(payload),
                         "precision_metadata_json": str(precision),
@@ -418,6 +476,7 @@ def test_current_target_plan_counts_openmeteo_manifest_with_target_day_samples(t
                         "target_date": "2026-06-09",
                         "target_dates": ["2026-06-09"],
                         "forecast_hours": 120,
+                        "source_cycle_time": "2026-06-07T06:00:00+00:00",
                         "source_run_id": "openmeteo-current-London",
                         "openmeteo_payload_json": str(payload),
                         "precision_metadata_json": str(precision),

@@ -531,7 +531,7 @@ def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path
     assert report.discovered_count == 0
     assert report.failed_count == 1
     assert report.written_seed_files == ()
-    assert "REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING" in report.reason_codes
+    assert "REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE" in report.reason_codes
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:

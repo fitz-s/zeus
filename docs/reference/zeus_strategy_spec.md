@@ -1491,9 +1491,9 @@ keys via `_day0_high_truth_classification_for_edge`:
 `settlement_capture` when the bin is observation-locked, and `day0_nowcast_entry`
 when it is NOT locked (`src/engine/evaluator.py:2216-2219` in `_edge_source_for`;
 `2236-2240` in `_strategy_key_for`; classifier at `evaluator.py:2284`).
-`day0_nowcast_entry` is a registered blocked strategy
-(`architecture/strategy_profile_registry.yaml`, `evidence_tier: REPLAY_PASS`)
-that the directive never names. The interval theorem
+`day0_nowcast_entry` is now the registered live strategy for unlocked Day0
+forecast-upside buy-YES decisions; observation-confirmed Day0 capture remains
+owned by `settlement_capture`. The interval theorem
 (`I_t ⊆ B_i` vs `I_t ∩ B_i = ∅`) maps onto the *observation-locked* half only; the
 *unlocked* half is forecast-upside (`day0_nowcast_entry`), which is a calibrated
 stochastic edge (§3.3 class), NOT a physical deterministic one (§3.2 class). A

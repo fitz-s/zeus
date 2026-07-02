@@ -723,6 +723,187 @@ def test_posterior_summary_blocks_expired_source_cycle(monkeypatch, tmp_path):
     assert result.evidence["latest_live_source_cycle_age_hours"] > 30.0
 
 
+def test_live_input_posterior_cycle_alignment_blocks_newer_raw_cycle(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    target_date = now.date().isoformat()
+    posterior_cycle = (now - timedelta(hours=12)).replace(microsecond=0)
+    raw_cycle = (now - timedelta(hours=6)).replace(microsecond=0)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (
+            1, 'Buenos Aires', ?, 'high', ?, ?, '{}', 'live'
+        )
+        """,
+        (target_date, posterior_cycle.isoformat(), (now - timedelta(hours=1)).isoformat()),
+    )
+    forecasts.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            source_id TEXT,
+            product_id TEXT
+        )
+        """
+    )
+    for model, source_id, product_id in (
+        ("ecmwf_ifs", "ecmwf_ifs_single_runs", "ecmwf_ifs::single_runs"),
+        ("icon_global", "icon_global_single_runs", "icon_global::single_runs"),
+    ):
+        forecasts.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time, endpoint,
+                coverage_status, captured_at, source_available_at, source_id, product_id
+            ) VALUES (?, 'Buenos Aires', ?, 'high', ?,
+                      'single_runs', 'COVERED', ?, ?, ?, ?)
+            """,
+            (
+                model,
+                target_date,
+                raw_cycle.isoformat(),
+                (raw_cycle + timedelta(minutes=10)).isoformat(),
+                (raw_cycle + timedelta(minutes=5)).isoformat(),
+                source_id,
+                product_id,
+            ),
+        )
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            range_label TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO market_events VALUES (
+            'Buenos Aires', ?, 'high', 'token-yes', '11°C'
+        )
+        """,
+        (target_date,),
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    result = preflight._live_input_posterior_cycle_alignment_check()
+
+    assert result.ok is False
+    assert result.evidence["lagged_or_missing_count"] == 1
+    assert result.evidence["samples"][0]["city"] == "Buenos Aires"
+    assert result.evidence["samples"][0]["risk"] == "live_posterior_cycle_lag"
+    assert result.evidence["samples"][0]["raw_cycle"] == raw_cycle.isoformat()
+    assert result.evidence["samples"][0]["posterior_cycle"] == posterior_cycle.isoformat()
+
+
+def test_live_input_posterior_cycle_alignment_ignores_closed_old_targets(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    old_target_date = (now.date() - timedelta(days=2)).isoformat()
+    posterior_cycle = (now - timedelta(hours=36)).replace(microsecond=0)
+    raw_cycle = (now - timedelta(hours=30)).replace(microsecond=0)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (
+            1, 'Buenos Aires', ?, 'high', ?, ?, '{}', 'live'
+        )
+        """,
+        (old_target_date, posterior_cycle.isoformat(), (now - timedelta(hours=1)).isoformat()),
+    )
+    forecasts.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            source_id TEXT,
+            product_id TEXT
+        )
+        """
+    )
+    for model, source_id, product_id in (
+        ("ecmwf_ifs", "ecmwf_ifs_single_runs", "ecmwf_ifs::single_runs"),
+        ("icon_global", "icon_global_single_runs", "icon_global::single_runs"),
+    ):
+        forecasts.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time, endpoint,
+                coverage_status, captured_at, source_available_at, source_id, product_id
+            ) VALUES (?, 'Buenos Aires', ?, 'high', ?,
+                      'single_runs', 'COVERED', ?, ?, ?, ?)
+            """,
+            (
+                model,
+                old_target_date,
+                raw_cycle.isoformat(),
+                (raw_cycle + timedelta(minutes=10)).isoformat(),
+                (raw_cycle + timedelta(minutes=5)).isoformat(),
+                source_id,
+                product_id,
+            ),
+        )
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            range_label TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO market_events VALUES (
+            'Buenos Aires', ?, 'high', 'token-yes', '11°C'
+        )
+        """,
+        (old_target_date,),
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    result = preflight._live_input_posterior_cycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["lagged_or_missing_count"] == 0
+    assert result.evidence["active_target_floor_date"] == now.date().isoformat()
+
+
 def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_mismatch(
     monkeypatch, tmp_path
 ):

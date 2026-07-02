@@ -1668,6 +1668,20 @@ def test_strategy_classifier_accepts_redecision_type():
     assert redecision == fsr, "a redecision must classify to the SAME forecast strategy as an FSR"
 
 
+def test_strategy_classifier_keeps_day0_out_of_forecast_entry_lanes():
+    from src.engine.event_reactor_adapter import _event_bound_strategy_key
+
+    day0_yes = _event_bound_strategy_key(
+        event_type="DAY0_EXTREME_UPDATED", direction="buy_yes", metric="high"
+    )
+    day0_no = _event_bound_strategy_key(
+        event_type="DAY0_EXTREME_UPDATED", direction="buy_no", metric="high"
+    )
+
+    assert day0_yes == "day0_nowcast_entry"
+    assert day0_no == "settlement_capture"
+
+
 def test_timeliness_floor_applies_to_redecision_type():
     """A strictly-past EDLI_REDECISION_PENDING must be filtered by the same timeliness floor as an
     FSR — else a price-driven redecision could re-fire on an already-settled market."""

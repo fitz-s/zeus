@@ -487,7 +487,14 @@ def _resolve_strategy_key_from_pre_submit(
     if not strategy_key:
         event_type = str(pre_submit.get("event_type") or "").strip()
         if event_type == "DAY0_EXTREME_UPDATED":
-            strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
+            if direction == "buy_no":
+                strategy_key = "settlement_capture"
+            elif direction == "buy_yes":
+                strategy_key = "day0_nowcast_entry"
+            else:
+                raise EdliPositionBridgeError(
+                    f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
+                )
         elif event_type == "FORECAST_SNAPSHOT_READY":
             strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
         else:

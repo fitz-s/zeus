@@ -118,10 +118,12 @@ class TestF1Day0NowcastStrategyAuthority:
         key = _strategy_key_for_hypothesis(candidate, hypothesis)
         assert key == "day0_nowcast_entry", f"Expected 'day0_nowcast_entry', got {key!r}"
 
-    def test_registry_day0_nowcast_entry_live_status_is_blocked(self) -> None:
+    def test_registry_day0_nowcast_entry_live_status_is_live(self) -> None:
         from src.strategy.strategy_profile import get
         profile = get("day0_nowcast_entry")
-        assert profile.live_status == "blocked"
+        assert profile.live_status == "live"
+        assert profile.metric_is_live("high") is True
+        assert profile.metric_is_live("low") is True
 
     def test_registry_day0_nowcast_entry_cycle_axis_dispatch_mode_is_null(self) -> None:
         """Must be null to avoid dispatch collision with settlement_capture (day0_capture)."""
