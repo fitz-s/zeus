@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def transition_phase(
     reason: str,
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
+    extra_payload: Mapping[str, object] | None = None,
 ) -> bool:
     """Atomically transition a position into pending_exit + emit canonical event.
 
@@ -249,6 +250,8 @@ def transition_phase(
             "last_exit_order_id": last_exit_order_id,
             "last_exit_command_id": last_exit_command_id,
         }
+        if extra_payload:
+            payload.update(dict(extra_payload))
         env = str(getattr(position, "env", "") or "live")
         if env not in {"live", "test", "replay", "backtest"}:
             env = "live"

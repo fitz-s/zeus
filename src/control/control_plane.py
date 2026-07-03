@@ -165,6 +165,9 @@ def _refresh_entries_pause_from_durable_state() -> dict:
         _control_state["entries_paused"] = bool(durable_state.get("entries_paused", False))
         _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
         _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
+        _control_state["entries_pause_issued_at"] = durable_state.get("entries_pause_issued_at")
+        _control_state["entries_pause_effective_until"] = durable_state.get("entries_pause_effective_until")
+        _control_state["entries_pause_issued_by"] = durable_state.get("entries_pause_issued_by")
         _control_state["durable_override_status"] = durable_state.get("status", "unknown")
     return durable_state
 
@@ -181,6 +184,19 @@ def get_entries_pause_source() -> str | None:
 def get_entries_pause_reason() -> str | None:
     _refresh_entries_pause_from_durable_state()
     return _control_state.get("entries_pause_reason")
+
+
+def get_entries_pause_evidence() -> dict:
+    """Return the active durable entry-pause row metadata for operator visibility."""
+
+    _refresh_entries_pause_from_durable_state()
+    return {
+        "issued_at": _control_state.get("entries_pause_issued_at"),
+        "effective_until": _control_state.get("entries_pause_effective_until"),
+        "issued_by": _control_state.get("entries_pause_issued_by"),
+        "source": _control_state.get("entries_pause_source"),
+        "reason": _control_state.get("entries_pause_reason"),
+    }
 
 
 
@@ -548,6 +564,9 @@ def refresh_control_state() -> None:
     _control_state["entries_paused"] = entries_paused
     _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
     _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
+    _control_state["entries_pause_issued_at"] = durable_state.get("entries_pause_issued_at")
+    _control_state["entries_pause_effective_until"] = durable_state.get("entries_pause_effective_until")
+    _control_state["entries_pause_issued_by"] = durable_state.get("entries_pause_issued_by")
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
     _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates

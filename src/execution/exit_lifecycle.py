@@ -632,6 +632,13 @@ class ExitIntent:
     shares: float
     current_market_price: float
     best_bid: float | None
+    fresh_prob: float | None = None
+    fresh_prob_is_fresh: bool | None = None
+    best_ask: float | None = None
+    market_vig: float | None = None
+    hours_to_settlement: float | None = None
+    position_state: str = ""
+    day0_active: bool | None = None
 
 
 def place_sell_order(
@@ -1462,6 +1469,13 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
+        fresh_prob=float(exit_context.fresh_prob) if exit_context.fresh_prob is not None else None,
+        fresh_prob_is_fresh=exit_context.fresh_prob_is_fresh,
+        best_ask=exit_context.best_ask,
+        market_vig=exit_context.market_vig,
+        hours_to_settlement=exit_context.hours_to_settlement,
+        position_state=exit_context.position_state,
+        day0_active=exit_context.day0_active,
     )
 
 
@@ -1475,6 +1489,12 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent shares mismatch")
     if exit_context.current_market_price is not None and abs(exit_intent.current_market_price - float(exit_context.current_market_price)) > 1e-9:
         raise ValueError("exit_intent current_market_price mismatch")
+    if exit_context.fresh_prob is not None and exit_intent.fresh_prob is not None and abs(exit_intent.fresh_prob - float(exit_context.fresh_prob)) > 1e-9:
+        raise ValueError("exit_intent fresh_prob mismatch")
+    if exit_context.best_bid is not None and exit_intent.best_bid is not None and abs(exit_intent.best_bid - float(exit_context.best_bid)) > 1e-9:
+        raise ValueError("exit_intent best_bid mismatch")
+    if exit_context.best_ask is not None and exit_intent.best_ask is not None and abs(exit_intent.best_ask - float(exit_context.best_ask)) > 1e-9:
+        raise ValueError("exit_intent best_ask mismatch")
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -2209,8 +2229,28 @@ def _record_exit_intent_before_execution_gates(
         reason=exit_intent.reason or "EXIT_INTENT",
         error="",
         event_type="EXIT_INTENT",
+        extra_payload=_exit_intent_audit_payload(exit_intent),
     )
     _commit_before_exit_venue_io(conn, stage="exit_intent")
+
+
+def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
+    """Canonical EXIT_INTENT evidence captured before execution gates mutate state."""
+
+    return {
+        "exit_intent_reason": exit_intent.reason,
+        "exit_intent_token_id": exit_intent.token_id,
+        "exit_intent_shares": exit_intent.shares,
+        "exit_intent_current_market_price": exit_intent.current_market_price,
+        "exit_intent_best_bid": exit_intent.best_bid,
+        "exit_intent_best_ask": exit_intent.best_ask,
+        "exit_intent_market_vig": exit_intent.market_vig,
+        "exit_intent_fresh_prob": exit_intent.fresh_prob,
+        "exit_intent_fresh_prob_is_fresh": exit_intent.fresh_prob_is_fresh,
+        "exit_intent_hours_to_settlement": exit_intent.hours_to_settlement,
+        "exit_intent_position_state": exit_intent.position_state,
+        "exit_intent_day0_active": exit_intent.day0_active,
+    }
 
 
 def _dual_write_canonical_pending_exit_if_available(
@@ -2220,6 +2260,7 @@ def _dual_write_canonical_pending_exit_if_available(
     reason: str,
     error: str,
     event_type: str = "EXIT_ORDER_REJECTED",
+    extra_payload: dict[str, object] | None = None,
 ) -> bool:
     """Backwards-compat shim — routes to the canonical transition_phase writer.
 
@@ -2239,6 +2280,7 @@ def _dual_write_canonical_pending_exit_if_available(
         reason=reason,
         error=error,
         source_module="src.execution.exit_lifecycle",
+        extra_payload=extra_payload,
     )
 
 
