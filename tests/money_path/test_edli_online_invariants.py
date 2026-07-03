@@ -371,6 +371,107 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert bool(settings_copy["edli"]["real_order_submit_enabled"]) is True
 
 
+def _w43_edli_updates(**overrides) -> dict:
+    """Shared minimal edli_live update set for the W4.3 scan-cadence tests (mirrors
+    test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron's
+    known-boots-clean base)."""
+    return {
+        "enabled": True,
+        "live_execution_mode": "edli_live",
+        "reactor_mode": "live",
+        "event_writer_enabled": True,
+        "forecast_snapshot_trigger_enabled": True,
+        "day0_extreme_trigger_enabled": False,
+        "day0_hard_fact_live_enabled": False,
+        "market_channel_ingestor_enabled": True,
+        "edli_user_channel_reconcile_enabled": True,
+        "real_order_submit_enabled": True,
+        **overrides,
+    }
+
+
+def test_edli_event_reactor_scan_interval_defaults_to_unchanged_60s(monkeypatch, tmp_path):
+    """W4.3 zero-behavior-change proof. process_pending (src/events/reactor.py:907) is the
+    SOLE consumer of the opportunity_events queue (no wake-on-write path exists anywhere in
+    src/ -- grepped) so every event lane's decision latency is gated by this job's poll
+    interval, not just a cold-start/outage backstop. ORCHESTRATOR ruling shape (b): the
+    cadence is NOT demoted in this packet, only a config knob lands. This proves the knob's
+    default reproduces the pre-W4.3 minutes=1 schedule byte-for-byte (60s)."""
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(**_stage_evidence_updates(tmp_path)),
+    )
+
+    reactor_job = next(job for job in scheduler.jobs if job.id == "edli_event_reactor")
+    assert reactor_job.trigger == "interval"
+    assert reactor_job.kwargs.get("seconds") == 60
+    assert "minutes" not in reactor_job.kwargs
+    assert "reactor_scan_interval_seconds" not in settings_copy["edli"]
+
+
+def test_edli_event_reactor_scan_interval_honors_config_override(monkeypatch, tmp_path):
+    """The W4.3 config knob (edli.reactor_scan_interval_seconds) is wired end-to-end so a
+    future cadence change is an explicit config edit, not a code change -- proves the knob
+    itself works even though this packet does not flip the default (an actual slowdown is an
+    E5-adjacent operator decision per the liveness analysis in main.py's job-registration
+    comment, not a side-effect of this packet)."""
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    reactor_job = next(job for job in scheduler.jobs if job.id == "edli_event_reactor")
+    assert reactor_job.kwargs.get("seconds") == 300
+    assert settings_copy["edli"]["reactor_scan_interval_seconds"] == 300
+
+
+def test_cascade_liveness_contract_no_false_alarm_at_demoted_reactor_cadence(monkeypatch, tmp_path):
+    """Gate-parameterization proof (ORCHESTRATOR ruling): main._assert_cascade_liveness_contract
+    (the boot-time source of truth mirrored by tests/test_cascade_liveness_contract.py) is a
+    job-ID presence check with no cadence coupling. Confirmed by calling the REAL (un-mocked)
+    function against a scheduler built at a demoted reactor cadence and proving it does not
+    fail-closed."""
+    import src.main as main
+
+    scheduler, _ = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    # No exception == no false alarm. The boot harness monkeypatches this call out during
+    # main() (so these fixtures don't need the full contract-YAML wiring); calling the real
+    # function directly here proves it stays cadence-blind by construction (P4 fix,
+    # tests/test_cascade_liveness_contract.py:196) even at a demoted reactor interval.
+    main._assert_cascade_liveness_contract(scheduler)
+
+
+def test_heartbeat_status_pulse_cadence_independent_of_reactor_scan_interval(monkeypatch, tmp_path):
+    """The stage_status_summary freshness gate (15-min window,
+    tests/test_edli_stage_status_summary_freshness.py) is fed by write_cycle_pulse, which
+    fires from BOTH the reactor cycle (main.py:4964) AND the independent heartbeat job
+    (main.py:1594-1595, id="heartbeat", unconditional seconds=60 -- registered outside the
+    `if live_execution_mode in EDLI_EVENT_DRIVEN_MODES` block). This proves the heartbeat
+    job's own interval does not read the W4.3 reactor-cadence knob, so a future reactor scan
+    demotion cannot widen the status_summary staleness window past its independently-pulsed
+    60s floor -- the freshness gate has no false-alarm exposure to this packet's knob."""
+    scheduler, _ = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    heartbeat_job = next(job for job in scheduler.jobs if job.id == "heartbeat")
+    assert heartbeat_job.kwargs.get("seconds") == 60
+
+
 def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl():
     """PROCESS-TOPOLOGY REFACTOR P2 (system_decomposition_plan §8 Step 1): the substrate
     warmer was LIFTED to the P2 substrate-observer daemon, so its TTL-fit invariant moves

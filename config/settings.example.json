@@ -59,6 +59,8 @@
     "edli_live_scope": "forecast_plus_day0",
     "reactor_mode": "live",
     "event_writer_enabled": true,
+    "_reactor_scan_interval_seconds_note": "W4.3: edli_event_reactor poll cadence (process_pending's ONLY caller). Default=60 is the current A2 latency-SLA detection floor; do not raise without re-measuring the SLA (see main.py's job registration comment).",
+    "reactor_scan_interval_seconds": 60,
     "forecast_snapshot_trigger_enabled": true,
     "day0_extreme_trigger_enabled": true,
     "day0_authority_catchup_scanner_enabled": true,
