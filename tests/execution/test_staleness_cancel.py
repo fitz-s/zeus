@@ -640,3 +640,117 @@ def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
     return conn.execute(
         "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
     ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# main._c3_staleness_cancel_cycle: the GLUE layer itself, not just the
+# extracted run_c3_staleness_cancel_cycle function.
+#
+# The E1 BLOCKER (early return on empty claimed_ids, filtering TTL by
+# affected_cities) lived entirely in this glue, not in the pure function above
+# -- every prior test in this file called run_c3_staleness_cancel_cycle
+# directly and would stay green even if the glue silently regressed. This
+# closes that gap: it drives the real @_scheduler_job-decorated main.py
+# function end-to-end (monkeypatched dependencies only, no behavior change),
+# with the exact scenario the BLOCKER broke -- zero claimed SOURCE_RUN_ARRIVED
+# events -- and asserts the TTL-expired rest is still cancelled.
+# ---------------------------------------------------------------------------
+
+
+class TestMainC3StalenessCancelCycleGlue:
+    def test_zero_claimed_events_still_cancels_expired_rest_through_the_real_scheduler_job(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.polymarket_client as polymarket_client_module
+        import src.events.event_store as event_store_module
+        import src.execution.command_recovery as command_recovery_module
+        import src.main as main_module
+        import src.state.db as state_db
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
+
+        trade_db_path = tmp_path / "trade.db"
+        forecasts_db_path = tmp_path / "forecasts.db"
+
+        seed_trade = sqlite3.connect(str(trade_db_path))
+        seed_trade.row_factory = sqlite3.Row
+        init_schema(seed_trade)
+        _seed_open_entry(
+            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None,
+            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        seed_trade.commit()
+        seed_trade.close()
+
+        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
+        seed_forecasts.row_factory = sqlite3.Row
+        apply_canonical_schema(seed_forecasts)
+        seed_forecasts.commit()
+        seed_forecasts.close()
+
+        def _open_trade():
+            conn = sqlite3.connect(str(trade_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        def _open_forecasts():
+            conn = sqlite3.connect(str(forecasts_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        class _FakeEventStore:
+            """Zero claimed events -- the exact scenario the BLOCKER broke."""
+
+            def __init__(self, conn, *, consumer_name):
+                pass
+
+            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
+                return []
+
+            def claim(self, event_id):
+                return True
+
+            def mark_processed(self, event_id):
+                pass
+
+        class _FakeWorldConn:
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        cancel_calls: list[list[str]] = []
+
+        class _FakeGatewayClient:
+            def cancel_orders_batch(self, order_ids):
+                cancel_calls.append(list(order_ids))
+                return [{"canceled": True, "orderID": oid} for oid in order_ids]
+
+        monkeypatch.setattr(
+            main_module, "_settings_section",
+            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+        # Invalid-entry-authority lane is orthogonal to this glue proof -- stub
+        # it to a no-op so this test stays focused on the TTL/event-clock seam.
+        monkeypatch.setattr(
+            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
+        )
+        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
+        monkeypatch.setattr(event_store_module, "EventStore", _FakeEventStore)
+        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
+        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
+        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
+
+        main_module._c3_staleness_cancel_cycle()
+
+        assert cancel_calls == [["v1"]]
+        check_conn = _open_trade()
+        try:
+            assert conn_state(check_conn, "c1") == "CANCELLED"
+        finally:
+            check_conn.close()
