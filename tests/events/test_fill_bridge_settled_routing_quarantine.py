@@ -167,10 +167,13 @@ def _seed_valid_aggregate(conn: sqlite3.Connection, aggregate_id: str, *, target
 
 
 def _run_scan(conn: sqlite3.Connection, *, now: datetime, limit: int = 50) -> int:
-    """Run _edli_durable_fill_bridge_scan via its public entry point in main.py."""
-    import src.main as main_mod
+    """Run _edli_durable_fill_bridge_scan. Moved from src/main.py to
+    src/ingest/price_channel_ingest.py by c0467692c (system-decomposition
+    daemon lift-out); src/main.py now imports it locally at call sites
+    instead of exposing it as a module attribute."""
+    from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
-    return main_mod._edli_durable_fill_bridge_scan(conn, now=now, limit=limit)
+    return _edli_durable_fill_bridge_scan(conn, now=now, limit=limit)
 
 
 def _now(date_str: str = TODAY_UTC) -> datetime:

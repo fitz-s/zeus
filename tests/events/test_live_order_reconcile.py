@@ -905,6 +905,7 @@ def _pre_submit_payload(**overrides):
         "min_entry_price": 0.10,
         "min_expected_profit_usd": 1.0,
         "min_submit_edge_density": 0.05,
+        "selection_authority_applied": "qkernel_spine",
         "qkernel_execution_economics": {
             "source": "qkernel_spine",
             "route_type": "portfolio",

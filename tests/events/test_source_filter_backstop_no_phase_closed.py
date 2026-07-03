@@ -85,8 +85,9 @@ def _world_conn() -> sqlite3.Connection:
 def test_source_filtered_queue_yields_no_post_trading_at_gate():
     from datetime import datetime, timezone
 
+    # Renamed forecast_only -> forecast_lane terminology by cdc3f47dc.
     from src.engine.event_reactor_adapter import (
-        _edli_forecast_only_phase_evidence,
+        _edli_forecast_lane_phase_evidence as _edli_forecast_only_phase_evidence,
     )
 
     conn = _world_conn()
