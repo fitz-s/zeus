@@ -205,6 +205,37 @@ def qkernel_spine_enabled() -> bool:
         return False
 
 
+def w3_solve_enabled() -> bool:
+    """The W3 SOLVE promotion flag — TIME-BOXED, DELETED AT PROMOTION (no-permanent-flags law).
+
+    Read from ``settings["feature_flags"]["w3_solve_enabled"]`` per call (no import-time cache,
+    so a G3 absent-vs-OFF comparison sees the same read each call). ABSENT = OFF; a config-read
+    fault is OFF. When True, the spine wraps the FamilyDecisionEngine with the joint solver
+    (``_wrap_engine_with_solve_shim``); OFF/absent leaves the legacy path byte-identical.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["feature_flags"].get("w3_solve_enabled", False))
+    except Exception:  # noqa: BLE001 — a config read fault is OFF (never routes solve live by accident).
+        return False
+
+
+def _wrap_engine_with_solve_shim(engine: Any) -> Any:
+    """Compose the W3 joint solver over the already-constructed engine (ON-mode ONLY).
+
+    The ``src.solve`` import is LAZY, inside this ON-branch helper, so with the flag OFF the
+    bridge never imports the solve package (G3 import-isolation). No ledger handle is reachable
+    at the construction site (see ``decide_family_via_spine`` signature — no spendable-cash
+    provider is threaded), so the shim's spendable-cash provider is left unset and its
+    conservative endowment floor applies; the real CAS-ledger read is threaded by the seam-swap
+    operator, not here (that would touch beyond the bridge construction site).
+    """
+    from src.solve.solver import SolveEngineShim
+
+    return SolveEngineShim(engine=engine)
+
+
 def _qkernel_spine_band_alpha() -> float:
     """Tail probability used for qkernel edge/DeltaU bands.
 
@@ -1376,6 +1407,10 @@ def decide_family_via_spine(
         # order is >1 (the NO_EXECUTABLE_ROUTE_CANDIDATE false no-trade). The min order
         # is read off the proofs' rows (probability units); default to a safe 5.
         shares_for_routing = _family_min_order_shares(route_proofs)
+        # W3 SOLVE promotion seam (time-boxed flag, deleted at promotion): ON → the joint solver
+        # selects; OFF/absent → this guard is skipped and the legacy path is byte-identical.
+        if w3_solve_enabled():
+            engine = _wrap_engine_with_solve_shim(engine)
         decision = engine.decide(
             case,
             omega,

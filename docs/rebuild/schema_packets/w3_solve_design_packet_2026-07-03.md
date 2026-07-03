@@ -319,3 +319,50 @@ Binding rule for how phase-1 promotion evidence treats the primary-leg size and 
   approximation. Receipt = truth; projection = reproducible approximation; they reconcile at
   grading time. No bankroll/portfolio side channel is threaded into the shim to close the gap
   (STOP-rule: never invent a side channel the frozen contract does not carry).
+
+## APPENDIX — SEAM SWAP + G3 HARNESS (W3.4, 2026-07-03)
+
+The final W3 packet: the time-boxed promotion flag, the single-point seam edit, and the G3 gate.
+
+**Flag: `feature_flags.w3_solve_enabled`** — TIME-BOXED, DELETED AT PROMOTION (no-permanent-flags
+law). Default ABSENT = OFF; a config-read fault is OFF. Accessor `qkernel_spine_bridge.w3_solve_enabled()`
+mirrors `qkernel_spine_enabled()` and reads per call (no import-time cache, so G3 absent-vs-OFF sees
+the same read each call). Operators enable by adding `feature_flags.w3_solve_enabled: true` to
+config/settings.json (uncommitted); the flag is registered here + in the accessor docstring (the
+committed record). DELETION DEADLINE: removed in the promotion commit that ARMs the solver (P2
+sequence: G0 → G3 → evidence gate → ARM flip → flag deleted).
+
+**Seam edit (qkernel_spine_bridge.py, MINIMAL — reviewed line-by-line).** Two additive helpers next
+to the existing flag accessor (`w3_solve_enabled()`, `_wrap_engine_with_solve_shim(engine)` — the
+latter LAZY-imports `src.solve` inside the ON branch) and a 4-line guard immediately before the
+existing `engine.decide(...)` call:
+
+    if w3_solve_enabled():
+        engine = _wrap_engine_with_solve_shim(engine)
+
+OFF/absent → the guard is skipped and `engine` stays the `FamilyDecisionEngine`; the `engine.decide(...)`
+call is UNCHANGED (byte-identical legacy path). ON → `engine` is wrapped in `SolveEngineShim` (which
+composes the same engine via `engine=`), and the same `engine.decide(...)` dispatches polymorphically
+to the shim. NOTHING else in the bridge changes.
+
+**Ledger handle (STOP-reported).** `decide_family_via_spine` carries no CAS-ledger / spendable-cash
+handle in its signature; threading `available_pusd` would require adding a parameter — touching the
+caller beyond the construction site. Per the ruling, the sanctioned fallback landed:
+`_wrap_engine_with_solve_shim` constructs the shim with NO `spendable_cash_provider`, so the shim's
+CONSERVATIVE ENDOWMENT FLOOR applies (spendable = min per-atom endowment; never fabricates cash the
+ledger has not confirmed). The real CAS-ledger `available_pusd` read is threaded by the seam-swap
+operator by hand (add a `spendable_usd_provider` param to `decide_family_via_spine` + its one caller).
+
+**G3 gate (tests/integration/test_w3_solve_seam_g3.py).** (a) absent-vs-OFF byte-identity over a
+realistic fixture corpus (serialized SpineDecisionResults identical); (b) single-divergence-point
+(AST: `w3_solve_enabled` consumed at exactly one call site, `_wrap_engine_with_solve_shim` called
+once); (c) ON-mode: the shim physically runs (`src.solve.solver` imported, decisions pass
+`validate_family_decision_contract`, and the ON no-trade reason is the solver's — DIVERGING from the
+legacy picker's on the same inputs); (d) OFF-path import-isolation (a subprocess drives a full decide
+with the flag OFF and asserts `src.solve` was never imported). The trade + projection-stamped path is
+covered by the shim unit tests (test_shim_decide); the realistic spine fixtures no-trade in-test
+(wide robust band / cold bankroll), exactly as the existing spine-routing suite handles with skips.
+
+**Promotion sequence pointer:** G0 unit/property suite (tests/solve) → G3 (this harness) → ON-phase-1
+settlement-graded evidence gate (grades the receipt actual submitted size) → operator ARM flip
+(existing require_operator_arm) → ON-phase-2 (batch + conversions) → flag deleted.

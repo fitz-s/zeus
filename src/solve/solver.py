@@ -885,8 +885,18 @@ class SolveEngineShim:
         self._engine_kwargs = engine_kwargs
         self._spendable_cash_provider = spendable_cash_provider
         self._ledger_snapshot_id_provider = ledger_snapshot_id_provider
+        # Route-surface inputs: prefer explicit kwargs, else read them off the composed engine
+        # (the seam wraps an already-constructed FamilyDecisionEngine as `engine=` so the bridge
+        # edit stays a one-liner — no need to re-pass the builder it already holds).
         self._route_set_builder = engine_kwargs.get("route_set_builder")
-        self._enable_negrisk_routes = bool(engine_kwargs.get("enable_negrisk_routes", False))
+        if self._route_set_builder is None and engine is not None:
+            self._route_set_builder = getattr(engine, "_route_set_builder", None)
+        if "enable_negrisk_routes" in engine_kwargs:
+            self._enable_negrisk_routes = bool(engine_kwargs["enable_negrisk_routes"])
+        elif engine is not None:
+            self._enable_negrisk_routes = bool(getattr(engine, "_enable_negrisk_routes", False))
+        else:
+            self._enable_negrisk_routes = False
         # Surfaced for tests / audit; the projection VALUES also flow via ``selected`` downstream.
         # ``last_plan`` is the joint SolutionPlan (its ΔU is DISTINCT from the projection's
         # standalone post-haircut ΔU — the two must never be sourced from the same quantity).
