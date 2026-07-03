@@ -26,9 +26,18 @@ from src.backtest.purpose import (
     SKILL_PARITY,
 )
 from src.backtest.skill import run_skill, _economics_fields_in_limitations
+# CORRECTED_ECONOMICS_COHORT was a plain alias for
+# CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION in the now-deleted
+# scripts/profit_validation_replay.py (removed by af0ee088f, "remove retired
+# shadow diagnose legacy surfaces"). That commit redirected this test's import
+# to scripts.equity_curve but never re-added the alias there; equity_curve.py
+# uses src.state.portfolio.CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+# directly instead (see its _exit_economics_cohort).
+from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION as CORRECTED_ECONOMICS_COHORT,
+)
 from scripts import equity_curve as equity_curve_module
 from scripts.equity_curve import (
-    CORRECTED_ECONOMICS_COHORT,
     LEGACY_DIAGNOSTIC_COHORT,
     _single_exit_economics_cohort,
     require_single_exit_economics_cohort,
