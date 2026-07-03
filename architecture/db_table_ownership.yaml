@@ -2396,6 +2396,21 @@ tables:
       convert_reservation_on_fill at the venue_command_repo.append_event
       terminal dispatch seam. Do not drop.
 
+  - name: exchange_reconcile_findings_v2
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: scripts/migrations/202607_cas_reservation_ledger.py
+    pk_col: finding_id
+    notes: >
+      SCH-W1.1-CAS-LEDGER (2026-07-02): TRANSIENT table-rebuild alias, never a
+      live table. The migration widens exchange_reconcile_findings' kind CHECK
+      (adds collateral_identity_mismatch) via the precedented CREATE-new +
+      INSERT-copy + DROP-old + RENAME recipe (SQLite cannot ALTER CHECK); the
+      v2 name exists only inside a single migration transaction and is renamed
+      to exchange_reconcile_findings before commit. Registered to satisfy
+      db_table_delta_gate (every CREATE TABLE in-tree needs an owner, INV-37).
+
   - name: collateral_unsettled_proceeds
     db: trade
     schema_class: trade_class

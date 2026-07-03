@@ -112,6 +112,7 @@ state_machines:
       - FILLED
       - UNKNOWN
       - SUBMIT_UNKNOWN_SIDE_EFFECT
+      - SUBMIT_UNKNOWN
       - REVIEW_REQUIRED
       - SUBMIT_REJECTED
       - SUBMIT_REQUESTED
@@ -353,6 +354,38 @@ state_machines:
       - tests/test_negrisk_redeem_payout_proof.py
       - tests/test_redeem_cascade_liveness.py
       - tests/test_settlement_commands.py
+  ctf_conversion_command:
+    owner: src/execution/ctf_conversion_commands.py
+    description: >
+      SCH-W2.4 CTF conversion command lifecycle (split/merge collateral
+      primitives). Chain-truth terminal states; UNKNOWN is recovery-owned
+      (never silently retried). Inert until a W5 caller wires conversion
+      into the live path.
+    states:
+      - CTF_CONVERSION_INTENT_CREATED
+      - CTF_CONVERSION_TX_HASHED
+      - CTF_CONVERSION_CONFIRMED
+      - CTF_CONVERSION_FAILED
+      - CTF_CONVERSION_UNKNOWN
+    invariant_tests:
+      - tests/execution/test_ctf_conversion_commands.py
+  venue_submit_error_code:
+    owner: src/execution/batch_order_submission.py
+    description: >
+      SCH-W2.1/W2.x venue submit error-code labels (batch wrapper and
+      polymarket_v2_adapter). Not command states; they classify why a submit
+      attempt produced no clean ack: V2_BATCH_SUBMIT_EXCEPTION (SDK raised
+      mid-batch, response-mapping ambiguity routes to SUBMIT_UNKNOWN),
+      V2_BATCH_SUBMIT_UNSUPPORTED (adapter capability refusal, fail-closed),
+      COMPAT_SUBMIT_NOT_PERMITTED_IN_LIVE (legacy compat submit path blocked
+      under live mode in src/venue/polymarket_v2_adapter.py).
+    states:
+      - V2_BATCH_SUBMIT_EXCEPTION
+      - V2_BATCH_SUBMIT_UNSUPPORTED
+      - COMPAT_SUBMIT_NOT_PERMITTED_IN_LIVE
+    invariant_tests:
+      - tests/execution/test_batch_order_submission.py
+      - tests/venue/test_batch_submit.py
   live_runtime_config:
     owner: src/strategy/family_exclusive_dedup.py
     description: >
@@ -1305,6 +1338,14 @@ external_truth_sources:
     authority_tier: chain_truth
     endpoint_patterns: [polygon-rpc, eth_sendRawTransaction, eth_call]
     required_tests: [tests/test_polymarket_v2_adapter_negrisk_redeem.py]
+  polymarket_docs:
+    # Documentation-only reference (SCH-W2.3 rate budget cites the published
+    # CLOB rate-limit table at docs.polymarket.com/api-reference/rate-limits).
+    # Never a runtime data source; registered so the semantic classifier does
+    # not treat the cited URL as an unregistered external truth surface.
+    authority_tier: documentation_reference
+    endpoint_patterns: [docs.polymarket.com]
+    required_tests: [tests/venue/test_rate_budget.py]
   polymarket_data_api:
     # Read-only venue position-inventory truth (data-api.polymarket.com/positions)
     # used by the redeem balance probe and the inventory-truth auto-collect sweep
