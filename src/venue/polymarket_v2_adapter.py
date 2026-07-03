@@ -45,6 +45,12 @@ from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.observability.counters import increment as _cnt_inc
 from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
+from src.venue.batch_submit import (
+    CANCEL_ECHO_CANDIDATE_FIELDS,
+    MAX_ORDERS_PER_BATCH,
+    SUBMIT_ECHO_CANDIDATE_FIELDS,
+    map_batch_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +287,10 @@ class PolymarketV2AdapterProtocol(Protocol):
     def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult: ...
 
     def cancel(self, order_id: str) -> CancelResult: ...
+
+    def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]: ...
+
+    def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]: ...
 
     def get_order(self, order_id: str) -> OrderState: ...
 
@@ -778,6 +788,206 @@ class PolymarketV2Adapter:
         else:
             raw = cancel(order_id)
         return _cancel_result_from_response(order_id, raw)
+
+    def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]:
+        """Submit up to MAX_ORDERS_PER_BATCH orders in ONE SDK post_orders call.
+
+        W2.1 (inert, no production call site). Chunking beyond
+        MAX_ORDERS_PER_BATCH is the CALLER's job (src.venue.batch_submit.
+        chunk_orders / src.execution.batch_order_submission) -- this method
+        refuses an oversized call rather than silently splitting it, so
+        callers cannot lose the INV-28 persist-before-side-effect pairing
+        that must happen per chunk.
+
+        Mirrors submit()'s pre-flight shape: envelopes are bound + asserted
+        live-authority first (no SDK contact on a placeholder envelope). A
+        signing failure (create_order) for ANY envelope aborts the WHOLE
+        call before any network contact -- no partial submission of an
+        unsigned order. If the post_orders() HTTP call itself raises AFTER
+        all orders are signed, this method does NOT catch it (mirrors
+        submit()'s _submit_once: the exception propagates so the caller can
+        record the AMBIGUOUS side effect -- signing succeeded, the network
+        outcome is unknown -- as SUBMIT_TIMEOUT_UNKNOWN, matching the
+        single-order executor.py:4697-4759 pattern).
+        """
+        if not envelopes:
+            return []
+        if len(envelopes) > MAX_ORDERS_PER_BATCH:
+            raise ValueError(
+                f"submit_batch: {len(envelopes)} orders exceeds MAX_ORDERS_PER_BATCH="
+                f"{MAX_ORDERS_PER_BATCH}; caller must chunk "
+                f"(see src.venue.batch_submit.chunk_orders)"
+            )
+
+        bound: list[VenueSubmissionEnvelope] = []
+        for envelope in envelopes:
+            try:
+                bound_envelope = self._bind_runtime_submission_envelope(envelope)
+                bound_envelope.assert_live_submit_bound()
+            except ValueError as exc:
+                _cnt_inc("placeholder_envelope_blocked_total")
+                logger.warning(
+                    "telemetry_counter event=placeholder_envelope_blocked_total path=submit_batch"
+                )
+                return [
+                    _rejected_submit_result(
+                        e,
+                        error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                        error_message=str(exc),
+                    )
+                    for e in envelopes
+                ]
+            bound.append(bound_envelope)
+
+        post_only_values = {bool(e.post_only) for e in bound}
+        if len(post_only_values) > 1:
+            # post_orders() takes ONE post_only flag for the whole call
+            # (py_clob_client_v2/client.py:840) -- envelopes with mixed
+            # post_only cannot share a batch. Fail closed rather than
+            # silently applying one envelope's flag to all.
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="BATCH_POST_ONLY_MISMATCH",
+                    error_message="submit_batch requires all envelopes to share one post_only value",
+                )
+                for e in envelopes
+            ]
+        batch_post_only = next(iter(post_only_values), False)
+
+        try:
+            preflight = self.preflight()
+        except Exception as exc:
+            return [
+                _rejected_submit_result(e, error_code="V2_PREFLIGHT_EXCEPTION", error_message=str(exc))
+                for e in envelopes
+            ]
+        if not preflight.ok:
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code=preflight.error_code or "V2_PREFLIGHT_FAILED",
+                    error_message=preflight.message,
+                )
+                for e in envelopes
+            ]
+
+        client = self._sdk_client()
+        if not callable(getattr(client, "create_order", None)) or not callable(
+            getattr(client, "post_orders", None)
+        ):
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="V2_BATCH_SUBMIT_UNSUPPORTED",
+                    error_message="SDK client exposes neither create_order nor post_orders",
+                )
+                for e in envelopes
+            ]
+
+        signed_orders: list[Optional[bytes]] = [None] * len(bound)
+        signed_hashes: list[Optional[str]] = [None] * len(bound)
+        post_orders_args: list[Any] = []
+        try:
+            from py_clob_client_v2.clob_types import PostOrdersV2Args
+
+            for i, envelope in enumerate(bound):
+                order_args = _order_args_from_envelope(envelope)
+                options = SimpleNamespace(tick_size=str(envelope.tick_size), neg_risk=envelope.neg_risk)
+                local_signed_order = client.create_order(order_args, options=options)
+                signed_bytes = _signed_order_bytes(local_signed_order)
+                signed_hashes[i] = hashlib.sha256(signed_bytes).hexdigest()
+                signed_orders[i] = signed_bytes
+                post_orders_args.append(PostOrdersV2Args(order=local_signed_order, orderType=envelope.order_type))
+        except Exception as exc:
+            # Pre-network signing failure -- no side effect crossed for
+            # ANY envelope in this call. Reject the whole batch (matches
+            # single-order submit()'s V2_PRE_SUBMIT_EXCEPTION when
+            # signed_order is None).
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_message=str(exc),
+                    signed_order=signed_orders[i] if i < len(signed_orders) else None,
+                    signed_order_hash=signed_hashes[i] if i < len(signed_hashes) else None,
+                )
+                for i, e in enumerate(envelopes)
+            ]
+
+        # Deliberately NOT wrapped in try/except: a post-signing exception
+        # here is an AMBIGUOUS side effect (venue may have received the
+        # request). Propagate so the caller records SUBMIT_TIMEOUT_UNKNOWN
+        # for every command in this chunk, mirroring executor.py's
+        # single-order post-submit exception handling.
+        raw_response = client.post_orders(post_orders_args, post_only=batch_post_only, defer_exec=False)
+
+        mapped = map_batch_items(
+            raw_response,
+            echo_keys=signed_hashes,
+            echo_candidate_fields=SUBMIT_ECHO_CANDIDATE_FIELDS,
+        )
+        results: list[SubmitResult] = []
+        for i, envelope in enumerate(bound):
+            item = mapped[i]
+            if item.source == "unmapped":
+                results.append(
+                    _unmapped_submit_result(
+                        envelope,
+                        signed_order=signed_orders[i],
+                        signed_order_hash=signed_hashes[i],
+                        raw_response=raw_response,
+                    )
+                )
+            else:
+                results.append(
+                    _submit_result_from_response(
+                        envelope,
+                        item.raw_item,
+                        signed_order=signed_orders[i],
+                        signed_order_hash=signed_hashes[i],
+                    )
+                )
+        return results
+
+    def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]:
+        """Cancel up to MAX_ORDERS_PER_BATCH orders in ONE SDK cancel_orders call.
+
+        W2.1 (inert, no production call site). Same chunking contract as
+        submit_batch: refuses an oversized call, caller chunks.
+        """
+        if not order_ids:
+            return []
+        if len(order_ids) > MAX_ORDERS_PER_BATCH:
+            raise ValueError(
+                f"cancel_batch: {len(order_ids)} orders exceeds MAX_ORDERS_PER_BATCH="
+                f"{MAX_ORDERS_PER_BATCH}; caller must chunk "
+                f"(see src.venue.batch_submit.chunk_orders)"
+            )
+        client = self._sdk_client()
+        cancel_orders = getattr(client, "cancel_orders", None)
+        if not callable(cancel_orders):
+            return [
+                _unmapped_cancel_result(order_id, error_code="CANCEL_BATCH_UNSUPPORTED")
+                for order_id in order_ids
+            ]
+        # Deliberately NOT wrapped in try/except -- mirrors submit_batch:
+        # a post-call exception is an ambiguous side effect the caller must
+        # record, not swallow into a false "rejected".
+        raw_response = cancel_orders(list(order_ids))
+        mapped = map_batch_items(
+            raw_response,
+            echo_keys=list(order_ids),
+            echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
+        )
+        results: list[CancelResult] = []
+        for i, order_id in enumerate(order_ids):
+            item = mapped[i]
+            if item.source == "unmapped":
+                results.append(_unmapped_cancel_result(order_id, raw_response=raw_response))
+            else:
+                results.append(_cancel_result_from_response(order_id, item.raw_item))
+        return results
 
     def get_order(self, order_id: str) -> OrderState:
         _assert_no_world_mutex_held_for_io("venue.get_order")
@@ -3851,6 +4061,51 @@ def _extract_string_sequence(raw: Any, *keys: str) -> tuple[str, ...]:
         if values:
             return values
     return ()
+
+
+def _unmapped_submit_result(
+    envelope: VenueSubmissionEnvelope,
+    *,
+    signed_order: bytes | None,
+    signed_order_hash: str | None,
+    raw_response: Any,
+) -> SubmitResult:
+    """Fail-closed batch-mapping outcome (ruling 1(c)): a response WAS
+    received for this call, but this envelope could not be attributed to
+    any item in it. NEVER a success -- the caller must record this as
+    SUBMIT_UNKNOWN (command_bus.CommandEventType.SUBMIT_UNKNOWN), distinct
+    from the post-call-exception SUBMIT_TIMEOUT_UNKNOWN case."""
+    updated = envelope.with_updates(
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        raw_response_json=_canonical_json(raw_response or {}),
+        error_code="BATCH_RESPONSE_UNMAPPED",
+        error_message="batch response could not be mapped to this request (unverified response shape)",
+    )
+    return SubmitResult(
+        status="unmapped",
+        envelope=updated,
+        error_code=updated.error_code,
+        error_message=updated.error_message,
+    )
+
+
+def _unmapped_cancel_result(
+    order_id: str,
+    *,
+    error_code: str = "BATCH_RESPONSE_UNMAPPED",
+    raw_response: Any = None,
+) -> CancelResult:
+    """Fail-closed batch-mapping outcome for cancel_batch -- same contract
+    as _unmapped_submit_result. status="UNKNOWN" matches the existing
+    single-order _cancel_result_from_response UNKNOWN branch."""
+    return CancelResult(
+        status="UNKNOWN",
+        order_id=order_id,
+        raw_response_json=_canonical_json(raw_response) if raw_response is not None else None,
+        error_code=error_code,
+        error_message="batch response could not be mapped to this request (unverified response shape)",
+    )
 
 
 def _rejected_submit_result(

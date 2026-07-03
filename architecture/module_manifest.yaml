@@ -344,6 +344,7 @@ modules:
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
       - src/execution/ctf_conversion_commands.py
+      - src/execution/batch_order_submission.py
     public_entry_files:
       - src/execution/executor.py
       - src/execution/exchange_reconcile.py
@@ -356,6 +357,7 @@ modules:
       - src/execution/exit_safety.py
       - src/execution/self_trade_guard.py
       - src/execution/ctf_conversion_commands.py
+      - src/execution/batch_order_submission.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -375,6 +377,7 @@ modules:
       - tests/test_self_trade_guard.py
       - tests/test_risk_allocator.py
       - tests/execution/test_ctf_conversion_commands.py
+      - tests/execution/test_batch_order_submission.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   venue:
@@ -393,6 +396,7 @@ modules:
     public_entry_files:
       - src/venue/polymarket_v2_adapter.py
       - src/contracts/venue_submission_envelope.py
+      - src/venue/batch_submit.py
     law_dependencies:
       - architecture/invariants.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
@@ -408,6 +412,7 @@ modules:
       - tests/test_neg_risk_passthrough.py
       - tests/venue/test_rate_budget.py
       - tests/test_polymarket_v2_adapter_ctf_conversion.py
+      - tests/venue/test_batch_submit.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   ingest:

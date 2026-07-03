@@ -200,6 +200,30 @@ rules:
       - pattern: $CLIENT.place_limit_order(...)
       - pattern: place_limit_order(...)
 
+  # W2.1 (2026-07-02, INV-24, NC-16): sibling rule for the batch gateway
+  # place_limit_orders_batch, landed inert alongside the single-order
+  # gateway above. Allowed callers: src/execution/executor.py (seam,
+  # reserved for future wiring), src/data/polymarket_client.py
+  # (definition), scripts/live_smoke_test.py (operator-only), and
+  # src/execution/batch_order_submission.py (the W2.1 batch orchestrator).
+  - id: zeus-place-limit-orders-batch-gateway-only
+    message: "place_limit_orders_batch is gateway-only. Call it only from the registered batch orchestrator/executor seam, not the SDK directly."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+        - scripts/**/*.py
+      exclude:
+        - src/execution/executor.py
+        - src/data/polymarket_client.py
+        - scripts/live_smoke_test.py
+        - src/execution/batch_order_submission.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: $CLIENT.place_limit_orders_batch(...)
+      - pattern: place_limit_orders_batch(...)
+
   # P1.S1 (NC-18): venue_command_events is append-only outside the repo.
   # Mutating a recorded event creates a "fact rewrite" path that is invisible
   # to forensic recovery — append a new event instead.

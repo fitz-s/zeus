@@ -21,11 +21,19 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 | `wrap_unwrap_commands.py` | Durable USDC.e↔pUSD command state | HIGH — no live chain side effects in Z4 |
 | `settlement_commands.py` | Durable settlement/redeem command ledger | HIGH — Q-FX-1 gated, crash-recoverable tx hash anchor |
 | `harvester.py` | Settlement harvesting | MEDIUM |
+| `batch_order_submission.py` | W2.1 batch submit/cancel journal orchestrator (INV-28 at batch shape) | HIGH — no production call site yet, but writes venue_commands and is on the INV-24 gateway allowlist |
 
 ## Domain rules
 
 - **Limit orders ONLY** — never market orders. Zeus always provides liquidity on entry
 - Live Polymarket V2 placement must route through `src/venue/polymarket_v2_adapter.py` and preserve venue-command pre-side-effect persistence.
+- Batch submit/cancel (W2.1, `batch_order_submission.py`): persist N commands
+  + N SUBMIT_REQUESTED/CANCEL_REQUESTED events per chunk, COMMITTED, before
+  that chunk's ONE SDK call, mirroring the single-order sequence at
+  `executor.py:4394-4476` applied N times per chunk rather than reusing it
+  verbatim. Do not invent a second journaling shape for batches -- extend
+  this one. Currently inert (no production caller); W3 is the intended
+  consumer.
 - Mode-based timeouts: Opening Hunt 4h, Update Reaction 1h, Day0 15min
 - Share quantization: BUY rounds UP, SELL rounds DOWN (0.01 increments)
 - Whale toxicity: cancel on adjacent bin sweeps (legacy predecessor lesson)
