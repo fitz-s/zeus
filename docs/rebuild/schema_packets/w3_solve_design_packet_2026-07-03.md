@@ -257,3 +257,65 @@ selected/no-trade transitions) so CVaR conservatism is not an artifact of one ta
 (not deferrable — evidence on a wealth object the live shim cannot derive is not evidence): atom wealth
 from current family holdings + spendable cash net of reservations (CAS ledger read) + `ledger_snapshot_id`.
 Implementation stays sub-slice 3; the full C5 exit ledger builder remains deferred.
+
+## APPENDIX — SUB-SLICE 3 (W3.3): SHIM BODY + ENTRY-SIDE WEALTH BUILDER (2026-07-03)
+
+Scope (phase-1 evidence chain; NO production wiring — bridge untouched, nothing imports the shim
+outside tests; the seam swap + G3 harness are the next packet).
+
+1. **`build_wealth_by_atom` (exits.py, entry-side).** Pure core with INJECTED inputs (W3.3 ruling):
+   `W_a = spendable_cash (net of reservations) + per-atom holdings payout`; strict positivity →
+   `ZeroWealthOutcomeError`; stamps `ledger_snapshot_id`. Reaches NO ledger connection itself — the
+   seam swap threads the real CAS-ledger read at the bridge; the shim/tests inject the values.
+
+2. **`SolveEngineShim.decide()`.** COMPOSES an inner `FamilyDecisionEngine` (same ctor surface) for
+   the FamilyDecision scaffolding (predictive, served joint_q/band pass-through, family_book,
+   market_coherence, market_implied_q, enumerated candidate economics) and REPLACES the selection
+   with the joint solver over a `SolveMenu` built from the same route surface. Endowment wealth
+   VECTOR = the legacy `portfolio` A_y (`portfolio.a(bin)`) — LIKE-FOR-LIKE with the picker; the
+   separate spendable-cash BUDGET is injected. The primary leg (safe_prefix_index 0) is re-scored
+   STANDALONE at its post-downstream-haircut size; `coherence_allows=True` (lockstep); `receipt_hash`
+   re-stamped; `validate_family_decision_contract` before return.
+
+3. **`LegacyDecisionProjection` + phase-1 grading.** The projection's standalone ΔU and post-haircut
+   size are STAMPED into `selected.optimal_delta_u` / `selected.optimal_stake_usd`, so the existing
+   proof overlay / facts writer grade the PROJECTION, never the joint plan's ΔU. Phase-1 gate:
+   primary leg must be direct-executable AND its standalone post-haircut ΔU `> 0`, else typed
+   no-trade (`PHASE1_PRIMARY_LEG_NOT_TRADEABLE`). Note: the solver's safe-prefix positivity already
+   refuses a hedge whose primary leg is negative alone (`UNSAFE_PREFIX_DECOMPOSITION`) BEFORE the
+   shim, so a "primary leg good only because of an unexecuted hedge" surfaces as a shim no-trade; the
+   shim gate is the defensive second layer.
+
+JUDGMENT CALLS (flagged for review):
+- **Downstream haircut re-scoring is CONFIG-FACTOR ONLY at decide() time.** The full
+  variance-adjusted haircut (`SizingContext`/`evaluate_kelly`, event_reactor_adapter.py:5657) needs
+  bankroll + portfolio-state provider + lead_days that are NOT in the frozen :1379 kwargs. The shim
+  reproduces only the config `kelly_multiplier` base factor (`post_size = pre_size × multiplier`) and
+  stamps both pre- and post-haircut sizes; the promotion-evidence gate grades the ACTUAL submitted
+  size from the settlement receipt (where the full haircut is known). No bankroll/portfolio side
+  channel was invented (per the STOP rule).
+- **Composition applies the inner engine's q_lcb / selection-calibrator guards** to the legacy
+  candidate economics the shim reuses; the solver selects on its own (unguarded) menu. Coherence veto
+  is bypassed per the lockstep ruling; the other guards (W5-deletion targets) still run in the inner
+  engine. Flagged as a phase-1 like-for-like nuance for the seam-swap review.
+- **Wealth vector = `portfolio.a(bin)`** (legacy A_y) with injected spendable as the budget; when no
+  spendable provider is injected (pre-seam-swap default) the shim floors spendable at the minimum
+  endowment so it never fabricates cash the ledger has not confirmed.
+
+### PHASE-1 EVIDENCE-GRADING CONTRACT (approved 2026-07-03)
+
+Binding rule for how phase-1 promotion evidence treats the primary-leg size and ΔU:
+
+- The `LegacyDecisionProjection` stamps BOTH the pre-haircut size and the **config-multiplier**
+  post-haircut size (`post = pre × settings.sizing.kelly_multiplier`), and its standalone
+  primary-leg ΔU (re-scored at that post-haircut size) flows into `selected.optimal_delta_u` /
+  `selected.optimal_stake_usd` — the overlay/facts-writer path.
+- The config-multiplier post-haircut size is a **reproducible APPROXIMATION** computed at decide()
+  time. It MAY DIFFER from the full variance-adjusted downstream haircut
+  (`SizingContext`/`evaluate_kelly`, event_reactor_adapter.py:5657), which depends on
+  bankroll + portfolio-state provider + lead_days that are NOT available in the frozen :1379 kwargs.
+- **The settlement-graded ACTUAL submitted size is AUTHORITATIVE.** The promotion-evidence gate
+  grades the actual submitted size read from the settlement receipts, not the projection's
+  approximation. Receipt = truth; projection = reproducible approximation; they reconcile at
+  grading time. No bankroll/portfolio side channel is threaded into the shim to close the gap
+  (STOP-rule: never invent a side channel the frozen contract does not carry).

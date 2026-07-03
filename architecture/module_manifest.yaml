@@ -360,6 +360,8 @@ modules:
       - tests/solve/test_types_validation.py
       - tests/solve/test_contract_validator.py
       - tests/solve/test_joint_axis.py
+      - tests/solve/test_wealth_builder.py
+      - tests/solve/test_shim_decide.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   execution:

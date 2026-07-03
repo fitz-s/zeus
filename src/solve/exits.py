@@ -43,7 +43,7 @@ typed error and the precheck contract are provided now.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Mapping, Optional
 
 from src.solve.types import WealthStateByAtom
 
@@ -78,22 +78,42 @@ class ExitPrecheckResult:
 def build_wealth_by_atom(
     *,
     family_key: str,
-    ledger_snapshot: Any,         # CAS ledger snapshot (W1.1) — typed in the exits sub-slice
-    open_positions: Any,          # PortfolioState positions slice — typed in the exits sub-slice
     atom_ids: tuple[str, ...],
+    holdings_payout_by_atom_id: Mapping[str, float],
     spendable_cash_usd: float,
+    reservations_usd: float = 0.0,
+    ledger_snapshot_id: Optional[str] = None,
+    source_positions: tuple[str, ...] = (),
 ) -> WealthStateByAtom:
-    """Derive W_a from the ledger snapshot: open positions grouped by joint outcome atom +
-    spendable cash net of reservations/resting/unsettled.
+    """Entry-side W_a: spendable cash (already NET of reservations) + per-atom holdings payout.
 
-    Contract: W_a = cash + Σ over held claims paying in atom a (shares × payout); every atom
-    in ``atom_ids`` present; wealth strictly positive in every atom (a zero-wealth atom makes
+    Pure core with INJECTED inputs (W3.3 ruling): the caller supplies ``spendable_cash_usd`` —
+    the CAS ledger's published spendable quantity, already net of pending-order reservations —
+    and ``holdings_payout_by_atom_id`` — the payout the family's currently-held claims deliver in
+    each joint outcome atom (shares × per-atom payout; a held YES on bin b pays in atom b, a held
+    NO pays in every atom but b). This module reaches NO ledger connection itself; the seam-swap
+    packet threads the real read at the bridge, and the shim/tests inject these values directly.
+
+    Contract: ``W_a = spendable_cash + holdings_payout(a)`` for every atom in ``atom_ids`` (missing
+    → 0 payout); wealth strictly positive in every atom (a zero/negative-wealth atom makes
     log-utility undefined — surface ``ZeroWealthOutcomeError``, never a silent clamp);
     ``ledger_snapshot_id`` stamped so the wealth state ties to the ledger read it came from.
     """
-    raise NotImplementedError(
-        "W3 exits sub-slice: group open positions by joint atom from the ledger snapshot, add "
-        "spendable cash net of reservations, validate strict positivity (ZeroWealthOutcomeError)"
+    cash = float(spendable_cash_usd)
+    wealth_by_atom = {a: cash + float(holdings_payout_by_atom_id.get(a, 0.0)) for a in atom_ids}
+    nonpos = [a for a in atom_ids if not wealth_by_atom[a] > 0.0]
+    if nonpos:
+        raise ZeroWealthOutcomeError(
+            f"non-positive endowment wealth in atoms {nonpos} for family {family_key!r} "
+            f"(spendable_cash={cash}); log-utility undefined — fail closed, never clamp"
+        )
+    return WealthStateByAtom(
+        atom_ids=tuple(atom_ids),
+        wealth_by_atom=wealth_by_atom,
+        cash_usd=cash,
+        reservations_usd=float(reservations_usd),
+        ledger_snapshot_id=ledger_snapshot_id,
+        source_positions=tuple(source_positions),
     )
 
 
