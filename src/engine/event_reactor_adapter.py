@@ -3006,7 +3006,12 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
 
     def _trusted_inline_control_pause_state(state: Mapping[str, object]) -> bool:
         issued_by = str(state.get("entries_pause_issued_by") or "")
-        return issued_by in {"control_plane", "manual_command", "system_auto_pause"} or issued_by.startswith("auto:")
+        if issued_by:
+            return issued_by in {"control_plane", "manual_command", "system_auto_pause"} or issued_by.startswith("auto:")
+        reason = str(state.get("entries_pause_reason") or "")
+        if reason.startswith("external:"):
+            return reason == "external:manual_command"
+        return bool(reason)
 
     try:
         from src.state.db import get_world_connection, query_control_override_state
