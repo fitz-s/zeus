@@ -290,7 +290,26 @@ def run_c3_staleness_cancel_cycle(
     rate_budget: Any = None,
     deadline_minutes: float | None = None,
 ) -> dict[str, Any]:
-    """Scan -> resolve families -> read current q -> classify -> cancel -> confirm.
+    """Two independent classification passes over one scan, merged before cancel.
+
+    TTL pass (UNCONDITIONAL, every call): scans every open ENTRY rest with NO
+    city filter and classifies with ``q_by_family={}`` — forcing
+    ``is_stale_pending_cancel`` to INDETERMINATE for every entry, so only
+    ``rest_deadline_exceeded`` can select a command here. This is the exact
+    unconditional-per-order-age backstop the retired ``maker_rest_escalation``
+    job owned; it must never be gated on ``affected_cities`` or on whether the
+    caller has any claimed events at all, or expired rests strand during quiet
+    periods (the orphaned-GTC composition bug this split fixes).
+
+    q-version staleness pass (scoped, only when ``affected_cities``): restricts
+    to entries whose resolved family's city is in ``affected_cities`` and reads
+    live q only for those families — a source-run event is what makes staleness
+    classification meaningful; families outside it never had their q move.
+
+    The two cancel-sets are merged de-duplicated by command_id (TTL wins on
+    conflict, since it ran unconditionally) before the single
+    ``cancel_commands_batch`` call — so a command that is both past-deadline and
+    q-stale in the same tick is cancelled once, not twice.
 
     Cancels go out through ``cancel_commands_batch`` (W2.1) — never a direct
     single-order call — so cutover_guard.gate_for_intent(CANCEL) and the W2.3
@@ -298,7 +317,12 @@ def run_c3_staleness_cancel_cycle(
     A rate-budget denial DEFERS (the outcome is "not_attempted"; the command stays
     open and un-journaled) rather than dropping the intent: the next tick's fresh
     scan reclassifies the same still-open, still-stale order and retries it — there
-    is no stored "pending cancel" state to leak or lose.
+    is no stored "pending cancel" state to leak or lose. A command already
+    CANCELLED or CANCEL_PENDING from a prior/duplicate tick is likewise safe to
+    re-submit here: cancel_commands_batch skips non-requestable terminal states
+    and treats CANCEL_PENDING as eligible without re-appending CANCEL_REQUESTED,
+    so a replayed SOURCE_RUN_ARRIVED can drive this cycle again without a
+    duplicate venue side effect.
 
     Returns ``confirmed_families``: families whose cancel-set command(s) are
     RE-READ (not assumed from the in-memory batch outcome) as CANCELLED via
@@ -318,22 +342,36 @@ def run_c3_staleness_cancel_cycle(
     entries = find_open_entry_rests(trade_conn_ro)
     families_by_command = resolve_order_families(entries, trade_conn_ro, forecasts_conn_ro)
 
-    if affected_cities is not None:
-        entries = [
+    ttl_cancel_set = classify_cancel_set(
+        entries, families_by_command, {}, now=now, deadline_minutes=deadline_minutes
+    )
+
+    q_cancel_set: list[dict[str, Any]] = []
+    if affected_cities:
+        scoped_entries = [
             e
             for e in entries
             if (families_by_command.get(str(e.get("command_id") or "")) or (None,))[0]
             in affected_cities
         ]
+        q_by_family = read_current_family_q_versions(
+            forecasts_conn_ro,
+            (
+                f
+                for f in families_by_command.values()
+                if f and f[0] in affected_cities
+            ),
+        )
+        q_cancel_set = classify_cancel_set(
+            scoped_entries, families_by_command, q_by_family, now=now, deadline_minutes=deadline_minutes
+        )
 
-    q_by_family = read_current_family_q_versions(
-        forecasts_conn_ro,
-        (f for f in families_by_command.values() if f),
-    )
-
-    cancel_set = classify_cancel_set(
-        entries, families_by_command, q_by_family, now=now, deadline_minutes=deadline_minutes
-    )
+    cancel_by_command: dict[str, dict[str, Any]] = {
+        str(e["command_id"]): e for e in ttl_cancel_set
+    }
+    for e in q_cancel_set:
+        cancel_by_command.setdefault(str(e["command_id"]), e)
+    cancel_set = list(cancel_by_command.values())
 
     result: dict[str, Any] = {
         "scanned": len(entries),

@@ -410,8 +410,12 @@ class TestRunC3StalenessCancelCycle:
         _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
         client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
 
+        # q-version staleness only fires within a claimed source event's
+        # affected_cities (TestTtlEventClockSplit covers the TTL-vs-event split
+        # itself); this test is about the q-stale classification+confirm path.
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
         )
 
         assert result["cancel_set_size"] == 1
@@ -459,6 +463,7 @@ class TestRunC3StalenessCancelCycle:
 
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=_DenyingBudget(),
+            affected_cities=frozenset({FAMILY[0]}),
         )
 
         assert result["cancel_set_size"] == 1  # classified as cancel-worthy...
@@ -511,12 +516,241 @@ class TestRunC3StalenessCancelCycle:
             affected_cities=frozenset({FAMILY[0]}),
         )
 
-        assert result["scanned"] == 1
+        # scanned reflects the FULL global scan (both cities) -- affected_cities
+        # only scopes the q-version staleness pass, never the TTL pass's scan.
+        assert result["scanned"] == 2
         assert result["confirmed_families"] == {FAMILY}
-        assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city untouched
+        assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city, fresh q, not past TTL -> untouched
+
+
+class TestTtlEventClockSplit:
+    """The composition fix: TTL (rest_deadline_exceeded) is a GLOBAL,
+    UNCONDITIONAL pass over every open rest on every call, independent of
+    whether any SOURCE_RUN_ARRIVED event fired or which cities it named.
+    q-version staleness is the only pass scoped to affected_cities. Regression
+    coverage for the orphaned-GTC scheduler-composition bug: gating the TTL
+    scan behind claimed events, or filtering entries by affected_cities BEFORE
+    classification, stranded expired rests during quiet periods / in
+    non-event cities."""
+
+    def test_no_source_event_still_cancels_expired_rest(self):
+        """affected_cities=None (no SOURCE_RUN_ARRIVED claimed this tick) must
+        NOT suppress the TTL pass -- an expired rest is still cancelled."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        # No market_events/posterior seeded at all -- family is unresolvable,
+        # proving TTL fires without ANY q-version machinery available.
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW, affected_cities=None,
+        )
+
+        assert result["cancel_set_size"] == 1
+        assert client.cancel_calls == [["v1"]]
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+
+    def test_source_event_city_does_not_starve_other_city_ttl(self):
+        """A SOURCE_RUN_ARRIVED for city A must not prevent an expired rest in
+        city B (untouched by the event) from being cancelled by TTL."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        city_b = ("Toronto", "2026-07-04", "high")
+        _seed_open_entry(
+            trade_conn, command_id="c-fresh-a", token_id="tok-a", venue_order_id="v-a",
+            q_version="q-old", created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-expired-b", token_id="tok-b", venue_order_id="v-b",
+            q_version="q-b", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok-a", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-b", city=city_b[0], target_date=city_b[1], metric=city_b[2])
+        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
+        # city_b's rest is well past TTL and NOT stale on q (no posterior is even
+        # seeded for city_b -- TTL alone must carry it). Both commands land in
+        # ONE merged cancel-set, so ONE batch call carries both order IDs.
+        client = _FakeGatewayClient(
+            cancel_responses=[[{"canceled": True, "orderID": "v-a"}, {"canceled": True, "orderID": "v-b"}]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),  # event only names city A
+        )
+
+        assert result["scanned"] == 2
+        cancelled_order_ids = {oid for chunk in client.cancel_calls for oid in chunk}
+        assert cancelled_order_ids == {"v-a", "v-b"}
+        assert conn_state(trade_conn, "c-fresh-a") == "CANCELLED"  # q-stale, scoped pass
+        assert conn_state(trade_conn, "c-expired-b") == "CANCELLED"  # TTL, unscoped pass -- not starved
+
+    def test_duplicate_source_event_replay_is_idempotent_no_double_cancel(self):
+        """A replayed/duplicate SOURCE_RUN_ARRIVED driving a second
+        run_c3_staleness_cancel_cycle call over the SAME already-cancelled
+        order must not produce a duplicate venue side effect -- the second
+        pass sees the command already CANCELLED and cancel_commands_batch
+        skips it as not_requestable (no second SDK call, no second journal
+        entry, no double cancel)."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version="q-old", created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}], [None]])
+
+        first = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+        assert first["confirmed_families"] == {FAMILY}
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+
+        cancel_events_after_first = trade_conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0]
+        assert cancel_events_after_first == 1
+
+        # REPLAY: the same command is still returned by find_open_entry_rests'
+        # underlying state? No -- it is CANCELLED now, so a second identical
+        # tick's TTL/q-stale classification would not even re-select it (the
+        # scan only returns state IN ('ACKED','POST_ACKED','PARTIAL')). This
+        # proves the idempotency at the SOURCE: a duplicate SOURCE_RUN_ARRIVED
+        # driving a second cycle finds nothing left to cancel for c1.
+        second = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+        assert second["cancel_set_size"] == 0
+        assert client.cancel_calls == [["v1"]]  # the SDK was never called a second time
+        cancel_events_after_second = trade_conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0]
+        assert cancel_events_after_second == 1  # no duplicate journal entry
 
 
 def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
     return conn.execute(
         "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
     ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# main._c3_staleness_cancel_cycle: the GLUE layer itself, not just the
+# extracted run_c3_staleness_cancel_cycle function.
+#
+# The E1 BLOCKER (early return on empty claimed_ids, filtering TTL by
+# affected_cities) lived entirely in this glue, not in the pure function above
+# -- every prior test in this file called run_c3_staleness_cancel_cycle
+# directly and would stay green even if the glue silently regressed. This
+# closes that gap: it drives the real @_scheduler_job-decorated main.py
+# function end-to-end (monkeypatched dependencies only, no behavior change),
+# with the exact scenario the BLOCKER broke -- zero claimed SOURCE_RUN_ARRIVED
+# events -- and asserts the TTL-expired rest is still cancelled.
+# ---------------------------------------------------------------------------
+
+
+class TestMainC3StalenessCancelCycleGlue:
+    def test_zero_claimed_events_still_cancels_expired_rest_through_the_real_scheduler_job(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.polymarket_client as polymarket_client_module
+        import src.events.event_store as event_store_module
+        import src.execution.command_recovery as command_recovery_module
+        import src.main as main_module
+        import src.state.db as state_db
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
+
+        trade_db_path = tmp_path / "trade.db"
+        forecasts_db_path = tmp_path / "forecasts.db"
+
+        seed_trade = sqlite3.connect(str(trade_db_path))
+        seed_trade.row_factory = sqlite3.Row
+        init_schema(seed_trade)
+        _seed_open_entry(
+            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None,
+            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        seed_trade.commit()
+        seed_trade.close()
+
+        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
+        seed_forecasts.row_factory = sqlite3.Row
+        apply_canonical_schema(seed_forecasts)
+        seed_forecasts.commit()
+        seed_forecasts.close()
+
+        def _open_trade():
+            conn = sqlite3.connect(str(trade_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        def _open_forecasts():
+            conn = sqlite3.connect(str(forecasts_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        class _FakeEventStore:
+            """Zero claimed events -- the exact scenario the BLOCKER broke."""
+
+            def __init__(self, conn, *, consumer_name):
+                pass
+
+            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
+                return []
+
+            def claim(self, event_id):
+                return True
+
+            def mark_processed(self, event_id):
+                pass
+
+        class _FakeWorldConn:
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        cancel_calls: list[list[str]] = []
+
+        class _FakeGatewayClient:
+            def cancel_orders_batch(self, order_ids):
+                cancel_calls.append(list(order_ids))
+                return [{"canceled": True, "orderID": oid} for oid in order_ids]
+
+        monkeypatch.setattr(
+            main_module, "_settings_section",
+            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+        # Invalid-entry-authority lane is orthogonal to this glue proof -- stub
+        # it to a no-op so this test stays focused on the TTL/event-clock seam.
+        monkeypatch.setattr(
+            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
+        )
+        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
+        monkeypatch.setattr(event_store_module, "EventStore", _FakeEventStore)
+        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
+        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
+        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
+
+        main_module._c3_staleness_cancel_cycle()
+
+        assert cancel_calls == [["v1"]]
+        check_conn = _open_trade()
+        try:
+            assert conn_state(check_conn, "c1") == "CANCELLED"
+        finally:
+            check_conn.close()
