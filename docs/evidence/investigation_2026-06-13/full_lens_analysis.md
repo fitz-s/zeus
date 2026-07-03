@@ -556,9 +556,9 @@ The structural analysis is complete. The defect claim is factually accurate abou
 
 **Reality from settings.json:** `day0_remaining_day_q_enabled: True` AND `edli_live_scope: forecast_plus_day0`.
 
-**The real structural kill:** The shadow comparator's adapter reads `q_remaining_day` from `edli_no_submit_receipts`. That field is only written when the scope is `day0_shadow` (where `force_shadow=True` fires at line 1587). In `forecast_plus_day0` mode, `day0_lane_blocked_here=False`, so `reject_day0_lane=False`, so `force_shadow` stays False — day0-lane events run the LIVE pipeline and produce real `proof_accepted=True` receipts (or real orders), NOT `DAY0_SCOPE_SHADOW_ONLY` no-submit receipts. The shadow comparator is therefore permanently starved of shadow data in this mode — confirmed by 0 `DAY0_SCOPE_SHADOW_ONLY` receipts in the DB and 0 `q_remaining_day` values even in the 91 recent receipts.
+**The real structural kill:** The shadow comparator's adapter reads `q_remaining_day` from `edli_no_submit_receipts`. That field is only written when the scope is `retired_day0_no_submit_scope` (where `force_shadow=True` fires at line 1587). In `forecast_plus_day0` mode, `day0_lane_blocked_here=False`, so `reject_day0_lane=False`, so `force_shadow` stays False — day0-lane events run the LIVE pipeline and produce real `proof_accepted=True` receipts (or real orders), NOT `RETIRED_DAY0_NO_SUBMIT_MARKER` no-submit receipts. The shadow comparator is therefore permanently starved of shadow data in this mode — confirmed by 0 `RETIRED_DAY0_NO_SUBMIT_MARKER` receipts in the DB and 0 `q_remaining_day` values even in the 91 recent receipts.
 
-**But what does this mean for real fills?** In `forecast_plus_day0`, day0 markets are LIVE and TRADEABLE. The shadow comparator is a promotion gate designed for the `day0_shadow` phase, which already ended when the operator flipped to `forecast_plus_day0`. The comparator returning INSUFFICIENT_N is not blocking any order — it is irrelevant to the current mode. Fixing it (writing `q_remaining_day` into the no-submit receipt when `force_shadow` is False) would require a design change that is not straightforward and would serve only a retrospective analytics purpose since the mode flip already happened. No real order would move as a result.
+**But what does this mean for real fills?** In `forecast_plus_day0`, day0 markets are LIVE and TRADEABLE. The shadow comparator is a promotion gate designed for the `retired_day0_no_submit_scope` phase, which already ended when the operator flipped to `forecast_plus_day0`. The comparator returning INSUFFICIENT_N is not blocking any order — it is irrelevant to the current mode. Fixing it (writing `q_remaining_day` into the no-submit receipt when `force_shadow` is False) would require a design change that is not straightforward and would serve only a retrospective analytics purpose since the mode flip already happened. No real order would move as a result.
 
 The candidate is a DEFECT_NO_CURRENT_IMPACT: the mechanism is broken as described, but it gates a shadow-promotion phase that is already superseded. The empirical claim about the flag defaulting False is also stale (it's now True). Kill found on both (b) — the description misdescribes the root cause (it's scope, not flag) — and (d) — fixing it would not move a real fill.
 
@@ -1013,11 +1013,11 @@ I have sufficient evidence. Let me synthesize.
 
 **Summary of findings:**
 
-1. **Repro confirms:** Zero hits for `settlement_attribution|shadow_comparator|promotion_readiness` in `src/events/candidate_evaluation.py` and `src/events/reactor.py`. The defect's factual code claim is correct.
+1. **Repro confirms:** Zero hits for `settlement_attribution|retired_comparison_tool|promotion_readiness` in `src/events/candidate_evaluation.py` and `src/events/reactor.py`. The defect's factual code claim is correct.
 
 2. **The cited line 1020 "Does NOT gate or block submissions" comment does not exist** in the current file — the file is 1038 lines and line 1020 is in a CLI argparse block. The claim is stale or fabricated, but it doesn't matter because the absence of any wiring IS the defect.
 
-3. **The loop is genuinely open:** `skill_win_rate` is computed in `settlement_skill_attribution.py` and logged, but is only read back in `main.py` for a log line. `shadow_comparator` writes `state/shadow_comparator.json` and a markdown file — no consumer in `src/events/`. `promotion_readiness` is only consumed in `src/backtest/shadow_replay_harness.py`. None feed into `q_lcb` construction.
+3. **The loop is genuinely open:** `skill_win_rate` is computed in `settlement_skill_attribution.py` and logged, but is only read back in `main.py` for a log line. `retired_comparison_tool` writes `state/retired_comparison_tool.json` and a markdown file — no consumer in `src/events/`. `promotion_readiness` is only consumed in `src/backtest/shadow_replay_harness.py`. None feed into `q_lcb` construction.
 
 4. **The `capital_efficiency_lcb_ev` gate is structurally correct** (`live_admission.py:113-118`: `ev_per_dollar = (q_lcb - price) / price <= 0` → reject). It is NOT over-tight. It rejects because `q_lcb <= price`, full stop. Closing the skill/shadow loop would not change this gate's logic — it would need to move `q_lcb` itself above `price`.
 
@@ -1674,7 +1674,7 @@ The timeout hit on calibration_pairs - it's likely large. Let me use scalar quer
 
 ### Final Assistant Message
 
-This is the critical finding. The note in settings.json says `day0_remaining_day_q_enabled=true` was set assuming `edli_live_scope=day0_shadow`, but `edli_live_scope` is now `forecast_plus_day0` (day0 is LIVE). Let me verify whether `q_remaining_day` is actually written to receipts when the flag is on.
+This is the critical finding. The note in settings.json says `day0_remaining_day_q_enabled=true` was set assuming `edli_live_scope=retired_day0_no_submit_scope`, but `edli_live_scope` is now `forecast_plus_day0` (day0 is LIVE). Let me verify whether `q_remaining_day` is actually written to receipts when the flag is on.
 
 ---
 
@@ -1714,7 +1714,7 @@ The claim "decision engine completely dark — zero new certificates" is partial
 
 Now I have enough to form a complete verdict. Let me summarize what I found:
 
-1. **Repro confirmed**: Zero hits for `settlement_attribution|shadow_comparator|promotion_readiness` in `candidate_evaluation.py` and `reactor.py`. The open loop is real at the code level.
+1. **Repro confirmed**: Zero hits for `settlement_attribution|retired_comparison_tool|promotion_readiness` in `candidate_evaluation.py` and `reactor.py`. The open loop is real at the code level.
 
 2. **Line 1020 citation is fabricated/misread**: The cited "Does NOT gate or block submissions" comment does not appear at line 1020 of `settlement_skill_attribution.py`. Line 1020 is inside the argparse description string. The advisory-only language exists in calibration modules (`blocked_oos.py`, `effective_sample_size.py`) but those carry `SHADOW_ONLY: bool = True` with ZDM-02 governance, not in `settlement_skill_attribution`.
 
@@ -1980,7 +1980,7 @@ EDGE EXISTENCE + SETTLEMENT GRADING — DIFF FORENSIC ANALYSIS
 
 ANGLE SUMMARY
 
-This angle covers how Zeus grades its own edge: the seven files span the settlement truth function (graded_receipt), the skill-vs-luck classifier (settlement_skill_attribution), the shadow promotion gate (shadow_comparator), the deterministic and probabilistic promotion validators (deterministic_edge_report, promotion_readiness, live_readiness_tribunal), and the supporting benchmark scaffolding (benchmark_suite). Together they form the loop: "did we have edge? how do we prove it? when do we promote?"
+This angle covers how Zeus grades its own edge: the seven files span the settlement truth function (graded_receipt), the skill-vs-luck classifier (settlement_skill_attribution), the shadow promotion gate (retired_comparison_tool), the deterministic and probabilistic promotion validators (deterministic_edge_report, promotion_readiness, live_readiness_tribunal), and the supporting benchmark scaffolding (benchmark_suite). Together they form the loop: "did we have edge? how do we prove it? when do we promote?"
 
 ---
 
@@ -2002,7 +2002,7 @@ Live DB state (verified this session):
 
 SHADOW COMPARATOR — HONEST ABSENCE, NOT A BLOCKER
 
-src/analysis/shadow_comparator.py (created 2026-06-09): the day0_remaining_day_adapter returns shadow_q=None for all cells because q_remaining_day is not yet persisted in any edli_no_submit_receipts row. The adapter honestly surfaces this as missing_shadow. The comparator therefore returns INSUFFICIENT_N for day0_remaining_day_q, which is the correct verdict given zero shadow-lane data. The default_registry() at line 664 registers exactly one candidate, which is correct (the gate was correctly left as the only live comparator, matching e583af06cd's removal of shadow strategies). No fabrication risk.
+src/analysis/retired_comparison_tool.py (created 2026-06-09): the day0_remaining_day_adapter returns shadow_q=None for all cells because q_remaining_day is not yet persisted in any edli_no_submit_receipts row. The adapter honestly surfaces this as missing_shadow. The comparator therefore returns INSUFFICIENT_N for day0_remaining_day_q, which is the correct verdict given zero shadow-lane data. The default_registry() at line 664 registers exactly one candidate, which is correct (the gate was correctly left as the only live comparator, matching e583af06cd's removal of shadow strategies). No fabrication risk.
 
 The comparator is a cron job at 09:20 daily (main.py:9504). It does not gate live submission. It does not cause B2. The absence of a PROMOTE_SUPPORTED verdict means the day0_remaining_day_q promotion remains stalled, which is an alpha-recovery issue, not the submission blocker.
 
@@ -2016,7 +2016,7 @@ Commit b1825c4a07 (2026-06-08) removed the `selector_enabled` cache-flag gate fr
 
 e583af06cd — CONFIRMED: SHADOW MODULES REMOVED, LIVE PATH BYTE-IDENTICAL
 
-Commit e583af06cd (2026-06-13) removed six dead shadow strategy modules (exit_belief, exit_calibration_alarm, exit_policy, exit_policy_shadow, horse_race_kelly, james_stein_blend) and four flags. The commit message states "Byte-identical live path — all removed flags were config-False; shadow compute was telemetry-only." No live selection math was touched. The selection_eb EB-computation was retained with authority_on=False. This did not break the grading loop — graded_receipt, settlement_skill_attribution, shadow_comparator, and promotion_readiness are untouched in this commit. Not causally linked to B1/B2/B3 from the grading angle.
+Commit e583af06cd (2026-06-13) removed six dead shadow strategy modules (exit_belief, exit_calibration_alarm, exit_policy, exit_policy_shadow, horse_race_kelly, james_stein_blend) and four flags. The commit message states "Byte-identical live path — all removed flags were config-False; shadow compute was telemetry-only." No live selection math was touched. The selection_eb EB-computation was retained with authority_on=False. This did not break the grading loop — graded_receipt, settlement_skill_attribution, retired_comparison_tool, and promotion_readiness are untouched in this commit. Not causally linked to B1/B2/B3 from the grading angle.
 
 ---
 
@@ -2090,7 +2090,7 @@ LEAKAGE AUDIT: sigma_scale_fit.json
 
 ARTIFACT STATE
 
-The live `state/sigma_scale_fit.json` is byte-identical to `state/sigma_scale_fit.candidate.json` (same md5: `77a5d8f9eaed0095be54fa014478795e`). The artifact carries `candidate: true` and `"OPERATOR_GATED"` promotion note but was renamed to the live path, presumably by operator action on Jun 13 at 14:36 CDT (19:36 UTC). It uses authority `sigma_shape_kernel_mixture_v1_mle` (the new kernel form replacing the uniform-pedestal live form).
+The live `state/sigma_scale_fit.json` is byte-identical to `state/sigma_scale_fit.candidate.json` (same md5: `77a5d8f9eaed0095be54fa014478795e`). The artifact carries `candidate: true` and `"candidate"` promotion note but was renamed to the live path, presumably by operator action on Jun 13 at 14:36 CDT (19:36 UTC). It uses authority `sigma_shape_kernel_mixture_v1_mle` (the new kernel form replacing the uniform-pedestal live form).
 
 FIT QUERY: NO DATE FILTER — STRUCTURAL LEAKAGE RISK
 
@@ -2255,7 +2255,7 @@ benchmark_suite.py (src/strategy/benchmark_suite.py, created 2026-04-27): A fram
 
 settlement_skill_attribution.py (src/analysis/settlement_skill_attribution.py, created 2026-06-12): Grades every FILLED and VERIFIED-settled position into five categories (SKILL_WIN, LUCKY_WIN, SKILL_LOSS, MISCALIBRATED_LOSS, STALE_DECISION) by comparing the position's held-token q, the freshest settlement-eve posterior, and the Direction Law. Runs as a cron job in main.py at 09:30 UTC daily. Read-only over graded/forecast tables; sole writer of settlement_attribution table. Does NOT gate or block submissions.
 
-shadow_comparator.py (src/analysis/shadow_comparator.py, created 2026-06-09): The standing shadow-vs-live promotion comparator. Reads persisted shadow q values from edli_no_submit_receipts, pairs them with VERIFIED settlements, scores both sides with log-loss and Brier, and emits PROMOTE_SUPPORTED / LIVE_BETTER / INSUFFICIENT_N via a bootstrap CI. Advisory only. Does NOT block submissions.
+retired_comparison_tool.py (src/analysis/retired_comparison_tool.py, created 2026-06-09): The standing shadow-vs-live promotion comparator. Reads persisted shadow q values from edli_no_submit_receipts, pairs them with VERIFIED settlements, scores both sides with log-loss and Brier, and emits PROMOTE_SUPPORTED / LIVE_BETTER / INSUFFICIENT_N via a bootstrap CI. Advisory only. Does NOT block submissions.
 
 deterministic_edge_report.py (src/analysis/deterministic_edge_report.py, created 2026-05-22): Verifies deterministic strategy promotions via payoff-identity reconciliation (Clause 1) and aggregate profitability (Clause 2). Read-only advisory; never writes a tier or calls adjudicate(). Not wired into the live path.
 
@@ -2263,7 +2263,7 @@ promotion_readiness.py + live_readiness_tribunal.py (both 2026-05-21/22): Promot
 
 graded_receipt.py (src/contracts/graded_receipt.py, created 2026-06-03): The single truth function for win/loss grading. Used by all attribution and comparison files. Correct, unit-safe, BinKind-aware. Not a gate for submissions.
 
-Bottom line on coupling: none of these files gate order submission. The evidence angle is advisory infrastructure only. A BLOCK from benchmark_suite, a NOT_READY from promotion_readiness, or an INSUFFICIENT_N from shadow_comparator does not suppress an order.
+Bottom line on coupling: none of these files gate order submission. The evidence angle is advisory infrastructure only. A BLOCK from benchmark_suite, a NOT_READY from promotion_readiness, or an INSUFFICIENT_N from retired_comparison_tool does not suppress an order.
 
 ---
 
@@ -2301,13 +2301,13 @@ File: src/analysis/evidence_report.py lines 237-281.
 
 n_decisions is the count of decision_events filtered by strategy_key (and optionally source). n_settled is the count of regret_decompositions rows joined through shadow_experiments, with the join through decision_events applied ONLY when decision_events is present. The CI is computed with n_wins as the numerator and n_settled as the denominator, but n_decisions is NOT the denominator. This means the CI is win-rate-of-settled-positions, not win-rate-of-all-decisions. Unsettled decisions (pending outcomes) are excluded from the CI denominator entirely. This is a deliberate design choice (the docstring acknowledges it), but it creates a survivorship bias in the CI: if settled positions have higher EV than unsettled ones (which is common when high-conviction trades settle faster), the CI will be inflated. For promotion decisions this creates a false optimistic signal. Does not block submission; can cause premature promotion into live tiers if left unaddressed. DEFECT that kills sound +EV evaluation.
 
-Finding 2-F: shadow_comparator's fresher_existed computation mirrors the same structural defect as Finding 2-A.
+Finding 2-F: retired_comparison_tool's fresher_existed computation mirrors the same structural defect as Finding 2-A.
 
 File: src/analysis/settlement_skill_attribution.py lines 715-722 (same block). The comment on the comparison is: "A strictly-fresher cycle existed at decision iff the family's latest posterior is newer than the one the decision consumed." This logic conflates "latest overall" with "strictly next after decision" — they are the same only when there is exactly one posterior after the decision. DEFECT_NO_CURRENT_IMPACT on submission.
 
-Finding 2-G: shadow_comparator day0_remaining_day_adapter yields zero shadow cells because no q_remaining_day field is persisted.
+Finding 2-G: retired_comparison_tool day0_remaining_day_adapter yields zero shadow cells because no q_remaining_day field is persisted.
 
-File: src/analysis/shadow_comparator.py lines 522-595, comment at lines 523-527.
+File: src/analysis/retired_comparison_tool.py lines 522-595, comment at lines 523-527.
 
 The adapter's own docstring states: "HONEST ABSENCE (current state, 2026-06-09): live WORLD DB has 3,063 day0 events and ZERO remaining_day-tagged events — the shadow q is not persisted anywhere yet." This is an acknowledged gap. Shadow_comparator always returns INSUFFICIENT_N for the day0_remaining_day_q candidate. The fix (dual-persist q_remaining_day into the receipt alongside q_live) is described but not implemented. This means the shadow lane for the only registered candidate has been producing zero evidence since at least 2026-06-09 and produces no promotion signal. Does not block submission. Does mean the shadow evidence base is empty.
 
@@ -2323,7 +2323,7 @@ ABSENCES (3) vs what a sound system needs
 
 The evidence angle is notably absent these sound-system properties:
 
-1. No feedback from evidence layer to order gate. The entire edge-evaluation infrastructure (benchmark_suite, skill_attribution, shadow_comparator, promotion_readiness) is advisory-only. There is no mechanism by which a degrading skill win-rate, an INSUFFICIENT_N verdict, or a NOT_READY assessment suppresses new orders. A miscalibrated strategy continues to trade indefinitely regardless of graded evidence.
+1. No feedback from evidence layer to order gate. The entire edge-evaluation infrastructure (benchmark_suite, skill_attribution, retired_comparison_tool, promotion_readiness) is advisory-only. There is no mechanism by which a degrading skill win-rate, an INSUFFICIENT_N verdict, or a NOT_READY assessment suppresses new orders. A miscalibrated strategy continues to trade indefinitely regardless of graded evidence.
 
 2. No real-time q_live capture on fills. The edli_live_profit_audit.q_live column exists in the schema but is documented as NULL on every live row (Finding 2-B comment in settlement_skill_attribution.py line 285). The skill grader falls back to the posterior's q_in_bin instead. A sound system would persist q_live at the moment of submission so post-settlement skill attribution uses the exact belief that drove the trade.
 
@@ -2333,7 +2333,7 @@ The evidence angle is notably absent these sound-system properties:
 
 5. benchmark_suite simulated-venue lane uses constants, not real market distributions. A sound simulated-venue benchmark would use actual bid-ask data, fee schedules, and fill-probability priors derived from the venue, not global 1%-spread, 0.1%-fee phantoms.
 
-6. The shadow_comparator's only registered candidate (day0_remaining_day_q) has zero evidence cells. A standing comparator with an empty registry is not generating any signal.
+6. The retired_comparison_tool's only registered candidate (day0_remaining_day_q) has zero evidence cells. A standing comparator with an empty registry is not generating any signal.
 
 ---
 
@@ -2343,7 +2343,7 @@ src/strategy/benchmark_suite.py: STALE_REWRITE. Created 2026-04-27, last audited
 
 src/analysis/settlement_skill_attribution.py: CURRENT_REUSABLE (with caveats). Created 2026-06-12, audited 2026-06-12. Authority basis is the 06-12 operator law against lucky-win accounting and the grade_receipt spine. Logic is sound and consistent with current Direction Law. The two caveats (Findings 2-A on fresher_cycle and 2-B on q_live NULL) are acknowledged in the source. Caveats reduce accuracy of skill accounting but do not create a structural violation.
 
-src/analysis/shadow_comparator.py: CURRENT_REUSABLE (with a functional gap). Created 2026-06-09. Architecture and statistical approach are sound; one-builder law and grade_receipt spine are respected. The day0 adapter's shadow lane produces zero cells (Finding 2-G, acknowledged in the code). Structurally correct; functionally empty for its primary customer.
+src/analysis/retired_comparison_tool.py: CURRENT_REUSABLE (with a functional gap). Created 2026-06-09. Architecture and statistical approach are sound; one-builder law and grade_receipt spine are respected. The day0 adapter's shadow lane produces zero cells (Finding 2-G, acknowledged in the code). Structurally correct; functionally empty for its primary customer.
 
 src/analysis/deterministic_edge_report.py: CURRENT_REUSABLE. Created 2026-05-22. Authority basis matches §16 of the STRATEGY_TAXONOMY_DIRECTIVE which is the standing law for deterministic strategies. No magic-number issues; both clauses are structurally sound. Not wired into the live path.
 
@@ -3381,7 +3381,7 @@ The evidence is now complete. Let me assess the four kill criteria:
 
 **(c) Is the empirical claim under-powered?** No - verified with direct DB queries: 2405 receipts since 06-04, 0 with `q_remaining_day`, 0 with `q_shadow_remaining_day`, 0 with `_edli_day0_q_mode='remaining_day'` via join. The INSUFFICIENT_N is accurate.
 
-**(d) Would fixing it move a real order?** This is where the defect's impact classification matters critically. The shadow_comparator is a read-only analytics cron job at 09:20. Its `INSUFFICIENT_N` verdict is NOT read by any execution path (engine, riskguard, control, supervisor_api). The `day0_remaining_day_q_enabled` flag gates which q-computation the reactor uses (full-day vs remaining-day), NOT whether orders submit. The shadow_comparator exists to evaluate whether to PROMOTE the flag - but the flag is already ON in settings.json. So fixing the shadow_comparator's data gap would improve the analytics/evidence for a future flag change, but since the flag is already on, no order is being blocked by INSUFFICIENT_N.
+**(d) Would fixing it move a real order?** This is where the defect's impact classification matters critically. The retired_comparison_tool is a read-only analytics cron job at 09:20. Its `INSUFFICIENT_N` verdict is NOT read by any execution path (engine, riskguard, control, supervisor_api). The `day0_remaining_day_q_enabled` flag gates which q-computation the reactor uses (full-day vs remaining-day), NOT whether orders submit. The retired_comparison_tool exists to evaluate whether to PROMOTE the flag - but the flag is already ON in settings.json. So fixing the retired_comparison_tool's data gap would improve the analytics/evidence for a future flag change, but since the flag is already on, no order is being blocked by INSUFFICIENT_N.
 
 The defect is real but its impact is purely on the promotion-evidence analytics organ, not the order flow. The flag it evaluates (`day0_remaining_day_q_enabled`) is already enabled. The submission blockers (B1 ws_gap latch, B2 capital_efficiency gate) are entirely separate.
 
@@ -3405,7 +3405,7 @@ Now I have enough grounded evidence. Let me compile the findings.
 
 I have enough to classify this. Let me summarize the findings:
 
-**Repro confirmed**: zero hits of `settlement_attribution`, `shadow_comparator`, `promotion_readiness` in `candidate_evaluation.py` and `reactor.py`. The loop is genuinely open.
+**Repro confirmed**: zero hits of `settlement_attribution`, `retired_comparison_tool`, `promotion_readiness` in `candidate_evaluation.py` and `reactor.py`. The loop is genuinely open.
 
 **Key kill attempt results**:
 
@@ -4380,7 +4380,7 @@ The candidate's claimed mechanism is wrong on both the code analysis and the emp
 
 The kernel angle governs what to KEEP versus collapse. The 14.8k reactor (`event_reactor_adapter.py`) is structured as two sequential layers: Layer A (per-candidate scoring + zeroing gates) feeding Layer B (family-level decision chain). The discovery gate in `cycle_runner.py` is the outer entry guard. The dispatch filter in `dispatch.py` controls which market phases enter. DDD wiring enforces coverage preconditions.
 
-The rebuild boundary question is: how many of these gates constitute honest decisions versus redundant veto accumulation? The kcut authority (docs/operations/kcut_decision_path_collapse_2026-06-13.md) answers: 174 seams collapse to K=5. What exists is K≫5, every gate independently capable of nullifying a genuinely +EV candidate.
+The rebuild boundary question is: how many of these gates constitute honest decisions versus redundant veto accumulation? The kcut authority (docs/archive/2026-Q2/operations_historical/kcut_decision_path_collapse_2026-06-13.md) answers: 174 seams collapse to K=5. What exists is K≫5, every gate independently capable of nullifying a genuinely +EV candidate.
 
 ---
 
@@ -4456,7 +4456,7 @@ ddd_wiring.py:295-325. Paris (`DDD_EXCLUDED_WORKSTREAM_A`), HK, Istanbul, Moscow
 
 **`architecture/test_topology.yaml`** — CURRENT_REUSABLE. The trust policy (lifecycle headers) and the 2026-06-13 test registrations are current-law. The `test_selection_shrinkage_wiring.py` note explicitly documents the EB_SHRINKAGE default-False contract, confirming D1/D5 is a known test-documented state.
 
-**`docs/operations/kcut_decision_path_collapse_2026-06-13.md`** — CURRENT_REUSABLE as design authority. Written today. It is the authoritative source for the K=5 target architecture and the Stage 1 unblock prescription. Status: design-only, no code changed. This document is the correct playbook for the surgical fixes.
+**`docs/archive/2026-Q2/operations_historical/kcut_decision_path_collapse_2026-06-13.md`** — CURRENT_REUSABLE as design authority. Written today. It is the authoritative source for the K=5 target architecture and the Stage 1 unblock prescription. Status: design-only, no code changed. This document is the correct playbook for the surgical fixes.
 
 ---
 
@@ -4809,7 +4809,7 @@ DEFECT 2 — KILLS SUBMISSION on far-tail bins: q_lcb bootstrap center_sigma vs 
 
 In _build_fused_q_bounds (materializer line 1359-1441), the center draws are from N(mu*, center_sigma_c) and the integration uses predictive_sigma_c for the bin probabilities. However the bootstrap is specifically described as "CENTER-ONLY: we do NOT re-add sigma_resid here; that would double-count the residual spread already inside sigma_pred" (materializer line 1176-1178). This is architecturally sound. But the resulting q_lcb_map is then passed as-is to the DB. The fused-center bootstrap for far/longshot bins produces a 5th percentile by shifting the Gaussian center: for a bin that is only reachable when the center moves toward it, the 5th percentile of its probability across 200 draws can legitimately be near zero — because most of the 200 draws from N(mu*, center_sigma=~anchor_sigma_c≈3C) don't push mass into a bin 3-4 bins away from the mode. The clip at line 1437 `lcb = min(max(lcb, 0.0), max(q_pt, 0.0))` is fine. But the fundamental problem: far-bin q_lcb IS artificially compressed toward 0 by construction — the bootstrap is designed to produce q_lcb≈0 for bins not reachable by the center-uncertainty draws. This is not a bug per se (the comments acknowledge it), but it means that for far/longshot bins q_lcb/q_point could be extremely low even when the point q is meaningful. If the live gate requires q_lcb > ask_price, far bins will systematically fail to trade. This is correct behavior if the center uncertainty genuinely justifies it; it is a problem if the center_sigma (anchor_sigma_c≈3C) is being used as the wrong quantity. Check: if the fused posterior sd (fused.sd) is being passed as anchor_sigma_c rather than the predictive sigma, far-bin bounds may be tighter or looser than they should be. The code path is: bayes_precision_fusion_override.anchor_sigma_c (which is fused.sd per line 1132 `anchor_sigma_c=float(fused.sd)`) as center_sigma_c in _build_fused_q_bounds. fused.sd is the posterior sd of the MEAN, not the predictive spread; this is intentional per the comment "we do NOT re-add sigma_resid". No defect here per the spec, but the far-bin compression is structural and intentional.
 
-DEFECT 3 — KILLS SUBMISSION: The default replacement_q_mode at line 1503 is BAYES_PRECISION_FUSION_CAPTURE_MISSING, which is NOT live-eligible. The code only upgrades this to FUSED_NORMAL_FULL/PARTIAL if BOTH the BPF override is present AND replacement_0_1_fused_q_shape_enabled flag is True. If that flag is off (default False per line 601), all rows that DO have a BPF override stay as SOFT_ANCHOR_FALLBACK (line 1533). Only a non-None bayes_precision_fusion_override causes the mode to be set to SOFT_ANCHOR_FALLBACK (line 1533), and SOFT_ANCHOR_FALLBACK is also not live-eligible per "FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit" (materializer line 1789). So if replacement_0_1_fused_q_shape_enabled=False, NO replacement forecast row is ever live-eligible, regardless of how good the fusion is. This is a known flag-gate, not accidental dead code. But it confirms: if the flag is currently false in settings, the replacement path writes zero live-eligible rows. This KILLS SUBMISSION on the replacement chain.
+DEFECT 3 — KILLS SUBMISSION: The default replacement_q_mode at line 1503 is BAYES_PRECISION_FUSION_CAPTURE_MISSING, which is NOT live-eligible. The code only upgrades this to FUSED_NORMAL_FULL/PARTIAL if BOTH the BPF override is present AND replacement_0_1_fused_q_shape_enabled flag is True. If that flag is off (default False per line 601), rows with a BPF override stay in the fused-center-only no-live mode. That mode is also not live-eligible per "FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit" (materializer line 1789). So if replacement_0_1_fused_q_shape_enabled=False, NO replacement forecast row is ever live-eligible, regardless of how good the fusion is. This is a known flag-gate, not accidental dead code. But it confirms: if the flag is currently false in settings, the replacement path writes zero live-eligible rows. This KILLS SUBMISSION on the replacement chain.
 
 File/line: materializer line 585-603 (`_replacement_fused_q_shape_enabled()`), line 1537-1538, line 1789-1805. Whether this flag is live-set is a DB/config question outside these files.
 
@@ -5914,7 +5914,7 @@ Stage 2 — Opportunity events (BOOK_SNAPSHOT, FORECAST_SNAPSHOT_READY, DAY0_EXT
 ALIVE but not progressing to decisions. 6,477,614 total opportunity_events. The reactor consumes them as:
 - BOOK_SNAPSHOT: 29,594 "ignored" + 2,112 "pending" + 78 "expired" since 06-13T20 — zero "processed". BOOK_SNAPSHOT events are superseded by the coalescer (`ignore_channel_cache_events` in `src/events/event_store.py:559`) before the reactor claims them. This is expected — BOOK_SNAPSHOTs are not the primary decision trigger.
 - FORECAST_SNAPSHOT_READY (FSR): last "processed" = 2026-06-12T17:05:56 (1 row). After that: ALL expire without processing. 477,931 expired, 284,318 processed (all pre-06-12T17), 14,038 dead_letter (up to 06-12T04:47), 231 pending right now.
-- DAY0_EXTREME_UPDATED: 421 processed since 06-13T20, latest 06-14T04:31. Day0 lane is live but shadow-only (DAY0_SCOPE_SHADOW_ONLY — no orders from this path).
+- DAY0_EXTREME_UPDATED: 421 processed since 06-13T20, latest 06-14T04:31. Day0 lane is live but shadow-only (RETIRED_DAY0_NO_SUBMIT_MARKER — no orders from this path).
 SQL for FSR: `SELECT processing_status, COUNT(*), MAX(updated_at) FROM opportunity_event_processing WHERE event_id IN (SELECT event_id FROM opportunity_events WHERE event_type='FORECAST_SNAPSHOT_READY') GROUP BY processing_status` on zeus-world.db.
 
 Stage 3 — edli_no_submit_receipts (decision evaluations)
@@ -6514,4 +6514,3 @@ The one decisive unverified check — and the explicit answer to the operator's 
 [No assistant messages found]
 
 ---
-

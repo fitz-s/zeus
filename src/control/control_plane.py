@@ -18,6 +18,7 @@ from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
     get_world_connection,
+    get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
 )
@@ -39,7 +40,7 @@ TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 # G6 antibody (2026-04-26): typed boot/catalog allowlist of strategies that
 # may be enabled when the live-only daemon starts. Post-A4 (PLAN.md §A4 +
 # Bug review §E) this is derived from the StrategyProfile registry —
-# strategies with live_status in {"live", "shadow"}. The pre-A4 hardcoded
+# strategies with live_status == "live". The pre-A4 hardcoded
 # frozenset diverged from _LIVE_ALLOWED_STRATEGIES (shoulder_sell was in
 # LIVE_SAFE but not _LIVE_ALLOWED); resolving the divergence in a single
 # source is the §A4 cutover invariant.
@@ -191,22 +192,6 @@ def alert_auto_pause(reason_code: str) -> None:
     )
 
 
-def _auto_pause_tombstone_path():
-    return state_path("auto_pause_failclosed.tombstone")
-
-
-def _clear_auto_pause_tombstone() -> None:
-    """Clear the fail-closed tombstone after an explicit operator resume."""
-    import os
-    try:
-        os.remove(_auto_pause_tombstone_path())
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.error("Failed to clear auto-pause tombstone on resume: %s", exc)
-
-
-
 AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
 
 
@@ -331,7 +316,7 @@ def pause_entries(
     # Persist so a daemon restart does not silently lose the pause.
     try:
         conn = get_world_connection()
-        # PRECEDENCE-1 (2026-05-18): refuse to shadow an indefinite operator freeze.
+        # PRECEDENCE-1 (2026-05-18): refuse to weaken an indefinite operator freeze.
         # Only system_auto_pause callers honor this; operator/control_plane callers
         # come through _apply_command, not here, so operator authority is absolute.
         if issued_by == "system_auto_pause" and _has_active_control_plane_override(conn, now_iso=now_iso):
@@ -407,7 +392,6 @@ def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
         )
-        _clear_auto_pause_tombstone()
         expire_control_override(
             conn,
             override_id="control_plane:global:edge_threshold_multiplier",
@@ -528,7 +512,7 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_world_connection()
+        conn = get_world_connection_with_trades_required()
         durable_state = query_control_override_state(conn)
         _refresh_live_allowed_strategy_cache(conn)
     except Exception:
@@ -647,7 +631,6 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 override_id="control_plane:global:entries_paused",
                 expired_at=issued_at,
             )
-            _clear_auto_pause_tombstone()
             expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",

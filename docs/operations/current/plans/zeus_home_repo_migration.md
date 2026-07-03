@@ -408,8 +408,8 @@ cutover:
 - `docs/runbooks/live-operation.md`
 - `docs/runbooks/forecast-live-daemon.md`
 - `docs/runbooks/live-phase-1-first-boot.md`
-- `docs/operations/com.zeus.d7-bias.plist`
-- `docs/operations/PLIST_UPDATE_FOR_RELOCK.md`
+- `docs/archive/2026-Q2/operations_historical/com.zeus.d7-bias.plist`
+- `docs/archive/2026-Q2/operations_historical/PLIST_UPDATE_FOR_RELOCK.md`
 - `docs/operations/current_state.md`
 - `docs/operations/current/task.md`
 - `docs/operations/current/package.yaml`
@@ -430,7 +430,6 @@ The local clone should bring:
 - `config/settings.example.json`
 - `state/.gitkeep`
 - `state/README.md`
-- `state/topology_v_next_shadow/.gitkeep`
 
 ### Copy Manually And Intentionally
 
@@ -766,8 +765,7 @@ Manual evidence to inspect:
 - heartbeats advance under `/Users/leofitz/zeus/state`
 - logs write under `/Users/leofitz/zeus/logs`
 - DB writes, if expected, occur in `/Users/leofitz/zeus/state`
-- `real_order_submit_enabled` remains false unless a separate live-arm plan is
-  explicitly approved
+- `real_order_submit_enabled` remains false until live-arm plan is complete
 - no duplicate writers
 - riskguard healthy
 - source freshness not assumed from stale docs
@@ -878,7 +876,7 @@ Post-rollback evidence:
 - old checkout logs advance
 - old checkout heartbeats advance
 - no new checkout writers remain
-- `real_order_submit_enabled` still false unless separately authorized
+- `real_order_submit_enabled` still false until live-arm plan complete
 
 ## Risks And Mitigations
 

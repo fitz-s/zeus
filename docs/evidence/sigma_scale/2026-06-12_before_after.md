@@ -1,6 +1,6 @@
 # σ Scale k=2.4 Before/After Evidence Table
 **Generated:** 2026-06-12T13:40Z
-**Authority:** docs/operations/c3_sigma_calibration_surface_2026-06-12.md
+**Authority:** docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md
 **Proposed k:** 2.4 (C-unit cities only; F cities unchanged)
 **Source:** freshest fused_normal_direct posterior per C-unit family, next 2 target dates
 
@@ -89,4 +89,4 @@ market snapshot — see executable_market_snapshots when populated.
 
 ---
 
-*Read-only script: docs/operations/c3_sigma_calibration_surface_2026-06-12.md. No code modified.*
+*Read-only script: docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md. No code modified.*

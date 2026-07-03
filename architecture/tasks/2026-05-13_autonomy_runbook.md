@@ -1,5 +1,7 @@
 # Zeus Autonomy Runbook — 2026-05-13 / Active Mission
 
+Status: ARCHIVED_REFERENCE
+
 Created: 2026-05-13
 Last reused or audited: 2026-05-13
 Authority basis: User directive "好好plan一个task.md作为autonomy运行指南" — operator wants the AI loop to drive itself through the queued work without per-step approvals.

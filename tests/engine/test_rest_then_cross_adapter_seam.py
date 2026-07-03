@@ -1,21 +1,20 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-21 (GAP-4 escalation-cross re-rest race fix:
-#   added TestEscalationCrossRerestRace — a post-escalation serial re-rest must
+# Last reused or audited: 2026-06-21 (GAP-4 rest-then-cross re-rest race fix:
+#   added TestRestThenCrossRerestRace — a post-escalation serial re-rest must
 #   not shadow the armed cross; double-submit safety preserved via the executor
 #   dedup backstop)
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
-#   + docs/evidence/live_order_pathology/2026-06-21_escalation_cross_fix.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
+#   + live_order_pathology GAP-4 rest-then-cross re-rest evidence
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 
 Pins the two seams the policy crosses:
 1. _family_rest_state: the venue-truth derivation of the antibody input
    (unexpired rest blocks ANY new order) and the escalation license
    (cancelled-unfilled >= deadline -> TAKER_ESCALATED_AFTER_REST lawful).
-2. _select_edli_order_mode leg 3: the fresh-mode witness is SUBORDINATED to the
-   proof's policy — a REST proof rests regardless of any fresh-book EV
-   preference for crossing; only TAKER_* policies witness TAKER. A legacy proof
-   (no policy field) witnesses MAKER (fail-closed migration: in-flight legacy
-   TAKER proofs abort MODE_FLIPPED once and re-rank under the policy).
+2. _select_edli_order_mode leg 3: the legacy helper witnesses the proof's
+   policy mode. The current final-submit path validates through
+   _fresh_rest_then_cross_mode and aborts for a full re-rank instead of
+   inline-flipping a proven command when fresh policy math changes.
 """
 
 import sqlite3
@@ -150,6 +149,26 @@ class TestFamilyRestState:
             False,
         )
 
+    def test_cancelled_command_with_stale_live_fact_does_not_hold(self):
+        """A terminal command row outranks a stale latest venue LIVE fact.
+
+        Live DB recovery can contain command_state=CANCELLED while the newest
+        venue_order_facts row is still an older LIVE/PARTIALLY_MATCHED snapshot.
+        The stale fact must not resurrect an active family rest after restart.
+        """
+        conn = _db()
+        created = NOW - timedelta(minutes=30)
+        _add(
+            conn,
+            created_at=created,
+            command_state="CANCELLED",
+            facts=[("LIVE", "0", created + timedelta(seconds=5))],
+        )
+        assert adapter._family_rest_state(conn, family=_family(), decision_time=NOW) == (
+            False,
+            False,
+        )
+
     def test_screen_pulled_unfilled_rest_between_floor_and_deadline_escalates(self):
         """RED-ON-REVERT (conversion death-line, 2026-06-20). The live break: the
         continuous-redecision SCREEN cancels most rests at 5-20 min (CONFIRMED_VALUE
@@ -219,7 +238,7 @@ class TestFamilyRestState:
         )
 
 
-class TestEscalationCrossRerestRace:
+class TestRestThenCrossRerestRace:
     """GAP 4 ROOT FIX (2026-06-21): a just-posted re-rest must NOT shadow an
     armed escalation from a PRIOR cancelled-unfilled rest of the SAME family.
 

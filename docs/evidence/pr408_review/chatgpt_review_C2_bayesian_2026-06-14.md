@@ -5,7 +5,7 @@ Confidence: high for the blocking code-path findings, with the usual caveat that
 The two most important blockers are:
 
 K3’s intended status semantics are contradicted downstream. settlement_backward_coverage.py says INSUFFICIENT_DATA must license-by-default and UNLICENSED blocks proven overconfidence; live_admission.py and the adapter credential instead license LICENSED + UNLICENSED and reject INSUFFICIENT_DATA. That inverts the rebuild’s operator intent.
-Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/settlement_backward_coverage.py L2-L7, L18-L28; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/live_inference/live_admission.py L3-L5, L15-L18; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L650-L664. 
+Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/settlement_backward_coverage.py L2-L7, L18-L28; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/live_inference/live_admission.py L3-L5, L15-L18; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L650-L664.
 GitHub
 +3
 GitHub
@@ -14,7 +14,7 @@ GitHub
 +3
 
 A live one-sided q_lcb market-anchor cap is enabled in production settings. The settings file admits it “only lowers q_lcb” and “can never create a trade,” while real_order_submit_enabled and operator authorization are true. That is a direct Law 3 violation: it is a new one-sided cap/gate that can only kill trades.
-Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/config/settings.json L18-L28, L24-L27. 
+Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/config/settings.json L18-L28, L24-L27.
 GitHub
 
 I would not merge until the CRITICAL/HIGH items below are fixed and regression-tested.
@@ -31,7 +31,7 @@ src/calibration/settlement_backward_coverage.py::arm_gate_coverage_blocks, settl
 src/strategy/live_inference/live_admission.py::SETTLEMENT_COVERAGE_LICENSING_STATUSES, live_buy_no_conservative_evidence_rejection_reason — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/live_inference/live_admission.py L3-L5, L15-L18
 src/engine/event_reactor_adapter.py::_replacement_calibration_payload_from_credential — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L650-L664
 
-Evidence: The K3 module explicitly says INSUFFICIENT_DATA is licensed-by-default, does not shrink, and does not ARM-block; only UNLICENSED is proven overconfidence and blocks. But live_admission.py defines SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"}), and both buy-NO admission and the replacement credential use that set. Comments in the adapter still describe the old rule: INSUFFICIENT_DATA / coverage-ratio missing is rejected, and UNLICENSED licenses the credential. 
+Evidence: The K3 module explicitly says INSUFFICIENT_DATA is licensed-by-default, does not shrink, and does not ARM-block; only UNLICENSED is proven overconfidence and blocks. But live_admission.py defines SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"}), and both buy-NO admission and the replacement credential use that set. Comments in the adapter still describe the old rule: INSUFFICIENT_DATA / coverage-ratio missing is rejected, and UNLICENSED licenses the credential.
 GitHub
 +3
 GitHub
@@ -70,7 +70,7 @@ Location:
 config/settings.json::edli.replacement_q_market_anchor_enabled — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/config/settings.json L24-L28
 src/engine/event_reactor_adapter.py::_replacement_q_market_anchor_enabled — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L660-L667
 
-Evidence: Settings have real_order_submit_enabled: true, edli_live_operator_authorized: true, and replacement_q_market_anchor_enabled: true. The note says the cap is “ONE-SIDED,” “only lowers q_lcb,” and “can never create a trade.” 
+Evidence: Settings have real_order_submit_enabled: true, edli_live_operator_authorized: true, and replacement_q_market_anchor_enabled: true. The note says the cap is “ONE-SIDED,” “only lowers q_lcb,” and “can never create a trade.”
 GitHub
 
 Impact: This is exactly the forbidden shape under Operator Law 3. It can only suppress trades and cannot improve the calibrated probability object; it also risks hiding model errors behind market deference instead of making q/q_lcb honest at the calibration seam. The settings note says to flip only after forward fills license it, yet the flag is already true.
@@ -88,7 +88,7 @@ Dimension: calibration honesty/leakage; law-8 metadata; runtime correctness/regr
 Location:
 src/engine/event_reactor_adapter.py::_per_day_claimed_qlcb_by_date, _settlement_coverage_observations, _maybe_apply_settlement_coverage_to_lcb — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L873-L886, L888-L894
 
-Evidence: _per_day_claimed_qlcb_by_date reads all edli_no_submit_receipts for a direction, orders by created_at, but ignores created_at after fetching. It keeps the last receipt per target_date with no decision_time cutoff. _settlement_coverage_observations reads all verified settlement_outcomes for the city/metric with no cutoff by current target date or decision time. The helper comments explicitly say any error/unavailable history returns an empty dict/list, which becomes INSUFFICIENT_DATA and now should be non-blocking. 
+Evidence: _per_day_claimed_qlcb_by_date reads all edli_no_submit_receipts for a direction, orders by created_at, but ignores created_at after fetching. It keeps the last receipt per target_date with no decision_time cutoff. _settlement_coverage_observations reads all verified settlement_outcomes for the city/metric with no cutoff by current target date or decision time. The helper comments explicitly say any error/unavailable history returns an empty dict/list, which becomes INSUFFICIENT_DATA and now should be non-blocking.
 GitHub
 
 Impact: In live current time this may often read only past facts, but in historical replay, backtests, promotion evidence, or daemon reruns it can leak future receipts and future verified outcomes into an earlier decision’s licensing. Worse, schema/DB/read errors are indistinguishable from true thin data: a structural authority fault can collapse into INSUFFICIENT_DATA and license-by-default. That is not “fail-closed”; it is fail-open disguised as thin history.
@@ -119,7 +119,7 @@ Dimension: law-8 metadata; calibration honesty/leakage
 Location:
 src/engine/event_reactor_adapter.py::_coverage_band_template, _per_day_claimed_qlcb_by_date — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L873-L881
 
-Evidence: The per-day q_lcb history is matched by stripping a trailing English " on Month day?" pattern from bin_label and comparing the resulting text. It does not use bin kind, low/high boundary, unit, condition/event identity, settlement station, or canonical market support identity. 
+Evidence: The per-day q_lcb history is matched by stripping a trailing English " on Month day?" pattern from bin_label and comparing the resulting text. It does not use bin kind, low/high boundary, unit, condition/event identity, settlement station, or canonical market support identity.
 GitHub
 
 Impact: This violates the spirit of Law 8. Any label wording drift, non-English month, year inclusion, punctuation change, city spelling change, or bin-label reuse can silently split or merge calibration cohorts. Because this is a settlement-coverage licensing input, wrong band identity makes downstream q_lcb shrink/license decisions confidently wrong.
@@ -151,7 +151,7 @@ src/calibration/emos.py::emos_mu_offset — https://raw.githubusercontent.com/fi
 scripts/fit_emos_mu_offset.py::gate_cell — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/fit_emos_mu_offset.py L13-L16
 src/calibration/emos_q_builder.py::build_emos_q — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/emos_q_builder.py L9-L14
 
-Evidence: The docs say the fitter only activates cold cells and offset_c < 0 so mu_corr = mu* - offset_c warms the center. But the fitter’s activation condition checks mean_res < -0.5, OOS residual/CRPS improvement, and abs(res_after) < abs(res_before); it does not require the stored all-history offset = median(res_all) to be negative, nor does it require walk-forward deltas to be negative. The loader returns any finite offset_c for an activated cell. The q builder blindly applies mu_c = mu_c - offset. 
+Evidence: The docs say the fitter only activates cold cells and offset_c < 0 so mu_corr = mu* - offset_c warms the center. But the fitter’s activation condition checks mean_res < -0.5, OOS residual/CRPS improvement, and abs(res_after) < abs(res_before); it does not require the stored all-history offset = median(res_all) to be negative, nor does it require walk-forward deltas to be negative. The loader returns any finite offset_c for an activated cell. The q builder blindly applies mu_c = mu_c - offset.
 GitHub
 +4
 GitHub
@@ -199,7 +199,7 @@ Location:
 src/engine/event_reactor_adapter.py::_maybe_apply_emos_ci_lcb_override — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/engine/event_reactor_adapter.py L864-L872
 src/strategy/probability_uncertainty.py::no_side_samples — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/probability_uncertainty.py L0-L13
 
-Evidence: The EMOS-CI override computes an analytic YES q_lcb, then states “Buy-NO requires an explicit NO-side posterior/LCB, not a YES complement” and sets emos_q_lcb_no = 0.0, writing that as EMOS_ANALYTIC provenance for buy-NO keys. But the probability uncertainty contract says native NO is not an independent forecast; it is the per-sample YES complement, and the correct NO lower bound is lower_quantile(1 - q_yes_samples) / 1 - upper_quantile(q_yes_samples). 
+Evidence: The EMOS-CI override computes an analytic YES q_lcb, then states “Buy-NO requires an explicit NO-side posterior/LCB, not a YES complement” and sets emos_q_lcb_no = 0.0, writing that as EMOS_ANALYTIC provenance for buy-NO keys. But the probability uncertainty contract says native NO is not an independent forecast; it is the per-sample YES complement, and the correct NO lower bound is lower_quantile(1 - q_yes_samples) / 1 - upper_quantile(q_yes_samples).
 GitHub
 +1
 
@@ -228,7 +228,7 @@ Location:
 src/strategy/market_analysis.py::find_edges_with_trace — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/market_analysis.py L37-L44
 src/strategy/probability_uncertainty.py::no_side_samples — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/probability_uncertainty.py L0-L13
 
-Evidence: If native buy-NO quotes exist, MarketAnalysis emits a trace decision buy_no_independent_no_posterior_missing and continues before the direction-law/modal-bin logic can build a non-modal buy-NO. The code below then sets p_model_no = 0.0 and p_post_no = 0.0, so even if reached it cannot emit a NO edge. This contradicts the canonical probability contract: NO is the sample-level YES complement, not an independent model. 
+Evidence: If native buy-NO quotes exist, MarketAnalysis emits a trace decision buy_no_independent_no_posterior_missing and continues before the direction-law/modal-bin logic can build a non-modal buy-NO. The code below then sets p_model_no = 0.0 and p_post_no = 0.0, so even if reached it cannot emit a NO edge. This contradicts the canonical probability contract: NO is the sample-level YES complement, not an independent model.
 GitHub
 +1
 
@@ -252,7 +252,7 @@ Dimension: gate-discipline/K-cut; settlement/position truth; test adequacy
 Location:
 src/strategy/post_peak_harvester.py — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/post_peak_harvester.py L0-L12
 
-Evidence: The module is justified by a named 2026-06-13 London fill, says the “paranoid guard” separated London from Paris/Munich, uses fixed thresholds (NEAR_IMPOSSIBLE_P_MAX = 0.05, PARANOID_FREE_RISE = 1.0, PARANOID_SIGMA_MULT = 2.0), and clamps fractional Kelly sizing into a $25-$40 envelope. It says it is only a scanner and does not submit orders, but also says the operator’s separate verified execution path consumes it. 
+Evidence: The module is justified by a named 2026-06-13 London fill, says the “paranoid guard” separated London from Paris/Munich, uses fixed thresholds (NEAR_IMPOSSIBLE_P_MAX = 0.05, PARANOID_FREE_RISE = 1.0, PARANOID_SIGMA_MULT = 2.0), and clamps fractional Kelly sizing into a $25-$40 envelope. It says it is only a scanner and does not submit orders, but also says the operator’s separate verified execution path consumes it.
 GitHub
 
 Impact: This is exactly the shape of “a fix just to fill one order” unless it is strictly shadow/read-only and settlement-graded forward. The fixed size envelope is a cap. The opportunity condition leans on near-certain NO/favorite economics, so base-rate favorite buying must be proven after cost, not inferred from high win probability.
@@ -266,7 +266,7 @@ Location:
 scripts/fit_emos_mu_offset.py::to_c, _SETTLE_SQL — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/fit_emos_mu_offset.py L12-L13
 scripts/fit_anchor_representativeness_debias.py::_settlement_to_celsius, _gather_residuals — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/fit_anchor_representativeness_debias.py L9-L11
 
-Evidence: The EMOS fitter’s settlement query requires settlement_value IS NOT NULL but not settlement_unit IS NOT NULL; to_c() treats null/unknown units as already Celsius. The anchor debias fitter has the same pattern: only "F" converts; everything else becomes float(value) in °C. 
+Evidence: The EMOS fitter’s settlement query requires settlement_value IS NOT NULL but not settlement_unit IS NOT NULL; to_c() treats null/unknown units as already Celsius. The anchor debias fitter has the same pattern: only "F" converts; everything else becomes float(value) in °C.
 GitHub
 +1
 
@@ -280,7 +280,7 @@ Dimension: calibration honesty/leakage; test adequacy
 Location:
 scripts/sigma_kernel_holdout_replay.py — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/sigma_kernel_holdout_replay.py L0-L23
 
-Evidence: The script is described as temporal holdout, but it computes realized-by-distance statistics from the candidate/test set and then uses that realized frequency as a market-free NO price proxy for replaying trades on the same test rows. 
+Evidence: The script is described as temporal holdout, but it computes realized-by-distance statistics from the candidate/test set and then uses that realized frequency as a market-free NO price proxy for replaying trades on the same test rows.
 GitHub
 
 Impact: It is acceptable as a diagnostic but not as live promotion evidence. It leaks held-out outcomes into the acceptance economics, which can overstate the stability of sigma-shape improvements.
@@ -295,7 +295,7 @@ src/engine/event_reactor_adapter.py::_maybe_bias_decay_kelly_haircut — https:/
 config/settings.json::bias_decay_kelly_haircut_enabled — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/config/settings.json L18-L23
 src/strategy/shoulder_cluster_cap.py — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/strategy/shoulder_cluster_cap.py L0-L8
 
-Evidence: Bias-decay is enabled and halves Kelly on missing/high bias rows. The shoulder cluster module removed the notional cap but keeps a hard cross-city same-direction refusal gate. 
+Evidence: Bias-decay is enabled and halves Kelly on missing/high bias rows. The shoulder cluster module removed the notional cap but keeps a hard cross-city same-direction refusal gate.
 GitHub
 +2
 GitHub
@@ -313,7 +313,7 @@ architecture/script_manifest.yaml — https://raw.githubusercontent.com/fitz-s/z
 architecture/test_topology.yaml — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/architecture/test_topology.yaml
 scripts/fit_emos_mu_offset.py — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/fit_emos_mu_offset.py
 
-Evidence: The EMOS μ-offset fitter writes state/emos_mu_offset.json, and the live q seam consumes that artifact, but fit_emos_mu_offset, probe_emos_mu_correction_D4, and scan_emos_mu_residual_all_cities are absent from script_manifest.yaml; emos_mu_offset is absent from test_topology.yaml. 
+Evidence: The EMOS μ-offset fitter writes state/emos_mu_offset.json, and the live q seam consumes that artifact, but fit_emos_mu_offset, probe_emos_mu_correction_D4, and scan_emos_mu_residual_all_cities are absent from script_manifest.yaml; emos_mu_offset is absent from test_topology.yaml.
 GitHub
 +4
 GitHub
@@ -333,7 +333,7 @@ config/settings.example.json — https://raw.githubusercontent.com/fitz-s/zeus/e
 src/config.py — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/config.py
 config/settings.json — https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/config/settings.json
 
-Evidence: The live settings file has a large edli block with live-money flags, but the example is sparse and src/config.py does not appear to enforce edli as a required top-level contract. 
+Evidence: The live settings file has a large edli block with live-money flags, but the example is sparse and src/config.py does not appear to enforce edli as a required top-level contract.
 GitHub
 +2
 GitHub
@@ -366,7 +366,7 @@ It treats INSUFFICIENT_DATA as no-shrink/no-block.
 
 grade_receipt is the intended direction-law truth source.
 
-Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/settlement_backward_coverage.py L0-L7, L15-L28. 
+Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/settlement_backward_coverage.py L0-L7, L15-L28.
 GitHub
 
 But the integration is not honest yet:
@@ -385,7 +385,7 @@ Claude Code should treat K3 as not mergeable until those are corrected.
 
 EMOS μ-offset assessment
 
-The intended sign in build_emos_q is correct if and only if offset_c < 0: mu_corr = mu* - offset_c warms a cold EMOS center. The no-artifact/no-cell behavior is fail-closed in the sense that it leaves today’s center unchanged. Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/emos_q_builder.py L9-L14 and https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/emos.py L22-L30. 
+The intended sign in build_emos_q is correct if and only if offset_c < 0: mu_corr = mu* - offset_c warms a cold EMOS center. The no-artifact/no-cell behavior is fail-closed in the sense that it leaves today’s center unchanged. Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/emos_q_builder.py L9-L14 and https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/calibration/emos.py L22-L30.
 GitHub
 +1
 
@@ -403,7 +403,7 @@ This is fixable, but it should not be merged as a live-affecting artifact path u
 
 INV-37 assessment
 
-I did not find a clear cross-DB write violation in the files I could read. The concerning K3 path performs cross-DB reads: receipts from zeus-world.db and settlements from zeus-forecasts.db; INV-37 is specifically about cross-DB writes. day0_shadow_enrichment.py appears to use a single connection/attach-style pattern for enrichment work, and the architecture registry says forecast/trade/world split writes are expected to use the declared attach/savepoint helpers. Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/architecture/db_table_ownership.yaml L7-L20, L38-L40; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/analysis/day0_shadow_enrichment.py. 
+I did not find a clear cross-DB write violation in the files I could read. The concerning K3 path performs cross-DB reads: receipts from zeus-world.db and settlements from zeus-forecasts.db; INV-37 is specifically about cross-DB writes. retired_day0_no_submit_enrichment.py appears to use a single connection/attach-style pattern for enrichment work, and the architecture registry says forecast/trade/world split writes are expected to use the declared attach/savepoint helpers. Evidence: https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/architecture/db_table_ownership.yaml L7-L20, L38-L40; https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/analysis/retired_day0_no_submit_enrichment.py.
 GitHub
 +1
 
@@ -531,7 +531,7 @@ scripts/sigma_kernel_holdout_replay.py — read; held-out price-proxy leakage. h
 
 scripts/zeus_status.py — read; no money-path finding. https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/scripts/zeus_status.py
 
-src/analysis/day0_shadow_enrichment.py — read; no blocking finding. https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/analysis/day0_shadow_enrichment.py
+src/analysis/retired_day0_no_submit_enrichment.py — read; no blocking finding. https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/analysis/retired_day0_no_submit_enrichment.py
 
 src/analysis/deterministic_edge_report.py — read; no blocking finding. https://raw.githubusercontent.com/fitz-s/zeus/ef421f1fd0/src/analysis/deterministic_edge_report.py
 

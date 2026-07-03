@@ -456,7 +456,7 @@ def _contract_evidence_fields(
     *,
     source_id: str | None,
 ) -> dict[str, Any]:
-    """Build shadow contract/bin/window evidence columns for a snapshot row.
+    """Build audit contract/bin/window evidence columns for a snapshot row.
 
     These fields are evidence only. They do not change ``training_allowed`` and
     therefore cannot relax LOW Law 1 by themselves.
@@ -633,7 +633,7 @@ def ingest_json_file(
     # any payload missing the field must be rejected, not silently accepted as OK.
     # Pre-Phase-5B high-track JSON that lacks causality must be quarantined or
     # re-extracted through extract_tigge_mx2t6_localday_max (which now emits the
-    # field) before re-ingest; silent-default would let RUNTIME_ONLY_FALLBACK or
+    # field) before re-ingest; silent-default would let ISSUE_TIME_MISSING or
     # N/A_CAUSAL_DAY_ALREADY_STARTED rows masquerade as clean training data.
     contract_payload = dict(payload)
     contract_payload.setdefault("temperature_metric", metric.temperature_metric)

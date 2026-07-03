@@ -314,86 +314,6 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     )
 
 
-def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_path, monkeypatch):
-    db_path = tmp_path / "shadow-signal-fallback.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    init_schema_forecasts(conn)  # B3: forecast-class tables
-    conn.execute(
-        """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
-        VALUES ('Dallas', '2026-04-05', '41-42°F', 42.0, 'high')
-        """
-    )
-    _mark_settlements_verified(conn)
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
-         temperature_metric, physical_quantity, observation_field)
-        VALUES (51, 'Dallas', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
-                '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0,
-                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1', 'high',
-                'mx2t6_local_calendar_day_max', 'high_temp')
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value,
-         temperature_metric, observation_field, dataset_id, decision_group_id)
-        VALUES
-        ('Dallas', '2026-04-05', '39-40°F', 0.1, 0, 1.0, 'MAM', 'Dallas',
-         '2026-04-04T08:00:00Z', 42.0, 'high', 'high_temp', 'tigge_v1', 'dg-dallas-1'),
-        ('Dallas', '2026-04-05', '41-42°F', 0.9, 1, 1.0, 'MAM', 'Dallas',
-         '2026-04-04T08:00:00Z', 42.0, 'high', 'high_temp', 'tigge_v1', 'dg-dallas-2')
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO shadow_signals
-        (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
-        VALUES ('Dallas', '2026-04-05', '2026-04-04T10:00:00+00:00', '51',
-                '[0.1, 0.9]', '[0.15, 0.85]',
-                '[{\"bin_label\":\"39-40°F\"},{\"bin_label\":\"41-42°F\"}]',
-                14.0)
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    import src.engine.replay as replay_module
-    import src.state.db as db_module
-
-    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
-
-    summary = run_replay(
-        "2026-04-05",
-        "2026-04-05",
-        mode="audit",
-        allow_snapshot_only_reference=True,
-    )
-
-    assert summary.n_replayed == 1
-    assert summary.limitations["authority_scope"] == "diagnostic_non_promotion"
-    assert summary.limitations["decision_reference_source_counts"] == {
-        "legacy_shadow_signal_diagnostic": 1,
-    }
-    assert summary.limitations["diagnostic_replay_subjects"] == 1
-    assert summary.outcomes[0].decision_reference_source == "legacy_shadow_signal_diagnostic"
-    validations = [
-        validation
-        for outcome in summary.outcomes
-        for decision in outcome.replay_decisions
-        for validation in decision.applied_validations
-    ]
-    assert "diagnostic_reference" in validations
-    assert "authority_scope:diagnostic_non_promotion" in validations
-    assert "decision_reference_storage_source:shadow_signals" in validations
-
-
 def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path, monkeypatch):
     db_path = tmp_path / "wu-preflight.db"
     conn = get_connection(db_path)
@@ -1283,12 +1203,12 @@ def test_trade_history_audit_labels_outcome_fact_as_legacy_non_promotion(tmp_pat
     assert summary.limitations["actual_outcome_learning_eligible"] is False
     assert summary.limitations["actual_outcome_promotion_eligible"] is False
     assert row["truth_source"] == "verified_settlement_vs_legacy_outcome_fact"
-    assert row["authority_scope"] == "diagnostic_non_promotion"
+    assert row["authority_scope"] == "offline_no_promotion"
     assert row["actual_trade_outcome"] == 0
     assert row["actual_pnl"] == -5.0
     assert evidence["actual_trade_outcome_source"] == "outcome_fact_legacy_lifecycle_projection"
     assert evidence["actual_outcome_evidence_class"] == "legacy_lifecycle_projection_not_settlement_authority"
-    assert evidence["actual_outcome_authority_scope"] == "diagnostic_non_promotion"
+    assert evidence["actual_outcome_authority_scope"] == "offline_no_promotion"
     assert evidence["actual_outcome_learning_eligible"] is False
     assert evidence["actual_outcome_promotion_eligible"] is False
     assert evidence["outcome_fact_consumed_as_actual_trade_evidence"] is True

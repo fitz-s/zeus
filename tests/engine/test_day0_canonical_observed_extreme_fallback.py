@@ -28,6 +28,7 @@ _NOW = datetime(2026, 6, 23, 23, 0, 0, tzinfo=UTC)
 _COLS = (
     "city", "target_date", "local_timestamp", "utc_timestamp",
     "running_max", "running_min", "authority", "causality_status", "source", "temperature_metric",
+    "training_allowed", "source_role",
 )
 
 
@@ -38,11 +39,23 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
         "CREATE TABLE observation_instants ("
         "city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT, "
         "running_max REAL, running_min REAL, authority TEXT, causality_status TEXT, "
-        "source TEXT, temperature_metric TEXT)"
+        "source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT)"
     )
+    normalized_rows = []
+    for row in rows:
+        if len(row) == len(_COLS):
+            normalized_rows.append(row)
+            continue
+        source = str(row[8] if len(row) > 8 else "")
+        if source == "hko_hourly_accumulator":
+            normalized_rows.append((*row, 0, "runtime_monitoring"))
+        elif source.startswith("wu") or source.startswith("ogimet_metar_"):
+            normalized_rows.append((*row, 1, "historical_hourly"))
+        else:
+            normalized_rows.append((*row, 0, "coverage_fill_evidence"))
     conn.executemany(
         f"INSERT INTO observation_instants ({','.join(_COLS)}) VALUES ({','.join('?' * len(_COLS))})",
-        rows,
+        normalized_rows,
     )
     return conn
 
@@ -97,6 +110,48 @@ def test_canonical_reader_low_metric_uses_running_min():
     extreme, obs_time, n_rows = out
     assert extreme == 16.0
     assert obs_time == "2026-06-19T13:00:00+00:00"
+
+
+def test_canonical_reader_accepts_hko_hourly_accumulator_for_hong_kong_low():
+    """Hong Kong is not WU-backed; its canonical Day0 surface is the HKO accumulator."""
+    conn = _obs_conn([
+        ("Hong Kong", "2026-06-26", "2026-06-26T04:00:00+08:00", "2026-06-25T20:00Z",
+         28.0, 28.0, "ICAO_STATION_NATIVE", "OK", "hko_hourly_accumulator", "low"),
+        ("Hong Kong", "2026-06-26", "2026-06-26T07:00:00+08:00", "2026-06-25T23:00Z",
+         27.0, 27.0, "ICAO_STATION_NATIVE", "OK", "hko_hourly_accumulator", "low"),
+    ])
+
+    out = monitor_refresh._day0_observed_extreme_from_canonical_surface(
+        city_name="Hong Kong",
+        target_date="2026-06-26",
+        metric_is_low=True,
+        now=datetime(2026, 6, 26, 1, 0, 0, tzinfo=UTC),
+        world_conn=conn,
+    )
+
+    assert out is not None
+    extreme, obs_time, n_rows = out
+    assert extreme == 27.0
+    assert obs_time == "2026-06-25T23:00Z"
+    assert n_rows == 2
+
+
+def test_canonical_reader_rejects_hko_reaudit_rows():
+    conn = _obs_conn([
+        ("Hong Kong", "2026-06-26", "2026-06-26T07:00:00+08:00", "2026-06-25T23:00Z",
+         27.0, 27.0, "ICAO_STATION_NATIVE", "REQUIRES_SOURCE_REAUDIT",
+         "hko_hourly_accumulator", "low", 0, "coverage_fill_evidence"),
+    ])
+
+    out = monitor_refresh._day0_observed_extreme_from_canonical_surface(
+        city_name="Hong Kong",
+        target_date="2026-06-26",
+        metric_is_low=True,
+        now=datetime(2026, 6, 26, 1, 0, 0, tzinfo=UTC),
+        world_conn=conn,
+    )
+
+    assert out is None
 
 
 def test_canonical_reader_excludes_future_observations_after_now():

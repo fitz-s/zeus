@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 9, PR D2)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 9, PR D2)
 """Antibody invariants: training eligibility is decided by typed fill authority.
 
 Finding 9 (P2 complexity debt): training/learning row writers in the

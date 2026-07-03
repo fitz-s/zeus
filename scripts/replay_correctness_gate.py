@@ -28,10 +28,8 @@ import argparse
 import hashlib
 import json
 import logging
-import shutil
 import sqlite3
 import sys
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,6 +39,7 @@ BASELINE_DIR = ROOT / "evidence" / "replay_baseline"
 RITUAL_SIGNAL_DIR = ROOT / "logs" / "ritual_signal"
 CHARTER_VERSION = "1.0.0"
 HELPER_NAME = "replay_correctness_gate"
+MAX_TEMP_COPY_BYTES = 100 * 1024 * 1024
 
 SEED_WINDOW_DAYS = 7
 
@@ -143,35 +142,6 @@ def _extract_opportunity_events(conn: sqlite3.Connection, cutoff: str) -> list[d
     return events
 
 
-def _extract_shadow_signals(conn: sqlite3.Connection, cutoff: str) -> list[dict]:
-    """Pull shadow_signals (deterministic calibration output)."""
-    try:
-        rows = conn.execute(
-            "SELECT id, city, target_date, timestamp, "
-            "p_raw_json, p_cal_json, edges_json "
-            "FROM shadow_signals WHERE timestamp >= ? ORDER BY id",
-            (cutoff,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    events = []
-    for row in rows:
-        events.append(
-            {
-                "source": "shadow_signals",
-                "event_type": "shadow_signal_emitted",
-                "id": row[0],
-                "city": row[1],
-                "target_date": row[2],
-                "timestamp": row[3],
-                "p_raw": json.loads(row[4] or "{}"),
-                "p_cal": json.loads(row[5] or "{}"),
-                "edges": json.loads(row[6] or "{}"),
-            }
-        )
-    return events
-
-
 def _extract_decision_log(conn: sqlite3.Connection, cutoff: str) -> list[dict]:
     """Pull decision_log rows (deterministic mode/decision record)."""
     try:
@@ -212,12 +182,11 @@ def extract_seed_events(db_path: Path) -> tuple[list[dict], list[str]]:
     try:
         chronicle = _extract_chronicle_events(conn, cutoff)
         opportunities = _extract_opportunity_events(conn, cutoff)
-        shadows = _extract_shadow_signals(conn, cutoff)
         decisions = _extract_decision_log(conn, cutoff)
     finally:
         conn.close()
 
-    all_events = chronicle + opportunities + shadows + decisions
+    all_events = chronicle + opportunities + decisions
     excluded = sorted(NON_DETERMINISTIC_EVENT_TYPES)
     return all_events, excluded
 
@@ -361,15 +330,27 @@ def compare(projection: dict, baseline: dict) -> tuple[bool, dict]:
 
 
 # ---------------------------------------------------------------------------
-# DB copy for seeded testing
+# DB copy guard for seeded testing
 # ---------------------------------------------------------------------------
 
 
 def copy_db_readonly_temp(db_path: Path) -> Path:
-    """Copy DB to a tempfile for mutation in tests (gate itself never mutates)."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    shutil.copy2(db_path, tmp.name)
-    return Path(tmp.name)
+    """Fail closed: this gate must not copy live or large DBs to temp storage."""
+    resolved = db_path.resolve()
+    if resolved == DEFAULT_DB.resolve() or resolved.name in {
+        "zeus_trades.db",
+        "zeus-world.db",
+        "zeus-forecasts.db",
+    }:
+        raise RuntimeError(f"refusing to copy canonical Zeus DB: {resolved}")
+    size = resolved.stat().st_size
+    if size > MAX_TEMP_COPY_BYTES:
+        raise RuntimeError(
+            f"refusing to copy {size} byte DB above {MAX_TEMP_COPY_BYTES} byte limit: {resolved}"
+        )
+    raise RuntimeError(
+        "DB temp-copy helper is disabled; build an isolated fixture under tmp_path instead"
+    )
 
 
 # ---------------------------------------------------------------------------

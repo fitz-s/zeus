@@ -36,7 +36,7 @@ from tests.conftest import make_world_forecasts_pair
 
 def _make_report(
     strategy_id: str = "shoulder_sell",
-    tier_observed: EvidenceTier = EvidenceTier.SHADOW_PASS,
+    tier_observed: EvidenceTier = EvidenceTier.REPLAY_PASS,
     n_settled: int = 10,
     n_wins: int = 7,
     ci_lower: float | None = 0.60,
@@ -88,7 +88,7 @@ def _seed_coherent_verifications(
                  fact_known_time, source_published_time,
                  venue_resolved_time, redeemed_time,
                  coherence_verdict, incoherence_reason, evidence_tier)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'COHERENT', NULL, 'SHADOW_PASS')
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'COHERENT', NULL, 'REPLAY_PASS')
             """,
             (
                 city,
@@ -114,7 +114,7 @@ class TestReadyRequiresAllThreeSignals:
         world_conn, forecasts_conn = dual_db_pair
         _seed_coherent_verifications(forecasts_conn, "NYC", "high", 5)
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -131,7 +131,7 @@ class TestReadyRequiresAllThreeSignals:
             operator_ref="op-test-001",
         )
         assert result.verdict == ReadinessVerdict.READY
-        assert result.tier_target == EvidenceTier.PAPER_COHORT  # SHADOW_PASS(3) + 1
+        assert result.tier_target == EvidenceTier.PAPER_COHORT
         assert all(s.passed for s in result.signals), (
             f"Expected all signals passed; got: {[(s.signal_name, s.passed) for s in result.signals]}"
         )
@@ -139,7 +139,7 @@ class TestReadyRequiresAllThreeSignals:
     def test_ready_without_settlement_gate(self) -> None:
         """T1: READY for non-settlement strategy (settlement gate N/A = PASS)."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -163,7 +163,7 @@ class TestNotReadyOnAnySingleFailure:
     def test_not_ready_ci_too_low(self) -> None:
         """T2a: NOT_READY when ci_lower <= breakeven (evidence insufficient)."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.50,  # <= breakeven
             breakeven_win_rate=0.55,
         )
@@ -180,7 +180,7 @@ class TestNotReadyOnAnySingleFailure:
     def test_not_ready_ci_is_none(self) -> None:
         """T2b: NOT_READY when n_settled=0 (ci_lower=None)."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             n_settled=0,
             ci_lower=None,
             ci_upper=None,
@@ -202,7 +202,7 @@ class TestNotReadyOnAnySingleFailure:
         # Only 2 coherent rows, threshold=5
         _seed_coherent_verifications(forecasts_conn, "CHI", "low", 2)
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -225,7 +225,7 @@ class TestNotReadyOnAnySingleFailure:
     def test_not_ready_ci_demote_signal(self) -> None:
         """T2d: NOT_READY when ci_lower shows underperformance (tribunal would DEMOTE)."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.30,  # well below breakeven
             breakeven_win_rate=0.55,
         )
@@ -249,7 +249,7 @@ class TestNoTierWrite:
     def test_no_evidence_tier_assignments_row_inserted(self, world_conn) -> None:
         """T3: assess() must NOT insert any row into evidence_tier_assignments."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -335,9 +335,9 @@ class TestOperatorRefRequired:
             )
 
     def test_no_operator_ref_required_for_sublive_target(self) -> None:
-        """T4: No ValueError for sub-live tier target (SHADOW_PASS → PAPER_COHORT)."""
+        """T4: No ValueError for sub-live tier target (REPLAY_PASS → PAPER_COHORT)."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -385,7 +385,7 @@ class TestSettlementGateExemption:
         """T5: requires_settlement_gate=False → settlement signal always PASS."""
         report = _make_report(
             strategy_id="center_buy",
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -408,7 +408,7 @@ class TestSettlementGateMissingArgs:
     def test_settlement_gate_fail_when_city_missing(self) -> None:
         """T6: FAIL when requires_settlement_gate=True but city not supplied."""
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -464,7 +464,7 @@ class TestCriticMissingInvariants:
         closed_conn.close()
 
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.62,
             breakeven_win_rate=0.55,
         )
@@ -488,7 +488,7 @@ class TestCriticMissingInvariants:
         Boundary: breakeven=0.55, ci_lower=0.55 → NOT_READY.
         """
         report = _make_report(
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             ci_lower=0.55,  # == breakeven, not strictly above
             breakeven_win_rate=0.55,
         )
@@ -540,7 +540,7 @@ class TestCohortScopeGate:
     def _make_regret_only_report(self, **kwargs) -> EvidenceReport:
         base = dict(
             strategy_id="shoulder_sell",
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             n_decisions=10,
             n_wins=8,
             n_no_trades=0,
@@ -592,7 +592,7 @@ class TestCohortScopeGate:
         """T8c (P1-4): FULL_SCOPE report is not short-circuited; normal evaluation runs."""
         report = EvidenceReport(
             strategy_id="shoulder_sell",
-            tier_observed=EvidenceTier.SHADOW_PASS,
+            tier_observed=EvidenceTier.REPLAY_PASS,
             n_decisions=10,
             n_wins=8,
             n_no_trades=0,

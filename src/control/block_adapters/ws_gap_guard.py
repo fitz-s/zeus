@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""Gate 10: ws_gap_guard_allow_submit adapter.
+"""Blocker 10: ws_gap_guard_allow_submit adapter.
 
 Probes: memory:WSGapStatus singleton via deps.ws_gap_guard_module.summary()
 Blocks when: summary()['entry']['allow_submit'] is False.
@@ -69,5 +69,5 @@ class WsGapGuardAdapter:
                 owner_module="src.control.ws_gap_guard",
                 owner_function="summary",
                 raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                notes="probe raised — unknown in snapshot",
             )

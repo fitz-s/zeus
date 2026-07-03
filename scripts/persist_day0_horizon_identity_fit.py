@@ -52,14 +52,14 @@ EFFECT
 ------
 read_latest_platt_fit() returns non-None -> _maybe_write_day0_nowcast
 (monitor_refresh.py:1767) stops short-circuiting -> the Day0 nowcast lane writes
-day0_nowcast_runs rows carrying observation_available_at. This is SHADOW LOGGING
+day0_nowcast_runs rows carrying observation_available_at. This is audit logging
 (nowcast_runs is logged, NOT traded); the mainline executor / trading decision
 path is untouched. Starting the clock lets the obs-timing dataset accumulate so a
 real holdout fit (and the G-DAY0 ROI verdict) become measurable later.
 
 USAGE
 -----
-  python3 scripts/persist_day0_horizon_identity_fit.py --dry-run   # temp DB copy
+  python3 scripts/persist_day0_horizon_identity_fit.py --dry-run   # tiny isolated temp DB
   python3 scripts/persist_day0_horizon_identity_fit.py --verify    # read-back only
   python3 scripts/persist_day0_horizon_identity_fit.py             # write to LIVE
 
@@ -70,10 +70,8 @@ Fail-soft: any error is reported and exits non-zero WITHOUT raising into a calle
 from __future__ import annotations
 
 import argparse
-import shutil
 import sqlite3
 import sys
-import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -157,22 +155,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    # Choose target DB: temp copy (dry-run) or LIVE.
+    # Choose target DB: tiny isolated fixture (dry-run) or LIVE.
     if args.dry_run:
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        target = Path(tmp.name)
-        if Path(ZEUS_FORECASTS_DB_PATH).exists():
-            shutil.copy2(ZEUS_FORECASTS_DB_PATH, target)
-        else:
-            # No live DB to copy: build the schema fresh so the dry-run is meaningful.
-            from src.state.db import _create_day0_horizon_platt_fits
+        target = Path("/tmp") / "zeus_day0_horizon_identity_fit_dry_run.db"
+        target.unlink(missing_ok=True)
+        from src.state.db import _create_day0_horizon_platt_fits
 
-            c = sqlite3.connect(target)
-            _create_day0_horizon_platt_fits(c)
-            c.commit()
-            c.close()
-        print(f"[dry-run] writing identity fit to TEMP copy: {target}")
+        c = sqlite3.connect(target)
+        _create_day0_horizon_platt_fits(c)
+        c.commit()
+        c.close()
+        print(f"[dry-run] writing identity fit to tiny isolated TEMP DB: {target}")
         try:
             conn = sqlite3.connect(target)
             write_platt_fit(fit, conn=conn)
@@ -210,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[live] read-back returned None -> lane would still short-circuit (FAILED).")
         return 2
     print(
-        "[live] OK -> Day0 horizon Platt fit persisted; nowcast lane will fire (shadow). "
+        "[live] OK -> Day0 horizon Platt fit persisted; nowcast lane will fire (audit). "
         f"fit_run_id={got.fit_run_id} alpha={got.alpha} n_obs={got.n_obs}"
     )
     return 0

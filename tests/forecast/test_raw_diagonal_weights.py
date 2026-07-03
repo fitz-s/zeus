@@ -15,7 +15,7 @@ reverted to the old equal-weight (``walk_forward_se_native`` never set → 1/n) 
     second moments ⇒ the weights are NOT 1/n and the model with the SMALLEST Ê[(x−Y)²] (the
     most precise) carries the LARGEST weight. Reverting to equal weights makes this RED.
   * ``test_absent_history_collapses_to_equal`` — members with no raw_m2 / n==0 ⇒ exactly 1/n.
-  * ``test_thin_history_shrinks_toward_equal`` — a thin (n < MIN_TRAIN) but very precise member
+  * ``test_thin_history_shrinks_toward_equal`` — a thin (n < MIN_SETTLED_N) but very precise member
     does NOT fully dominate; its weight is between equal and the deep-history full-precision
     weight (the EB shrink-to-equal). Reverting the shrink lets a thin member dominate.
   * ``test_weights_are_nonneg_and_sum_to_one`` — the INV-C1 convexity precondition holds.
@@ -27,8 +27,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from src.forecast.bayes_precision_fusion import KAPPA, LOWN_INFLATE, MIN_TRAIN, SIGMA_FLOOR
-from src.forecast.center import walk_forward_model_weights
+from src.forecast.bayes_precision_fusion import KAPPA, LOWN_INFLATE, SIGMA_FLOOR
+from src.forecast.center import MIN_SETTLED_N, walk_forward_model_weights
 
 # Reuse the Tokyo fixtures from the envelope test (one fixture vocabulary).
 from tests.forecast.test_center_envelope import _case, _member
@@ -40,12 +40,12 @@ def _member_m2(model_id: str, value: float, raw_m2, n: int):
 
 
 def test_divergent_raw_m2_diverges_from_equal_upweighting_lowest():
-    # Three deep-history members with DISTINCT raw second moments. n >= MIN_TRAIN so no shrink.
+    # Three deep-history members with DISTINCT raw second moments. n >= MIN_SETTLED_N so no shrink.
     # m_best has the SMALLEST E[r^2] (most precise) -> it MUST carry the largest weight.
     members = [
-        _member_m2("m_best", 21.0, raw_m2=1.0, n=MIN_TRAIN + 50),   # precise
-        _member_m2("m_mid", 22.0, raw_m2=4.0, n=MIN_TRAIN + 50),    # mid
-        _member_m2("m_worst", 23.0, raw_m2=16.0, n=MIN_TRAIN + 50),  # noisy
+        _member_m2("m_best", 21.0, raw_m2=1.0, n=MIN_SETTLED_N + 50),   # precise
+        _member_m2("m_mid", 22.0, raw_m2=4.0, n=MIN_SETTLED_N + 50),    # mid
+        _member_m2("m_worst", 23.0, raw_m2=16.0, n=MIN_SETTLED_N + 50),  # noisy
     ]
     w = walk_forward_model_weights(_case(), members)
 
@@ -77,12 +77,12 @@ def test_absent_history_collapses_to_equal():
 
 
 def test_thin_history_shrinks_toward_equal():
-    # A thin (n=2 << MIN_TRAIN) but VERY precise member must NOT fully dominate; the EB
+    # A thin (n=2 << MIN_SETTLED_N) but VERY precise member must NOT fully dominate; the EB
     # shrink pulls its effective E[r^2] toward the equal-precision floor. A deep noisy member
     # is its counterweight. The thin member's weight is strictly between the equal weight and
     # the weight it WOULD get with no shrink.
     thin_precise = _member_m2("thin", 21.0, raw_m2=0.5, n=2)        # tiny n, tiny E[r^2]
-    deep_noisy = _member_m2("deep", 23.0, raw_m2=9.0, n=MIN_TRAIN + 100)
+    deep_noisy = _member_m2("deep", 23.0, raw_m2=9.0, n=MIN_SETTLED_N + 100)
     w = walk_forward_model_weights(_case(), [thin_precise, deep_noisy])
 
     equal = 0.5
@@ -97,7 +97,7 @@ def test_thin_history_shrinks_toward_equal():
 
 def test_weights_are_nonneg_and_sum_to_one():
     members = [
-        _member_m2("a", 21.0, raw_m2=1.0, n=MIN_TRAIN + 1),
+        _member_m2("a", 21.0, raw_m2=1.0, n=MIN_SETTLED_N + 1),
         _member_m2("b", 22.0, raw_m2=None, n=0),       # mixed: one absent
         _member_m2("c", 23.0, raw_m2=4.0, n=3),        # one thin
     ]
@@ -111,8 +111,8 @@ def test_floor_caps_precision_of_a_subfloor_raw_m2():
     # capped at 1/floor^2, so two such members (one at 0.01, one at 0.10, both << 0.64) get the
     # SAME (floored) precision and therefore equal weight.
     members = [
-        _member_m2("tiny1", 21.0, raw_m2=0.01, n=MIN_TRAIN + 10),
-        _member_m2("tiny2", 22.0, raw_m2=0.10, n=MIN_TRAIN + 10),
+        _member_m2("tiny1", 21.0, raw_m2=0.01, n=MIN_SETTLED_N + 10),
+        _member_m2("tiny2", 22.0, raw_m2=0.10, n=MIN_SETTLED_N + 10),
     ]
     w = walk_forward_model_weights(_case(), members)
     assert np.allclose(w, np.full(2, 0.5)), (
@@ -127,9 +127,9 @@ def test_f_city_floor_and_shrink_scaled_to_native_unit():
     else an F-city thin-history member is blended/floored against a 3.24× too-small target and
     OVER-weighted (intent inverted). RED on the pre-fix degC²-constant code."""
     f_case = replace(_case(), unit="F")
-    # thin precise member (n=10 < MIN_TRAIN) + deep noisy counterweight; raw_m2 in °F² (native).
+    # thin precise member (n=10 < MIN_SETTLED_N) + deep noisy counterweight; raw_m2 in °F² (native).
     thin = _member_m2("thin", 70.0, raw_m2=2.0, n=10)
-    deep = _member_m2("deep", 74.0, raw_m2=20.0, n=MIN_TRAIN + 100)
+    deep = _member_m2("deep", 74.0, raw_m2=20.0, n=MIN_SETTLED_N + 100)
     w = walk_forward_model_weights(f_case, [thin, deep])
 
     u = (9.0 / 5.0) ** 2

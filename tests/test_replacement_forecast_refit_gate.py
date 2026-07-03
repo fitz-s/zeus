@@ -56,7 +56,7 @@ def test_refit_gate_blocks_single_day_small_sample_and_bucket_sparse_evidence() 
         _evidence(official_days=1, official_rows=57, min_guardrail_bucket_rows=5)
     )
 
-    assert decision.status == "SHADOW_REFIT_BLOCKED"
+    assert decision.status == "BLOCKED"
     assert decision.product_specific_training_allowed is False
     assert "REPLACEMENT_REFIT_INSUFFICIENT_OFFICIAL_DAYS" in decision.reason_codes
     assert "REPLACEMENT_REFIT_INSUFFICIENT_OFFICIAL_ROWS" in decision.reason_codes
@@ -72,7 +72,7 @@ def test_refit_gate_blocks_baseline_emos_platt_and_high_low_mixing() -> None:
         )
     )
 
-    assert decision.status == "SHADOW_REFIT_BLOCKED"
+    assert decision.status == "BLOCKED"
     assert "REPLACEMENT_REFIT_HIGH_LOW_MIXING_BLOCKED" in decision.reason_codes
     assert "REPLACEMENT_REFIT_BASELINE_CALIBRATION_REUSED" in decision.reason_codes
     assert "REPLACEMENT_REFIT_BASELINE_METHOD_FORBIDDEN" in decision.reason_codes
@@ -81,7 +81,7 @@ def test_refit_gate_blocks_baseline_emos_platt_and_high_low_mixing() -> None:
 def test_refit_gate_requires_product_keyed_emos_before_data_refit() -> None:
     decision = evaluate_replacement_forecast_refit_gate(_evidence(emos_key_includes_product=False))
 
-    assert decision.status == "SHADOW_REFIT_BLOCKED"
+    assert decision.status == "BLOCKED"
     assert "REPLACEMENT_REFIT_EMOS_KEY_MUST_INCLUDE_PRODUCT" in decision.reason_codes
     assert decision.emos_replacement_ready is False
 
@@ -94,7 +94,7 @@ def test_refit_gate_requires_ready_emos_identity_evidence_before_data_refit() ->
         )
     )
 
-    assert decision.status == "SHADOW_REFIT_BLOCKED"
+    assert decision.status == "BLOCKED"
     assert "REPLACEMENT_REFIT_EMOS_KEY_SCHEMA_NOT_PRODUCT_KEYED" in decision.reason_codes
     assert "REPLACEMENT_REFIT_EMOS_IDENTITY_EVIDENCE_NOT_READY" in decision.reason_codes
     assert decision.emos_replacement_ready is False

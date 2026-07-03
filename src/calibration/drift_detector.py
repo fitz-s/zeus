@@ -110,12 +110,13 @@ def _get_settlements_window(
             JOIN settlements s ON (cp.city = s.city AND cp.target_date = s.target_date)
             WHERE cp.city = ?
               AND cp.target_date >= ?
+              AND cp.temperature_metric = ?
               AND cp.authority = 'VERIFIED'
               AND s.authority = 'VERIFIED'
               AND s.temperature_metric = ?
             ORDER BY cp.target_date
             """,
-            (city, since_param, temperature_metric),
+            (city, since_param, temperature_metric, temperature_metric),
         )
         rows = cur.fetchall()
         if rows:
@@ -152,12 +153,13 @@ def _get_baseline_brier(
             WHERE cp.city = ?
               AND cp.target_date >= ?
               AND cp.target_date < ?
+              AND cp.temperature_metric = ?
               AND cp.authority = 'VERIFIED'
               AND s.authority = 'VERIFIED'
               AND s.temperature_metric = ?
             ORDER BY cp.target_date
             """,
-            (city, baseline_start, window_cutoff_iso, temperature_metric),
+            (city, baseline_start, window_cutoff_iso, temperature_metric, temperature_metric),
         )
         rows = cur.fetchall()
         if not rows:

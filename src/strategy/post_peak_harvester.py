@@ -144,7 +144,7 @@ class PostPeakWindow:
     rounded_max_bin_value: Optional[int]
     last_obs_time: Optional[datetime]
     minutes_since_max_advance: Optional[float]
-    local_hour: Optional[float]
+    clock_hour: Optional[float]
     peak_hour: Optional[float]
     sample_count: int
 
@@ -235,7 +235,7 @@ def determine_post_peak_window(
             rounded_max_bin_value=None,
             last_obs_time=None,
             minutes_since_max_advance=None,
-            local_hour=None,
+            clock_hour=None,
             peak_hour=float(getattr(city, "historical_peak_hour", 15.0)),
             sample_count=0,
         )
@@ -245,9 +245,9 @@ def determine_post_peak_window(
     # (A) local hour vs typical peak.
     tz = ZoneInfo(str(getattr(city, "timezone")))
     local_now = now_utc.astimezone(tz)
-    local_hour = local_now.hour + local_now.minute / 60.0
+    clock_hour = local_now.hour + local_now.minute / 60.0
     peak_hour = float(getattr(city, "historical_peak_hour", 15.0))
-    past_peak_hour = local_hour >= (peak_hour + PEAK_HOUR_MARGIN_HOURS)
+    past_peak_hour = clock_hour >= (peak_hour + PEAK_HOUR_MARGIN_HOURS)
 
     # (B) running-max lock: find the last time the running max ADVANCED to its
     # current high. If the most recent advance is older than peak_lock_window,
@@ -261,7 +261,7 @@ def determine_post_peak_window(
     )
 
     if not past_peak_hour:
-        reason = f"before_peak_hour(local={local_hour:.1f}<peak={peak_hour:.1f})"
+        reason = f"before_peak_hour(local={clock_hour:.1f}<peak={peak_hour:.1f})"
     elif not max_locked:
         reason = (
             "max_not_locked("
@@ -279,7 +279,7 @@ def determine_post_peak_window(
         rounded_max_bin_value=rounded_max,
         last_obs_time=last_obs_time,
         minutes_since_max_advance=minutes_since_advance,
-        local_hour=local_hour,
+        clock_hour=clock_hour,
         peak_hour=peak_hour,
         sample_count=extremes.sample_count,
     )

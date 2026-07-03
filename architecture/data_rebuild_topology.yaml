@@ -101,7 +101,7 @@ criteria:
       - tests/test_backtest_outcome_comparison.py
       - tests/test_backtest_trade_subject_identity.py
       - tests/test_run_replay_cli.py
-    certification_gate: "Backtest output remains diagnostic_non_promotion and cannot authorize live changes."
+    certification_gate: "Backtest output remains offline_no_promotion and cannot authorize live changes."
     blocks_live_math_certification: true
   replay_coverage_prerequisites:
     status: implemented_topology_gate
@@ -172,9 +172,9 @@ replay_coverage_rule:
     - market_price_linkage
   p_and_l_without_market_price: "N/A, never coerced to zero"
 
-diagnostic_non_promotion:
+offline_no_promotion:
   db: state/zeus_backtest.db
-  authority_scope: diagnostic_non_promotion
+  authority_scope: offline_no_promotion
   forbidden_promotions:
     - state/zeus_trades.db
     - state/zeus-world.db

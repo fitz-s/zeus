@@ -42,7 +42,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -68,6 +68,7 @@ DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-is
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
+DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -91,6 +92,27 @@ _INDEX_DDL = (
 )
 
 
+def day0_hourly_target_dates_for_refresh(
+    *, city: Any, decision_time: datetime
+) -> tuple[str, ...]:
+    """Target dates covered by a 2-day hourly fetch for the city's local clock.
+
+    Open-Meteo requests in this module ask for ``forecast_days=2``. Persisting the
+    response only under the city's current local date starves active next-day weather
+    markets: the read path correctly requires exact ``(city, target_date)``, so a
+    June 29 market cannot use a June 28-stamped vector even though the payload already
+    contains June 29 hours. Persist both local today and local tomorrow under separate
+    target_date identities.
+    """
+
+    tz = ZoneInfo(str(getattr(city, "timezone")))
+    local_day = decision_time.astimezone(tz).date()
+    return (
+        local_day.isoformat(),
+        (local_day + timedelta(days=1)).isoformat(),
+    )
+
+
 @dataclass(frozen=True)
 class Day0HourlyVector:
     model: str
@@ -100,6 +122,15 @@ class Day0HourlyVector:
     captured_at: str
     times: tuple[str, ...]       # ISO local timestamps as served (city timezone)
     temps_c: tuple[float, ...]   # ALWAYS degC
+
+
+@dataclass(frozen=True)
+class Day0HourlyRefreshStats:
+    vectors_written: int = 0
+    cities_attempted: int = 0
+    cities_skipped_throttle: int = 0
+    incomplete_expected_bundles: int = 0
+    budget_exhausted: bool = False
 
 
 def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_MODELS) -> list[str]:
@@ -126,16 +157,21 @@ def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_
 def day0_hourly_models_for_city(city: Any) -> list[str]:
     """Live Day0 remaining-day hourly model set for a city.
 
-    Regional high-resolution models are preferred when the domain gate admits at least one. Global
-    ECMWF IFS 9km is the universal fallback, matching the replacement forecast anchor source already
-    used by the live probability chain. Without this fallback, cities outside the regional polygons
-    enter the Day0 evaluator and then fail at ``DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`` forever.
+    Regional high-resolution models are experts, not a replacement for the live
+    probability chain's global anchor. When a regional model is available, keep
+    it in the bundle and also include the ECMWF IFS 9km anchor. Cities outside
+    the regional polygons use the anchor alone. Without this anchor floor, a
+    same-day monitor can silently collapse to one regional model and make live
+    exits on a different probability authority than the entry chain.
     """
 
     regional = in_domain_models_for_city(city)
-    if regional:
-        return regional
-    return list(GLOBAL_DAY0_HOURLY_FALLBACK_MODELS)
+    out: list[str] = []
+    for model in (*regional, *GLOBAL_DAY0_HOURLY_FALLBACK_MODELS):
+        normalized = str(model or "").strip()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -384,14 +420,30 @@ def read_freshest_day0_hourly_vectors(
     max_age_hours: float = 3.0,
     now: Optional[datetime] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_models: Optional[Iterable[str]] = None,
+    require_expected: bool = False,
+    max_bundle_skew_minutes: Optional[float] = None,
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
 
     Vectors older than max_age_hours are EXCLUDED (a stale high-res run must
     not masquerade as the current remaining-day distribution — fail-closed to
     the legacy full-day path instead).
+
+    ``expected_models`` lets live consumers define the complete bundle they are
+    willing to treat as same-day authority. With ``require_expected=True``, any
+    missing expected model returns [] so a partial single-model regional vector
+    cannot sponsor a live decision. ``max_bundle_skew_minutes`` additionally
+    prevents mixing a fresh model row with a materially older row from another
+    model as one live authority bundle.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
+    expected: list[str] = []
+    for model in expected_models or ():
+        normalized = str(model or "").strip()
+        if normalized and normalized not in expected:
+            expected.append(normalized)
+    expected_set = set(expected)
     own_conn = conn is None
     if own_conn:
         from src.state.db import get_forecasts_connection_read_only
@@ -414,6 +466,8 @@ def read_freshest_day0_hourly_vectors(
         freshest: dict[str, Day0HourlyVector] = {}
         for row in rows:
             model = str(row[0])
+            if expected_set and model not in expected_set:
+                continue
             if model in freshest:
                 continue
             try:
@@ -434,6 +488,30 @@ def read_freshest_day0_hourly_vectors(
                 timezone_name=str(row[3]), captured_at=str(row[4]),
                 times=times, temps_c=temps,
             )
+        if require_expected and expected and any(model not in freshest for model in expected):
+            return []
+        if (
+            require_expected
+            and expected
+            and max_bundle_skew_minutes is not None
+            and all(model in freshest for model in expected)
+        ):
+            captured_times: list[datetime] = []
+            for model in expected:
+                captured = datetime.fromisoformat(
+                    str(freshest[model].captured_at).replace("Z", "+00:00")
+                )
+                if captured.tzinfo is None:
+                    return []
+                captured_times.append(captured.astimezone(UTC))
+            if captured_times:
+                skew_minutes = (
+                    max(captured_times) - min(captured_times)
+                ).total_seconds() / 60.0
+                if skew_minutes > float(max_bundle_skew_minutes):
+                    return []
+        if expected:
+            return [freshest[model] for model in expected if model in freshest]
         return list(freshest.values())
     finally:
         if own_conn:
@@ -497,7 +575,8 @@ def maybe_refresh_day0_hourly_vectors(
     max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
     persist_lock_blocking: bool = True,
-) -> int:
+    return_stats: bool = False,
+) -> int | Day0HourlyRefreshStats:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
     Cities with an in-domain regional high-res model use that regional source;
@@ -507,6 +586,9 @@ def maybe_refresh_day0_hourly_vectors(
     refresh interval; the key is cleared so the next reactor pass can retry.
     """
     written = 0
+    skipped_throttle = 0
+    incomplete_expected_bundles = 0
+    budget_exhausted = False
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
@@ -514,6 +596,7 @@ def maybe_refresh_day0_hourly_vectors(
         if checked >= max(0, int(max_cities)):
             break
         if budget_s > 0.0 and checked > 0 and (time.monotonic() - started_monotonic) >= budget_s:
+            budget_exhausted = True
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_BUDGET_EXHAUSTED checked=%d budget_s=%.3f",
                 checked,
@@ -524,12 +607,14 @@ def maybe_refresh_day0_hourly_vectors(
         if not name:
             continue
         try:
-            tz = ZoneInfo(str(getattr(city, "timezone")))
-            target_date = decision_time.astimezone(tz).date().isoformat()
-            refresh_key = f"{name}|{target_date}"
+            target_dates = day0_hourly_target_dates_for_refresh(
+                city=city, decision_time=decision_time
+            )
+            refresh_key = f"{name}|{target_dates[0]}"
             with _REFRESH_LOCK:
                 last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
                 if now_monotonic - last < float(interval_s):
+                    skipped_throttle += 1
                     continue
                 _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
             models = day0_hourly_models_for_city(city)
@@ -549,12 +634,20 @@ def maybe_refresh_day0_hourly_vectors(
                     city, models=models, now=decision_time
                 )
             if vectors and request_hash:
-                written += persist_day0_hourly_vectors(
-                    vectors,
-                    target_date=target_date,
-                    request_hash=request_hash,
-                    lock_blocking=persist_lock_blocking,
-                )
+                vector_models = {str(vector.model) for vector in vectors}
+                expected_models = {str(model) for model in models}
+                incomplete_expected = bool(expected_models and not expected_models.issubset(vector_models))
+                for target_date in target_dates:
+                    written += persist_day0_hourly_vectors(
+                        vectors,
+                        target_date=target_date,
+                        request_hash=request_hash,
+                        lock_blocking=persist_lock_blocking,
+                    )
+                if incomplete_expected:
+                    incomplete_expected_bundles += 1
+                    with _REFRESH_LOCK:
+                        _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
             else:
                 with _REFRESH_LOCK:
                     _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
@@ -566,4 +659,11 @@ def maybe_refresh_day0_hourly_vectors(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
                 name, type(exc).__name__, exc,
             )
-    return written
+    stats = Day0HourlyRefreshStats(
+        vectors_written=written,
+        cities_attempted=checked,
+        cities_skipped_throttle=skipped_throttle,
+        incomplete_expected_bundles=incomplete_expected_bundles,
+        budget_exhausted=budget_exhausted,
+    )
+    return stats if return_stats else stats.vectors_written

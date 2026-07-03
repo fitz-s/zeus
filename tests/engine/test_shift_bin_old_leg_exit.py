@@ -34,10 +34,43 @@ CREATE TABLE position_current (
 )
 """
 
+_COLLATERAL_LEDGER_SNAPSHOTS_DDL = """
+CREATE TABLE collateral_ledger_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ctf_token_balances_json TEXT NOT NULL DEFAULT '{}',
+    captured_at TEXT NOT NULL,
+    authority_tier TEXT NOT NULL
+)
+"""
+
+_VENUE_COMMANDS_DDL = """
+CREATE TABLE venue_commands (
+    command_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL DEFAULT '',
+    envelope_id TEXT NOT NULL DEFAULT '',
+    position_id TEXT NOT NULL DEFAULT '',
+    decision_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    intent_kind TEXT NOT NULL,
+    market_id TEXT NOT NULL DEFAULT '',
+    token_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    size REAL NOT NULL DEFAULT 0,
+    price REAL NOT NULL DEFAULT 0,
+    venue_order_id TEXT,
+    state TEXT NOT NULL,
+    last_event_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    review_required_reason TEXT
+)
+"""
+
 
 @dataclass
 class _FakeOrderResult:
     status: str
+    command_id: str = ""
     order_id: str = ""
     external_order_id: str = ""
     reason: str = ""
@@ -47,6 +80,8 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(_POSITION_CURRENT_DDL)
+    conn.execute(_COLLATERAL_LEDGER_SNAPSHOTS_DDL)
+    conn.execute(_VENUE_COMMANDS_DDL)
     ensure_table(conn)
     return conn
 
@@ -104,6 +139,31 @@ def _stub_exit_inputs(monkeypatch, *, shares=10.0, price=0.42):
     )
 
 
+def _insert_collateral_snapshot(conn, *, token_id="tok-A", balance_micro=0):
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            ctf_token_balances_json, captured_at, authority_tier
+        ) VALUES (?, '2026-06-22T06:30:00+00:00', 'CHAIN')
+        """,
+        (f'{{"{token_id}": {int(balance_micro)}}}',),
+    )
+
+
+def _insert_exit_command(conn, *, token_id="tok-A", state="ACKED", command_id="exit-cmd-existing"):
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, intent_kind, token_id, side, size, price,
+            venue_order_id, state, created_at, updated_at
+        ) VALUES (?, 'shift_bin_exit:p-old', 'EXIT', ?, 'SELL', 12.03, 0.49,
+                  '0xexisting', ?, '2026-06-22T06:20:00+00:00',
+                  '2026-06-22T06:21:00+00:00')
+        """,
+        (command_id, token_id, state),
+    )
+
+
 def _now():
     return datetime(2026, 6, 22, 6, 40, tzinfo=timezone.utc)
 
@@ -116,7 +176,7 @@ def test_placed_sell_advances_lease_exit_submitted(monkeypatch):
     import src.execution.exit_lifecycle as xl
     monkeypatch.setattr(
         xl, "place_sell_order",
-        lambda **kw: _FakeOrderResult(status="pending", order_id="exit-cmd-1"),
+        lambda **kw: _FakeOrderResult(status="pending", command_id="exit-cmd-1", order_id="ord-1"),
     )
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
@@ -125,6 +185,54 @@ def test_placed_sell_advances_lease_exit_submitted(monkeypatch):
     ).fetchone()
     assert row["status"] == "EXIT_SUBMITTED"  # family stays BLOCKING; no counter-entry
     assert row["old_exit_command_id"] == "exit-cmd-1"
+
+
+def test_placed_sell_records_durable_command_id_not_venue_order_id(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(status="pending", command_id="cmd123", order_id="ord456"),
+    )
+
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_SUBMITTED"
+    assert row["old_exit_command_id"] == "cmd123"
+    assert "venue_order_id=ord456" in (row["abort_reason"] or "")
+
+
+def test_pending_sell_without_durable_command_does_not_record_exit_submitted(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(status="pending", order_id="ord-no-command"),
+    )
+
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["old_exit_command_id"] in (None, "")
+    assert row["abort_reason"] == "SHIFT_BIN_EXIT_PENDING_NO_DURABLE_COMMAND"
 
 
 def test_buy_no_shift_exit_sells_no_token(monkeypatch):
@@ -152,7 +260,7 @@ def test_buy_no_shift_exit_sells_no_token(monkeypatch):
     import src.execution.exit_lifecycle as xl
     def _placed(**kw):
         captured["kw"] = kw
-        return _FakeOrderResult(status="pending", order_id="exit-cmd-1")
+        return _FakeOrderResult(status="pending", command_id="exit-cmd-1", order_id="ord-1")
 
     monkeypatch.setattr(xl, "place_sell_order", _placed)
     payload = _payload(intent)
@@ -170,7 +278,7 @@ def test_unknown_side_effect_blocks_family(monkeypatch):
     import src.execution.exit_lifecycle as xl
     monkeypatch.setattr(
         xl, "place_sell_order",
-        lambda **kw: _FakeOrderResult(status="unknown_side_effect", order_id="exit-cmd-2"),
+        lambda **kw: _FakeOrderResult(status="unknown_side_effect", command_id="exit-cmd-2", order_id="ord-2"),
     )
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
@@ -200,6 +308,36 @@ def test_clean_rejection_releases_lease(monkeypatch):
     assert "exit_mutex_held" in (row["abort_reason"] or "")
 
 
+def test_auth_signature_rejection_keeps_shift_exit_retry_active(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(
+            status="rejected",
+            command_id="exit-cmd-auth",
+            order_id="ord-auth",
+            reason=(
+                "venue_rejected_400: PolyApiException[status_code=400, "
+                "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+            ),
+        ),
+    )
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_UNKNOWN"
+    assert row["old_exit_command_id"] == "exit-cmd-auth"
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_EXIT_RETRYABLE_REJECTED:")
+
+
 def test_exit_raises_without_durable_command_releases_for_retry(monkeypatch):
     conn = _conn()
     _insert_old_leg(conn)
@@ -218,6 +356,101 @@ def test_exit_raises_without_durable_command_releases_for_retry(monkeypatch):
     assert row["status"] == "ABORTED"
     assert "NO_DURABLE_COMMAND" in (row["abort_reason"] or "")
     assert "network blip at venue boundary" in (row["abort_reason"] or "")
+
+
+def test_ctf_available_zero_without_chain_zero_stays_blocking(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    _insert_collateral_snapshot(conn, balance_micro=12030000)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    def _closed_on_chain(**kw):
+        raise CollateralInsufficient(
+            "ctf_tokens_insufficient: token_id=tok-A required=12030000 available=0"
+        )
+
+    monkeypatch.setattr(xl, "place_sell_order", _closed_on_chain)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert "NO_DURABLE_COMMAND" in (row["abort_reason"] or "")
+
+
+def test_ctf_available_zero_completes_only_when_chain_total_zero(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    _insert_collateral_snapshot(conn, balance_micro=0)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    def _closed_on_chain(**kw):
+        raise CollateralInsufficient(
+            "ctf_tokens_insufficient: token_id=tok-A required=12030000 available=0"
+        )
+
+    monkeypatch.setattr(xl, "place_sell_order", _closed_on_chain)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_ONLY_COMPLETE"
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_OLD_LEG_CHAIN_ZERO_COLLATERAL:")
+
+
+def test_existing_acked_exit_command_is_reattached_without_new_submit(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    _insert_collateral_snapshot(conn, balance_micro=12030000)
+    _insert_exit_command(conn, state="ACKED", command_id="exit-cmd-existing")
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+
+    def _should_not_submit(**kw):
+        raise AssertionError("existing in-flight exit command must be reattached")
+
+    monkeypatch.setattr(xl, "place_sell_order", _should_not_submit)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_SUBMITTED"
+    assert row["old_exit_command_id"] == "exit-cmd-existing"
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_EXIT_ALREADY_IN_FLIGHT:")
+
+
+def test_ctf_available_positive_shortfall_stays_blocking(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    def _partial_shortfall(**kw):
+        raise CollateralInsufficient(
+            "ctf_tokens_insufficient: token_id=tok-A required=12030000 available=100"
+        )
+
+    monkeypatch.setattr(xl, "place_sell_order", _partial_shortfall)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert "NO_DURABLE_COMMAND" in (row["abort_reason"] or "")
 
 
 def test_old_leg_already_closed_leaves_lease_blocking(monkeypatch):

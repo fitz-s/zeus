@@ -311,6 +311,7 @@ class TestPortfolioExitIntegration:
     def test_buy_no_day0_exit_requires_best_bid_for_ev_gate(self):
         """Day0 buy_no reversal also fails closed without held-token quote."""
         pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
         with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
             decision = pos._buy_no_exit(
                 forward_edge=-0.10,
@@ -351,6 +352,7 @@ class TestPortfolioExitIntegration:
         cost-aware factory when day0_active=True.
         """
         pos = self._make_position("buy_yes")
+        pos.neg_edge_count = 2
         with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
             decision = pos._buy_yes_exit(
                 forward_edge=-0.10,  # below edge_threshold, triggers Day0 gate
@@ -370,6 +372,7 @@ class TestPortfolioExitIntegration:
         flag ON via integration path, not just factory-level assertion.
         """
         pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
         with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
             decision = pos._buy_no_exit(
                 forward_edge=-0.10,

@@ -32,6 +32,9 @@ Antibody contracts (sed-flip verifiable):
   T6: ACTIVE origin → existing behavior preserved; returns "pending_exit".
   T7: PENDING_EXIT origin → idempotent self-fold; returns "pending_exit".
   T8 (sed-flip): removing the guard block makes T1-T5 raise ValueError.
+  T9: QUARANTINED + entry_authority_quarantined chain state may transition to
+      pending_exit so a real on-chain exposure is not stranded by bad entry
+      proof.
 """
 
 from __future__ import annotations
@@ -83,6 +86,15 @@ def test_pending_exit_origin_is_idempotent():
     assert result == LifecyclePhase.PENDING_EXIT.value, (
         f"T7 FAIL: PENDING_EXIT self-fold must return pending_exit; got {result!r}"
     )
+
+
+def test_entry_authority_quarantine_origin_can_transition_to_pending_exit():
+    """T9: bad entry authority does not mean real inventory can be ignored."""
+    result = enter_pending_exit_runtime_state(
+        "quarantined",
+        chain_state="entry_authority_quarantined",
+    )
+    assert result == LifecyclePhase.PENDING_EXIT.value
 
 
 def test_day0_window_origin_transitions_to_pending_exit():

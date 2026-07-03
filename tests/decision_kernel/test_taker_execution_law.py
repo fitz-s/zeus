@@ -60,7 +60,8 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  quote_overrides: dict | None = None, return_parents: bool = False,
                  passive_maker_context=_UNSET,
                  available_crossable_shares: float | None = None,
-                 sweep_expected_fill_price: str | None = None):
+                 sweep_expected_fill_price: str | None = None,
+                 taker_quality_proof: dict | None = None):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
     Mirrors ``test_execution_command_certificate.builder_chain`` but threads an
@@ -90,6 +91,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         "risk_decision_id": "risk-1",
         "live_cap_usage_id": "cap-1",
         "final_intent_id": "intent-1",
+        "strategy_key": "center_buy",
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "native_quote_available": True,
         "submitted": False,
@@ -175,6 +177,19 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
             "best_ask": float(quote_payload["best_ask"]),
         }
 
+    if taker_quality_proof is None and str(order_mode).strip().upper() == "TAKER":
+        taker_quality_proof = {
+            "schema_version": 1,
+            "passed": True,
+            "reason": "allowed",
+            "passed_basis": "test_fixture_taker_quality_floor",
+            "taker_fee_adjusted_edge": "0.03",
+            "taker_expected_profit_usd": "0.30",
+            "maker_expected_profit_usd": "0.00",
+            "incremental_expected_profit_usd": "0.30",
+            "model_confidence": "0.90",
+        }
+
     final_intent = build_final_intent_certificate_from_actionable(
         actionable_cert=actionable,
         executable_snapshot_cert=executable,
@@ -191,6 +206,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         best_ask=float(quote_payload["best_ask"]),
         available_crossable_shares=available_crossable_shares,
         sweep_expected_fill_price=sweep_expected_fill_price,
+        taker_quality_proof=taker_quality_proof,
     )
     if return_parents:
         # The builder attaches all five parents; verify_final_intent requires them.

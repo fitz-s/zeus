@@ -18,8 +18,6 @@ ObservationField = Literal["high_temp", "low_temp"]
 SettlementUnit = Literal["F", "C"]
 CalibrationRoute = Literal[
     "PRIMARY_EXACT",
-    "LEGACY_HIGH_ONLY",
-    "ON_THE_FLY_HIGH_ONLY",
     "COMPATIBLE_FALLBACK",
     "RAW_UNCALIBRATED",
     "BLOCKED",
@@ -213,8 +211,8 @@ class ContractOutcomeDomain:
 class ForecastToBinEvidence:
     """Forecast-window evidence bound to a contract outcome domain.
 
-    Ambiguous or adjacent-day evidence may be useful for shadow research, but it
-    cannot be marked training/live allowed here.  Later weighting work can add
+    Ambiguous or adjacent-day evidence cannot be marked training/live allowed here.
+    Later weighting work can add
     precision weights only after this object proves the contract outcome family.
     """
 
@@ -250,7 +248,7 @@ class ForecastToBinEvidence:
     def reassignment_candidate_local_date(self) -> date | None:
         """Adjacent local date if this is deterministic but not the requested date.
 
-        This does not authorize training.  It is the shadow recovery marker that
+        This does not authorize training. It is the explicit recovery marker that
         says a later revision path may relabel the target date with explicit
         provenance instead of silently accepting the row.
         """
@@ -279,7 +277,7 @@ class ForecastToBinEvidence:
         *,
         live_allowed: bool = False,
     ) -> "ForecastToBinEvidence":
-        """Build shadow evidence from an ingest/extractor payload.
+        """Build forecast-to-bin evidence from an ingest/extractor payload.
 
         The factory intentionally requires explicit forecast-window fields.  It
         does not treat ``local_day_start_utc`` / ``local_day_end_utc`` as the
@@ -430,8 +428,7 @@ class ForecastToBinEvidence:
 class CalibrationAuthorityResult:
     """Read-path authority envelope for p_cal use.
 
-    This is a shadow contract shape for the LOW/HIGH alignment work.  It makes
-    fallback authority explicit before evaluator wiring can consume it.
+    This makes fallback authority explicit before evaluator wiring can consume it.
     """
 
     contract_domain: ContractOutcomeDomain
@@ -452,7 +449,7 @@ class CalibrationAuthorityResult:
     def __post_init__(self) -> None:
         if self.n_eff < 0 or self.n_samples < 0:
             raise ValueError("n_eff and n_samples must be non-negative")
-        if self.route in {"PRIMARY_EXACT", "LEGACY_HIGH_ONLY", "ON_THE_FLY_HIGH_ONLY", "COMPATIBLE_FALLBACK"}:
+        if self.route in {"PRIMARY_EXACT", "COMPATIBLE_FALLBACK"}:
             if self.served_calibration_domain is None:
                 raise ForecastCalibrationDomainMismatch(f"{self.route} requires served_calibration_domain")
             if self.calibrator_model_key is None:

@@ -1,4 +1,6 @@
 # Exit Strategy Code Audit — 2026-05-27
+
+Status: ARCHIVED_REFERENCE
 Base: origin/main b360211d99
 Auditor: sonnet (structural verification only, no logic critique)
 

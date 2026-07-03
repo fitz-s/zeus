@@ -20,6 +20,7 @@ import pytest
 
 from src.data.market_scanner import (
     ExecutableSnapshotCaptureError,
+    _snapshot_condition_refresh_state,
     _top_book_level_decimal,
     capture_executable_market_snapshot,
 )
@@ -47,8 +48,14 @@ from src.engine.evaluator import (
     _risk_limits_for_effective_min_order,
 )
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
-from src.state.db import init_schema
-from src.state.snapshot_repo import get_snapshot, insert_snapshot
+from src.state.db import init_schema, init_schema_trade_only
+from src.state.snapshot_repo import (
+    get_snapshot,
+    insert_snapshot,
+    latest_snapshot_for_market,
+    record_snapshot_invalidation,
+    snapshot_is_invalidated,
+)
 from src.state.venue_command_repo import insert_command
 
 
@@ -66,11 +73,15 @@ class FakeClobFacts:
         orderbook: dict | None = None,
         fee_rate=30,
     ):
-        self.market_info = market_info if market_info is not None else {
+        self.market_info = dict(market_info) if market_info is not None else {
             "condition_id": "condition-1",
             "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
             "feesEnabled": True,
+            "archived": False,
+            "enable_order_book": True,
         }
+        self.market_info.setdefault("archived", False)
+        self.market_info.setdefault("enable_order_book", True)
         self.orderbook = orderbook if orderbook is not None else {
             "asset_id": "yes-token",
             "tick_size": "0.01",
@@ -150,6 +161,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 
@@ -304,6 +316,216 @@ def test_insert_snapshot_persists_all_fields(conn):
     assert loaded.sports_start_at == NOW + timedelta(minutes=30)
     assert loaded.fee_details == {"bps": 0, "source": "test"}
     assert loaded.token_map_raw == {"YES": "yes-token", "NO": "no-token"}
+
+
+def test_insert_snapshot_upserts_latest_state_without_mutating_append_log(conn):
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-older", captured_at=NOW))
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-newer",
+            captured_at=NOW + timedelta(seconds=10),
+            freshness_deadline=NOW + timedelta(seconds=40),
+            orderbook_top_bid=Decimal("0.48"),
+        ),
+    )
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-out-of-order",
+            captured_at=NOW - timedelta(seconds=10),
+            freshness_deadline=NOW + timedelta(seconds=20),
+            orderbook_top_bid=Decimal("0.47"),
+        ),
+    )
+
+    append_count = conn.execute(
+        "SELECT COUNT(*) FROM executable_market_snapshots WHERE condition_id = ?",
+        ("condition-1",),
+    ).fetchone()[0]
+    latest = conn.execute(
+        """
+        SELECT snapshot_id, orderbook_top_bid, captured_at
+        FROM executable_market_snapshot_latest
+        WHERE condition_id = ? AND selected_outcome_token_id = ?
+        """,
+        ("condition-1", "yes-token"),
+    ).fetchone()
+
+    assert append_count == 3
+    assert latest["snapshot_id"] == "snap-newer"
+    assert latest["orderbook_top_bid"] == "0.48"
+    assert latest["captured_at"] == (NOW + timedelta(seconds=10)).isoformat()
+
+
+def test_market_channel_invalidation_blocks_old_snapshot_without_mutating_append_log(conn):
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-old", captured_at=NOW))
+
+    inserted = record_snapshot_invalidation(
+        conn,
+        condition_id="condition-1",
+        token_id="yes-token",
+        reason="tick_size_change",
+        invalidated_at=NOW + timedelta(seconds=1),
+    )
+    old_snapshot = get_snapshot(conn, "snap-old")
+
+    assert inserted == 1
+    assert old_snapshot is not None
+    assert old_snapshot.freshness_deadline == NOW + timedelta(seconds=30)
+    assert snapshot_is_invalidated(conn, old_snapshot, checked_at=NOW) is False
+    assert snapshot_is_invalidated(
+        conn,
+        old_snapshot,
+        checked_at=NOW + timedelta(seconds=2),
+    ) is True
+    assert latest_snapshot_for_market(
+        conn,
+        "condition-1",
+        NOW + timedelta(seconds=2),
+    ) is None
+    with pytest.raises(StaleMarketSnapshotError, match="invalidated"):
+        _insert_command(
+            conn,
+            snapshot_id="snap-old",
+            checked_at=NOW + timedelta(seconds=2),
+        )
+
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-new",
+            captured_at=NOW + timedelta(seconds=3),
+            freshness_deadline=NOW + timedelta(seconds=60),
+        ),
+    )
+
+    latest = latest_snapshot_for_market(conn, "condition-1", NOW + timedelta(seconds=4))
+    assert latest is not None
+    assert latest.snapshot_id == "snap-new"
+    _insert_command(
+        conn,
+        snapshot_id="snap-new",
+        checked_at=NOW + timedelta(seconds=4),
+    )
+
+
+def test_snapshot_refresh_state_reads_latest_mirror_without_append_scan(conn):
+    class _TracingConn:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.latest_queries = 0
+            self.append_queries = 0
+
+        def execute(self, sql, params=()):
+            if "FROM executable_market_snapshot_latest" in str(sql):
+                self.latest_queries += 1
+            if "FROM executable_market_snapshots" in str(sql):
+                self.append_queries += 1
+            return self._wrapped.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-yes-latest",
+            selected_outcome_token_id="yes-token",
+            outcome_label="YES",
+            captured_at=NOW,
+            freshness_deadline=NOW + timedelta(seconds=30),
+        ),
+    )
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-no-latest",
+            selected_outcome_token_id="no-token",
+            outcome_label="NO",
+            captured_at=NOW + timedelta(milliseconds=1),
+            freshness_deadline=NOW + timedelta(seconds=30),
+        ),
+    )
+
+    tracing = _TracingConn(conn)
+    priority, fresh_tokens = _snapshot_condition_refresh_state(
+        tracing,
+        "condition-1",
+        {"token_id": "yes-token", "no_token_id": "no-token"},
+        captured=NOW + timedelta(seconds=5),
+    )
+
+    assert priority[0] == 3
+    assert fresh_tokens == {"yes-token", "no-token"}
+    assert tracing.latest_queries == 1
+    assert tracing.append_queries == 0
+
+
+def test_latest_snapshot_for_market_reads_latest_id_before_append_primary_key(conn):
+    class _TracingConn:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.latest_queries = 0
+            self.append_condition_scans = 0
+            self.append_primary_key_reads = 0
+
+        @property
+        def row_factory(self):
+            return self._wrapped.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self._wrapped.row_factory = value
+
+        def execute(self, sql, params=()):
+            text = " ".join(str(sql).split())
+            if "FROM executable_market_snapshot_latest" in text:
+                self.latest_queries += 1
+            if (
+                "FROM executable_market_snapshots" in text
+                and "WHERE condition_id" in text
+            ):
+                self.append_condition_scans += 1
+            if (
+                "FROM executable_market_snapshots" in text
+                and "WHERE snapshot_id" in text
+            ):
+                self.append_primary_key_reads += 1
+            return self._wrapped.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-older",
+            selected_outcome_token_id="yes-token",
+            outcome_label="YES",
+            captured_at=NOW - timedelta(seconds=10),
+            freshness_deadline=NOW + timedelta(seconds=30),
+        ),
+    )
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-newer",
+            selected_outcome_token_id="no-token",
+            outcome_label="NO",
+            captured_at=NOW,
+            freshness_deadline=NOW + timedelta(seconds=30),
+        ),
+    )
+
+    tracing = _TracingConn(conn)
+    loaded = latest_snapshot_for_market(tracing, "condition-1", NOW)
+
+    assert loaded is not None
+    assert loaded.snapshot_id == "snap-newer"
+    assert tracing.latest_queries == 1
+    assert tracing.append_primary_key_reads == 1
+    assert tracing.append_condition_scans == 0
 
 
 def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn):
@@ -980,7 +1202,10 @@ def test_capture_executable_snapshot_uses_market_fact_methods_only(conn):
     assert clob.calls == ["get_clob_market_info", "get_orderbook_snapshot", "get_fee_rate"]
 
 
-@pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"])
+@pytest.mark.parametrize(
+    "authority",
+    ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "NEVER_FETCHED"],
+)
 def test_capture_executable_snapshot_requires_verified_gamma_authority(conn, authority):
     with pytest.raises(ExecutableSnapshotCaptureError, match="VERIFIED Gamma authority"):
         capture_executable_market_snapshot(
@@ -2196,7 +2421,7 @@ def test_final_execution_intent_requires_cost_basis_hash():
 # ---------------------------------------------------------------------------
 # FT-64 (2026-05-27): batch orderbook prefetch — additive, byte-identical path.
 # Lifecycle: created=2026-05-27
-# Authority basis: docs/operations/POLYMARKET_ORDERBOOK_FRESHNESS_PATTERN_2026-05-27.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/POLYMARKET_ORDERBOOK_FRESHNESS_PATTERN_2026-05-27.md
 # Invariant guarded: prefetched orderbook path must produce a snapshot
 #   byte-identical to the per-token fetched path; per-bin staleness must not
 #   abort the event; the CLOB-archived fail-closed guard must still fire.

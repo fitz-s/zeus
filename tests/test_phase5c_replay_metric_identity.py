@@ -58,10 +58,6 @@ def _make_replay_db(*, with_forecast_rows: bool = True, with_trade_decision: boo
         CREATE TABLE IF NOT EXISTS decision_log (
             started_at TEXT, artifact_json TEXT
         );
-        CREATE TABLE IF NOT EXISTS shadow_signals (
-            timestamp TEXT, city TEXT, target_date TEXT,
-            decision_snapshot_id TEXT, p_raw_json TEXT, p_cal_json TEXT, edges_json TEXT
-        );
         CREATE TABLE IF NOT EXISTS calibration_bins (
             bin_id INTEGER PRIMARY KEY, city TEXT, temperature_metric TEXT,
             bin_label TEXT, low REAL, high REAL, unit TEXT

@@ -225,6 +225,40 @@ def test_effective_entry_economics_honours_row_fill_authority() -> None:
     )
 
 
+def test_effective_entry_economics_uses_chain_cost_without_fill_hint() -> None:
+    """A chain-synced row must not display zero exposure just because the
+    linked execution_fact fill hint is absent.
+
+    This guards the Helsinki-style state: chain/position_current know the real
+    shares and cost, while the legacy audit bridge was synthesized with
+    size_usd=0. The read model must use canonical chain economics.
+    """
+    from src.state.db import _position_current_effective_entry_economics
+
+    row = {
+        "size_usd": 0.0,
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "entry_price": 0.0,
+        "phase": "active",
+        "fill_authority": "venue_confirmed_full",
+        "chain_avg_price": 0.65,
+        "chain_cost_basis_usd": 2.3205,
+        "chain_shares": 3.57,
+    }
+
+    result = _position_current_effective_entry_economics(row, fill_hint=None)
+
+    assert result["effective_cost_basis_usd"] == pytest.approx(2.3205)
+    assert result["pnl_cost_basis_usd"] == pytest.approx(2.3205)
+    assert result["effective_shares"] == pytest.approx(3.57)
+    assert result["effective_entry_price"] == pytest.approx(0.65)
+    assert result["entry_economics_authority"] == "corrected_executable_cost_basis"
+    assert result["entry_economics_source"] == "position_current_chain_observed"
+    assert result["fill_authority"] == "venue_confirmed_full"
+    assert result["entry_fill_verified"] is True
+
+
 def test_effective_entry_economics_none_row_fill_authority_still_defaults() -> None:
     """Regression guard: legacy rows with NULL fill_authority still get
     FILL_AUTHORITY_NONE (no behavioural change for the legacy path)."""

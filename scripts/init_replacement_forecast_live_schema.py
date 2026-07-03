@@ -22,7 +22,6 @@ REPLACEMENT_LIVE_TABLES = (
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
 )
 
 

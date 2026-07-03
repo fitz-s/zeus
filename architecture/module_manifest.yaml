@@ -37,6 +37,8 @@ modules:
     authority_role: canonical_runtime_truth
     high_risk_files:
       - src/state/db.py
+      - src/state/write_coordinator.py
+      - src/state/schema/execution_feasibility_evidence_schema.py
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
       - src/state/chain_reconciliation.py
@@ -51,6 +53,8 @@ modules:
       - src/state/market_topology_repo.py
     public_entry_files:
       - src/state/db.py
+      - src/state/write_coordinator.py
+      - src/state/schema/execution_feasibility_evidence_schema.py
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
       - src/state/collateral_ledger.py
@@ -60,6 +64,7 @@ modules:
       - src/state/source_run_repo.py
       - src/state/readiness_repo.py
       - src/state/market_topology_repo.py
+      - src/state/order_state_predicates.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
@@ -86,6 +91,10 @@ modules:
       - tests/test_source_run_schema.py
       - tests/test_readiness_state_schema.py
       - tests/test_market_topology_state_schema.py
+      - tests/state/test_write_coordinator.py
+      - tests/test_order_state_predicates.py
+      - tests/test_ddl_copies_normalized_identical.py
+      - tests/test_schema_fingerprint.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:
@@ -104,6 +113,8 @@ modules:
       - src/engine/monitor_refresh.py
       - src/engine/replay.py
       - src/engine/lifecycle_events.py
+      - src/engine/replacement_forecast_hook_factory.py
+      - src/engine/position_belief.py
     public_entry_files:
       - src/engine/cycle_runner.py
       - src/engine/evaluator.py
@@ -190,9 +201,10 @@ modules:
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py
       - tests/money_path/test_edli_online_invariants.py
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
+      - tests/data/test_source_run_arrived_event.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   data:
@@ -217,6 +229,11 @@ modules:
       - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
+      - src/data/openmeteo_model_updates.py
+      - src/data/source_clock_update_probe.py
+      - src/data/replacement_forecast_materializer.py
+      - src/data/replacement_forecast_bundle_reader.py
+      - src/data/replacement_input_hwm.py
     public_entry_files:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py
@@ -228,6 +245,8 @@ modules:
       - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
+      - src/data/openmeteo_model_updates.py
+      - src/data/source_clock_update_probe.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/city_truth_contract.yaml
@@ -249,8 +268,103 @@ modules:
       - tests/test_hourly_clients_parse.py
       - tests/test_v2_adapter.py
       - tests/test_release_calendar.py
+      - tests/data/test_openmeteo_model_updates.py
+      - tests/data/test_source_run_arrived_event.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  decision:
+    path: src/decision
+    scoped_agents: src/decision/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional (not "stable") — live money-path admission/sizing chain, but
+    # family_decision_engine.py is a BUILD target at W3 (new src/solve/ module swaps in at
+    # qkernel_spine_bridge.py:1332) and the selection machinery (curse bound + calibrator +
+    # qlcb guard) is a W5 deletion target, per
+    # docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    maturity: provisional
+    zone: source
+    authority_role: decision_logic
+    high_risk_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/market_coherence.py
+      - src/decision/payoff_vector.py
+      - src/decision/qlcb_reliability_guard.py
+      - src/decision/selection_calibrator.py
+      - src/decision/selection_curse_bound.py
+      - src/decision/city_skill_gate.py
+    public_entry_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/decision_receipt.py
+      - src/decision/market_coherence.py
+      - src/decision/payoff_vector.py
+      - src/decision/qlcb_reliability_guard.py
+      - src/decision/selection_calibrator.py
+      - src/decision/selection_curse_bound.py
+      - src/decision/selection_curse_bound_loader.py
+      - src/decision/city_skill_gate.py
+    law_dependencies:
+      - AGENTS.md
+      - architecture/invariants.yaml
+      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/decision/test_family_decision_engine.py
+      - tests/decision/test_market_coherence.py
+      - tests/decision/test_payoff_vector_edge.py
+      - tests/decision/test_vector_sizing_authority.py
+      - tests/decision/test_qlcb_reliability_guard.py
+      - tests/decision/test_qlcb_guard_decision_integration.py
+      - tests/decision/test_selection_calibrator.py
+      - tests/decision/test_selection_calibrator_eb.py
+      - tests/decision/test_selection_curse_bound.py
+      - tests/decision/test_selection_curse_bound_loader.py
+      - tests/decision/test_city_skill_gate.py
+      - tests/decision/test_live_receipt_contract.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
+  solve:
+    path: src/solve
+    scoped_agents: src/solve/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional — order-engine rebuild W3 SOLVE core. Math bodies land in
+    # sub-slice 2 (solver.py solve(), menu_adapter, scenario_service); the FamilyDecision
+    # shim + bridge wiring are sub-slice 3. Inert: nothing imports src/solve yet; the ONLY
+    # intended seam is qkernel_spine_bridge.py:1332 behind the w3_solve_enabled flag.
+    maturity: provisional
+    zone: source
+    authority_role: decision_logic
+    high_risk_files:
+      - src/solve/solver.py
+      - src/solve/kappa.py
+      - src/solve/scenario_service.py
+    public_entry_files:
+      - src/solve/solver.py
+      - src/solve/types.py
+      - src/solve/scenario_service.py
+      - src/solve/menu_adapter.py
+      - src/solve/kappa.py
+      - src/solve/exits.py
+    law_dependencies:
+      - AGENTS.md
+      - docs/rebuild/order_engine_first_principles_design_2026-07-02.md
+      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      - docs/rebuild/schema_packets/w3_solve_design_packet_2026-07-03.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/solve/test_solver_properties.py
+      - tests/solve/test_solver_numerical.py
+      - tests/solve/test_scenario_service.py
+      - tests/solve/test_menu_adapter.py
+      - tests/solve/test_types_validation.py
+      - tests/solve/test_contract_validator.py
+      - tests/solve/test_joint_axis.py
+      - tests/solve/test_wealth_builder.py
+      - tests/solve/test_shim_decide.py
+      - tests/integration/test_w3_solve_seam_g3.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md
@@ -271,6 +385,8 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
+      - src/execution/ctf_conversion_commands.py
+      - src/execution/batch_order_submission.py
     public_entry_files:
       - src/execution/executor.py
       - src/execution/exchange_reconcile.py
@@ -281,6 +397,11 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
+      - src/execution/self_trade_guard.py
+      - src/execution/ctf_conversion_commands.py
+      - src/execution/batch_order_submission.py
+      - src/execution/staleness_cancel.py
+      - src/execution/venue_cancel_journal.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -297,7 +418,12 @@ modules:
       - tests/test_exit_safety.py
       - tests/test_exchange_reconcile.py
       - tests/test_settlement_commands.py
+      - tests/test_self_trade_guard.py
       - tests/test_risk_allocator.py
+      - tests/execution/test_ctf_conversion_commands.py
+      - tests/execution/test_batch_order_submission.py
+      - tests/execution/test_staleness_cancel.py
+      - tests/execution/test_venue_cancel_journal.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   venue:
@@ -316,6 +442,7 @@ modules:
     public_entry_files:
       - src/venue/polymarket_v2_adapter.py
       - src/contracts/venue_submission_envelope.py
+      - src/venue/batch_submit.py
     law_dependencies:
       - architecture/invariants.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
@@ -329,6 +456,9 @@ modules:
       - tests/integration/test_p0_live_money_safety.py
       - tests/test_executor_command_split.py
       - tests/test_neg_risk_passthrough.py
+      - tests/venue/test_rate_budget.py
+      - tests/test_polymarket_v2_adapter_ctf_conversion.py
+      - tests/venue/test_batch_submit.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   ingest:
@@ -440,13 +570,14 @@ modules:
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
       - src/strategy/benchmark_suite.py
+      - src/strategy/live_inference/source_clock_vnext.py
+      - src/strategy/live_inference/source_clock_city_weights.py
     public_entry_files:
       - src/strategy/market_analysis.py
       - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/benchmark_suite.py
       - src/strategy/data_lake.py
-      - src/strategy/candidates/__init__.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -457,6 +588,8 @@ modules:
       - tests/test_fdr.py
       - tests/test_kelly.py
       - tests/test_kelly_cascade_bounds.py
+      - tests/strategy/live_inference/test_source_clock_vnext.py
+      - tests/strategy/live_inference/test_source_clock_city_weights.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   riskguard:
@@ -909,30 +1042,6 @@ modules:
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: none
 
-  topology_v_next:
-    path: scripts/topology_v_next/
-    scoped_agents: AGENTS.md
-    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-    priority: p1_first_wave
-    maturity: shadow
-    zone: tool
-    authority_role: admission_advisor
-    high_risk_files:
-      - scripts/topology_v_next/admission_engine.py
-      - scripts/topology_v_next/dataclasses.py
-      - scripts/topology_v_next/validator.py
-    public_entry_files:
-      - scripts/topology_v_next/admission_engine.py
-    law_dependencies:
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/topology_v_next/
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: none
-
   zeus_bindings:
     path: bindings/zeus/
     scoped_agents: AGENTS.md
@@ -948,7 +1057,6 @@ modules:
       - bindings/zeus/config.yaml
       - bindings/zeus/safety_overrides.yaml
     law_dependencies:
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
       - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
     current_fact_dependencies:
       - docs/operations/current_state.md

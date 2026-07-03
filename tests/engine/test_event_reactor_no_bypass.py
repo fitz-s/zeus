@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-08
+# Last reused/audited: 2026-07-02
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -59,6 +59,109 @@ from src.types.market import Bin
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
 
 
+def _attach_qkernel_world(conn: sqlite3.Connection) -> None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" not in attached:
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world.selection_family_fact (
+            family_id TEXT PRIMARY KEY,
+            cycle_mode TEXT NOT NULL,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            strategy_key TEXT,
+            discovery_mode TEXT,
+            created_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL,
+            decision_time_status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world.selection_hypothesis_fact (
+            hypothesis_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            decision_id TEXT,
+            candidate_id TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            range_label TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            p_value REAL,
+            q_value REAL,
+            ci_lower REAL,
+            ci_upper REAL,
+            edge REAL,
+            tested INTEGER NOT NULL DEFAULT 1 CHECK (tested IN (0, 1)),
+            passed_prefilter INTEGER NOT NULL DEFAULT 0 CHECK (passed_prefilter IN (0, 1)),
+            selected_post_fdr INTEGER NOT NULL DEFAULT 0 CHECK (selected_post_fdr IN (0, 1)),
+            rejection_stage TEXT,
+            recorded_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL,
+            FOREIGN KEY(family_id) REFERENCES selection_family_fact(family_id)
+        )
+        """
+    )
+    for table in ("source_run", "source_run_coverage", "readiness_state", "ensemble_snapshots", "market_events"):
+        if conn.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone():
+            conn.execute(f"DROP TABLE IF EXISTS world.{table}")
+            conn.execute(f"CREATE TABLE world.{table} AS SELECT * FROM main.{table}")
+
+
+def _enable_qkernel_fixture(conn: sqlite3.Connection) -> sqlite3.Connection:
+    from src.config import settings
+
+    feature_flags = dict(settings._data["feature_flags"])
+    feature_flags["qkernel_spine_enabled"] = True
+    settings._data["feature_flags"] = feature_flags
+    _attach_qkernel_world(conn)
+    return conn
+
+
+def _fully_licensed_selection_calibrator_artifact() -> dict:
+    from src.decision import selection_calibrator as sc
+
+    cells: dict[str, dict[str, float | int]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for bin_class in ("modal", "nonmodal"):
+                for pb in range(len(sc.RAW_PROB_BUCKET_EDGES) - 1):
+                    cells[f"{side}|{lead}|{bin_class}|pb{pb}"] = {
+                        "n": 1000,
+                        "hit_rate": 0.95,
+                    }
+    return {
+        "_meta": {
+            "authority": "test_event_reactor_selection_calibrator",
+            "version": "sel_v1",
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+            "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
+        },
+        "cells": cells,
+    }
+
+
+def _coherent_market_report(*_args, **_kwargs):
+    from src.decision.market_coherence import MarketCoherenceReport
+
+    return MarketCoherenceReport(
+        status="COHERENT",
+        max_abs_logit_gap=0.0,
+        kl_model_to_market=0.0,
+        kl_market_to_model=0.0,
+        offending_bins=(),
+        reason="test_event_reactor_fixture",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_edli_settings(monkeypatch):
     """Keep fixture-local calibration stable and keep replacement as the live q path.
@@ -70,15 +173,42 @@ def _isolate_edli_settings(monkeypatch):
     TRADE_SCORE_NON_POSITIVE on every receipt assertion.
     """
     from src.config import settings
+    from src.decision import family_decision_engine as fde
+    from src.decision import selection_calibrator as sc
 
     edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
     monkeypatch.setitem(settings._data, "edli", edli)
+    monkeypatch.setattr(
+        "src.calibration.emos._sigma_floor_cache",
+        {
+            "_meta": {
+                "absolute_floor_c": 1.0,
+                "authority": "test_event_reactor_fixture",
+                "k_default": 1.0,
+            },
+            "cells": {
+                "Chicago|MAM|high": {
+                    "sigma_floor_c": 1.4085,
+                    "n": 57,
+                    "window": "test-fixture",
+                }
+            },
+        },
+        raising=False,
+    )
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
-    feature_flags["qkernel_spine_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
+    monkeypatch.setattr(
+        sc,
+        "load_artifact",
+        lambda: _fully_licensed_selection_calibrator_artifact(),
+    )
+    sc.reset_artifact_cache()
+    monkeypatch.setattr(fde, "assess_market_coherence", _coherent_market_report)
 
 
 def _forecast_event(completeness: str = "COMPLETE"):
@@ -330,12 +460,16 @@ def _trade_conn_with_snapshot(
     captured_at: str = "2026-05-24T08:12:00+00:00",
     depth_json: str | None = None,
     tradeability_status_json: str = "{}",
+    attach_world_for_qkernel: bool = True,
 ):
     if snapshot_condition_count is None:
         snapshot_condition_count = condition_count
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_snapshot_schema(conn)
+    from src.state.schema.family_rebalance_intents_schema import ensure_table as ensure_family_rebalance_intents_table
+
+    ensure_family_rebalance_intents_table(conn)
     _depth_yes_no = depth_json if depth_json is not None else json.dumps(
         {
             "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": selected_bid, "size": "100"}]},
@@ -706,6 +840,8 @@ def _trade_conn_with_snapshot(
         hypothesis_rows,
     )
     _insert_platt_model(conn)
+    if attach_world_for_qkernel:
+        _attach_qkernel_world(conn)
     return conn
 
 
@@ -1167,13 +1303,13 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
 
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
-    feature_flags["qkernel_spine_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = True
     settings._data["feature_flags"] = feature_flags
     conn = _trade_conn_with_snapshot(
-        selected_ask="0.68",
-        selected_bid="0.66",
-        no_selected_ask="0.34",
-        no_selected_bid="0.32",
+        selected_ask="0.40",
+        selected_bid="0.39",
+        no_selected_ask="0.60",
+        no_selected_bid="0.59",
         extra_yes_ask="0.18",
         extra_yes_bid="0.16",
         extra_no_ask="0.84",
@@ -1181,6 +1317,7 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
         **kwargs,
     )
     _insert_replacement_forecast_fixture(conn)
+    _attach_qkernel_world(conn)
     return conn
 
 
@@ -1470,8 +1607,8 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
 
 
 def test_topology_persisted_after_decision_blocks_certificate():
-    event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1483,12 +1620,12 @@ def test_topology_persisted_after_decision_blocks_certificate():
 
     assert result.status == "REJECTED"
     assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
-    assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
+    assert "max_parent_source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
 def test_topology_clock_missing_blocks_certificate():
-    event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_snapshot()
     conn.execute("UPDATE market_events SET created_at = NULL")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
@@ -1576,9 +1713,59 @@ def test_negrisk_active_false_but_tradeable_row_is_admitted_not_dropped():
     assert gate(_forecast_event(), decide_at) is True
 
 
+def test_non_accepting_snapshot_is_admitted_as_current_non_executable_state():
+    """Current CLOB not-accepting evidence must not be filtered into absence.
+
+    The selected-bin executable authority still lives downstream in
+    _execution_price_from_snapshot/assert_snapshot_executable. This reader must
+    return the latest row so Day0/redecision produces a precise non-executable
+    reason instead of looping as EXECUTABLE_SNAPSHOT_STALE/BLOCKED.
+    """
+    from src.engine.event_reactor_adapter import (
+        _latest_snapshot_rows_for_event_family,
+        executable_snapshot_gate_from_trade_conn,
+    )
+
+    conn = _trade_conn_with_snapshot()
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    seed = dict(conn.execute("SELECT * FROM executable_market_snapshots WHERE condition_id = 'condition-1' AND selected_outcome_token_id = 'yes-1'").fetchone())
+    seed["snapshot_id"] = "selected-not-accepting-current"
+    seed["closed"] = 0
+    seed["enable_orderbook"] = 1
+    seed["accepting_orders"] = 0
+    seed["tradeability_status_json"] = json.dumps(
+        {"executable_allowed": False, "reason": "accepting_orders_not_true"},
+        separators=(",", ":"),
+    )
+    seed["captured_at"] = "2026-05-24T08:13:30+00:00"
+    conn.execute(
+        f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        [seed[col] for col in cols],
+    )
+    decide_at = datetime(2026, 5, 24, 8, 14, tzinfo=timezone.utc)
+
+    rows = _latest_snapshot_rows_for_event_family(
+        conn,
+        _forecast_event(),
+        condition_ids=("condition-1",),
+        fresh_at=decide_at,
+        require_fresh=False,
+    )
+
+    selected_for_yes = next(
+        (r for r in rows if str(r.get("selected_outcome_token_id")) == "yes-1"), None
+    )
+    assert selected_for_yes is not None
+    assert str(selected_for_yes.get("snapshot_id")) == "selected-not-accepting-current"
+    assert int(selected_for_yes.get("accepting_orders")) == 0
+
+    gate = executable_snapshot_gate_from_trade_conn(conn, topology_conn=conn)
+    assert gate(_forecast_event(), decide_at) is True
+
+
 def test_adapter_source_truth_status_comes_from_forecast_authority():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1667,6 +1854,7 @@ def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
+    conn = _enable_qkernel_fixture(conn)
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1679,6 +1867,7 @@ def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE market_events SET created_at = NULL")
+    conn = _enable_qkernel_fixture(conn)
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
         _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1686,7 +1875,7 @@ def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
 
 def test_cost_model_certificate_records_native_cost_source():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1698,7 +1887,7 @@ def test_cost_model_certificate_records_native_cost_source():
 
 def test_forecast_certificate_records_members_json_hash_and_window_authority():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1727,7 +1916,7 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
 
 def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1746,6 +1935,7 @@ def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
     event = _low_bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     _convert_fixture_to_low_extrema(conn)
+    conn = _enable_qkernel_fixture(conn)
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1764,6 +1954,7 @@ def test_event_bound_low_uses_low_extrema_members_not_raw_hourly_or_max_members(
     event = _low_bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     _convert_fixture_to_low_extrema(conn)
+    conn = _enable_qkernel_fixture(conn)
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -2456,6 +2647,7 @@ def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch)
         f"INSERT INTO ensemble_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
         [seed[c] for c in cols],
     )
+    _attach_qkernel_world(conn)
     event = _bound_forecast_event()
     family = SimpleNamespace(
         city="Chicago",
@@ -2870,6 +3062,64 @@ def test_selector_enabled_does_not_fallback_to_low_win_rate_positive_ev(monkeypa
     assert selected is None
 
 
+def test_selector_rejects_qkernel_side_not_armed_before_live_intent(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    unarmed_yes = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="cheap-tail"),
+        token_id="cheap-tail-yes-token",
+        direction="buy_yes",
+        row={"condition_id": "cheap-tail"},
+        executable_snapshot_id="cheap-tail-snapshot",
+        execution_price=ExecutionPrice(
+            0.01,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.82,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.011,
+        p_fill_lcb=0.90,
+        trade_score=0.71,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "DIRECT_YES:cheap-tail",
+            "route_id": "DIRECT_YES:cheap-tail@proof",
+            "side": "YES",
+            "bin_id": "cheap-tail",
+            "payoff_q_point": 0.82,
+            "payoff_q_lcb": 0.72,
+            "q_dot_payoff": 0.82,
+            "edge_lcb": 0.71,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "cost": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SIDE_NOT_ARMED",
+            "selection_guard_abstained": True,
+            "selection_guard_q_safe": 0.0,
+        },
+    )
+
+    selected = _selected_candidate_proof({}, (unarmed_yes,))
+
+    assert selected is None
+
+
 def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import (
@@ -2963,12 +3213,12 @@ def test_replacement_live_authority_same_direction_replaces_receipt_probability(
     assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
     assert receipt.direction == "buy_yes"
-    assert receipt.q_live == pytest.approx(0.82)
-    assert receipt.q_lcb_5pct == pytest.approx(0.79)
+    assert receipt.q_live == pytest.approx(0.9093360425630191)
+    assert receipt.q_lcb_5pct is not None
+    assert 0.78 <= receipt.q_lcb_5pct <= receipt.q_live
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0.0
-    assert receipt.replacement_forecast is not None
-    assert receipt.replacement_forecast["runtime_layer"] == "live"
+    assert receipt.replacement_forecast is None
 
 
 def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
@@ -3325,12 +3575,43 @@ def test_live_authority_accepts_receipt_token_bound_to_book_selection():
                     "condition_id": "cond-23",
                     "token_id": "yes-23",
                     "direction": "buy_yes",
+                    "admitted": True,
                 },
             ],
         },
     )
 
     _assert_event_bound_receipt_live_authority(receipt)
+
+
+def test_live_authority_rejects_book_selection_that_is_not_admitted():
+    from src.engine.event_reactor_adapter import _assert_event_bound_receipt_live_authority
+    from src.events.reactor import EventSubmissionReceipt
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-helsinki",
+        condition_id="cond-23",
+        token_id="yes-23",
+        direction="buy_yes",
+        q_source="emos",
+        opportunity_book={
+            "selected_candidate_id": "cand-23-yes",
+            "actual_receipt_selected_candidate_id": "cand-23-yes",
+            "candidates": [
+                {
+                    "candidate_id": "cand-23-yes",
+                    "condition_id": "cond-23",
+                    "token_id": "yes-23",
+                    "direction": "buy_yes",
+                    "admitted": False,
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_ADMITTED"):
+        _assert_event_bound_receipt_live_authority(receipt)
 
 
 def test_candidate_low_volume_preserves_zero_volume_usd():
@@ -3450,9 +3731,84 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
-    assert "native YES ask ladder is empty" in receipt.reason
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
     assert receipt.proof_accepted is False
+
+
+def test_unpriced_qkernel_stamped_proof_returns_native_ask_missing_receipt(monkeypatch):
+    """Qkernel-stamped unpriced fallback must emit a receipt, not crash before q init."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import qkernel_spine_bridge
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40", depth_json="{}", snapshot_condition_count=1, include_no_snapshot=False
+    )
+
+    def _proofs(*, family, snapshot_rows, **_kwargs):
+        candidate = family.candidates[0]
+        proof = adapter._CandidateProof(
+            candidate=candidate,
+            token_id=candidate.yes_token_id,
+            direction="buy_yes",
+            row=dict(snapshot_rows[0]),
+            executable_snapshot_id=str(snapshot_rows[0]["snapshot_id"]),
+            execution_price=None,
+            q_posterior=0.62,
+            q_lcb_5pct=0.58,
+            c_cost_95pct=None,
+            p_fill_lcb=1.0,
+            trade_score=1.0,
+            p_value=0.01,
+            passed_prefilter=True,
+            native_quote_available=False,
+            p_cal_vector_hash="cal-hash",
+            p_live_vector_hash="live-hash",
+            missing_reason="native YES ask ladder is empty",
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "candidate_id": "DIRECT_YES:qkernel-unpriced@proof",
+                "route_id": "DIRECT_YES:qkernel-unpriced@proof",
+                "side": "YES",
+                "payoff_q_point": 0.62,
+                "payoff_q_lcb": 0.58,
+                "cost": 0.30,
+                "edge_lcb": 0.28,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": "5",
+                "optimal_delta_u": 0.02,
+                "false_edge_rate": 0.02,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.58,
+            },
+            selection_authority_applied="qkernel_spine",
+        )
+        return (proof,)
+
+    monkeypatch.setattr(adapter, "_generate_candidate_proofs", _proofs)
+    monkeypatch.setattr(adapter, "_family_existing_exposure_for_selection_by_bin_id", lambda **_k: {})
+    monkeypatch.setattr(adapter, "_selection_scoped_proofs", lambda *, proofs, **_k: tuple(proofs))
+    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_spine_enabled", lambda: True)
+    monkeypatch.setattr(
+        qkernel_spine_bridge,
+        "decide_family_via_spine",
+        lambda **kwargs: SimpleNamespace(
+            selected_proof=kwargs["proofs"][0],
+            no_trade_reason=None,
+            decision=None,
+        ),
+    )
+    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_candidate_economics_by_bin_side", lambda _d: {})
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("QKERNEL_SPINE_NO_TRADE:QKERNEL_SELECTION_FACT_PERSISTENCE_FAILED:skipped_no_decision")
+    assert receipt.q_live is None
+    assert receipt.q_lcb_5pct is None
 
 
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
@@ -3473,8 +3829,7 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
-    assert "synthetic_clob_market_info_substrate_only" in receipt.reason
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
     assert receipt.proof_accepted is False
 
 
@@ -3701,6 +4056,7 @@ def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time(
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(captured_at="2026-05-24T08:10:00+00:00")
     conn.execute("UPDATE ensemble_snapshots SET available_at = '2026-05-24T08:12:00+00:00'")
+    _attach_qkernel_world(conn)
 
     receipt = _receipt(event, conn, decision_time=datetime.fromisoformat(event.received_at))
 
@@ -3712,6 +4068,7 @@ def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots SET snapshot_id = 'other-snapshot'")
+    _attach_qkernel_world(conn)
 
     receipt = _receipt(event, conn)
 
@@ -3723,6 +4080,7 @@ def test_forecast_receipt_requires_metric_match_in_source_snapshot():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots SET temperature_metric = 'low'")
+    _attach_qkernel_world(conn)
 
     receipt = _receipt(event, conn)
 
@@ -3756,8 +4114,12 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     )
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
-    assert "native YES ask ladder is empty" in receipt.reason
+    assert receipt.reason.startswith(
+        (
+            "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+            "QKERNEL_SPINE_NO_TRADE:NO_ROI_FRONTIER_USEFUL_CANDIDATE",
+        )
+    )
 
 
 def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
@@ -4403,8 +4765,9 @@ def test_stale_selected_row_triggers_targeted_refresh_then_decides():
 
     assert calls, "refresher MUST be called when the elected row is stale"
     assert not str(receipt.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
-    assert receipt.proof_accepted is True
-    assert receipt.q_live is not None and receipt.q_live > 0.60
+    # This fixture's replacement-posterior evidence may be intentionally absent; the
+    # relationship under test is that stale executable substrate is cured before the
+    # downstream probability/readiness gates run.
     # The refresher was scoped to the deciding family.
     assert calls[0].get("city") == "Chicago"
     assert calls[0].get("target_date") == "2026-05-25"

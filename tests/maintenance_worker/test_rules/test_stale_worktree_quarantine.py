@@ -4,11 +4,13 @@
 """
 Tests for maintenance_worker.rules.stale_worktree_quarantine.
 
-4 tests:
+6 tests:
   1. Idle clean worktree → STALE_QUARANTINE_CANDIDATE
   2. Main/current-branch worktree → SKIP_CURRENT_BRANCH
   3. Worktree with uncommitted changes → SKIP_UNCOMMITTED
   4. apply() always dry_run_only + mock diff
+  5. gh unavailable -> SKIP_PR_CHECK_UNVERIFIED
+  6. open PR found -> SKIP_OPEN_PR
 """
 from __future__ import annotations
 

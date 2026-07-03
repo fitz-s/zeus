@@ -136,7 +136,7 @@ class AifsBinProbabilityResult:
     physical_quantity: str = PHYSICAL_QUANTITY
     aggregation_window_policy: str = AGGREGATION_WINDOW_POLICY
     probability_source: str = "aifs_sampled_2t_member_frequency"
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -148,8 +148,8 @@ class AifsBinProbabilityResult:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("data_version", self.data_version)):
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"{field_name} must use the full product identity")
-        if self.trade_authority_status != "SHADOW_ONLY" or self.training_allowed:
-            raise ValueError("AIFS sampled-2t probabilities are shadow-only until promoted by evidence")
+        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
+            raise ValueError("AIFS sampled-2t probabilities are blocked until promoted by evidence")
         total = sum(float(value) for value in self.probabilities.values())
         if abs(total - 1.0) > 1e-9:
             raise ValueError("AIFS probabilities must sum to 1")
@@ -169,7 +169,7 @@ class OpenMeteoIfs9AifsSoftAnchorResearchResult:
     anchor_product_id: str
     source_id: str = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
     product_id: str = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -180,8 +180,8 @@ class OpenMeteoIfs9AifsSoftAnchorResearchResult:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id)):
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"{field_name} must use the full product identity")
-        if self.trade_authority_status != "SHADOW_ONLY" or self.training_allowed:
-            raise ValueError("soft-anchor research result is shadow-only until promoted by evidence")
+        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
+            raise ValueError("soft-anchor research result is blocked until promoted by evidence")
 
 
 def _normalize_metric(metric: str) -> Metric:

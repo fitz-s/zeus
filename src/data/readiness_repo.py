@@ -16,9 +16,7 @@ from src.state.connection_pair import WorldConnection
 READINESS_STATUSES = frozenset({
     "READY",
     "LIVE_ELIGIBLE",
-    "SHADOW_ONLY",
     "BLOCKED",
-    "DEGRADED_LOG_ONLY",
     "UNKNOWN_BLOCKED",
 })
 SCOPE_TYPES = frozenset({"global", "source", "city_metric", "market", "strategy", "quote"})

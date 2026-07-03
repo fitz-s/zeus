@@ -19,7 +19,7 @@ predictive inputs threaded on the payload.
 Asserts:
   (a) the decision is produced by ``family_decision_engine`` (the spine) — the result
       carries ``decided_by_spine`` and a ``FamilyDecision`` whose ``receipt_hash`` is
-      the spine receipt anchor; the selection is the spine's ``argmax optimal_delta_u``,
+      the spine receipt anchor; the selection is the spine's ROI-frontier objective,
       NOT the legacy scalar selector.
   (b) a no-trade returns a TYPED ``no_trade_reason`` (the spine's own vocabulary or a
       bridge typed reason).
@@ -57,7 +57,7 @@ def _fast_band_draws(monkeypatch):
     """Lower the joint-q band draw count for a fast, deterministic smoke.
 
     The band draw count only sets the Monte-Carlo resolution of the robust edge lower
-    bound; it never changes the selection LOGIC (direction/coherence/edge/argmax-ΔU). A
+    bound; it never changes the selection LOGIC (direction/coherence/edge/ROI-frontier). A
     smaller count keeps the smoke quick. Production uses the engine default (4000).
     """
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
@@ -248,12 +248,66 @@ def _drive(family, proofs, payload):
     )
 
 
+def test_duplicate_bin_side_proofs_use_one_canonical_proof_for_size_route_and_remap():
+    family, bins = _three_bin_family()
+    candidate = family.candidates[1]
+    expensive_row = _row(
+        condition_id=candidate.condition_id,
+        yes_token=candidate.yes_token_id,
+        no_token=candidate.no_token_id,
+        yes_ask=0.40,
+        no_ask=0.80,
+        snapshot_id="snap-expensive",
+    )
+    cheap_row = _row(
+        condition_id=candidate.condition_id,
+        yes_token=candidate.yes_token_id,
+        no_token=candidate.no_token_id,
+        yes_ask=0.20,
+        no_ask=0.80,
+        snapshot_id="snap-cheap",
+    )
+    expensive = _proof(
+        direction="buy_yes",
+        row=expensive_row,
+        token_id=candidate.yes_token_id,
+        q_posterior=0.75,
+        q_lcb_5pct=0.65,
+        bin_obj=bins[1],
+    )
+    cheap = _proof(
+        direction="buy_yes",
+        row=cheap_row,
+        token_id=candidate.yes_token_id,
+        q_posterior=0.75,
+        q_lcb_5pct=0.65,
+        bin_obj=bins[1],
+    )
+
+    proof_index = bridge._proof_by_bin_side([expensive, cheap], era._candidate_bin_id)
+    sizing = bridge._sizing_candidates_from_proofs(
+        family_key=family.family_id,
+        proofs=[expensive, cheap],
+        native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+        candidate_bin_id=era._candidate_bin_id,
+    )
+    route_set = bridge._proof_native_direct_route_set_builder([expensive, cheap], era._candidate_bin_id)(
+        None
+    )
+
+    key = (era._candidate_bin_id(cheap), "YES")
+    assert proof_index[key] is cheap
+    assert sizing[key].market_snapshot_id == "snap-cheap"
+    assert sizing[key].executable_cost_curve.levels[0].price == Decimal("0.20")
+    assert Decimal(str(route_set.direct_yes[key[0]].avg_cost.value)) == Decimal("0.20")
+
+
 # ===========================================================================
 # (a) the decision is produced by family_decision_engine (the spine).
 # ===========================================================================
 def test_decision_is_produced_by_the_spine_not_the_legacy_selector():
     """The spine computes the decision: the result is a SpineDecisionResult whose
-    FamilyDecision carries the spine receipt_hash (the spine's argmax-ΔU pipeline ran),
+    FamilyDecision carries the spine receipt_hash (the spine's ROI-frontier pipeline ran),
     and a selected trade returns a well-formed submission-pipeline proof.
 
     Family is built so the spine should find a +edge trade: an UNDERPRICED YES on the

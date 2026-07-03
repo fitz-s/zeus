@@ -73,7 +73,7 @@ def storage_root_with_snapshot(monkeypatch, tmp_path):
     """Redirect storage to tmp_path and place a synthetic snapshot at the
     canonical layout that the bridge will discover (no mocks needed)."""
     monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
-    snap_dir = tmp_path / "raw" / "oracle_shadow_snapshots"
+    snap_dir = tmp_path / "raw" / "oracle_time_snapshots"
     city_dir = snap_dir / "Chicago"
     city_dir.mkdir(parents=True)
     snap = {
@@ -87,7 +87,7 @@ def storage_root_with_snapshot(monkeypatch, tmp_path):
 
 
 def _write_snapshot(tmp_path, city, target_date, payload):
-    city_dir = tmp_path / "raw" / "oracle_shadow_snapshots" / city
+    city_dir = tmp_path / "raw" / "oracle_time_snapshots" / city
     city_dir.mkdir(parents=True, exist_ok=True)
     snap = {"city": city, "target_date": target_date, **payload}
     (city_dir / f"{target_date}.json").write_text(json.dumps(snap))
@@ -360,15 +360,15 @@ def test_bridge_keeps_hko_oracle_truncate_for_celsius_snapshots(
 
 
 @patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
-def test_bridge_uses_canonical_observation_history_without_shadow_snapshots(
+def test_bridge_uses_canonical_observation_history_without_oracle_time_snapshots(
     mock_helper, mock_db, monkeypatch, tmp_path
 ):
     """Canonical verified observations must prevent false oracle MISSING.
 
-    The live bug was at the bridge seam: raw shadow snapshots had only a tiny
+    The live bug was at the bridge seam: raw oracle-time snapshots had only a tiny
     rolling window, while the K1 DB already had enough verified observations
     and settlements. The bridge must build the oracle artifact from canonical
-    DB evidence even when there are no shadow snapshots.
+    DB evidence even when there are no oracle-time snapshots.
     """
     db_path, conn = mock_db
     monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))

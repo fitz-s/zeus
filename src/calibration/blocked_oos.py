@@ -1,14 +1,10 @@
-# Shadow-only: outputs are additive facts, not live blockers
 """Blocked out-of-sample calibration evaluation.
 
-Shadow-only evaluation surface. Fits Platt models on an earlier target date
-block and evaluates them on a later target date block without changing the
-active calibration routing. Metrics are returned in the report dict only.
+Fits Platt models on an earlier target-date block and evaluates them on a
+later target-date block. Metrics are returned in the report dict only.
 """
 
 from __future__ import annotations
-
-SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter evaluator/control gate
 
 import hashlib
 import json
@@ -66,6 +62,7 @@ def _fetch_rows(
     *,
     start: str,
     end: str,
+    temperature_metric: str = "high",
     authority_filter: str = "VERIFIED",
 ) -> list[CalibrationEvalRow]:
     rows = conn.execute(
@@ -74,10 +71,12 @@ def _fetch_rows(
             pair_id, city, target_date, range_label, p_raw, outcome, lead_days,
             season, cluster, forecast_available_at
         FROM calibration_pairs
-        WHERE target_date >= ? AND target_date <= ? AND authority = ?
+        WHERE target_date >= ? AND target_date <= ?
+          AND temperature_metric = ?
+          AND authority = ?
         ORDER BY cluster, season, target_date, city, pair_id
         """,
-        (start, end, authority_filter),
+        (start, end, temperature_metric, authority_filter),
     ).fetchall()
     return [
         CalibrationEvalRow(
@@ -151,6 +150,7 @@ def evaluate_blocked_oos_calibration(
     train_end: str,
     test_start: str,
     test_end: str,
+    temperature_metric: str = "high",
     run_id: str | None = None,
     model_name: str = "extended_platt",
     model_artifact_id: str = "blocked_oos",
@@ -168,8 +168,18 @@ def evaluate_blocked_oos_calibration(
         test_start=test_start,
         test_end=test_end,
     )
-    train_rows = _fetch_rows(conn, start=train_start, end=train_end)
-    test_rows = _fetch_rows(conn, start=test_start, end=test_end)
+    train_rows = _fetch_rows(
+        conn,
+        start=train_start,
+        end=train_end,
+        temperature_metric=temperature_metric,
+    )
+    test_rows = _fetch_rows(
+        conn,
+        start=test_start,
+        end=test_end,
+        temperature_metric=temperature_metric,
+    )
 
     by_bucket: dict[str, list[CalibrationEvalRow]] = {}
     for row in train_rows:
@@ -213,7 +223,6 @@ def evaluate_blocked_oos_calibration(
         "log_loss_calibrated": _mean(log_loss_calibrated),
     }
     report = {
-        "shadow_only": True,
         "run_id": run_id,
         "model_name": model_name,
         "model_version": model_artifact_id,
@@ -254,14 +263,13 @@ def recommend_calibration_promotion(
         blockers.append(f"fallback_rate:{fallback_rate:.3f}>{max_fallback_rate:.3f}")
 
     if blockers:
-        status = "shadow"
+        status = "blocked"
         decision_reason = ";".join(blockers)
     else:
         status = "candidate"
         decision_reason = "blocked_oos_passed"
 
     return {
-        "shadow_only": True,
         "promotion_id": f"promotion:{report.get('run_id')}",
         "model_name": report.get("model_name", "extended_platt"),
         "model_version": report.get("model_version", "blocked_oos"),

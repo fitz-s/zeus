@@ -66,7 +66,7 @@ _PIPELINE_B_STRATEGY_KEYS: frozenset[str] = frozenset({
     "cross_market_correlation_hedge",
     "imminent_open_capture",
     "stale_quote_detector",  # default route (non-FOK sub-type)
-    # Wave-added stochastic shadow keys (S2, S3 emit distinct strategy_key values
+    # Wave-added stochastic keys (S2, S3 emit distinct strategy_key values
     # not covered by the base key aliases above — MAJOR-3 fix).
     "opening_inertia_relaxation",              # S2 OpeningInertiaRelaxation
     "imminent_open_capture_posterior_collapse",  # S3 ImminentOpenCapturePosteriorCollapse

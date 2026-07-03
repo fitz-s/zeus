@@ -141,7 +141,7 @@ timeout; this fix only STOPS NEW duplicates.
 
 ## RED-on-revert test
 
-`tests/money_path/test_edli_live_canary.py`:
+`tests/money_path/test_edli_live_readiness.py`:
 
 - `test_fixA_cap_transitioned_consumed_suppresses_resting_live_order`
   (replaces the old, defect-encoding `test_fixA_cap_transitioned_consumed_releases_lock`):
@@ -160,12 +160,12 @@ the fix makes it pass.
 
 ```
 # Money path (full canary suite):
-$ python3 -m pytest tests/money_path/test_edli_live_canary.py -q
+$ python3 -m pytest tests/money_path/test_edli_live_readiness.py -q
 ........................................................                 [100%]
 56 passed in 1.19s
 
 # FIX A lock family (incl. both new tests):
-$ python3 -m pytest tests/money_path/test_edli_live_canary.py -k fixA -q
+$ python3 -m pytest tests/money_path/test_edli_live_readiness.py -k fixA -q
 ...........                                                              [100%]
 11 passed, 45 deselected in 1.18s
 
@@ -181,7 +181,7 @@ FAILED ...::test_fixA_cap_transitioned_consumed_suppresses_resting_live_order
 
 - `src/engine/event_reactor_adapter.py` — `_TERMINAL_EVENT_SQL` (drop `'CONSUMED'`
   from terminal cap-status set) + comment corrections.
-- `tests/money_path/test_edli_live_canary.py` — replaced the defect-encoding
+- `tests/money_path/test_edli_live_readiness.py` — replaced the defect-encoding
   CONSUMED-releases test with the RED-on-revert suppress test; added the
   CONSUMED-then-fill release guard.
 

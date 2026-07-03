@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Literal, TypeAlias
 
-CertificateMode: TypeAlias = Literal["LIVE", "NO_SUBMIT", "SHADOW", "REPLAY_COUNTERFACTUAL"]
+CertificateMode: TypeAlias = Literal["LIVE", "NO_SUBMIT", "REPLAY_COUNTERFACTUAL"]
 
 LIVE_LIKE_MODES: frozenset[str] = frozenset({"LIVE", "NO_SUBMIT"})
-ALLOWED_MODES: frozenset[str] = frozenset({"LIVE", "NO_SUBMIT", "SHADOW", "REPLAY_COUNTERFACTUAL"})
+ALLOWED_MODES: frozenset[str] = frozenset({"LIVE", "NO_SUBMIT", "REPLAY_COUNTERFACTUAL"})
 
 
 def is_live_like(mode: str) -> bool:

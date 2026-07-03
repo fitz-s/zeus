@@ -4,7 +4,7 @@
 # Lifecycle: created=2026-05-28; last_reviewed=2026-05-28; last_reused=never
 # Purpose: M4 bin-bias before/after analysis — proves sd3 directional improvement vs mainstream forecast.
 # Reuse: Run AFTER M2 MC rebuild completes. Read-only. Requires --baseline-source operator decision.
-# Authority basis: M-series #154 per docs/operations/ENS_B_BLOCKERS_AND_M_SERIES_CONTEXT_2026-05-28.md.
+# Authority basis: M-series #154 per docs/archive/2026-Q2/operations_historical/ENS_B_BLOCKERS_AND_M_SERIES_CONTEXT_2026-05-28.md.
 """M4 — bin-bias before/after analysis.
 
 Compares per-bin probability mass against a mainstream forecast baseline + against
@@ -18,7 +18,7 @@ Reports per-city + global metrics:
   - ece                : Expected Calibration Error               — lower better
   - improvement_vote   : per-city tally of POST < PRE on bin_bias + rps + ece
 
-ACCEPTANCE THRESHOLD (M4 gate to authorize M5 unshadow):
+ACCEPTANCE THRESHOLD (M4 gate to authorize M5 promotion):
   - directional improvement in ≥2 of 3 metrics on ≥75% of cities
   - global mean POST-vs-PRE delta favourable in ≥2 of 3 metrics
 
@@ -45,7 +45,7 @@ VERDICT FILE (--verdict <path>):
   Writes a one-line summary doc:
       "M4 VERDICT: GREEN/RED  cities_improved=N/50  global_delta_bias_bias=...  global_delta_rps=...  global_delta_ece=...  authorizes_m5=true/false"
 
-  GREEN authorizes M5 unshadow per §12 D17 of context doc.
+  GREEN authorizes M5 promotion per §12 D17 of context doc.
 """
 from __future__ import annotations
 

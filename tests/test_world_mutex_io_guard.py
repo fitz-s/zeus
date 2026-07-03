@@ -15,11 +15,14 @@
 #   the violation an immediate, located exception instead of a silent wedge.
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 
 import pytest
 
 from src.state.db import (
+    ZEUS_WORLD_DB_PATH,
     WorldMutexIOViolation,
     assert_no_world_mutex_held_for_io,
     world_mutex_is_held,
@@ -61,6 +64,40 @@ def test_guard_flag_tracks_context_manager_use():
     with mutex:
         assert world_mutex_is_held() is True
     assert world_mutex_is_held() is False
+
+
+def test_world_mutex_respects_cross_process_world_writer_flock():
+    """A launchd sidecar in another process must block the live world writer mutex.
+
+    This is the runtime shape for src.main vs price-channel-ingest: a process-local
+    threading.Lock is insufficient once both daemons write zeus-world.db.
+    """
+    _reset_guard()
+    lock_path = ZEUS_WORLD_DB_PATH.with_name(ZEUS_WORLD_DB_PATH.name + ".writer-lock.live")
+    script = f"""
+import fcntl, os, sys, time
+fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("locked", flush=True)
+time.sleep(2.0)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "locked"
+        mutex = world_write_mutex()
+        assert mutex.acquire(blocking=False) is False
+        assert world_mutex_is_held() is False
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 def test_io_assertion_raises_when_world_mutex_held():

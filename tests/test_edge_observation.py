@@ -19,18 +19,16 @@ Six relationship tests (per dispatch §"BATCH 1" + boot §2):
   1. test_per_strategy_aggregation_correctness — synthetic in-memory DB with
      known outcomes/p_posterior; verify mean-edge math + win_rate
   2. test_sample_quality_boundaries — exactly 10/30/100 trade boundaries
-  3. test_empty_result_safety — no rows → all 4 strategies return n_trades=0
+  3. test_empty_result_safety — no rows → every governed strategy returns n_trades=0
   4. test_degraded_rows_excluded — degraded row should not contribute
   5. test_window_filter — settled_at outside window → excluded
-  6. test_strategy_filter_only_4_known — unknown strategy_key → quarantined
+  6. test_strategy_filter_only_reportable_known — unknown strategy_key → quarantined
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
-
-import pytest
 
 from src.state.db import init_schema
 from src.state.edge_observation import (
@@ -178,7 +176,7 @@ def test_sample_quality_boundaries():
 
 
 def test_empty_result_safety():
-    """RELATIONSHIP: empty DB → all 4 strategies present with n_trades=0."""
+    """RELATIONSHIP: empty DB → governed strategy buckets present with n_trades=0."""
     conn = _make_conn()
     result = compute_realized_edge_per_strategy(conn, end_date="2026-04-28")
     assert set(result.keys()) == set(STRATEGY_KEYS)
@@ -233,24 +231,20 @@ def test_window_filter():
     assert abs(rec["edge_realized"] - 0.6) < 1e-9
 
 
-def test_strategy_filter_only_4_known():
-    """RELATIONSHIP: only the 4 governed strategy_keys appear in output.
+def test_strategy_filter_only_reportable_known():
+    """RELATIONSHIP: only governed/reportable strategy_keys appear in output.
 
-    A position with strategy_key not in the canonical 4 cannot be inserted into
-    position_events (CHECK constraint at schema:53-58 enforces). This test
-    confirms the schema contract holds AND the function still returns all 4
-    keys when only a subset has trades.
+    Schema is intentionally wide enough to retain historical/imported rows.
+    The computation layer owns quarantine: unknown strategy_key rows are skipped
+    and every governed output bucket is still present.
     """
     conn = _make_conn()
     base = "2026-04-20T12:00:00+00:00"
     _insert_settled(conn, position_id="x1", strategy="opening_inertia",
                     settled_at=base, outcome=1, p_posterior=0.5)
-    # Schema CHECK rejects unknown strategy_key — this is the antibody.
-    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
-        _insert_settled(conn, position_id="bad1", strategy="not_a_real_strategy",
-                        settled_at=base, outcome=1, p_posterior=0.5)
+    _insert_settled(conn, position_id="bad1", strategy="not_a_real_strategy",
+                    settled_at=base, outcome=1, p_posterior=0.5)
     result = compute_realized_edge_per_strategy(conn, window_days=14, end_date="2026-04-28")
-    # All 4 always present.
     assert set(result.keys()) == set(STRATEGY_KEYS)
     # Only opening_inertia has trades.
     assert result["opening_inertia"]["n_trades"] == 1

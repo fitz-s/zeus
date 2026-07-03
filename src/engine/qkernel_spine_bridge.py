@@ -10,19 +10,19 @@
 """qkernel_spine_bridge — the Wave-5B cutover bridge from the live reactor to the
 rebuilt q-kernel spine.
 
-This module is the ONLY place the reactor's per-family decision is routed through
-``src/decision/family_decision_engine.FamilyDecisionEngine.decide()``. It exists so
-the reactor seam edit stays a single ``if/else`` branch: when the
-``qkernel_spine_enabled`` flag is ON, the reactor calls
-:func:`decide_family_via_spine` here; when OFF, the legacy decision path runs
-byte-for-byte unchanged and NOTHING in this module is imported on the hot path.
+This module is the ONLY place the reactor's forecast-family decision is routed
+through ``src/decision/family_decision_engine.FamilyDecisionEngine.decide()``.
+When the ``qkernel_spine_enabled`` flag is ON, forecast families call
+:func:`decide_family_via_spine` here. When it is OFF or unreadable, forecast
+families no-trade with ``QKERNEL_SPINE_REQUIRED`` at the reactor seam; they do
+not fall back to the old scalar selector.
 
 WHAT IT DOES (the cutover contract):
 
-  1. ``qkernel_spine_enabled()`` — reads the single boolean cutover flag from
-     ``settings["feature_flags"]["qkernel_spine_enabled"]`` (default False) using the
-     SAME accessor the other reactor flags use (no new config mechanism). A config
-     read fault keeps the OFF default (fail-closed to legacy).
+  1. ``qkernel_spine_enabled()`` — reads the single boolean live-authority flag
+     from ``settings["feature_flags"]["qkernel_spine_enabled"]``. A config read
+     fault returns False; the reactor converts that to a typed no-trade, never to
+     a live fallback selector.
 
   2. ``decide_family_via_spine(...)`` — builds the spine inputs from the
      reactor-native data already in scope at the ``_generate_candidate_proofs`` /
@@ -90,6 +90,7 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -115,6 +116,8 @@ from src.probability.event_resolution import (
     ResolutionError,
     event_resolution_for_city,
 )
+from src.probability.joint_q import JointQ
+from src.probability.joint_q_band import JointQBand
 from src.probability.outcome_space import (
     OutcomeBin,
     OutcomeSpace,
@@ -140,9 +143,7 @@ NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE = "NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE
 # bucket has its own settlement-EV replay, so live qkernel is restricted to it. A case
 # outside the replayed bucket is a typed no-trade until that bucket is EV-replayed.
 NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED = "QKERNEL_LEAD_BUCKET_NOT_REPLAYED"
-# v1 day0 hard-block (consult_review_pr409_round2.md §3): qkernel reads no day0
-# observation, so a day0 event type is refused BEFORE the spine is driven.
-NO_TRADE_QKERNEL_DAY0_NOT_WIRED = "QKERNEL_DAY0_NOT_WIRED"
+_LEGACY_ROUNDED_MU_DIRECTION_REJECTION_PREFIX = "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
 
 # The route_id prefixes a DIRECT native route carries (negrisk_routes._direct_*_route:
 # route_id = f"{route_type}:{bin_id}@{shares}"). These are the ONLY route types one
@@ -187,21 +188,52 @@ def _spine_debias_authority(case: ForecastCase):  # noqa: ARG001 — identity co
 # ===========================================================================
 
 def qkernel_spine_enabled() -> bool:
-    """The single Wave-5B cutover/rollback flag (default False).
+    """The single forecast qkernel live-authority flag.
 
     Read from ``settings["feature_flags"]["qkernel_spine_enabled"]`` using the SAME
     accessor the other reactor feature flags use (e.g. the replacement-authority
-    flag reads ``settings["feature_flags"][...]``). A config read fault keeps the OFF
-    default — fail-closed to the legacy decision path. When False, the reactor's
-    legacy per-family decision path is byte-for-byte unchanged and this bridge is
-    never on the decision path.
+    flag reads ``settings["feature_flags"][...]``). A config read fault returns
+    False; forecast families then emit ``QKERNEL_SPINE_REQUIRED`` at the reactor
+    seam. Disabling the flag is not a license to route live forecast money through
+    a fallback selector.
     """
     try:
         from src.config import settings
 
         return bool(settings["feature_flags"].get("qkernel_spine_enabled", False))
-    except Exception:  # noqa: BLE001 — fail-closed to legacy on any config fault
+    except Exception:  # noqa: BLE001 — reactor turns False into QKERNEL_SPINE_REQUIRED.
         return False
+
+
+def w3_solve_enabled() -> bool:
+    """The W3 SOLVE promotion flag — TIME-BOXED, DELETED AT PROMOTION (no-permanent-flags law).
+
+    Read from ``settings["feature_flags"]["w3_solve_enabled"]`` per call (no import-time cache,
+    so a G3 absent-vs-OFF comparison sees the same read each call). ABSENT = OFF; a config-read
+    fault is OFF. When True, the spine wraps the FamilyDecisionEngine with the joint solver
+    (``_wrap_engine_with_solve_shim``); OFF/absent leaves the legacy path byte-identical.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["feature_flags"].get("w3_solve_enabled", False))
+    except Exception:  # noqa: BLE001 — a config read fault is OFF (never routes solve live by accident).
+        return False
+
+
+def _wrap_engine_with_solve_shim(engine: Any) -> Any:
+    """Compose the W3 joint solver over the already-constructed engine (ON-mode ONLY).
+
+    The ``src.solve`` import is LAZY, inside this ON-branch helper, so with the flag OFF the
+    bridge never imports the solve package (G3 import-isolation). No ledger handle is reachable
+    at the construction site (see ``decide_family_via_spine`` signature — no spendable-cash
+    provider is threaded), so the shim's spendable-cash provider is left unset and its
+    conservative endowment floor applies; the real CAS-ledger read is threaded by the seam-swap
+    operator, not here (that would touch beyond the bridge construction site).
+    """
+    from src.solve.solver import SolveEngineShim
+
+    return SolveEngineShim(engine=engine)
 
 
 def _qkernel_spine_band_alpha() -> float:
@@ -250,6 +282,12 @@ class SpineDecisionResult:
     no_trade_reason: Optional[str]
     decision: Optional[FamilyDecision]
     decided_by_spine: bool = True
+
+
+@dataclass(frozen=True)
+class _OverlayResult:
+    proof: Any | None
+    reason: str | None = None
 
 
 # ===========================================================================
@@ -416,6 +454,122 @@ def build_outcome_space(family: Any, case: ForecastCase) -> OutcomeSpace:
     return omega
 
 
+def _served_joint_belief_from_proofs(
+    *,
+    omega: OutcomeSpace,
+    proofs: Sequence[Any],
+    candidate_bin_id,
+    alpha: float,
+) -> tuple[JointQ, JointQBand, dict[tuple[str, str], float], None] | tuple[None, None, None, str]:
+    """Rehydrate the reactor-served posterior q for the qkernel selector.
+
+    The bridge must not let qkernel rebuild a second point probability from the
+    raw member envelope while admission/execution use the already-served
+    replacement posterior.  This helper builds a ``JointQ`` directly from the
+    selected family's proof probabilities and a candidate-side q_lcb map from
+    those same proofs, so route economics and submit certificates consume one
+    live belief surface.
+    """
+
+    yes_q_by_bin: dict[str, float] = {}
+    payoff_lcb_by_side: dict[tuple[str, str], float] = {}
+
+    for proof in proofs:
+        side = _proof_side(proof)
+        if side not in {"YES", "NO"}:
+            continue
+        try:
+            bin_id = str(candidate_bin_id(proof))
+            q_point = float(getattr(proof, "q_posterior"))
+            q_lcb = float(getattr(proof, "q_lcb_5pct"))
+        except (TypeError, ValueError):
+            return None, None, None, "SERVED_BELIEF_PROOF_Q_UNPARSEABLE"
+        if not (
+            bin_id
+            and math.isfinite(q_point)
+            and math.isfinite(q_lcb)
+            and 0.0 <= q_lcb <= q_point <= 1.0
+        ):
+            return None, None, None, "SERVED_BELIEF_PROOF_Q_INVALID"
+        if side == "YES":
+            yes_q_by_bin[bin_id] = q_point
+            payoff_lcb_by_side[(bin_id, "YES")] = q_lcb
+        else:
+            yes_q_by_bin.setdefault(bin_id, float(1.0 - q_point))
+            payoff_lcb_by_side[(bin_id, "NO")] = q_lcb
+
+    q_values: list[float] = []
+    for b in omega.bins:
+        if b.bin_id not in yes_q_by_bin:
+            return None, None, None, f"SERVED_BELIEF_Q_MISSING:{b.bin_id}"
+        q = float(yes_q_by_bin[b.bin_id])
+        if not (math.isfinite(q) and 0.0 <= q <= 1.0):
+            return None, None, None, f"SERVED_BELIEF_Q_INVALID:{b.bin_id}"
+        q_values.append(q)
+
+    q_arr = np.asarray(q_values, dtype=float)
+    total = float(q_arr.sum())
+    if not (math.isfinite(total) and abs(total - 1.0) <= 1e-6):
+        return None, None, None, f"SERVED_BELIEF_Q_NOT_SIMPLEX:sum={total:.12f}"
+    if abs(total - 1.0) > 1e-12:
+        q_arr = q_arr / total
+
+    # Every executable route the proof-native route builder can enumerate must
+    # have its own side lower bound.  Missing side-q_lcb would make the selector
+    # fall back to a synthetic band bound and recreate the split-belief defect.
+    for proof in proofs:
+        side = _proof_side(proof)
+        if side not in {"YES", "NO"}:
+            continue
+        try:
+            key = (str(candidate_bin_id(proof)), side)
+        except Exception:  # noqa: BLE001
+            return None, None, None, "SERVED_BELIEF_LCB_KEY_UNRESOLVABLE"
+        if key not in payoff_lcb_by_side:
+            return None, None, None, f"SERVED_BELIEF_LCB_MISSING:{key[0]}:{key[1]}"
+
+    h = hashlib.sha256()
+    h.update(b"REACTOR_SERVED_POSTERIOR_JOINT_Q_V1")
+    h.update(omega.topology_hash.encode("utf-8"))
+    h.update(omega.resolution.rounding_rule.encode("utf-8"))
+    for b, q in zip(omega.bins, q_arr):
+        h.update(f"|{b.bin_id}={float(q):.12f}".encode("utf-8"))
+    identity_hash = h.hexdigest()
+    q_by_bin_id = {b.bin_id: float(q) for b, q in zip(omega.bins, q_arr)}
+    joint_q = JointQ(
+        omega=omega,
+        q=q_arr,
+        q_by_bin_id=q_by_bin_id,
+        predictive_distribution_id="reactor_served_posterior",
+        q_source="REACTOR_SERVED_POSTERIOR_V1",  # type: ignore[arg-type]
+        q_sum=float(q_arr.sum()),
+        identity_hash=identity_hash,
+    )
+    joint_q.assert_valid()
+
+    # Candidate economics receive the side-specific served q_lcb through
+    # ``guarded_payoff_q_lcb``.  The band still has to be a valid simplex draw
+    # matrix for coherence/receipt/sizing plumbing; a deterministic one-row band
+    # is honest here because this bridge is not inventing a new uncertainty
+    # surface.  Any q_lcb authority comes from ``payoff_lcb_by_side`` above.
+    samples = np.asarray([q_arr], dtype=float)
+    bh = hashlib.sha256()
+    bh.update(b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1")
+    bh.update(identity_hash.encode("utf-8"))
+    bh.update(f"alpha={float(alpha):.12f}".encode("utf-8"))
+    band = JointQBand(
+        joint_q=joint_q,
+        samples=samples,
+        q_lcb=q_arr.copy(),
+        q_ucb=q_arr.copy(),
+        alpha=float(alpha),
+        basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        sample_hash=bh.hexdigest(),
+    )
+    band.assert_valid()
+    return joint_q, band, payoff_lcb_by_side, None
+
+
 def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     """Lift the reactor's served predictive center/dispersion/members from the payload.
 
@@ -479,7 +633,7 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
     if source_cycle is None:
         return None
-    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # RAW PRECISION (single-serving-rule §1-§2): the per-member raw second moment Ê[(x−Y)²]
     # + walk-forward n, threaded by the Stage-0 producer in the SAME index order as the
     # member arrays. Lifted here so build_fresh_model_set can attach it to each
     # RawModelMember and the spine's walk_forward_model_weights forms the RAW diagonal
@@ -594,7 +748,7 @@ def build_fresh_model_set(
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         arr = np.asarray([float(served["mu_native"])], dtype=float)
-    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # RAW PRECISION (single-serving-rule §1-§2): the per-member raw second moment Ê[(x−Y)²]
     # + walk-forward n, lifted by _served_predictive_inputs in the SAME index order as
     # the member array. Attached to each RawModelMember so build_center's
     # walk_forward_model_weights forms the RAW diagonal 1/E[r²] weight. When absent /
@@ -783,16 +937,112 @@ class _ReactorServedPredictiveBuilder:
         )
 
 
-class _NoDay0Reader:
-    """A ``Day0Reader`` that serves no observation (the reactor's forecast lane).
+def _payload_float(payload: Mapping[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(parsed):
+            return parsed
+    return None
 
-    The forecast decision lane has no day0 observed extreme at this seam; the spine's
-    predictive builder treats ``None`` as the inactive (NO_DAY0) identity transform.
-    A day0-scope wiring is a follow-up; this bridge serves the forecast lane.
+
+def _payload_datetime_utc(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+class _PayloadDay0Reader:
+    """Read a live Day0 observed extreme from the same event payload the reactor prices.
+
+    Day0 is not a separate order type here. It is the same family decision with one
+    extra fact: a live-authorized observed running extreme that conditions the
+    predictive identity. The selected probabilities still come from the reactor's
+    served Day0 q/q_lcb proof surface passed into ``served_joint_q``.
     """
 
+    def __init__(self, payload: Mapping[str, Any], family: Any, *, enabled: bool) -> None:
+        self._state: Optional[Day0ObservationState] = None
+        self._block_reason: Optional[str] = None
+        if not enabled:
+            return
+        try:
+            from src.events.day0_authority import assert_live_day0_payload_authority
+
+            assert_live_day0_payload_authority(payload)
+        except Exception as exc:  # noqa: BLE001 - typed into a no-trade reason by caller.
+            self._block_reason = f"DAY0_OBSERVATION_AUTHORITY_REQUIRED:{exc}"
+            return
+
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
+        if metric == "high":
+            observed_extreme = _payload_float(payload, "high_so_far", "raw_value", "rounded_value")
+            observed_high = observed_extreme
+            observed_low = _payload_float(payload, "low_so_far")
+        elif metric == "low":
+            observed_extreme = _payload_float(payload, "low_so_far", "raw_value", "rounded_value")
+            observed_high = _payload_float(payload, "high_so_far")
+            observed_low = observed_extreme
+        else:
+            self._block_reason = f"DAY0_OBSERVATION_METRIC_UNSUPPORTED:{metric or 'missing'}"
+            return
+        if observed_extreme is None:
+            self._block_reason = "DAY0_OBSERVED_EXTREME_MISSING"
+            return
+
+        samples = payload.get("samples_count", payload.get("sample_count", 1))
+        try:
+            samples_count = max(1, int(samples))
+        except (TypeError, ValueError):
+            samples_count = 1
+        observation_id = str(
+            payload.get("observation_context_id")
+            or payload.get("payload_hash")
+            or payload.get("event_id")
+            or ""
+        )
+        raw_hash = hashlib.sha256(
+            (
+                f"{payload.get('city') or getattr(family, 'city', '')}|"
+                f"{payload.get('target_date') or getattr(family, 'target_date', '')}|"
+                f"{metric}|{observed_extreme!r}|{payload.get('observation_time') or ''}|"
+                f"{observation_id}"
+            ).encode("utf-8")
+        ).hexdigest()
+        self._state = Day0ObservationState(
+            observed=True,
+            station_id=str(payload.get("station_id") or ""),
+            source=str(payload.get("settlement_source") or payload.get("source") or ""),
+            samples_count=samples_count,
+            latest_observed_at_utc=_payload_datetime_utc(
+                payload.get("observation_time") or payload.get("observation_available_at")
+            ),
+            observed_high_native=observed_high,
+            observed_low_native=observed_low,
+            observed_extreme_native=observed_extreme,
+            raw_observation_hash=raw_hash,
+        )
+
+    @property
+    def block_reason(self) -> Optional[str]:
+        return self._block_reason
+
     def read(self, case: ForecastCase) -> Optional[Day0ObservationState]:  # noqa: ARG002
-        return None
+        return self._state
 
 
 # ---------------------------------------------------------------------------
@@ -816,15 +1066,14 @@ def _sizing_candidates_from_proofs(
     proof's direction (buy_yes -> YES, buy_no -> NO).
     """
     out: dict[tuple[str, str], Any] = {}
-    for proof in proofs:
+    for (bin_id, side), proof in _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    ).items():
         try:
             candidate = native_side_candidate_from_proof(family_key=family_key, proof=proof)
         except Exception:  # noqa: BLE001 — a non-materializable proof is simply absent
-            continue
-        bin_id = candidate_bin_id(proof)
-        direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
-        if side is None:
             continue
         out[(bin_id, side)] = candidate
     return out
@@ -857,14 +1106,81 @@ def _proof_by_bin_side(
     proofs: Sequence[Any], candidate_bin_id
 ) -> dict[tuple[str, str], Any]:
     """Index the reactor proofs by (bin_id, side) for the selected-proof remap."""
-    out: dict[tuple[str, str], Any] = {}
+    return _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    )
+
+
+def _proof_side(proof: Any) -> str | None:
+    direction = str(getattr(proof, "direction", "") or "")
+    return "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+
+
+def _proof_execution_price_value(proof: Any) -> Decimal | None:
+    execution_price = getattr(proof, "execution_price", None)
+    if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
+        return None
+    try:
+        return Decimal(str(getattr(execution_price, "value")))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _canonical_proofs_by_bin_side(
+    proofs: Sequence[Any],
+    candidate_bin_id,
+    *,
+    require_probability_unit_price: bool,
+) -> dict[tuple[str, str], Any]:
+    """Choose one proof per (bin_id, side), then reuse it across route/size/remap.
+
+    The bridge is the boundary between reactor-native proof objects and qkernel
+    route economics. A duplicate key cannot be allowed to size on one proof, route
+    on another, and remap selection to a third; choose once by executable price and
+    stable venue identity, and every downstream map consumes that same proof.
+    """
+
+    chosen: dict[tuple[str, str], Any] = {}
+    chosen_key: dict[tuple[str, str], tuple] = {}
     for proof in proofs:
-        direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        if _proof_direction_law_rejected(proof):
+            continue
+        side = _proof_side(proof)
         if side is None:
             continue
-        out[(candidate_bin_id(proof), side)] = proof
-    return out
+        price = _proof_execution_price_value(proof)
+        if require_probability_unit_price and price is None:
+            continue
+        candidate = getattr(proof, "candidate", None)
+        key = (candidate_bin_id(proof), side)
+        rank_key = (
+            price if price is not None else Decimal("Infinity"),
+            str(getattr(proof, "token_id", "") or ""),
+            str(getattr(candidate, "condition_id", "") or ""),
+            str(getattr(proof, "executable_snapshot_id", "") or ""),
+        )
+        if key not in chosen or rank_key < chosen_key[key]:
+            chosen[key] = proof
+            chosen_key[key] = rank_key
+    return chosen
+
+
+def _proof_direction_law_rejected(proof: Any) -> bool:
+    """Whether a proof should be removed before qkernel scoring.
+
+    The legacy ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` reason was a rounded-mu bin
+    heuristic. It is not live authority after the qkernel payoff-vector selector owns
+    side/bin admission, so it must not delete an otherwise valid native direct proof
+    before the spine can compute edge and robust utility. Malformed native side is
+    handled by the callers when they derive YES/NO from ``proof.direction``.
+    """
+
+    reason = str(getattr(proof, "missing_reason", "") or "")
+    if reason.startswith(_LEGACY_ROUNDED_MU_DIRECTION_REJECTION_PREFIX):
+        return False
+    return False
 
 
 def _parse_candidate_id(candidate_id: str) -> Optional[tuple[str, str]]:
@@ -913,6 +1229,7 @@ def decide_family_via_spine(
     family: Any,
     payload: Mapping[str, Any],
     proofs: Sequence[Any],
+    selection_proofs: Optional[Sequence[Any]] = None,
     decision_time: datetime,
     native_side_candidate_from_proof,
     candidate_bin_id,
@@ -935,8 +1252,11 @@ def decide_family_via_spine(
     import of the giant adapter module):
         family: the reactor ``EventBoundCandidateFamily`` (city/date/metric/candidates).
         payload: the threaded payload (carries the Stage-0 ``_edli_spine_*`` inputs).
-        proofs: the per-candidate ``_CandidateProof`` tuple already materialized for
-            the submission pipeline (carries rows/execution_price/native costs).
+        proofs: the full per-candidate ``_CandidateProof`` tuple already materialized
+            for the submission pipeline. This is the served family belief surface and
+            must stay complete over Omega.
+        selection_proofs: optional executable/admission-scoped subset used only for
+            route/book/sizing construction and selected-proof remap.
         decision_time: the decision instant (tz-aware UTC).
         native_side_candidate_from_proof: the reactor's
             ``_native_side_candidate_from_proof`` (the ONE materialization path).
@@ -951,6 +1271,8 @@ def decide_family_via_spine(
     ``FamilyDecision`` for the receipt. Never raises into the reactor hot path.
     """
     family_key = str(getattr(family, "family_id", "") or "family")
+    belief_proofs = tuple(proofs)
+    route_proofs = tuple(selection_proofs) if selection_proofs is not None else belief_proofs
     served = _served_predictive_inputs(payload)
     if served is None:
         return SpineDecisionResult(
@@ -967,6 +1289,17 @@ def decide_family_via_spine(
         case = build_forecast_case(
             family, source_cycle_time_utc=served["source_cycle_time_utc"]
         )
+        event_type = str(
+            payload.get("event_type") or getattr(family, "event_type", "") or ""
+        )
+        is_day0_family = event_type == "DAY0_EXTREME_UPDATED"
+        day0_reader = _PayloadDay0Reader(payload, family, enabled=is_day0_family)
+        if day0_reader.block_reason is not None:
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{day0_reader.block_reason}",
+                decision=None,
+            )
         # LEAD-BUCKET ADMISSION (2026-06-15). The prior "only 24h" restriction was tied to
         # the settlement-EV REPLAY (round-2 §3) — which the operator DELETED (price replay is
         # not the validation; settlement-σ coverage is). Every FORECAST lead bucket
@@ -976,21 +1309,40 @@ def decide_family_via_spine(
         # the spine's own edge_lcb>0 filter sets a strictly HIGHER edge bar at long lead. The
         # q is therefore calibration-honest at every forecast lead, and edge_lcb>0 (not a
         # bucket whitelist) is the EV gate — the spine self-restricts to genuine positive
-        # edge. day0 (lead<24h) is still excluded: it has no Day0Reader in the spine and
-        # routes to the legacy lane.
+        # edge. For DAY0_EXTREME_UPDATED, the same family optimizer is now fed the live
+        # observed extreme through ``day0_reader``; Day0 is a belief input, not a separate
+        # legacy selector.
         from src.forecast.sigma_authority import lead_bucket_for
 
-        if lead_bucket_for(case) == "day0":
+        if lead_bucket_for(case) == "day0" and not is_day0_family:
             return SpineDecisionResult(
                 selected_proof=None,
                 no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
                 decision=None,
             )
         omega = build_outcome_space(family, case)
+        _band_alpha = _qkernel_spine_band_alpha()
+        (
+            served_joint_q,
+            served_band,
+            served_payoff_q_lcb_by_side,
+            served_belief_reason,
+        ) = _served_joint_belief_from_proofs(
+            omega=omega,
+            proofs=belief_proofs,
+            candidate_bin_id=candidate_bin_id,
+            alpha=_band_alpha,
+        )
+        if served_belief_reason:
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{served_belief_reason}",
+                decision=None,
+            )
         models = build_fresh_model_set(case, served)
         sizing_candidates = _sizing_candidates_from_proofs(
             family_key=family_key,
-            proofs=proofs,
+            proofs=route_proofs,
             native_side_candidate_from_proof=native_side_candidate_from_proof,
             candidate_bin_id=candidate_bin_id,
         )
@@ -1007,10 +1359,10 @@ def decide_family_via_spine(
         _engine_kwargs: dict[str, Any] = {}
         if SPINE_BAND_DRAWS is not None:
             _engine_kwargs["n_band_draws"] = int(SPINE_BAND_DRAWS)
-        _engine_kwargs["band_alpha"] = _qkernel_spine_band_alpha()
+        _engine_kwargs["band_alpha"] = _band_alpha
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
-            day0_reader=_NoDay0Reader(),
+            day0_reader=day0_reader,
             # The belief authority at this seam is the reactor-served live predictive
             # payload: center/day0/raw-law structure is assembled by the spine builder
             # over the RAW multi-model member envelope, while σ is preserved from the
@@ -1035,12 +1387,17 @@ def decide_family_via_spine(
             # Inject a family_book_builder that assembles the FamilyBook DIRECTLY from
             # the reactor proofs' native ladders (the SAME books the reactor priced
             # each proof against) — bypassing ExecutableMarketSnapshot reconstruction.
-            family_book_builder=_family_book_builder_from_proofs(proofs, candidate_bin_id),
+            family_book_builder=_family_book_builder_from_proofs(route_proofs, candidate_bin_id),
             # PROOF-NATIVE direct routes (consult_review_pr409_round2.md §1): each direct
             # YES/NO route is priced at the proof's OWN maker/taker execution_price, not
             # the negrisk ask-ladder. This preserves the maker buy_no edge class (resting
             # bid into an empty NO ask) the ask-ladder taker cost would discard.
-            route_set_builder=_proof_native_direct_route_set_builder(proofs, candidate_bin_id),
+            route_set_builder=_proof_native_direct_route_set_builder(route_proofs, candidate_bin_id),
+            # Live money ranks admissible native legs by ROI frontier: lower-bound edge
+            # per capital with an absolute usefulness floor, then robust log-utility. This
+            # preserves NO when it is truly best, but stops low-ROI large NO legs from
+            # suppressing capital-efficient YES.
+            selection_objective="roi_frontier",
             **_engine_kwargs,
         )
         captured_at_utc = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)
@@ -1049,7 +1406,11 @@ def decide_family_via_spine(
         # default of 1 share would mark every route non-executable on a book whose min
         # order is >1 (the NO_EXECUTABLE_ROUTE_CANDIDATE false no-trade). The min order
         # is read off the proofs' rows (probability units); default to a safe 5.
-        shares_for_routing = _family_min_order_shares(proofs)
+        shares_for_routing = _family_min_order_shares(route_proofs)
+        # W3 SOLVE promotion seam (time-boxed flag, deleted at promotion): ON → the joint solver
+        # selects; OFF/absent → this guard is skipped and the legacy path is byte-identical.
+        if w3_solve_enabled():
+            engine = _wrap_engine_with_solve_shim(engine)
         decision = engine.decide(
             case,
             omega,
@@ -1062,6 +1423,9 @@ def decide_family_via_spine(
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
             shares_for_routing=shares_for_routing,
+            served_joint_q=served_joint_q,
+            served_band=served_band,
+            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
     except (ResolutionError, OutcomeSpaceError) as exc:
         # A settlement/topology resolution fault is a genuine reconstruction gap:
@@ -1127,7 +1491,7 @@ def decide_family_via_spine(
             decision=decision,
         )
 
-    proof_index = _proof_by_bin_side(proofs, candidate_bin_id)
+    proof_index = _proof_by_bin_side(route_proofs, candidate_bin_id)
     parsed = _parse_candidate_id(decision.selected.candidate_id)
     selected_proof = proof_index.get(parsed) if parsed is not None else None
     if selected_proof is None:
@@ -1142,18 +1506,19 @@ def decide_family_via_spine(
             decision=decision,
         )
 
-    overlaid = _overlay_spine_economics_onto_proof(selected_proof, decision)
-    if overlaid is None:
+    overlay_result = _overlay_spine_economics_onto_proof_with_reason(selected_proof, decision)
+    if overlay_result.proof is None:
         return SpineDecisionResult(
             selected_proof=None,
             no_trade_reason=(
                 f"{NO_TRADE_SPINE_WIRING_FAULT}:QKERNEL_EXECUTION_CERTIFICATE_OVERLAY_FAILED:"
+                f"{overlay_result.reason or 'UNKNOWN'}:"
                 f"{decision.selected.candidate_id}"
             ),
             decision=decision,
         )
     return SpineDecisionResult(
-        selected_proof=overlaid,
+        selected_proof=overlay_result.proof,
         no_trade_reason=None,
         decision=decision,
     )
@@ -1295,17 +1660,13 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
 
     direct_yes: dict[str, RouteCost] = {}
     direct_no: dict[str, RouteCost] = {}
-    for proof in proofs:
+    for (bin_id, side), proof in _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    ).items():
         direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
-        if side is None:
-            continue
         execution_price = getattr(proof, "execution_price", None)
-        if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
-            # An unpriced / wrong-unit proof is not a routable direct candidate; the
-            # engine simply has no route for that (bin, side) and never sizes it.
-            continue
-        bin_id = candidate_bin_id(proof)
         candidate = getattr(proof, "candidate", None)
         token_id = str(getattr(proof, "token_id", "") or "")
         condition_id = str(getattr(candidate, "condition_id", "") or "")
@@ -1336,8 +1697,7 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
             reason=None,
         )
         target = direct_yes if side == "YES" else direct_no
-        # First proof for a (bin, side) wins (YES and NO proofs are distinct sides).
-        target.setdefault(bin_id, route)
+        target[bin_id] = route
 
     def _build(family_book, *, shares=Decimal("1"), enable_negrisk_routes=False):  # noqa: ARG001
         return NegRiskRouteSet(
@@ -1353,24 +1713,42 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
 
 
 def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any | None:
+    return _overlay_spine_economics_onto_proof_with_reason(proof, decision).proof
+
+
+def _overlay_spine_economics_onto_proof_with_reason(
+    proof: Any,
+    decision: FamilyDecision,
+) -> _OverlayResult:
     """Overlay the spine decision's economics onto the selected reactor proof.
 
-    The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
-    ``execution_price`` etc. off the proof. The spine is the selection authority, but
-    its payoff-space fair value is not a replacement for the receipt-facing
-    selected-side probability fields. Preserve ``q_source``, ``q_posterior``, and
-    ``q_lcb_5pct``; record qkernel selection authority separately and overlay only
-    the spine's selected edge/score provenance. The executable identity
-    (row / token / execution_price / native_quote_available) is LEFT UNCHANGED — the
-    spine selected this exact executable leg, and the submit pipeline re-authorizes it
-    at submit time. Returns a NEW proof (frozen dataclass replace) so the original
-    tuple is untouched.
+    The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` /
+    ``trade_score`` / ``execution_price`` etc. off the proof. Qkernel may rank,
+    size, and tighten the lower bound for the selected direct route, but the
+    direct-route point probability must be the same selected-side probability
+    already served on the proof. If those disagree, the route/payoff identity is
+    not the same belief surface and the live path must no-trade rather than mint
+    a new probability by overlay.
+
+    The executable identity (row / token / execution_price /
+    native_quote_available) is LEFT UNCHANGED — the spine selected this exact
+    executable leg, and the submit pipeline re-authorizes it at submit time.
+    Returns a NEW proof (frozen dataclass replace) so the original tuple is
+    untouched.
     """
     from dataclasses import replace
 
     selected = decision.selected
     if selected is None:
-        return None
+        return _OverlayResult(None, "SELECTION_MISSING")
+    if _proof_direction_law_rejected(proof):
+        return _OverlayResult(None, "DIRECTION_LAW_REJECTED_PROOF")
+    missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
+    if not _qkernel_may_clear_legacy_missing_reason(missing_reason):
+        return _OverlayResult(
+            None,
+            f"PROOF_ADMISSION_REJECTION_NOT_QKERNEL_RECOVERABLE:{missing_reason}",
+        )
     selected_decision = None
     for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
         try:
@@ -1385,17 +1763,55 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         selected=selected,
     )
     if qkernel_execution_economics is None:
-        return None
+        return _OverlayResult(None, "PAYLOAD_BUILD_FAILED")
+    selection_guard_reason = _qkernel_selection_guard_rejection_reason(
+        qkernel_execution_economics
+    )
+    if selection_guard_reason:
+        return _OverlayResult(None, selection_guard_reason)
+    qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
+        qkernel_execution_economics
+    )
+    if qkernel_q_point is None or qkernel_q_lcb is None:
+        return _OverlayResult(None, "INVALID_DIRECT_Q_PAIR")
+    try:
+        proof_q_point = float(getattr(proof, "q_posterior"))
+        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
+    except (TypeError, ValueError):
+        proof_q_point = float("nan")
+        proof_q_lcb = float("nan")
+    if math.isfinite(proof_q_point):
+        qkernel_execution_economics["pre_qkernel_q_posterior"] = proof_q_point
+    if math.isfinite(proof_q_lcb):
+        qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] = proof_q_lcb
+    qkernel_execution_economics["q_lcb_authority"] = "qkernel_payoff_bound"
+    qkernel_execution_economics["probability_authority"] = "qkernel_payoff_direct_route"
+    served_belief_reason = _qkernel_served_belief_consistency_rejection_reason(
+        qkernel_q_point=qkernel_q_point,
+        qkernel_q_lcb=qkernel_q_lcb,
+        proof_q_point=proof_q_point,
+        proof_q_lcb=proof_q_lcb,
+    )
+    if served_belief_reason:
+        return _OverlayResult(None, served_belief_reason)
+    if not _qkernel_execution_direction_admitted(
+        qkernel_execution_economics,
+        direction=str(getattr(proof, "direction", "") or ""),
+    ):
+        return _OverlayResult(None, "DIRECTION_NOT_ADMITTED")
+    if qkernel_execution_economics.get("coherence_allows") is not True:
+        return _OverlayResult(None, "COHERENCE_BLOCKED")
     edge_lcb = float(qkernel_execution_economics["edge_lcb"])
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     if false_edge_rate is None:
-        return None
+        return _OverlayResult(None, "FALSE_EDGE_RATE_UNAVAILABLE")
     qkernel_execution_economics["false_edge_rate"] = false_edge_rate
     overlay: dict[str, Any] = {
-        # The selected qkernel candidate is licensed by the conservative vector
-        # edge and robust utility, not by scalar point EV. Keep the score on the
-        # same conservative economics the downstream FDR/receipt surfaces consume.
+        # The selected qkernel candidate is licensed by its route economics. Feed
+        # the same probability pair to receipt, sizing, and submit verification.
         "trade_score": edge_lcb,
+        "q_posterior": qkernel_q_point,
+        "q_lcb_5pct": qkernel_q_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
         # qkernel has re-ranked this proof under the settlement/payoff family law.
@@ -1406,9 +1822,118 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "passed_prefilter": edge_lcb > 0.0,
     }
     try:
-        return replace(proof, **overlay)
+        return _OverlayResult(replace(proof, **overlay))
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
-        return None
+        return _OverlayResult(None, "PROOF_REPLACE_FAILED")
+
+
+def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool:
+    """Allow qkernel to rescore obsolete pre-spine blockers.
+
+    The low-price YES authority moved into the qkernel ROI/submit proof chain:
+    qkernel may clear the old center-buy ultra-low scalar veto, while true live
+    policy gates remain non-recoverable by overlay.
+    """
+
+    text = str(missing_reason or "").strip()
+    if not text:
+        return True
+    return text.startswith(
+        (
+            "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            "ADMISSION_CAPITAL_EFFICIENCY",
+            "ADMISSION_WIN_RATE_FLOOR",
+            "CENTER_BUY_ULTRA_LOW_PRICE",
+            "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
+        )
+    )
+
+
+def _qkernel_selection_guard_rejection_reason(
+    qkernel_execution_economics: Mapping[str, Any],
+) -> str:
+    basis = str(qkernel_execution_economics.get("selection_guard_basis") or "").strip()
+    if not basis:
+        return "SELECTION_GUARD_MISSING"
+    if basis == "SIDE_NOT_ARMED":
+        return "SELECTION_GUARD_SIDE_NOT_ARMED"
+    raw_abstained = qkernel_execution_economics.get("selection_guard_abstained")
+    if isinstance(raw_abstained, bool):
+        abstained = raw_abstained
+    else:
+        text = str(raw_abstained).strip().lower()
+        if text in {"0", "false", "no"}:
+            abstained = False
+        elif text in {"1", "true", "yes"}:
+            abstained = True
+        else:
+            return "SELECTION_GUARD_ABSTAINED_UNKNOWN"
+    if abstained:
+        return "SELECTION_GUARD_ABSTAINED"
+    try:
+        q_safe = float(qkernel_execution_economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return "SELECTION_GUARD_Q_SAFE_MISSING"
+    if not (math.isfinite(q_safe) and q_safe > 0.0):
+        return "SELECTION_GUARD_Q_SAFE_NON_POSITIVE"
+    return ""
+
+
+def _qkernel_served_belief_consistency_rejection_reason(
+    *,
+    qkernel_q_point: float,
+    qkernel_q_lcb: float,
+    proof_q_point: float,
+    proof_q_lcb: float,
+) -> str:
+    """Fail closed when qkernel direct-route q is not the served proof belief.
+
+    For a DIRECT_YES/DIRECT_NO leg, ``q_dot_payoff`` is the selected-side scalar
+    probability of the same settlement outcome the proof already carries. The
+    qkernel can use a tighter lower bound after route/selection guards, but it
+    cannot raise the served point probability or loosen the served lower bound.
+    """
+
+    tolerance = 1e-6
+    if not (
+        math.isfinite(proof_q_point)
+        and math.isfinite(proof_q_lcb)
+        and 0.0 <= proof_q_lcb <= proof_q_point <= 1.0
+    ):
+        return "QKERNEL_SERVED_BELIEF_INVALID"
+    if not math.isclose(qkernel_q_point, proof_q_point, rel_tol=1e-9, abs_tol=tolerance):
+        return (
+            "QKERNEL_SERVED_BELIEF_POINT_MISMATCH:"
+            f"payoff_q_point={qkernel_q_point:.9f}:"
+            f"served_q_point={proof_q_point:.9f}"
+        )
+    if qkernel_q_lcb > proof_q_lcb + tolerance:
+        return (
+            "QKERNEL_SERVED_BELIEF_LCB_LOOSENED:"
+            f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
+            f"served_q_lcb={proof_q_lcb:.9f}"
+        )
+    return ""
+
+
+def _qkernel_execution_direction_admitted(
+    qkernel_execution_economics: Mapping[str, Any],
+    *,
+    direction: str | None = None,
+) -> bool:
+    """Mirror the live family selector's native-side admission."""
+
+    if qkernel_execution_economics.get("direction_law_ok") is not True:
+        return False
+    side = str(qkernel_execution_economics.get("side") or "").upper()
+    if side not in {"YES", "NO"}:
+        return False
+    native_side = "YES" if str(direction or "") == "buy_yes" else (
+        "NO" if str(direction or "") == "buy_no" else ""
+    )
+    if native_side and side != native_side:
+        return False
+    return True
 
 
 def _candidate_qkernel_execution_economics_payload(
@@ -1431,23 +1956,62 @@ def _candidate_qkernel_execution_economics_payload(
         if selected is None:
             return None
     try:
-        cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
-        edge_lcb = float(selected.edge_lcb)
+        route_cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
+        chosen_cost = getattr(selected, "chosen_stake_cost", None)
+        cost_value = (
+            float(getattr(chosen_cost, "value", 0.0) or 0.0)
+            if chosen_cost is not None
+            else route_cost_value
+        )
+        edge_lcb_raw = getattr(selected, "chosen_stake_edge_lcb", None)
+        point_ev_raw = getattr(selected, "chosen_stake_point_ev", None)
+        edge_lcb = float(edge_lcb_raw) if edge_lcb_raw is not None else float(selected.edge_lcb)
+        point_ev = float(point_ev_raw) if point_ev_raw is not None else float(selected.point_ev)
+        delta_u_at_min = float(selected.delta_u_at_min)
+        optimal_delta_u = float(selected.optimal_delta_u)
+        q_dot_payoff = float(selected.q_dot_payoff)
+        payoff_q_lcb_raw = getattr(selected, "payoff_q_lcb", None)
+        if payoff_q_lcb_raw is None:
+            return None
+        payoff_q_lcb = float(payoff_q_lcb_raw)
+        finite_execution_values = (
+            cost_value,
+            edge_lcb,
+            point_ev,
+            delta_u_at_min,
+            optimal_delta_u,
+            q_dot_payoff,
+            payoff_q_lcb,
+        )
+        if not all(math.isfinite(value) for value in finite_execution_values):
+            return None
+        if not (0.0 <= payoff_q_lcb <= q_dot_payoff + 1e-9 <= 1.0 + 1e-9):
+            return None
+        expected_edge_lcb = payoff_q_lcb - cost_value
+        if not math.isclose(edge_lcb, expected_edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+            return None
         payload: dict[str, Any] = {
             "source": "qkernel_spine",
             "decision_id": getattr(decision, "decision_id", None),
             "receipt_hash": getattr(decision, "receipt_hash", None),
             "candidate_id": selected.candidate_id,
             "route_id": selected.route_id,
-            "payoff_q_lcb": edge_lcb + cost_value,
+            "payoff_q_point": q_dot_payoff,
+            "payoff_q_lcb": payoff_q_lcb,
             "edge_lcb": edge_lcb,
-            "point_ev": float(selected.point_ev),
-            "delta_u_at_min": float(selected.delta_u_at_min),
+            "point_ev": point_ev,
+            "delta_u_at_min": delta_u_at_min,
             "optimal_stake_usd": str(selected.optimal_stake_usd),
-            "optimal_delta_u": float(selected.optimal_delta_u),
-            "q_dot_payoff": float(selected.q_dot_payoff),
+            "optimal_delta_u": optimal_delta_u,
+            "q_dot_payoff": q_dot_payoff,
             "cost": cost_value,
+            "cost_basis": "chosen_stake" if chosen_cost is not None else "route",
+            "route_cost": route_cost_value,
+            "route_edge_lcb": float(selected.edge_lcb),
+            "route_point_ev": float(selected.point_ev),
         }
+        if chosen_cost is not None:
+            payload["chosen_stake_cost"] = cost_value
         if route is not None and candidate_decision is not None:
             payload.update(
                 {
@@ -1456,6 +2020,21 @@ def _candidate_qkernel_execution_economics_payload(
                     "q_lcb_guard_basis": candidate_decision.q_lcb_guard_basis,
                     "q_lcb_guard_abstained": bool(candidate_decision.q_lcb_guard_abstained),
                     "q_lcb_guard_cell_key": candidate_decision.q_lcb_guard_cell_key,
+                    "selection_guard_basis": getattr(
+                        candidate_decision, "selection_guard_basis", ""
+                    ),
+                    "selection_guard_abstained": bool(
+                        getattr(candidate_decision, "selection_guard_abstained", False)
+                    ),
+                    "selection_guard_cell_key": getattr(
+                        candidate_decision, "selection_guard_cell_key", ""
+                    ),
+                    "selection_guard_n": int(
+                        getattr(candidate_decision, "selection_guard_n", 0) or 0
+                    ),
+                    "selection_guard_q_safe": getattr(
+                        candidate_decision, "selection_guard_q_safe", None
+                    ),
                     "direction_law_ok": bool(
                         getattr(candidate_decision, "direction_law_ok", False)
                     ),
@@ -1467,9 +2046,43 @@ def _candidate_qkernel_execution_economics_payload(
                     ),
                 }
             )
+        false_edge_rate = _qkernel_false_edge_rate(decision, candidate_decision)
+        if false_edge_rate is not None:
+            payload["false_edge_rate"] = false_edge_rate
     except (TypeError, ValueError, AttributeError):
         return None
     return payload
+
+
+def _direct_route_probability_pair(
+    qkernel_execution_economics: Mapping[str, Any],
+) -> tuple[float | None, float | None]:
+    """Return the direct-route selected-side q pair or ``(None, None)``.
+
+    The live submit path executes a single native YES/NO leg for DIRECT routes. For
+    that route, ``q_dot_payoff`` is the same selected-side probability the
+    receipt/monitor must use (YES_i for buy_yes, 1-YES_i for buy_no). The guarded
+    lower bound must be conservative for that same scalar.
+    """
+
+    route_id = str(qkernel_execution_economics.get("route_id") or "")
+    if not route_id.startswith(("DIRECT_YES:", "DIRECT_NO:")):
+        return None, None
+    try:
+        payoff_q_point = float(qkernel_execution_economics.get("payoff_q_point"))
+        payoff_q_lcb = float(qkernel_execution_economics.get("payoff_q_lcb"))
+    except (TypeError, ValueError):
+        return None, None
+    if not all(
+        math.isfinite(value)
+        for value in (payoff_q_point, payoff_q_lcb)
+    ):
+        return None, None
+    if not (-1e-12 <= payoff_q_lcb <= payoff_q_point + 1e-9 <= 1.0 + 1e-9):
+        return None, None
+    payoff_q_point = min(max(payoff_q_point, 0.0), 1.0)
+    payoff_q_lcb = min(max(payoff_q_lcb, 0.0), payoff_q_point)
+    return payoff_q_point, payoff_q_lcb
 
 
 def qkernel_candidate_economics_by_bin_side(
@@ -1494,6 +2107,78 @@ def qkernel_candidate_economics_by_bin_side(
     return out
 
 
+_GUARDED_FALSE_EDGE_RATE_95_BASES = {
+    "DAY0_REMAINING_DAY_Q_LCB",
+    "OOF_WILSON_95",
+    "OOF_WILSON_95_POOLED_TAIL",
+    "SELECTION_BETA_95",
+    "SELECTION_EB_BETA",
+}
+
+
+def _guarded_qkernel_false_edge_rate(selected_decision: Any | None) -> float | None:
+    """False-edge bound aligned to the guard that produced the served q_lcb.
+
+    Once the family engine applies an active OOF/selection reliability guard,
+    the selected edge is no longer the raw ``band.samples @ payoff - cost``
+    quantile. It is the guarded ``q_safe - cost`` value. Feeding raw band edges
+    to FDR after that creates two live authorities for the same candidate and can
+    reject a trade whose served 95% lower bound is already above cost.
+    """
+
+    if selected_decision is None:
+        return None
+    econ = getattr(selected_decision, "economics", None)
+    if econ is None:
+        return None
+    try:
+        edge_lcb_raw = getattr(econ, "chosen_stake_edge_lcb", None)
+        edge_lcb = float(edge_lcb_raw) if edge_lcb_raw is not None else float(econ.edge_lcb)
+        payoff_q_lcb = float(econ.payoff_q_lcb)
+        chosen_cost = getattr(econ, "chosen_stake_cost", None)
+        cost_obj = chosen_cost if chosen_cost is not None else econ.cost
+        cost = float(cost_obj.value)
+    except Exception:  # noqa: BLE001
+        return None
+    if not (
+        math.isfinite(edge_lcb)
+        and math.isfinite(payoff_q_lcb)
+        and math.isfinite(cost)
+        and edge_lcb > 0.0
+        and 0.0 <= payoff_q_lcb <= 1.0
+        and math.isclose(edge_lcb, payoff_q_lcb - cost, rel_tol=1e-9, abs_tol=1e-9)
+    ):
+        return None
+
+    guarded_bases: list[str] = []
+    q_lcb_basis = str(getattr(selected_decision, "q_lcb_guard_basis", "") or "").strip()
+    if (
+        q_lcb_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
+        and getattr(selected_decision, "q_lcb_guard_abstained", None) is False
+    ):
+        guarded_bases.append(q_lcb_basis)
+
+    selection_basis = str(getattr(selected_decision, "selection_guard_basis", "") or "").strip()
+    if (
+        selection_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
+        and getattr(selected_decision, "selection_guard_abstained", None) is False
+    ):
+        try:
+            selection_q_safe = float(getattr(selected_decision, "selection_guard_q_safe"))
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(selection_q_safe) and selection_q_safe > 0.0):
+            return None
+        guarded_bases.append(selection_basis)
+
+    if not guarded_bases:
+        return None
+    # The active guard bases above are 95% lower bounds. Use the same confidence
+    # semantics as the FDR p-value for the guarded route; unguarded routes fall
+    # back to the raw band empirical rate below.
+    return 0.05
+
+
 def _qkernel_false_edge_rate(
     decision: FamilyDecision,
     selected_decision: Any | None,
@@ -1507,12 +2192,17 @@ def _qkernel_false_edge_rate(
     empirical p-value over the tested band draws.
     """
 
+    guarded_rate = _guarded_qkernel_false_edge_rate(selected_decision)
+    if guarded_rate is not None:
+        return guarded_rate
     if selected_decision is None or getattr(decision, "band", None) is None:
         return None
     try:
         samples = np.asarray(decision.band.samples, dtype=float)
         payoff = np.asarray(selected_decision.route.payoff_vector, dtype=float)
-        cost = float(selected_decision.economics.cost.value)
+        chosen_cost = getattr(selected_decision.economics, "chosen_stake_cost", None)
+        cost_obj = chosen_cost if chosen_cost is not None else selected_decision.economics.cost
+        cost = float(cost_obj.value)
     except Exception:  # noqa: BLE001
         return None
     if samples.ndim != 2 or payoff.ndim != 1 or samples.shape[1] != payoff.shape[0]:

@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 7: scripts/ and src/state/schema/ have no rollback_*, migrate_*_v<N>+,
 or *_legacy* paths. xfail(strict=False): many such scripts exist today.

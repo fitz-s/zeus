@@ -1,7 +1,8 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-06-13
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1); docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P2-1.
-# 2026-06-13 add: family_venue_closed (warm-lane venue-close skip authority) — docs/operations/live_inventory_warm_skip_2026-06-13.md.
+# 2026-06-26 update: family_venue_closed retained for compatibility only; static
+# city/date timing cannot prove venue closure.
 """``MarketPhase`` axis — market-time lifecycle of a Polymarket weather market.
 
 Per PLAN_v3 §2 (axis A), ``MarketPhase`` is computed from
@@ -23,12 +24,9 @@ Boundary anchors (locked from PLAN_v3 §1.E1+§2):
   (Polymarket ``startDate``, T-2 days before target)
 - ``PRE_SETTLEMENT_DAY → SETTLEMENT_DAY`` at city-local
   end-of-target_date − 24h (UTC instant)
-- ``SETTLEMENT_DAY → POST_TRADING`` at ``polymarket_end_utc``
-  (uniformly 12:00 UTC of ``target_date`` per F1 — verified across 13
-  cities via Gamma API; INVESTIGATION_EXTERNAL Q3 documents 7 cities,
-  CRITIC_REVIEW_R2 spot-checks 6 more = 13 total. See
-  task_2026-05-04_strategy_redesign_day0_endgame/CRITIC_REVIEW_R2.md
-  for the full city list.)
+- ``SETTLEMENT_DAY → POST_TRADING`` at ``polymarket_end_utc`` for the legacy
+  phase axis. This is a resolution/endDate phase marker, not proof that the
+  live CLOB is no longer accepting orders.
 - ``POST_TRADING → RESOLVED`` at UMA proposePrice settlement (variable;
   caller passes ``uma_resolved=True`` once observed on-chain)
 
@@ -255,7 +253,7 @@ def market_end_anchor_source(market: dict) -> str:
 
     Returns 'gamma_explicit' when market_end_at / endDate / end_date is present
     in the market dict, otherwise 'f1_12z_fallback' (the F1 12:00 UTC uniform
-    anchor is used as the settlement end time).
+    anchor is used as a resolution/endDate fallback, not venue-close proof).
 
     Runtime report trust no longer treats the DB default as verified authority:
     settlement_commands rows default to 'unknown_legacy' unless the caller
@@ -311,8 +309,8 @@ def market_phase_admits(
       - ``city`` resolves a timezone via the runtime city registry; a missing
         timezone yields phase=None → reject.
       - ``market_row`` supplies an explicit endDate/startDate when present;
-        absent timing falls back to the F1 12:00-UTC anchor (per
-        ``market_phase_from_market_dict`` / ``market_phase_evidence``).
+        absent timing falls back to the legacy F1 endDate anchor for
+        forecast-only phase admission only.
 
     ``metric`` is accepted for caller symmetry and so a future per-metric phase
     law can hook here without changing call sites; it is not used today (the
@@ -346,16 +344,11 @@ def market_open_at_decision(
     polymarket_end_utc: datetime,
     as_of_utc: datetime,
 ) -> bool:
-    """Canonical POST_TRADING-boundary predicate: True iff the market is still
-    OPEN (NOT POST_TRADING) at ``as_of``.
+    """Legacy POST_TRADING-boundary predicate for endDate-based filters.
 
-    This is the single authority for the "is this market end-time still in the
-    future" universe filter. It is exactly the complement of the POST_TRADING
-    transition that ``market_phase_for_decision`` applies
-    (``decision_time_utc >= polymarket_end_utc → POST_TRADING``), so the
-    market-channel universe filter and the phase axis cannot diverge on the
-    end-boundary. A market with ``as_of >= polymarket_end_utc`` is closed and
-    must not enter the live subscription / REST-seed universe.
+    This answers only whether ``as_of`` is before the market endDate marker. It
+    is not venue-closure authority; live order availability requires explicit
+    venue fields such as ``closed`` and ``acceptingOrders``.
 
     NOTE: this is intentionally NOT the forecast_only-admission predicate
     (``is_forecast_only_admissible``). The universe legitimately includes
@@ -371,53 +364,17 @@ def family_venue_closed(
     target_date: str | None,
     now_utc: datetime,
 ) -> bool:
-    """True iff city X's weather market for ``target_date`` is VENUE-CLOSED
-    (POST_TRADING / RESOLVED) at ``now`` — the warm-lane analogue of the
-    reactor's ``_venue_market_closed_horizon``.
+    """Fail-soft warm-lane predicate for static family-level venue closure.
 
-    The venue close is the F1 12:00-UTC anchor of ``target_date`` (uniform
-    across the 13 verified cities, ``_f1_fallback_end_utc``), which is EARLIER
-    than the target LOCAL-day end (``EventStore._strictly_past_in_tz``) for
-    every city whose local day extends past 12:00 UTC. In the window
-    ``[venue_close, local_day_end)`` the venue book is gone, so the family can
-    produce no fresh executable book — re-probing it (Gamma returns an empty
-    event list) is pure budget waste. ``_strictly_past_in_tz`` alone does NOT
-    skip such a family (its local day has not ended); the venue-close anchor is
-    the precise authority for "this market closed".
-
-    This reuses the SAME POST_TRADING boundary ``market_open_at_decision`` /
-    ``market_phase_for_decision`` apply (venue-closed is exactly the complement
-    of ``market_open_at_decision``), so the warm-lane skip, the reactor horizon
-    (``_venue_market_closed_horizon``), and the bind-time phase gate cannot
-    disagree on the venue-close instant — no new clock, no venue probe, no
-    snapshot read.
-
-    Fail-SOFT (uncertain ⇒ keep): a missing city/target_date or an unresolvable
-    timezone returns ``False`` (treat as NOT closed) so the caller keeps the
-    family. Mislabeling a live family ``True`` would silently drop a tradeable
-    candidate; every uncertain case must therefore return ``False``. This is the
-    OPPOSITE fail direction from the forecast_only admission gate
-    (``market_phase_admits`` fails CLOSED) — here a wrong ``True`` is the harm.
+    Gamma ``endDate``/the F1 12:00Z anchor is a resolution timestamp, not proof
+    that the CLOB is no longer accepting orders. Live Gamma markets have been
+    observed after ``endDate`` with ``active=true``, ``closed=false``, and
+    ``acceptingOrders=true``. A city/date-only predicate cannot see those venue
+    fields, so it must never declare the family closed. Executable snapshot and
+    submit gates still block rows with explicit ``closed=true`` and
+    ``accepting_orders=false``.
     """
-    if not city or not target_date:
-        return False
-    from src.config import runtime_cities_by_name
-
-    city_config = runtime_cities_by_name().get(city)
-    tz = getattr(city_config, "timezone", None) if city_config is not None else None
-    if not tz:
-        return False
-    try:
-        target_local_date = date.fromisoformat(str(target_date))
-    except (ValueError, TypeError):
-        return False
-    polymarket_end_utc = _f1_fallback_end_utc(target_local_date)
-    # market_open_at_decision is the single POST_TRADING-boundary authority;
-    # venue-closed is exactly its complement.
-    return not market_open_at_decision(
-        polymarket_end_utc=polymarket_end_utc,
-        as_of_utc=now_utc,
-    )
+    return False
 
 
 def is_forecast_only_admissible(

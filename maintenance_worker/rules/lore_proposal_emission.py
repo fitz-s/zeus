@@ -13,10 +13,8 @@ enumerate(): scans lore_topic_dirs under docs/lore/ for entries older
   than lore_review_ttl_days that lack a companion REVIEWED or PROMOTED
   marker; separately greps docs/operations/task_*/ packets for a
   "## Lessons" section and reports them as pending-lore proposals.
-  Only the packet_closure_with_lessons_section trigger is implemented;
-  the remaining 4 triggers (memory_feedback_write, critic_recurring_pattern,
-  missed_authority_doc_update, external_vendor_quirk) are stubbed as
-  logger.debug() — detection logic not yet specified in the catalog.
+  The implemented triggers are packet Lessons sections and stale entries under
+  docs/lore/<topic>/. Other catalog ideas are not wired here.
 
 apply(): always dry_run_only=True — lore emission requires human review.
   Returns mock diff showing what would be emitted to proposals_dir.
@@ -28,10 +26,9 @@ Verdict strings:
   SKIP_TOO_FRESH            — entry mtime within lore_review_ttl_days
   SKIP_NO_LESSONS_SECTION   — packet has no detectable lessons section
 
-Deviation: triggers 2–5 (memory_feedback, critic_recurring, missed_authority,
-  external_vendor_quirk) are not implemented in this batch — catalog spec
-  does not define their detection logic. Logged as deviations. Each stub
-  emits logger.debug() only.
+Scope: this handler deliberately emits only review proposals. It does not infer
+unimplemented catalog triggers from memory feedback, critic patterns, missed
+authority updates, or vendor quirks.
 """
 from __future__ import annotations
 
@@ -81,8 +78,6 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
     Trigger 1 (implemented): scan docs/operations/task_*/ packets for
       "## Lessons" section older than lore_review_ttl_days.
-    Trigger 2-5 (stubbed): not yet specified — emits logger.debug only.
-
     Also scans configured lore_topic_dirs under docs/lore/ for stale
     unreviewed entries.
     """
@@ -99,9 +94,6 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
     # --- Trigger 1: closed packets with ## Lessons section ---
     candidates.extend(_scan_packet_lessons(repo_root, now_ts, ttl_seconds, ttl_days))
-
-    # --- Trigger 2-5: stubbed ---
-    _stub_triggers_2_to_5()
 
     # --- Stale lore entries in docs/lore/<topic>/ ---
     candidates.extend(_scan_lore_topic_dirs(repo_root, lore_topic_dirs, now_ts, ttl_seconds, ttl_days))
@@ -271,22 +263,6 @@ def _scan_lore_topic_dirs(
             ))
 
     return candidates
-
-
-def _stub_triggers_2_to_5() -> None:
-    """
-    Triggers 2-5 are not yet implemented — catalog spec does not define
-    their detection logic. Stubs emit logger.debug only.
-
-    Deviation: logged to BATCH_C_DONE. To implement, replace each stub
-    with a concrete scanner using the catalog triggers_to_scan spec.
-    """
-    logger.debug(
-        "lore_proposal_emission: triggers 2-5 not implemented "
-        "(memory_feedback_write, critic_recurring_pattern, "
-        "missed_authority_doc_update, external_vendor_quirk) — "
-        "detection logic not specified in catalog; deferred to WAVE 7"
-    )
 
 
 def _find_lessons_file(packet_dir: Path) -> Path | None:

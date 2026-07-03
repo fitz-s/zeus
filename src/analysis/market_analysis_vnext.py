@@ -112,8 +112,8 @@ class MarketAnalysisVNext:
                      triggering cycle (F4 retrofit).
             bin_schema_id: Companion to bin_grid_id.
             family_book_snapshot: Inert carrier (always None in live code). Its only
-                     consumer was the neg_risk_basket shadow candidate, removed with the
-                     shadow-candidate framework (2026-06-14). Retained as a None-default
+                     consumer was the removed neg_risk_basket candidate path
+                     (2026-06-14). Retained as a None-default
                      parameter to preserve __init__ arity.
         """
         self._snapshot = snapshot

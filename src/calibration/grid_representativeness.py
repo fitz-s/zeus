@@ -1,6 +1,6 @@
 # Created: 2026-06-02
 # Last reused or audited: 2026-06-02
-# Authority basis: docs/operations/FORECAST_COLD_ROOT_UNIVERSAL_2026-06-02.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/FORECAST_COLD_ROOT_UNIVERSAL_2026-06-02.md
 #   Per-(city,season) grid→point representativeness offset loader.
 #   Table fit by scripts/fit_grid_representativeness_offset.py.
 #   Lead-invariant, OOS-validated, shrunk (×0.85) bias toward settlement station.

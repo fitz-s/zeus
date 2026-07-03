@@ -64,21 +64,19 @@ class ChainState(str, Enum):
     # — crashed on enum coercion, killing risk attestations and fail-closing
     # the entry gate to RED. Writer-set MUST be a subset of this enum.
     CHAIN_CONFIRMED_ZERO = "chain_confirmed_zero"
-    # Attribution-quarantine class: chain reconciliation found a CONFIRMED
-    # position whose on-chain CTF balance is absent at the attributed location
-    # (src.state.chain_reconciliation._quarantine_confirmed_chain_absence writes
-    # it via the named constant CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE, alongside
-    # state=QUARANTINED — it quarantines for attribution review instead of
-    # phantom-voiding; root incident: shared-wallet commingling, the 2026-06-09
-    # Hong Kong token). Carries NO clean attributable on-chain holding, so like
-    # CHAIN_CONFIRMED_ZERO / EXTERNAL_OPERATOR_CLOSED it is a no-exposure terminal-
-    # ish class and is deliberately OMITTED from _CLOSED_POSITION_WALLET_HOLDING_
-    # CHAIN_STATES (no expected wallet holding). Registered here because the writer
-    # set MUST be a subset of this enum: it escaped via a NAMED CONSTANT (the
-    # literal-only vocabulary antibody missed it), poisoning 9 live positions'
-    # load_portfolio on 2026-06-22 (Tokyo/Seoul/Houston/Denver/Milan/...). The
-    # antibody is now strengthened to resolve *_CHAIN_STATE constants too.
+    # No-current-risk attribution-debt class: a chain snapshot/fact proves the
+    # held token is absent and no positive venue-fill conflict remains to manage.
+    # Confirmed venue fills with missing/contradictory chain snapshots use
+    # ENTRY_AUTHORITY_QUARANTINED instead so live monitor/redecision can manage
+    # the residual money risk. Registered here because writer-set values must be
+    # enum members before Position loader coercion sees them.
     CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED = "chain_absent_confirmed_position_unattributed"
+    # Live-entry authority quarantine class: command_recovery has proven the
+    # entry's executable authority is missing/quarantined/invalid, but the
+    # position can still carry real CTF inventory. This value must round-trip
+    # through the runtime loader; monitor/exit policy, not enum coercion, owns
+    # whether the held exposure is reduced, sold, or held to settlement.
+    ENTRY_AUTHORITY_QUARANTINED = "entry_authority_quarantined"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.
@@ -131,6 +129,7 @@ class EntryMethod(str, Enum):
     """Known probability refresh methods carried by Position across modules."""
 
     ENS_MEMBER_COUNTING = "ens_member_counting"
+    QKERNEL_SPINE = "qkernel_spine"
     DAY0_OBSERVATION = "day0_observation"
 
     @classmethod

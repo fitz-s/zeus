@@ -267,9 +267,31 @@ def test_pre_submit_orphan_resolver_releases_command_created_without_side_effect
     monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
     monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
 
-    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+    continuations: list[dict] = []
+    rc = resolver_mod.resolve_pre_submit_orphans(
+        aggregate_id=None,
+        apply=True,
+        log=lambda msg: None,
+        collect_continuations=continuations,
+    )
 
     assert rc == 0
+    assert continuations == [
+        {
+            "reason": resolver_mod.PRE_SUBMIT_ORPHAN_REASON,
+            "aggregate_id": seeded["aggregate_id"],
+            "execution_command_id": seeded["execution_command_id"],
+            "event_id": seeded["event_id"],
+            "final_intent_id": seeded["final_intent_id"],
+            "family_id": "fam-pre-submit-orphan",
+            "city": "Hong Kong",
+            "target_date": "2026-06-19",
+            "metric": "low",
+            "condition_id": "condition-1",
+            "token_id": "token-yes",
+            "direction": "buy_no",
+        }
+    ]
     check = _connect(seeded["db_path"])
     try:
         assert check.execute(
@@ -286,6 +308,136 @@ def test_pre_submit_orphan_resolver_releases_command_created_without_side_effect
         ).fetchone()
         assert rejected is not None
         assert '"orphan_class":"pre_submit_command_created_without_side_effect"' in rejected["payload_json"]
+    finally:
+        check.close()
+
+
+def test_pre_submit_orphan_resolver_scopes_to_latest_command_after_prior_terminal(tmp_path, monkeypatch):
+    seeded = _seed_pre_submit_orphan(tmp_path / "world.db", include_regret=False)
+    conn = _connect(seeded["db_path"])
+    try:
+        ledger = LiveOrderAggregateLedger(conn)
+        cap_ledger = LiveCapLedger(conn)
+        receipt_hash = "receipt-prior-command"
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "idempotency_key": "prior-idempotency-key",
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="SubmitRejected",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "reason_code": "entries_paused:old-local-rejection",
+                "venue_call_started": True,
+                "pre_submit_rejection": False,
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="CapTransitioned",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "to_status": "RELEASED",
+                "projection_status": "RELEASED",
+                "transition_reason": "entries_paused:old-local-rejection",
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
+        cap_ledger.release(seeded["usage_id"], "prior command released")
+
+        next_command_id = "cmd-pre-submit-orphan-2"
+        pre_submit = ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                event_id=seeded["event_id"],
+                final_intent_id=seeded["final_intent_id"],
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        reservation = cap_ledger.reserve(
+            event_id=seeded["event_id"],
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=12.0,
+            final_intent_id=seeded["final_intent_id"],
+            execution_command_id=next_command_id,
+        )
+        live_cap = ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="LiveCapReserved",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "usage_id": reservation.usage_id,
+            },
+            occurred_at=NOW,
+            source_authority="live_cap_ledger",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": next_command_id,
+                "pre_submit_event_hash": pre_submit.event_hash,
+                "live_cap_reserved_event_hash": live_cap.event_hash,
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(resolver_mod, "get_world_connection_read_only", lambda: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
+
+    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+
+    assert rc == 0
+    check = _connect(seeded["db_path"])
+    try:
+        assert check.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()["reservation_status"] == "RELEASED"
+        events_after_latest_command = check.execute(
+            """
+            SELECT GROUP_CONCAT(event_type)
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_sequence > (
+                  SELECT MAX(event_sequence)
+                  FROM edli_live_order_events
+                  WHERE aggregate_id = ? AND event_type = 'ExecutionCommandCreated'
+              )
+            """,
+            (seeded["aggregate_id"], seeded["aggregate_id"]),
+        ).fetchone()[0]
+        assert events_after_latest_command == "SubmitRejected,CapTransitioned"
     finally:
         check.close()
 
@@ -367,6 +519,10 @@ def _seed_pre_submit_orphan(db_path, *, include_regret: bool) -> dict[str, str]:
                 "condition_id": "condition-1",
                 "token_id": "token-yes",
                 "direction": "buy_no",
+                "family_id": "fam-pre-submit-orphan",
+                "city": "Hong Kong",
+                "target_date": "2026-06-19",
+                "metric": "tmin",
                 "limit_price": 0.44,
                 "size": 25,
             },
@@ -477,6 +633,20 @@ def _pre_submit_payload(*, event_id: str, final_intent_id: str):
         "current_best_bid": 0.41,
         "current_best_ask": 0.43,
         "limit_price": 0.40,
+        "size": 25,
+        "q_live": 0.50,
+        "q_lcb_5pct": 0.45,
+        "expected_edge": 0.05,
+        "min_entry_price": 0.05,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "qkernel_execution_economics": {
+            "route_type": "direct",
+            "route_id": "DIRECT_NO",
+            "route": {"side": "NO"},
+            "payoff_q_point": 0.50,
+            "payoff_q_lcb": 0.45,
+        },
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

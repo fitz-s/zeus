@@ -153,6 +153,79 @@ def test_live_adapter_submit_blocks_when_operator_arm_is_none(monkeypatch) -> No
     assert executor_called["called"] is False
 
 
+def test_live_adapter_entries_pause_blocks_before_live_cap_and_command(monkeypatch) -> None:
+    """Operator pause must stop before live-cap reserve / ExecutionCommandCreated."""
+    from src.main import require_operator_arm
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE control_overrides (
+            override_id TEXT,
+            target_type TEXT,
+            target_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_by TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            reason TEXT,
+            precedence INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (
+            'control_plane:global:entries_paused', 'global', 'entries',
+            'gate', 'true', 'manual_command',
+            '2026-05-24T18:00:00+00:00', NULL,
+            'operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix', 100
+        )
+        """
+    )
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: _accepted_no_submit_receipt(event),
+    )
+    executor_called = {"called": False}
+
+    def _executor_submit(_final_intent, _command):
+        executor_called["called"] = True
+        raise AssertionError("executor_submit must not run while entries are paused")
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=_executor_submit,
+        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
+    )
+
+    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "entries_paused:external:manual_command"
+    assert executor_called["called"] is False
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN "
+            "('edli_live_cap_usage', 'edli_live_order_events')"
+        ).fetchone()[0]
+        == 0
+    )
+
+
 def test_live_adapter_submit_passes_arm_guard_when_operator_arm_present(monkeypatch) -> None:
     """With a present operator_arm, the 4th guard must NOT block — execution proceeds
     PAST the arm guard (it reaches the live-order build path, which here surfaces a

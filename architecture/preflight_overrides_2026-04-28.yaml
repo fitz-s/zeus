@@ -1,3 +1,4 @@
+# Status: ACTIVE
 schema_version: 1
 drift_residual:
   rationale: '16 wu_icao_history rows with 1F/1C drift between row value and

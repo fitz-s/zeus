@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect AIFS ENS GRIB identity proof for sampled-2t replacement shadow artifacts.
+# Purpose: Protect AIFS ENS GRIB identity proof for sampled-2t replacement blocked candidate artifacts.
 # Reuse: Run before trusting downloaded AIFS GRIB files as 51-member sampled-2t posterior inputs.
-# Authority basis: ECMWF AIFS ENS sampled-2t shadow integration; not B0 calibration authority.
+# Authority basis: ECMWF AIFS ENS sampled-2t blocked-candidate integration; not B0 calibration authority.
 """AIFS ENS GRIB identity scanner tests."""
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def test_aifs_grib_identity_accepts_ai_aifs_ens_2t_cf_pf_members() -> None:
     assert len(decision.member_ids) == 51
     assert "control" in decision.member_ids
     assert "pf:50" in decision.member_ids
-    assert decision.trade_authority_status == "SHADOW_ONLY"
+    assert decision.trade_authority_status == "BLOCKED"
     assert decision.training_allowed is False
 
 

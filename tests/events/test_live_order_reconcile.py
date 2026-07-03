@@ -428,7 +428,7 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
     # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
     # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
     # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
-    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # trade connection + scheduler-health writer are imported INSIDE the cycle from their canonical
     # source modules, so they are patched on those sources, not on this alias.
     from src.ingest import price_channel_ingest as main
     import src.state.db as _state_db
@@ -485,7 +485,11 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
             }
         },
     )
-    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: conn,
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -509,7 +513,7 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
     # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
     # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
     # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
-    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # trade connection + scheduler-health writer are imported INSIDE the cycle from their canonical
     # source modules, so they are patched on those sources, not on this alias.
     from src.ingest import price_channel_ingest as main
     import src.state.db as _state_db
@@ -549,7 +553,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
             }
         },
     )
-    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -678,7 +686,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages
             }
         },
     )
-    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -743,7 +755,11 @@ def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monk
             }
         },
     )
-    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: conn,
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -882,6 +898,18 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "size": 7.0,
+        "q_live": 0.72,
+        "q_lcb_5pct": 0.62,
+        "expected_edge": 0.20,
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_type": "portfolio",
+        },
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

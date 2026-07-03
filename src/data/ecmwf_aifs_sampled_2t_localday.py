@@ -1,4 +1,4 @@
-"""AIFS ENS sampled-2t local-day extraction for replacement shadow research."""
+"""AIFS ENS sampled-2t local-day extraction for replacement blocked-candidate research."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ class AifsSampledLocalDayExtraction:
     artifact_id: int | None = None
     raw_sha256: str | None = None
     source_product_id: str = PRODUCT_ID
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -110,8 +110,8 @@ class AifsSampledLocalDayExtraction:
                 raise ValueError(f"{field_name} must use the full product identity")
         if "mx2t" in self.high_data_version or "mn2t" in self.low_data_version:
             raise ValueError("AIFS sampled-2t extraction cannot use period-extrema data_versions")
-        if self.trade_authority_status != "SHADOW_ONLY" or self.training_allowed:
-            raise ValueError("AIFS sampled-2t extraction is shadow-only until promoted by evidence")
+        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
+            raise ValueError("AIFS sampled-2t extraction is blocked until promoted by evidence")
         if not self.members:
             raise ValueError("AIFS sampled extraction requires at least one member")
         if self.source_product_id != PRODUCT_ID:

@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -61,6 +62,21 @@ _scheduler: Any | None = None
 # SIGTERM-unif (WAVE-4 parity): captured at module load so the forensic elapsed emitted in
 # _graceful_shutdown matches src/main.py / src/ingest_main.py / src/riskguard/riskguard.py.
 _PROCESS_START = time.monotonic()
+
+
+def _git_head_at_boot() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
 
 # Substrate-warm cadence (mirrors src/main.py:_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS, the
 # value the lifted warm job was registered with). The budget<interval invariant below is
@@ -110,7 +126,22 @@ def _scheduler_job(job_name: str):
                 result = fn(*args, **kwargs)
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
-                    _write_scheduler_health(job_name, failed=False, reason=None)
+                    business_liveness = result if isinstance(result, dict) else None
+                    failed = bool(
+                        isinstance(business_liveness, dict)
+                        and business_liveness.get("scheduler_failed")
+                    )
+                    reason = (
+                        str(business_liveness.get("scheduler_failure_reason") or business_liveness.get("status") or "")
+                        if isinstance(business_liveness, dict)
+                        else None
+                    )
+                    _write_scheduler_health(
+                        job_name,
+                        failed=failed,
+                        reason=reason or None,
+                        extra=business_liveness,
+                    )
                 except Exception:  # noqa: BLE001 — health write must never break the job
                     pass
                 return result
@@ -136,6 +167,7 @@ def _write_substrate_observer_heartbeat() -> None:
             "daemon": "substrate-observer",
             "alive_at": datetime.now(timezone.utc).isoformat(),
             "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
@@ -174,8 +206,10 @@ def main() -> None:
     # The lifted producers from the trading-lane-free module. Importing this module does
     # NOT pull in src.engine / src.main — failure-domain isolation (criterion 3).
     from src.data.substrate_observer import (
+        _edli_money_path_substrate_priority_cycle,
         _edli_market_substrate_warm_cycle,
         _market_discovery_cycle,
+        _priority_refresh_interval_seconds,
     )
 
     # Pre-flight (system_decomposition_plan §8 Step 1 mitigation): assert this process can
@@ -184,10 +218,18 @@ def main() -> None:
     # A misconfigured producer = no coverage, so fail LOUD at boot rather than silently.
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
+        ensure_forecast_runtime_indexes,
+        get_forecasts_connection,
         get_trade_connection,
         get_world_connection,
     )
 
+    _forecast_conn = get_forecasts_connection(write_class="live")
+    try:
+        ensure_forecast_runtime_indexes(_forecast_conn)
+        _forecast_conn.commit()
+    finally:
+        _forecast_conn.close()
     _trade_conn = get_trade_connection(write_class="live")
     try:
         _trade_conn.execute(
@@ -223,6 +265,7 @@ def main() -> None:
             # Snapshot writers stay serialized on the default worker. The heartbeat is
             # file-only liveness evidence and must not be starved by CLOB/Gamma work.
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "priority": _APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
@@ -248,6 +291,16 @@ def main() -> None:
     # The daemon applies its OWN observability wrapper (the lifted functions are not
     # decorated in the trading-lane-free module). Job ids are byte-identical to the order
     # daemon's so dashboards / scheduler_health keying carry over unchanged.
+    _scheduler.add_job(
+        _scheduler_job("money_path_substrate_priority")(_edli_money_path_substrate_priority_cycle),
+        "interval",
+        seconds=_priority_refresh_interval_seconds(),
+        id="money_path_substrate_priority",
+        executor="priority",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     _scheduler.add_job(
         _scheduler_job("edli_market_substrate_warm")(_edli_market_substrate_warm_cycle),
         "interval",

@@ -10,17 +10,32 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
+from src.contracts.canonical_lifecycle import OrderProofClass, VenueOrderStatus
 
-TERMINAL_NO_FILL = "TERMINAL_NO_FILL"
-TERMINAL_FILLED = "TERMINAL_FILLED"
-TERMINAL_PARTIAL = "TERMINAL_PARTIAL"
-PARTIAL_WITH_REMAINDER = "PARTIAL_WITH_REMAINDER"
-LIVE_RESTING = "LIVE_RESTING"
-UNKNOWN_SIDE_EFFECT = "UNKNOWN_SIDE_EFFECT"
-REVIEW_REQUIRED = "REVIEW_REQUIRED"
+# Proof-class constants are now the typed OrderProofClass members. They remain
+# module-level names for backward compatibility; OrderProofClass is a StrEnum, so
+# legacy consumers comparing against the raw string ("TERMINAL_FILLED") still match.
+TERMINAL_NO_FILL = OrderProofClass.TERMINAL_NO_FILL
+TERMINAL_FILLED = OrderProofClass.TERMINAL_FILLED
+TERMINAL_PARTIAL = OrderProofClass.TERMINAL_PARTIAL
+PARTIAL_WITH_REMAINDER = OrderProofClass.PARTIAL_WITH_REMAINDER
+LIVE_RESTING = OrderProofClass.LIVE_RESTING
+UNKNOWN_SIDE_EFFECT = OrderProofClass.UNKNOWN_SIDE_EFFECT
+REVIEW_REQUIRED = OrderProofClass.REVIEW_REQUIRED
 
-_TERMINAL_STATES = {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
-_OPEN_STATES = {"LIVE", "RESTING", "PARTIALLY_MATCHED"}
+# Input classification tied to the canonical VenueOrderStatus enum (single source).
+# StrEnum members are set-interchangeable with their raw string values, so the
+# `_state(fact)` (uppercased str) membership tests are byte-identical to before.
+# "RESTING" is a raw venue synonym for LIVE retained here until the ingress
+# normalizer is wired into the reducer; UNKNOWN/SUBMIT_* are A1 command-side raw
+# spellings (CommandTruthState folds them).
+_TERMINAL_STATES = {
+    VenueOrderStatus.MATCHED,
+    VenueOrderStatus.CANCEL_CONFIRMED,
+    VenueOrderStatus.EXPIRED,
+    VenueOrderStatus.VENUE_WIPED,
+}
+_OPEN_STATES = {VenueOrderStatus.LIVE, VenueOrderStatus.PARTIALLY_MATCHED, "RESTING"}
 _UNKNOWN_STATES = {"UNKNOWN", "SUBMIT_UNKNOWN_SIDE_EFFECT"}
 _REVIEW_STATES = {"REVIEW_REQUIRED"}
 
@@ -32,7 +47,7 @@ class CanonicalOrderTruth:
     state: str
     remaining_size: Decimal | None
     matched_size: Decimal
-    proof_class: str
+    proof_class: OrderProofClass
     source_state: str = ""
 
 

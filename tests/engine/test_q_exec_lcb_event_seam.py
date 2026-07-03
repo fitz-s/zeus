@@ -61,22 +61,139 @@ def test_midprice_buy_no_taker_refused_when_bound_armed(monkeypatch):
     assert float(proof["q_exec_lcb"]) == pytest.approx(0.66, abs=1e-6)
 
 
-def test_deep_favorite_buy_no_untouched(monkeypatch):
-    # Favorite NO at price 0.97: realized ~1.0 -> bound keeps raw q_lcb -> still passes.
+def test_deep_favorite_buy_no_still_needs_taker_margin(monkeypatch):
+    # Favorite NO at price 0.97: realized ~1.0 keeps raw q_lcb, but live taker submit
+    # still requires a significant after-fee margin above the touch.
     _patch(monkeypatch, _bound())
     payload = dict(_BUY_NO, q_lcb_5pct="0.99")
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload, order_mode="TAKER", fresh_best_bid=0.96, fresh_best_ask=0.97
     )
-    assert proof is not None and proof["passed"] is True
+    assert proof is not None and proof["passed"] is False
+    assert proof["reason"] == "taker_quality_threshold_not_met"
     assert float(proof["q_exec_lcb"]) == pytest.approx(0.99, abs=1e-6)  # min(0.99, ~1.0)
 
 
 def test_buy_yes_is_identity(monkeypatch):
     _patch(monkeypatch, _bound())  # bound has buy_no only
-    payload = dict(_BUY_NO, direction="buy_yes", q_lcb_5pct="0.30")
+    payload = dict(_BUY_NO, direction="buy_yes", q_live="0.70", q_lcb_5pct="0.60")
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload, order_mode="TAKER", fresh_best_bid=0.11, fresh_best_ask=0.12
     )
     assert proof is not None and proof["passed"] is True
     assert proof["q_exec_lcb_basis"] == "BUY_YES_IDENTITY"
+
+
+def test_center_buy_taker_quality_preserves_declared_floor_above_registry(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
+        kelly_size_usd="10.0",
+        min_entry_price="0.05",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.03,
+        fresh_best_ask=0.04,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is False
+    assert proof["reason"] == "strategy_live_quality_floor_not_met"
+    assert proof["min_entry_price"] == "0.05"
+    assert proof["entry_price_floor_applies"] == "True"
+
+
+def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
+        kelly_size_usd="10.0",
+        min_entry_price="0.10",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+        selection_authority_applied=None,
+        qkernel_execution_economics=None,
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.09,
+        fresh_best_ask=0.10,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is True
+    assert proof["entry_price_floor_pass"] == "True"
+    assert float(proof["effective_min_entry_price"]) == pytest.approx(0.10)
+
+
+def test_qkernel_center_buy_taker_allows_low_price_only_after_live_quality_clears(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.70",
+        q_lcb_5pct="0.60",
+        kelly_size_usd="10.0",
+        min_entry_price="0.05",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+        selection_authority_applied="qkernel_spine",
+        candidate_id="family-1:condition-1",
+        candidate_bin_id="bin-yes-30c",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "YES:bin-yes-30c:DIRECT_YES:bin-yes-30c@proof",
+            "bin_id": "bin-yes-30c",
+            "route_id": "DIRECT_YES:bin-yes-30c@proof",
+            "side": "YES",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.60,
+            "edge_lcb": 0.56,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.02,
+            "cost": 0.04,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.60,
+        },
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.03,
+        fresh_best_ask=0.04,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is True
+    assert proof["reason"] == "allowed"
+    assert proof["entry_price_floor_applies"] == "False"
+    assert proof["entry_price_floor_pass"] == "True"
+    assert proof["effective_min_entry_price"] == "0.02"
+    assert proof["qkernel_low_price_floor_authorized"] == "True"
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+    assert proof["min_entry_price"] == "0.05"

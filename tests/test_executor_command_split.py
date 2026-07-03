@@ -1,11 +1,11 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-01
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-06-24
+# Last reused/audited: 2026-07-01
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
-#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 legacy execute_intent override.
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
 Each test names the relationship it locks, not just the function.
@@ -45,17 +45,24 @@ def mem_conn():
 def _cutover_guard_live_enabled(monkeypatch):
     """This file tests command-journal ordering, not cutover gating."""
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+    from src.state.db import apply_architecture_kernel_schema
 
-    monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
-    monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(world_conn)
+    monkeypatch.setattr("src.state.db.get_world_connection", lambda: world_conn)
+    monkeypatch.setattr(
+        "src.execution.executor._assert_collateral_allows_sell",
+        lambda *args, **kwargs: {"component": "collateral_ledger", "allowed": True},
+    )
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
 
-    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+    def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
         ctf_units = 1_000_000_000
         ctf_tokens = {
             "tok-" + "1" * 36: ctf_units,
@@ -143,6 +150,63 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
     return snapshot_id
 
 
+def test_pre_submit_envelope_uses_canonical_funder_identity(mem_conn, monkeypatch):
+    from src.execution.executor import _build_pre_submit_envelope
+
+    token_id = "token-canonical-funder"
+    snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+    monkeypatch.delenv("POLYMARKET_FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYMARKET_PROXY_ADDRESS", raising=False)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0xcanonicalfunder",
+    )
+
+    envelope = _build_pre_submit_envelope(
+        mem_conn,
+        command_id="cmd-canonical-funder",
+        snapshot_id=snapshot_id,
+        token_id=token_id,
+        side="BUY",
+        price=0.56,
+        size=10.0,
+        order_type="GTC",
+        post_only=False,
+        captured_at=_NOW.isoformat(),
+    )
+
+    assert envelope is not None
+    assert envelope.funder_address == "0xcanonicalfunder"
+
+
+def test_pre_submit_envelope_fails_closed_without_canonical_funder(mem_conn, monkeypatch):
+    from src.execution.executor import (
+        PreSubmitIdentityBindingError,
+        _build_pre_submit_envelope,
+    )
+
+    token_id = "token-missing-funder"
+    snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing keychain funder")),
+    )
+
+    with pytest.raises(PreSubmitIdentityBindingError, match="missing keychain funder"):
+        _build_pre_submit_envelope(
+            mem_conn,
+            command_id="cmd-missing-funder",
+            snapshot_id=snapshot_id,
+            token_id=token_id,
+            side="BUY",
+            price=0.56,
+            size=10.0,
+            order_type="GTC",
+            post_only=False,
+            captured_at=_NOW.isoformat(),
+        )
+
+
 def _ensure_envelope(
     conn,
     *,
@@ -210,6 +274,43 @@ def _ensure_envelope(
     return envelope_id
 
 
+def _submit_requested_payload(command_id: str) -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "command_id": command_id,
+            "capability_id": f"cap-{command_id}",
+            "components": [
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {"certificate_hash": "a" * 64},
+                },
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "reason": "allowed",
+                    "details": {
+                        "q_live": 0.99,
+                        "q_lcb_5pct": 0.95,
+                        "expected_edge": 0.07,
+                        "min_entry_price": 0.10,
+                        "limit_price": 0.55,
+                        "submit_edge": 0.40,
+                        "expected_profit_usd": 7.276,
+                        "min_expected_profit_usd": 1.0,
+                        "submit_edge_density": 0.7272727272727273,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 18.19,
+                        "qkernel_side": "YES",
+                    },
+                },
+            ],
+        }
+    }
+
+
 _DEFAULT_CONTEXT = object()
 
 
@@ -241,6 +342,7 @@ def _make_entry_intent(
     decision_source_context=_DEFAULT_CONTEXT,
     submit_order_type: str = "GTC",
     post_only: bool = True,
+    actionable_certificate_hash: str | None = None,
 ) -> object:
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
@@ -252,7 +354,14 @@ def _make_entry_intent(
         _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     if decision_source_context is _DEFAULT_CONTEXT:
         decision_source_context = _decision_source_context()
-    return ExecutionIntent(
+    auto_insert_actionable_certificate = actionable_certificate_hash is None and conn is not None
+    if auto_insert_actionable_certificate:
+        import hashlib
+
+        actionable_certificate_hash = hashlib.sha256(
+            f"actionable:{token_id}:{limit_price}:{snapshot_id}".encode()
+        ).hexdigest()
+    intent = ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
         limit_price=limit_price,
@@ -270,6 +379,104 @@ def _make_entry_intent(
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
         decision_source_context=decision_source_context,
+        q_live=0.99,
+        q_lcb_5pct=0.95,
+        expected_edge=0.07,
+        min_entry_price=0.10,
+        min_expected_profit_usd=1.0,
+        min_submit_edge_density=0.05,
+        selection_authority_applied="qkernel_spine",
+        actionable_certificate_hash=actionable_certificate_hash,
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:bin-test@proof",
+            "route_type": "direct",
+            "candidate_id": "YES:bin-test:DIRECT_YES:bin-test@proof",
+            "bin_id": "bin-test",
+            "side": "YES",
+            "payoff_q_point": 0.99,
+            "payoff_q_lcb": 0.95,
+            "cost": limit_price,
+            "edge_lcb": 0.95 - limit_price,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
+        },
+    )
+    if auto_insert_actionable_certificate and conn is not None and actionable_certificate_hash:
+        _insert_actionable_certificate_for_intent(
+            conn,
+            intent,
+            certificate_hash=actionable_certificate_hash,
+        )
+    return intent
+
+
+def _insert_actionable_certificate_for_intent(
+    conn: sqlite3.Connection,
+    intent,
+    *,
+    certificate_hash: str,
+) -> None:
+    payload = {
+        "event_id": "event-entry-capability",
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "forecast-snap-entry-capability",
+        "family_id": "family-entry-capability",
+        "candidate_id": "candidate-entry-capability",
+        "condition_id": "condition-test",
+        "token_id": intent.token_id,
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "executable_snapshot_id": intent.executable_snapshot_id,
+        "q_live": intent.q_live,
+        "q_lcb_5pct": intent.q_lcb_5pct,
+        "c_fee_adjusted": intent.limit_price,
+        "c_cost_95pct": intent.limit_price,
+        "p_fill_lcb": 0.5,
+        "trade_score": 0.10,
+        "action_score": 0.10,
+        "min_entry_price": intent.min_entry_price,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": dict(intent.qkernel_execution_economics),
+        "fdr_family_id": "fdr-family-entry-capability",
+        "kelly_decision_id": "kelly-entry-capability",
+        "kelly_size_usd": 3.0,
+        "risk_decision_id": "risk-entry-capability",
+        "live_cap_usage_id": "cap-entry-capability",
+        "final_intent_id": "intent-entry-capability",
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": True,
+        "submitted": False,
+    }
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = "a" * 64
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time, authority_id,
+            authority_version, algorithm_id, algorithm_version, payload_json,
+            payload_hash, certificate_hash, verifier_status, created_at
+        ) VALUES (?, 'ActionableTradeCertificate', 1, 'test-v1',
+                  ?, 'actionable_trade', 'LIVE', ?, 'test-authority',
+                  'v1', 'test-algorithm', 'v1', ?, ?, ?, 'VERIFIED', ?)
+        """,
+        (
+            f"ActionableTradeCertificate:{certificate_hash[:24]}",
+            f"actionable:event-entry-capability:{intent.token_id}",
+            _NOW.isoformat(),
+            payload_json,
+            payload_hash,
+            certificate_hash,
+            _NOW.isoformat(),
+        ),
     )
 
 
@@ -424,8 +631,26 @@ class TestLiveOrderCommandSplit:
             "_assert_ws_gap_allows_submit",
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
 
-        intent = _make_entry_intent(mem_conn)
+        certificate_hash = "c" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
 
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
@@ -469,8 +694,18 @@ class TestLiveOrderCommandSplit:
             "ws_gap_guard",
             "collateral_ledger",
             "decision_source_integrity",
+            "entry_economics",
+            "entry_actionable_certificate",
             "executable_snapshot_gate",
         }
+        assert components_by_name["entry_economics"]["allowed"] is True
+        assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.10
+        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.02
+        assert components_by_name["entry_actionable_certificate"]["allowed"] is True
+        assert (
+            components_by_name["entry_actionable_certificate"]["details"]["certificate_hash"]
+            == certificate_hash
+        )
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
         assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"
@@ -662,10 +897,11 @@ class TestLiveOrderCommandSplit:
         """A durable entries pause must stop queued EDLI submits at executor."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
-        from src.state.db import DEFAULT_CONTROL_OVERRIDE_PRECEDENCE, upsert_control_override
+        from src.state.db import DEFAULT_CONTROL_OVERRIDE_PRECEDENCE, get_world_connection, upsert_control_override
 
+        world_conn = get_world_connection()
         upsert_control_override(
-            mem_conn,
+            world_conn,
             override_id="control_plane:global:entries_paused",
             target_type="global",
             target_key="entries",
@@ -677,7 +913,7 @@ class TestLiveOrderCommandSplit:
             effective_until=None,
             precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
         )
-        mem_conn.commit()
+        world_conn.commit()
 
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -707,46 +943,39 @@ class TestLiveOrderCommandSplit:
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
-    def test_entry_control_pause_reads_attached_world_override(
+    def test_entry_control_pause_reads_world_control_authority(
         self,
         mem_conn,
         monkeypatch,
     ):
-        """Trade connections must not stop at an empty main control view."""
+        """Trade connections read pause authority from world control state."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
 
-        mem_conn.execute("ATTACH DATABASE ':memory:' AS world")
-        mem_conn.execute(
-            """
-            CREATE TABLE world.control_overrides (
-                override_id TEXT,
-                target_type TEXT,
-                target_key TEXT,
-                action_type TEXT,
-                value TEXT,
-                issued_by TEXT,
-                issued_at TEXT,
-                effective_until TEXT,
-                reason TEXT,
-                precedence INTEGER
-            )
-            """
+        from src.state.db import (
+            DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+            apply_architecture_kernel_schema,
+            upsert_control_override,
         )
-        mem_conn.execute(
-            """
-            INSERT INTO world.control_overrides (
-                override_id, target_type, target_key, action_type, value,
-                issued_by, issued_at, effective_until, reason, precedence
-            ) VALUES (
-                'control_plane:global:entries_paused', 'global', 'entries',
-                'gate', 'true', 'control_plane',
-                '2026-06-17T16:27:51+00:00', NULL,
-                'manual_pause:attached_world', 100
-            )
-            """
+
+        world_conn = sqlite3.connect(":memory:")
+        world_conn.row_factory = sqlite3.Row
+        apply_architecture_kernel_schema(world_conn)
+        upsert_control_override(
+            world_conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by="control_plane",
+            issued_at="2026-06-17T16:27:51+00:00",
+            reason="manual_pause:world_control",
+            effective_until=None,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
         )
-        mem_conn.commit()
+        world_conn.commit()
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda: world_conn)
 
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -770,7 +999,7 @@ class TestLiveOrderCommandSplit:
             )
 
         assert result.status == "rejected"
-        assert result.reason == "entries_paused:manual_pause:attached_world"
+        assert result.reason == "entries_paused:manual_pause:world_control"
         insert_command.assert_not_called()
         MockClient.assert_not_called()
 
@@ -942,7 +1171,26 @@ class TestLiveOrderCommandSplit:
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
 
-        intent = _make_entry_intent(mem_conn, token_id=token_id)
+        certificate_hash = "c" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            token_id=token_id,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
 
         with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
             "src.data.polymarket_client.PolymarketClient"
@@ -961,6 +1209,122 @@ class TestLiveOrderCommandSplit:
         insert_command.assert_not_called()
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
+    def test_entry_same_token_terminal_no_fill_redecision_cools_down_before_repost(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A proven zero-fill terminal ENTRY releases exposure but not cooldown."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        token_id = "tok-terminal-nofill-repost"
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+        envelope_id = _ensure_envelope(
+            mem_conn,
+            token_id=token_id,
+            price=Decimal("0.40"),
+            size=Decimal("10.0"),
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-recent-terminal-nofill', ?, ?, 'pos-recent-terminal-nofill',
+                'dec-recent-terminal-nofill', 'idem-recent-terminal-nofill', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-terminal-nofill',
+                'CANCELLED', NULL, ?, ?, NULL
+            )
+            """,
+            (
+                snapshot_id,
+                envelope_id,
+                token_id,
+                now_iso,
+                now_iso,
+            ),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, venue_timestamp, local_sequence,
+                raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'order-terminal-nofill', 'cmd-recent-terminal-nofill',
+                'CANCEL_CONFIRMED', '10.0', '0', 'WS_USER', ?, ?, 1, ?, '{}'
+            )
+            """,
+            (
+                now_iso,
+                now_iso,
+                "f" * 64,
+            ),
+        )
+        mem_conn.commit()
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        certificate_hash = "b" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            token_id=token_id,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+
+        with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
+            result = _live_order(
+                trade_id="trd-terminal-nofill-repost",
+                intent=intent,
+                shares=11.0,
+                conn=mem_conn,
+                decision_id="dec-terminal-nofill-repost",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "entry_cooldown:same_token_terminal_no_fill_cooling_down"
+        assert result.command_state == "REJECTED"
+        insert_command.assert_not_called()
+        MockClient.assert_not_called()
+        assert (
+            mem_conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE token_id = ? AND intent_kind = 'ENTRY'
+                """,
+                (token_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
     def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):
         """FinalExecutionIntent handoff must use the same pre-submit integrity split."""
@@ -1004,6 +1368,27 @@ class TestLiveOrderCommandSplit:
             resolution_window="2026-05-22",
             correlation_key="Jeddah:2026-05-22",
             decision_source_context=context,
+            q_live=0.99,
+            q_lcb_5pct=0.95,
+            expected_edge=0.07,
+            min_entry_price=0.05,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.99,
+                "payoff_q_lcb": 0.95,
+                "cost": 0.25,
+                "edge_lcb": 0.70,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.95,
+            },
         )
 
         legacy_intent = _legacy_entry_intent_from_final(
@@ -1015,6 +1400,10 @@ class TestLiveOrderCommandSplit:
 
         assert legacy_intent.decision_source_context is context
         assert legacy_intent.token_id == "tok-pre-submit-audit"
+        assert legacy_intent.actionable_executable_snapshot_id == "snap-pre-submit-audit"
+        assert legacy_intent.min_entry_price == pytest.approx(0.05)
+        assert legacy_intent.min_expected_profit_usd == pytest.approx(0.05)
+        assert legacy_intent.min_submit_edge_density == pytest.approx(0.02)
 
     @pytest.mark.parametrize(
         ("context", "expected_reason"),
@@ -1687,12 +2076,37 @@ class TestLiveOrderCommandSplit:
             assert retry_result.venue_ack_time == submit_acked["occurred_at"]
             assert len(command_ids_seen) == 1
 
-    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
-        """A matched FOK submit response is a fill boundary, not a resting ACK."""
+    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn, monkeypatch):
+        """A matched FOK submit response is a fill boundary, not a resting ACK.
+
+        The fill must also become visible to position/redecision immediately;
+        the periodic recovery loop is only a crash backstop, not the first
+        consumer of a known matched submit.
+        """
+        import src.execution.executor as executor_module
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command, list_events
 
-        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        certificate_hash = "d" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -1702,11 +2116,22 @@ class TestLiveOrderCommandSplit:
             command_ids_seen.append(kwargs["command_id"])
             return _real_insert(*args, **kwargs)
 
+        projection_calls: list[str] = []
+
+        def _project_now(_conn, *, command_id: str, client=None):
+            projection_calls.append(command_id)
+            assert client is mock_inst
+            return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
         with patch(
             "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
         ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
+            monkeypatch.setattr(
+                "src.execution.command_recovery.ensure_live_entry_projection_for_command",
+                _project_now,
+            )
             mock_inst.v2_preflight.return_value = None
             bound = _capture_bound_submission_envelope(mock_inst)
             mock_inst.place_limit_order.side_effect = (
@@ -1744,6 +2169,7 @@ class TestLiveOrderCommandSplit:
         assert result.shares == pytest.approx(5.0)
         assert len(command_ids_seen) == 1
         command_id = command_ids_seen[0]
+        assert projection_calls == [command_id]
         cmd = get_command(mem_conn, command_id)
         assert cmd is not None
         assert cmd["state"] == "FILLED"
@@ -1785,7 +2211,96 @@ class TestLiveOrderCommandSplit:
             "tx_hash": "0xhash-matched",
         }
 
-    def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
+    def test_matched_submit_without_fill_evidence_requires_review(self, mem_conn, monkeypatch):
+        """Matched venue status without fill size/price/trade proof is unresolved."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        certificate_hash = "e" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-matched-missing-fill",
+                    status="matched",
+                    success=True,
+                )
+            )
+            mock_inst.get_order.return_value = {
+                "id": "ord-matched-missing-fill",
+                "status": "MATCHED",
+            }
+
+            result = _live_order(
+                trade_id="trd-matched-missing-fill",
+                intent=intent,
+                shares=5.0,
+                conn=mem_conn,
+                decision_id="dec-matched-missing-fill",
+            )
+
+        assert result.status == "unknown_side_effect"
+        assert result.reason == "matched_submit_missing_fill_size"
+        assert result.command_state == "REVIEW_REQUIRED"
+        command_id = command_ids_seen[0]
+        cmd = get_command(mem_conn, command_id)
+        assert cmd is not None
+        assert cmd["state"] == "REVIEW_REQUIRED"
+        assert cmd["venue_order_id"] == "ord-matched-missing-fill"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_id)]
+        assert "REVIEW_REQUIRED" in event_types
+        assert "SUBMIT_ACKED" not in event_types
+        assert (
+            mem_conn.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            mem_conn.execute(
+                "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_idempotency_key_collision_raises_before_submit(self, mem_conn, monkeypatch):
         """Duplicate idempotency key: place_limit_order must NOT be called.
 
         Insert a command with a known idempotency_key first, then run a second
@@ -1795,8 +2310,17 @@ class TestLiveOrderCommandSplit:
         from src.execution.executor import _live_order
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command
+        import src.execution.executor as executor_module
 
         intent = _make_entry_intent(mem_conn, token_id="tok-idem" + "0" * 33)
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_actionable_certificate_payload_and_component",
+            lambda *args, **kwargs: (
+                {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+                {"actionable_certificate_hash": "hash-test"},
+            ),
+        )
 
         # Pre-insert a command with the key that _live_order will derive
         idem = IdempotencyKey.from_inputs(
@@ -1849,10 +2373,11 @@ class TestLiveOrderCommandSplit:
         assert result.reason is not None and "idempotency_collision" in result.reason, (
             f"Expected reason containing 'idempotency_collision', got {result.reason!r}"
         )
+        assert result.idempotency_key == idem.value
         # Most importantly: place_limit_order was never reached
         mock_inst.place_limit_order.assert_not_called()
 
-    def test_v2_preflight_failure_writes_rejected_event(self, mem_conn):
+    def test_v2_preflight_failure_writes_rejected_event(self, mem_conn, monkeypatch):
         """V2 preflight raises V2PreflightError -> state=REJECTED, place_limit_order not called.
 
         The command is already persisted (SUBMITTING) when preflight runs.
@@ -1862,9 +2387,54 @@ class TestLiveOrderCommandSplit:
         from src.execution.executor import _live_order
         from src.data.polymarket_client import V2PreflightError
         from src.state.venue_command_repo import get_command
+        import src.execution.executor as executor_module
 
         intent = _make_entry_intent(mem_conn)
         command_ids_seen: list[str] = []
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_actionable_certificate_payload_and_component",
+            lambda *args, **kwargs: (
+                {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+                {"actionable_certificate_hash": "hash-test"},
+            ),
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_duplicate_same_token_component",
+            lambda *args, **kwargs: {
+                "component": "entry_duplicate_same_token",
+                "allowed": True,
+                "reason": "no_duplicate",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_same_token_cooldown_component",
+            lambda *args, **kwargs: {
+                "component": "entry_same_token_cooldown",
+                "allowed": True,
+                "reason": "not_in_cooldown",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_decision_source_component",
+            lambda *args, **kwargs: {
+                "component": "entry_decision_source",
+                "allowed": True,
+                "reason": "valid",
+            },
+        )
 
         import src.state.venue_command_repo as _repo
         _real_insert = _repo.insert_command
@@ -1899,6 +2469,9 @@ class TestLiveOrderCommandSplit:
         assert cmd["state"] == "REJECTED", (
             f"Expected state=REJECTED after v2_preflight failure, got {cmd['state']!r}"
         )
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
 
     def test_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,
@@ -1924,6 +2497,22 @@ class TestLiveOrderCommandSplit:
         def fail_reservation(*args, **kwargs):
             raise CollateralInsufficient("pusd_allowance_insufficient")
 
+        monkeypatch.setattr(
+            "src.execution.executor._entry_actionable_certificate_component",
+            lambda *args, **kwargs: {
+                "component": "entry_actionable_certificate",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
         monkeypatch.setattr(
             "src.execution.executor._reserve_collateral_for_buy",
             fail_reservation,
@@ -1964,6 +2553,61 @@ class TestLiveOrderCommandSplit:
         unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
         assert unknown_count == 0
         assert unknown_markets == ()
+
+    def test_pre_command_collateral_failure_does_not_append_unknown_command_event(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Collateral preflight before insert_command has no command row to annotate."""
+        from src.execution.executor import _live_order
+        from src.state.collateral_ledger import CollateralInsufficient
+
+        intent = _make_entry_intent(mem_conn)
+
+        def fail_preflight(*args, **kwargs):
+            raise CollateralInsufficient("pusd_allowance_insufficient")
+
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_buy",
+            fail_preflight,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_actionable_certificate_component",
+            lambda *args, **kwargs: {
+                "component": "entry_actionable_certificate",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+
+        with patch("src.state.venue_command_repo.append_event") as append_event_mock, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
+            result = _live_order(
+                trade_id="trd-pre-command-collateral",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-pre-command-collateral",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert result.reason is not None
+        assert "pre_submit_collateral_reservation_failed" in result.reason
+        append_event_mock.assert_not_called()
+        MockClient.assert_not_called()
+        assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert mem_conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
 
     def test_executionprice_validation_runs_before_persist(self, mem_conn):
         """NaN limit_price: ExecutionPrice rejects before any DB write.
@@ -2013,6 +2657,35 @@ class TestLiveOrderCommandSplit:
 
 class TestExitOrderCommandSplit:
     """INV-30: execute_exit_order must persist before it submits."""
+
+    def test_exit_submit_checks_live_venue_runtime_gate(self, mem_conn, monkeypatch):
+        """Exit submit must be blocked by the same live runtime gate as entry."""
+        import src.architecture.gate_runtime as gate_runtime
+        from src.execution.executor import execute_exit_order
+
+        checked: list[str] = []
+
+        def _spy_check(capability: str) -> None:
+            checked.append(capability)
+
+        monkeypatch.setattr(gate_runtime, "check", _spy_check)
+        intent = _make_exit_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-gate")
+            )
+
+            execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-gate",
+            )
+
+        assert checked[:2] == ["live_venue_submit", "settlement_write"]
 
     def test_exit_persist_precedes_submit(self, mem_conn):
         """insert_command must run before place_limit_order (exit path)."""
@@ -2244,6 +2917,78 @@ class TestExitOrderCommandSplit:
         assert order_type_selection["selected_order_type"] == "FOK"
         assert order_type_selection["order_type"] == "FAK"
 
+    def test_exit_collateral_refresh_precedes_sell_preflight_and_proof(self, mem_conn, monkeypatch):
+        """Exit sell collateral truth must refresh before the CTF sell preflight."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import list_events
+
+        call_order: list[str] = []
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        def refresh(conn, *, token_id, shares):
+            call_order.append("refresh")
+            return {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+                "reason": "refreshed_before_exit_submit",
+                "token_id": token_id,
+                "shares": shares,
+            }
+
+        def assert_sell(token_id, shares, *, conn):
+            call_order.append("assert_sell")
+            assert call_order == ["refresh", "assert_sell"]
+            return {
+                "component": "collateral_ledger",
+                "allowed": True,
+                "reason": "ctf_tokens_available",
+                "token_id": token_id,
+                "shares": shares,
+            }
+
+        monkeypatch.setattr(executor_module, "_refresh_exit_collateral_snapshot_for_submit", refresh)
+        monkeypatch.setattr(executor_module, "_assert_collateral_allows_sell", assert_sell)
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-refresh-before-preflight")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-refresh-before-preflight")
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-refresh-before-preflight",
+            )
+
+        assert result.status == "pending"
+        assert call_order == ["refresh", "assert_sell"]
+        command = mem_conn.execute(
+            "SELECT command_id FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-refresh-before-preflight",),
+        ).fetchone()
+        requested = [
+            event for event in list_events(mem_conn, command["command_id"])
+            if event["event_type"] == "SUBMIT_REQUESTED"
+        ][0]
+        capability = json.loads(requested["payload_json"])["execution_capability"]
+        component_names = [component["component"] for component in capability["components"]]
+        assert component_names.index("collateral_snapshot_refresh") < component_names.index("collateral_ledger")
+
     def test_exit_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,
         mem_conn,
@@ -2433,6 +3178,85 @@ class TestExitOrderCommandSplit:
         ).fetchone()
         assert row["error_code"] == "POST_ONLY_REJECTED"
 
+    def test_exit_submit_rejected_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
+        """Exit success=false ACK returns the derived command idempotency key."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-success-false-idem")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+                bound,
+                success=False,
+                status="rejected",
+                error_code="CLOB_REJECTED",
+                error_message="rejected",
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-success-false-idem",
+            )
+
+        command = mem_conn.execute(
+            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-success-false-idem",),
+        ).fetchone()
+        assert result.status == "rejected"
+        assert result.idempotency_key == command["idempotency_key"]
+        assert result.idempotency_key != intent.idempotency_key
+
+    def test_exit_missing_order_id_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
+        """Exit missing-order-id ACK returns the derived command idempotency key."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-missing-order-idem")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id=None, status="LIVE")
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-missing-order-idem",
+            )
+
+        command = mem_conn.execute(
+            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-missing-order-idem",),
+        ).fetchone()
+        assert result.status == "rejected"
+        assert result.reason == "missing_order_id"
+        assert result.idempotency_key == command["idempotency_key"]
+        assert result.idempotency_key != intent.idempotency_key
+
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.
 
@@ -2601,11 +3425,11 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-matched-sell",
             )
 
-        assert result.status == "pending"
+        assert result.status == "filled"
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
-        assert cmd["state"] == "ACKED"
+        assert cmd["state"] == "FILLED"
         order_fact = mem_conn.execute(
             """
             SELECT venue_order_id, state, remaining_size, matched_size, source
@@ -2622,6 +3446,23 @@ class TestExitOrderCommandSplit:
             "remaining_size": "0",
             "matched_size": "15.5",
             "source": "REST",
+        }
+        trade_fact = mem_conn.execute(
+            """
+            SELECT venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "venue_order_id": "ord-exit-matched-sell",
+            "state": "MATCHED",
+            "filled_size": "15.5",
+            "fill_price": "0.7",
+            "tx_hash": "0xhash-exit-matched",
         }
 
     def test_exit_idempotency_key_collision_raises_before_submit(self, mem_conn):
@@ -2692,6 +3533,7 @@ class TestExitOrderCommandSplit:
 
         assert result.status == "rejected"
         assert result.reason is not None and "idempotency_collision" in result.reason
+        assert result.idempotency_key == idem.value
         mock_inst.place_limit_order.assert_not_called()
 
 
@@ -2749,6 +3591,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-acked",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-acked"),
         )
         append_event(
             mem_conn,
@@ -2824,6 +3667,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-filled",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-filled"),
         )
         append_event(
             mem_conn,
@@ -2903,6 +3747,7 @@ class TestIdempotencyCollisionRetry:
             command_id="pre-cmd-rejected",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:00+00:00",
+            payload=_submit_requested_payload("pre-cmd-rejected"),
         )
         append_event(
             mem_conn,
@@ -2990,11 +3835,11 @@ def test_create_execution_intent_rejects_reprice_above_max_slippage():
 
 
 # ---------------------------------------------------------------------------
-# MAJOR-2 WARNING: synthetic decision_id emits warning
+# MAJOR-2 WARNING: synthetic decision_id emits warning and fails closed
 # ---------------------------------------------------------------------------
 
 def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
-    """When decision_id is empty, executor emits WARNING about synthetic id."""
+    """When decision_id is empty, executor emits WARNING and rejects live submit."""
     from src.execution.executor import _live_order
     import logging
 
@@ -3019,7 +3864,10 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
                     decision_id="",  # empty => synthetic
                 )
 
-    assert result.status == "pending"
+    assert result.status == "rejected"
+    assert result.reason == "entry_decision_identity:missing_durable_live_entry_decision_id"
+    assert result.order_id is None
+    mock_inst.place_limit_order.assert_not_called()
     warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     synth_warnings = [m for m in warning_messages if "synthetic decision_id" in m]
     assert len(synth_warnings) >= 1, (
@@ -3031,14 +3879,59 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
 # MEDIUM-3 payload shape: v2_preflight SUBMIT_REJECTED payload
 # ---------------------------------------------------------------------------
 
-def test_v2_preflight_payload_shape(mem_conn):
+def test_v2_preflight_payload_shape(mem_conn, monkeypatch):
     """V2 preflight failure must write SUBMIT_REJECTED with payload {{reason: v2_preflight_failed}}."""
     from src.execution.executor import _live_order
     from src.data.polymarket_client import V2PreflightError
     from src.state.venue_command_repo import get_command, list_events
+    import src.execution.executor as executor_module
 
     intent = _make_entry_intent(mem_conn)
     command_ids_seen: list[str] = []
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: (
+            {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+            {"actionable_certificate_hash": "hash-test"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_control_pause_component",
+        lambda *args, **kwargs: {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "not_paused",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_duplicate_same_token_component",
+        lambda *args, **kwargs: {
+            "component": "entry_duplicate_same_token",
+            "allowed": True,
+            "reason": "no_duplicate",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_same_token_cooldown_component",
+        lambda *args, **kwargs: {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "not_in_cooldown",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_decision_source_component",
+        lambda *args, **kwargs: {
+            "component": "entry_decision_source",
+            "allowed": True,
+            "reason": "valid",
+        },
+    )
 
     import src.state.venue_command_repo as _repo
     _real_insert = _repo.insert_command

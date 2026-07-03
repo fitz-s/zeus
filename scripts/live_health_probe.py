@@ -36,7 +36,18 @@ ROOT = str(
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
-DEFAULT_EXPECTED_REF = "origin/main"
+DEFAULT_EXPECTED_REF = ""
+MATERIAL_CODE_PLANE_DIRTY_PREFIXES = (
+    "architecture/",
+    "config/",
+    "scripts/",
+    "src/",
+)
+MATERIAL_CODE_PLANE_DIRTY_FILES = frozenset({
+    "AGENTS.md",
+    "pyproject.toml",
+    "requirements.txt",
+})
 VOLATILE_CODE_PLANE_DIRTY_PATHS = frozenset({
     "station_migration_alerts.json",
     "state/station_migration_alerts.json",
@@ -354,8 +365,15 @@ def _porcelain_dirty_paths(status_text):
 
 def _code_plane_dirty_state(status_text):
     paths = _porcelain_dirty_paths(status_text)
-    material = [p for p in paths if p not in VOLATILE_CODE_PLANE_DIRTY_PATHS]
-    ignored = [p for p in paths if p in VOLATILE_CODE_PLANE_DIRTY_PATHS]
+    material = [
+        p for p in paths
+        if p not in VOLATILE_CODE_PLANE_DIRTY_PATHS
+        and (
+            p in MATERIAL_CODE_PLANE_DIRTY_FILES
+            or any(p.startswith(prefix) for prefix in MATERIAL_CODE_PLANE_DIRTY_PREFIXES)
+        )
+    ]
+    ignored = [p for p in paths if p not in material]
     return bool(material), material, ignored
 
 def _git_runtime_identity(root=ROOT):
@@ -382,6 +400,9 @@ def _git_runtime_identity(root=ROOT):
     expected_error = None
     if not expected_commit and expected_ref:
         expected_commit, expected_error = _git_text(root, ["rev-parse", expected_ref])
+    elif not expected_commit:
+        expected_ref = "HEAD"
+        expected_commit = head
     return {
         "status": "ok" if expected_commit and dirty is not None else "incomplete",
         "repo": root,
@@ -446,8 +467,8 @@ def _classify_alerts(report, ss_age):
     if report.get("cycle", {}).get("risk_level") not in ("GREEN", None):
         alerts.append(f"risk={report['cycle']['risk_level']}")
     entry_status = report.get("entry_capable", {}).get("status")
-    if entry_status == "blocked" or report.get("blocking_gates"):
-        alerts.append("entry_blocked")
+    if entry_status == "unavailable" or report.get("blocking_gates"):
+        alerts.append("entry_unavailable")
     return alerts
 
 def main():
@@ -549,6 +570,7 @@ def main():
 
     prefix = "ALERT " if alerts else "OK    "
     flags = ",".join(alerts) if alerts else "all_healthy"
+    runtime_health = "DEAD" if "daemon_dead" in alerts else ("DEGRADED" if alerts else "OK")
     summary = (
         f"{prefix}{now} hb={report['hb'].get('age_s')}s "
         f"cycle_age={ss_age}s "
@@ -559,7 +581,8 @@ def main():
         f"commit={report.get('code_plane',{}).get('head','?')} "
         f"expected={report.get('code_plane',{}).get('expected_commit','?')} "
         f"dirty={report.get('code_plane',{}).get('dirty','?')} "
-        f"risk={report.get('cycle',{}).get('risk_level','?')} "
+        f"runtime_health={runtime_health} "
+        f"cycle_risk={report.get('cycle',{}).get('risk_level','?')} "
         f"ws={report.get('cycle',{}).get('ws_subscription','?')} "
         f"funnel={report.get('funnel',{}).get('evaluated','?')}/{report.get('funnel',{}).get('selected','?')}/{report.get('funnel',{}).get('filled','?')} "
         f"entry={report.get('entry_capable',{}).get('status','?')} "

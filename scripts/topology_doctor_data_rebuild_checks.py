@@ -108,9 +108,9 @@ def run_data_rebuild(api: Any) -> Any:
     if "N/A" not in str(replay_rule.get("p_and_l_without_market_price", "")):
         issues.append(api._issue("data_rebuild_replay_pnl_unsafe", "p_and_l_without_market_price", "missing N/A rule"))
 
-    diagnostic = topology.get("diagnostic_non_promotion") or {}
-    if diagnostic.get("authority_scope") != "diagnostic_non_promotion":
-        issues.append(api._issue("data_rebuild_non_promotion_missing", "diagnostic_non_promotion", "authority_scope must be diagnostic_non_promotion"))
+    diagnostic = topology.get("offline_no_promotion") or {}
+    if diagnostic.get("authority_scope") != "offline_no_promotion":
+        issues.append(api._issue("data_rebuild_non_promotion_missing", "offline_no_promotion", "authority_scope must be offline_no_promotion"))
     for target in (
         "state/zeus_trades.db",
         "state/zeus-world.db",

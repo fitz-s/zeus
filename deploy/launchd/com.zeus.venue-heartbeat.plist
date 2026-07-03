@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-06-28
+  Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §6;
+  src/control/heartbeat_supervisor.py external venue-heartbeat split.
+
+  ARTIFACT ONLY. This launchd job description is committed so the live venue
+  heartbeat keeper is installed from the same reviewed deployment surface as the
+  other money-path daemons. The keeper writes state/venue-heartbeat-keeper.json,
+  which ExternalHeartbeatSupervisor reads before allowing resting live orders.
+
+  CREDENTIALS - DO NOT COMMIT REAL SECRETS. Replace the POLYMARKET_API_* values
+  at install time with the same CLOB L2 credentials used by live-trading. The
+  explicit POLYMARKET_CLOB_V2_SIGNATURE_TYPE is non-secret and required: the
+  heartbeat keeper builds the same CLOB V2 adapter as submit-capable daemons, so
+  relying on an implicit historical default makes live entry fail closed.
+
+  INSTALL (operator):
+    cp deploy/launchd/com.zeus.venue-heartbeat.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.zeus.venue-heartbeat 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.venue-heartbeat.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>POLYMARKET_API_KEY</key>
+		<string>REPLACE_ME_POLYMARKET_API_KEY</string>
+		<key>POLYMARKET_API_PASSPHRASE</key>
+		<string>REPLACE_ME_POLYMARKET_API_PASSPHRASE</string>
+		<key>POLYMARKET_API_SECRET</key>
+		<string>REPLACE_ME_POLYMARKET_API_SECRET</string>
+		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
+		<string>2</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>ZEUS_HEARTBEAT_CADENCE_SECONDS</key>
+		<string>5</string>
+		<key>ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS</key>
+		<string>2</string>
+		<key>ZEUS_MODE</key>
+		<string>live</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.zeus.venue-heartbeat</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>-m</string>
+		<string>src.control.heartbeat_supervisor</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-venue-heartbeat.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-venue-heartbeat.log</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

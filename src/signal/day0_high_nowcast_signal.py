@@ -143,7 +143,7 @@ class Day0HighNowcastSignal:
         violating the physical monotonicity of a daily-max statistic).
         current_temp is preserved for diagnostics / uncertainty in forecast_context().
 
-        Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
+        Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
         """
         return build_day0_high_distribution(
             observed_high_so_far=self.obs_floor,

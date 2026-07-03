@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,128 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 NOW = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+
+
+def _entry_submit_payload() -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.62,
+                        "q_lcb_5pct": 0.55,
+                        "expected_edge": 0.05,
+                        "limit_price": 0.50,
+                        "submit_edge": 0.05,
+                        "expected_profit_usd": 1.00,
+                        "min_entry_price": 0.05,
+                        "min_expected_profit_usd": 1.00,
+                        "submit_edge_density": 0.10,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 20.0,
+                        "qkernel_side": "YES",
+                    },
+                },
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "details": {"certificate_id": "cert-m2"},
+                },
+            ],
+        },
+    }
+
+
+def _actionable_payload(*, token_id: str, price: float) -> dict:
+    q_lcb = 0.62
+    submit_edge = q_lcb - float(price)
+    return {
+        "event_id": "event-m2",
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": f"snap-{token_id}",
+        "family_id": "family-m2",
+        "candidate_id": "candidate-m2",
+        "condition_id": "condition-m2",
+        "token_id": token_id,
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "executable_snapshot_id": f"snap-{token_id}",
+        "q_live": 0.70,
+        "q_lcb_5pct": q_lcb,
+        "c_fee_adjusted": price,
+        "c_cost_95pct": price,
+        "p_fill_lcb": 0.1,
+        "trade_score": submit_edge,
+        "action_score": submit_edge,
+        "min_entry_price": 0.10,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": q_lcb,
+            "cost": price,
+            "edge_lcb": submit_edge,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "selection_guard_basis": "EDGE_POSITIVE",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+        "fdr_family_id": "family-m2",
+        "kelly_decision_id": "kelly-m2",
+        "kelly_size_usd": 3.0,
+        "risk_decision_id": "risk-m2",
+        "live_cap_usage_id": "cap-m2",
+        "final_intent_id": "intent-m2",
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": True,
+        "submitted": False,
+    }
+
+
+def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, price: float) -> str:
+    payload_json = json.dumps(_actionable_payload(token_id=token_id, price=price), sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+    certificate_hash = hashlib.sha256(f"actionable:{token_id}:{price}".encode()).hexdigest()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time, source_available_at,
+            agent_received_at, persisted_at, max_parent_source_available_at,
+            max_parent_agent_received_at, max_parent_persisted_at, authority_id,
+            authority_version, algorithm_id, algorithm_version, config_hash,
+            model_version_hash, payload_json, payload_hash, certificate_hash,
+            verifier_status, created_at
+        ) VALUES (?, 'ActionableTradeCertificate', 1, 'test', ?, 'actionable_trade',
+            'LIVE', ?, ?, ?, ?, ?, ?, ?, 'test-authority', 'test', 'test-algo',
+            'test', NULL, NULL, ?, ?, ?, 'VERIFIED', ?)
+        """,
+        (
+            f"cert-{certificate_hash[:12]}",
+            f"actionable:{token_id}:{price}",
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            payload_json,
+            payload_hash,
+            certificate_hash,
+            NOW.isoformat(),
+        ),
+    )
+    return certificate_hash
 
 
 @pytest.fixture
@@ -37,6 +160,19 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
     monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000abc",
+    )
+    monkeypatch.setattr("src.architecture.gate_runtime.check", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "not_paused",
+        },
+    )
+    monkeypatch.setattr(
         "src.execution.executor._assert_collateral_allows_sell",
         lambda *args, **kwargs: {
             "component": "collateral_snapshot_refresh",
@@ -53,7 +189,7 @@ def conn(monkeypatch):
         },
     )
 
-    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+    def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
         CollateralLedger(conn).set_snapshot(
             CollateralSnapshot(
                 pusd_balance_micro=1_000_000_000,
@@ -172,6 +308,10 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
     from src.contracts.slippage_bps import SlippageBps
 
     snapshot_id = _ensure_snapshot(conn, token_id=token_id)
+    q_lcb = 0.62
+    submit_edge = q_lcb - float(price)
+    qkernel_cost = float(price)
+    certificate_hash = _insert_actionable_certificate(conn, token_id=token_id, price=float(price))
     return ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
@@ -183,6 +323,31 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
         token_id=token_id,
         timeout_seconds=3600,
         decision_edge=0.05,
+        q_live=0.70,
+        q_lcb_5pct=q_lcb,
+        expected_edge=submit_edge,
+        min_entry_price=0.10,
+        min_expected_profit_usd=0.05,
+        min_submit_edge_density=0.02,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": q_lcb,
+            "cost": qkernel_cost,
+            "edge_lcb": submit_edge,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "selection_guard_basis": "EDGE_POSITIVE",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": q_lcb,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+        actionable_certificate_hash=certificate_hash,
         executable_snapshot_id=snapshot_id,
         executable_snapshot_min_tick_size=Decimal("0.01"),
         executable_snapshot_min_order_size=Decimal("0.01"),
@@ -282,7 +447,13 @@ def _insert_unknown_side_effect(
         created_at=created.isoformat(),
         snapshot_checked_at=created.isoformat(),
     )
-    append_event(conn, command_id=command_id, event_type="SUBMIT_REQUESTED", occurred_at=created.isoformat())
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=created.isoformat(),
+        payload=_entry_submit_payload(),
+    )
     append_event(
         conn,
         command_id=command_id,
@@ -564,12 +735,12 @@ def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(co
     class PolyApiException(Exception):
         pass
 
-    intent = _make_entry_intent(conn, price=0.01)
+    intent = _make_entry_intent(conn, price=0.10)
     mock_client = MagicMock()
     mock_client.v2_preflight.return_value = None
     mock_client.place_limit_order.side_effect = PolyApiException(
         "PolyApiException[status_code=400, error_message={'error': "
-        "'invalid amount for a marketable BUY order ($0.03), min size: $1'}]"
+        "'invalid amount for a marketable BUY order ($0.30), min size: $1'}]"
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
@@ -603,19 +774,19 @@ def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_term
     class PolyApiException(Exception):
         pass
 
-    intent = _make_entry_intent(conn, price=0.01)
+    intent = _make_entry_intent(conn, price=0.10)
     mock_client = MagicMock()
     mock_client.v2_preflight.return_value = None
     mock_client.place_limit_order.side_effect = PolyApiException(
         "PolyApiException[status_code=400, error_message={'error': "
-        "'invalid amount for a marketable BUY order ($0.12), min size: 1'}]"
+        "'invalid amount for a marketable BUY order ($0.30), min size: 1'}]"
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
         result = _live_order(
             "trade-m2-marketable-buy-min-no-currency",
             intent,
-            shares=12.0,
+            shares=3.0,
             conn=conn,
             decision_id="dec-m2-marketable-buy-min-no-currency",
         )
@@ -840,11 +1011,11 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
 
     cmd = _command(conn)
     assert result.status == "rejected"
-    assert result.reason == "V2_SUBMIT_UNSUPPORTED"
+    assert result.reason == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
     assert cmd["state"] == "REJECTED"
     assert "SUBMIT_REJECTED" in _events(conn, cmd["command_id"])
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in _events(conn, cmd["command_id"])
-    assert fake_sdk.calls == [("get_ok",)]
+    assert fake_sdk.calls == []
 
 
 def test_duplicate_retry_blocked_during_unknown(conn):

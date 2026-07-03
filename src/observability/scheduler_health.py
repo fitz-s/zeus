@@ -75,10 +75,12 @@ def _write_scheduler_health(
         entry["last_skip_at"] = now
         entry["last_skip_reason"] = skip_reason or reason or ""
         entry["consecutive_skips"] = int(entry.get("consecutive_skips") or 0) + 1
+        entry.pop("last_failure_reason", None)
     elif started:
         entry["status"] = "RUNNING"
         entry["last_started_at"] = now
         entry["consecutive_skips"] = 0
+        entry.pop("last_failure_reason", None)
     elif failed:
         entry["status"] = "FAILED"
         entry["last_failure_at"] = now
@@ -88,6 +90,7 @@ def _write_scheduler_health(
         entry["status"] = "OK"
         entry["last_success_at"] = now
         entry["consecutive_skips"] = 0
+        entry.pop("last_failure_reason", None)
     if extra:
         entry["business_liveness"] = dict(extra)
     existing[job_name] = entry

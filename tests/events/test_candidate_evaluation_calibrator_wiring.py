@@ -75,16 +75,15 @@ def test_city_skill_gate_allows_good_city_with_explicit_artifact():
 
 
 def test_calibrator_deflates_qlcb_and_blocks_toxic_no():
-    # The toxic-NO cell: raw NO prob ~0.875 -> q_posterior(YES-in-bin) ~0.125. Use a candidate whose
-    # NO raw prob lands in the toxic bucket.
+    # The toxic-NO cell: q_posterior is side-native on CandidateEvaluation, so
+    # raw NO prob ~0.875 is carried directly.
     raw_no = 0.875
     bidx, _ = sc.raw_prob_bucket(raw_no)
     art = {
         "_meta": {"posterior_version": sc.DEFAULT_POSTERIOR_VERSION, "min_n": 30},
         "cells": {f"NO|L1|nonmodal|pb{bidx}": {"n": 104, "hit_rate": 0.679}},
     }
-    # q_posterior is the YES-in-bin belief; NO raw prob = 1 - q_posterior.
-    ev = _base(direction="buy_no", q_posterior=1.0 - raw_no, q_lcb_5pct=0.83,
+    ev = _base(direction="buy_no", q_posterior=raw_no, q_lcb_5pct=0.83,
                execution_price=0.70, selection_calibrator_artifact=art)
     # The calibrator-deflated admission q_lcb is below the 0.70 cost -> not admitted.
     assert ev.calibrated_admission_q_lcb < 0.83
@@ -94,16 +93,22 @@ def test_calibrator_deflates_qlcb_and_blocks_toxic_no():
 
 def test_buy_yes_genuine_edge_survives_live_calibrator(monkeypatch):
     monkeypatch.delenv("ZEUS_SELECTION_CALIBRATOR_LIVE", raising=False)
-    raw_yes = 0.45
+    # q_lcb_5pct must clear LIVE_DIRECTION_WIN_RATE_FLOOR (0.51,
+    # src/strategy/live_inference/live_admission.py) — a separate, unrelated
+    # admission gate — or `admitted` is False regardless of calibrator
+    # wiring. Values below keep the original deflation shape (q_lcb_5pct
+    # slightly under raw_yes, hit_rate slightly over raw_yes) scaled up to
+    # clear that floor.
+    raw_yes = 0.56
     bidx, _ = sc.raw_prob_bucket(raw_yes)
     art = {
         "_meta": {"posterior_version": sc.DEFAULT_POSTERIOR_VERSION, "min_n": 30},
-        "cells": {f"YES|L1|modal|pb{bidx}": {"n": 200, "hit_rate": 0.46}},
+        "cells": {f"YES|L1|modal|pb{bidx}": {"n": 200, "hit_rate": 0.57}},
     }
     ev = _base(
         direction="buy_yes",
         q_posterior=raw_yes,
-        q_lcb_5pct=0.42,
+        q_lcb_5pct=0.53,
         execution_price=0.30,
         bin_class="modal",
         selection_calibrator_artifact=art,

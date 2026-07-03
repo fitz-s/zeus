@@ -41,6 +41,7 @@ from src.execution.day0_hard_fact_exit import (
     _reset_wu_memo_for_tests,
     cancel_day0_dead_bin_resting_entries,
     evaluate_hard_fact_exit,
+    final_observed_bin_verdict,
     hard_fact_bin_verdict,
     hard_fact_monitor_belief,
     settlement_grade_effective_extreme,
@@ -69,6 +70,45 @@ def _clean_state(monkeypatch):
     _reset_wu_memo_for_tests()
 
 
+def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
+    from src.engine import cycle_runtime
+    from src.state.portfolio import QUARANTINE_SENTINEL, Position
+
+    day0 = Position(
+        trade_id="day0-pos", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="day0_window", shares=1.0,
+    )
+    active = Position(
+        trade_id="active-pos", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="active", shares=1.0,
+    )
+    quarantined_partial = Position(
+        trade_id="q-pos", market_id="m", city="Lucknow", cluster="asia",
+        target_date="2026-06-10", bin_label="35C or below", direction="buy_yes",
+        state="quarantined", chain_state="entry_authority_quarantined",
+        shares_filled=20.0, filled_cost_basis_usd=1.20,
+    )
+    quarantined_placeholder = Position(
+        trade_id="q-placeholder", market_id="m", city=QUARANTINE_SENTINEL,
+        cluster="unknown", target_date="2026-06-10", bin_label="UNKNOWN",
+        direction="buy_yes", state="quarantined",
+        chain_state="entry_authority_quarantined", shares_filled=20.0,
+    )
+    quarantined_no_exposure = Position(
+        trade_id="q-empty", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="quarantined", chain_state="entry_authority_quarantined",
+    )
+
+    assert cycle_runtime._day0_hard_fact_position_eligible(day0) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(active) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_partial) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is False
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is False
+
+
 def _tokyo():
     # settlement-faithful, empirical threshold 1.0 (config/wu_metar_divergence.json)
     return SimpleNamespace(
@@ -89,6 +129,13 @@ def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
         wu_station="LFPB", settlement_source_type="wu_icao",
+    )
+
+
+def _manila():
+    return SimpleNamespace(
+        name="Manila", timezone="Asia/Manila", settlement_unit="C",
+        wu_station="RPLL", settlement_source_type="wu_icao",
     )
 
 
@@ -206,6 +253,24 @@ class TestVerdictMatrix:
             metric="high", direction="buy_yes", bin_low=27.0, bin_high=27.0,
             effective_extreme=25.0,
         ) is None
+
+    def test_final_observed_finite_bin_containment_is_settlement_verdict(self):
+        yes = final_observed_bin_verdict(
+            metric="high",
+            direction="buy_yes",
+            bin_low=32.0,
+            bin_high=32.0,
+            final_extreme=32.0,
+        )
+        no = final_observed_bin_verdict(
+            metric="high",
+            direction="buy_no",
+            bin_low=32.0,
+            bin_high=32.0,
+            final_extreme=32.0,
+        )
+        assert yes is not None and yes.action == "HOLD_STRUCTURAL_WIN"
+        assert no is not None and no.action == "EXIT_DEAD_BIN"
 
 
 # ===========================================================================
@@ -332,6 +397,93 @@ class TestSourceDiscipline:
         assert effective == pytest.approx(23.0)
         assert source == "durable_observation_instants"
 
+    def test_final_day_durable_exact_bin_marks_buy_no_structural_loss(self, monkeypatch):
+        """Manila regression: after local day completion, final high=32 means
+        32C YES won and a held 32C NO is structurally dead. Intraday containment
+        remains estimator territory; this only fires with durable end-of-day
+        WU coverage."""
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        for local_ts, utc_ts, high, low in [
+            ("2026-06-29T00:00:00+08:00", "2026-06-28T16:00:00+00:00", 30.0, 28.0),
+            ("2026-06-29T18:00:00+08:00", "2026-06-29T10:00:00+00:00", 32.0, 30.0),
+            ("2026-06-29T23:00:00+08:00", "2026-06-29T15:00:00+00:00", 28.0, 28.0),
+        ]:
+            conn.execute(
+                "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Manila",
+                    "2026-06-29",
+                    "wu_icao_history",
+                    "Asia/Manila",
+                    local_ts,
+                    utc_ts,
+                    high,
+                    low,
+                    "VERIFIED",
+                    "OK",
+                    None,
+                ),
+            )
+
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Manila",
+                target_date="2026-06-29",
+                bin_label="Will the highest temperature in Manila be 32°C on June 29?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_manila(),
+            now=datetime(2026, 6, 30, 3, 40, tzinfo=UTC),
+            world_conn=conn,
+        )
+        assert verdict is not None
+        assert verdict.action == "EXIT_DEAD_BIN"
+        assert verdict.rounded_extreme == pytest.approx(32.0)
+        assert verdict.source == "durable_observation_instants"
+        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
+        assert belief is not None
+        assert belief.yes_prob == pytest.approx(1.0)
+        assert belief.held_side_prob == pytest.approx(0.0)
+
+    def test_final_day_exact_bin_does_not_fire_before_local_day_complete(self, monkeypatch):
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        for local_ts, utc_ts, high, low in [
+            ("2026-06-29T18:00:00+08:00", "2026-06-29T10:00:00+00:00", 32.0, 30.0),
+            ("2026-06-29T23:00:00+08:00", "2026-06-29T15:00:00+00:00", 32.0, 28.0),
+        ]:
+            conn.execute(
+                "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Manila",
+                    "2026-06-29",
+                    "wu_icao_history",
+                    "Asia/Manila",
+                    local_ts,
+                    utc_ts,
+                    high,
+                    low,
+                    "VERIFIED",
+                    "OK",
+                    None,
+                ),
+            )
+
+        assert evaluate_hard_fact_exit(
+            position=_position(
+                city="Manila",
+                target_date="2026-06-29",
+                bin_label="Will the highest temperature in Manila be 32°C on June 29?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_manila(),
+            now=datetime(2026, 6, 29, 15, 30, tzinfo=UTC),
+            world_conn=conn,
+        ) is None
+
     def test_evaluate_hard_fact_exit_normalizes_direction_enum(self, monkeypatch):
         from src.contracts.semantic_types import Direction
 
@@ -361,7 +513,7 @@ class TestSourceDiscipline:
             city=_tokyo(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective == pytest.approx(26.0)
-        assert source == "metar_fast_lane"
+        assert source == "same_station_fast_tail"
 
     def test_metar_kill_at_unmeasured_city_carries_default_margin(self, monkeypatch):
         """default_guess city: the METAR extreme is shifted by the conservative
@@ -398,7 +550,7 @@ class TestSourceDiscipline:
             city=_tokyo(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective == pytest.approx(27.0)  # absorbing compose: max
-        assert source == "wu_api+metar_fast_lane"
+        assert source == "wu_api+same_station_fast_tail"
 
     def test_no_source_yields_none(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)
@@ -420,7 +572,7 @@ class TestLaneEndToEnd:
         _set_metar_memo(monkeypatch, 26)
         verdict = evaluate_hard_fact_exit(position=_position(), city=_tokyo(), now=NOW)
         assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
-        assert verdict.source == "metar_fast_lane"
+        assert verdict.source == "same_station_fast_tail"
 
     def test_buy_no_death_ride_is_closed(self, monkeypatch):
         """Reviewer 'worst way to lose money #1': buy_no on the shoulder the
@@ -797,7 +949,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
-            metric="high", rounded_extreme=26.0, source="metar_fast_lane",
+            metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
         assert summary.get("day0_hard_fact_exits") == 1
@@ -806,7 +958,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         exits = [r for r in results if getattr(r, "should_exit", False)]
         assert exits, "the dead-bin exit decision must be recorded despite the write failure"
         assert any("DAY0_HARD_FACT_BIN_DEAD" in str(getattr(r, "exit_reason", "")) for r in exits)
-        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # shadow mode: decision made, no real order
+        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # submit-disabled fixture: decision made, no order
 
     def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
@@ -1179,9 +1331,10 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
     )
 
     assert calls["refresh"] == 1
-    assert summary.get("monitor_pending_exit_phase_evaluated") == 1
-    assert summary.get("pending_exit_exit_signal_already_in_flight") == 1
-    assert summary["exits"] == 0
+    assert summary.get("monitor_released_pending_exit_without_order") == 1
+    assert summary.get("monitor_pending_exit_phase_evaluated") is None
+    assert summary.get("pending_exit_exit_signal_already_in_flight") is None
+    assert summary["exits"] == 1
     assert results and results[0].should_exit is True
 
 

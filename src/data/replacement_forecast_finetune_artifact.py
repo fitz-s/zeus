@@ -236,7 +236,7 @@ def build_replacement_forecast_finetune_artifact(
     return ReplacementForecastFineTuneArtifact(
         schema_version=ARTIFACT_SCHEMA_VERSION,
         generated_at=generated.astimezone(timezone.utc).isoformat(),
-        status="FINE_TUNE_ARTIFACT_READY" if result.promotion_ready else "FINE_TUNE_ARTIFACT_SHADOW_ONLY",
+        status="FINE_TUNE_ARTIFACT_READY" if result.promotion_ready else "FINE_TUNE_ARTIFACT_BLOCKED",
         reason_codes=result.reason_codes,
         result=result,
         row_count=len(rows),

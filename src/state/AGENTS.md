@@ -22,6 +22,8 @@ Derived surfaces may never become truth by being convenient.
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `db.py` | Canonical DB write/query substrate | CRITICAL — all truth flows through here |
+| `write_coordinator.py` | Declared DB-set writer lease/transaction coordinator | CRITICAL — governs future DB write serialization |
+| `schema/execution_feasibility_evidence_schema.py` | Trade quote evidence append/latest schema owner | CRITICAL — live pre-submit quote freshness seam |
 | `lifecycle_manager.py` | Sole lifecycle transition authority | CRITICAL — only legal phase transitions |
 | `ledger.py` | Append-only event spine | CRITICAL — canonical event history |
 | `projection.py` | Deterministic projection fold from events | CRITICAL — current state from events |
@@ -98,6 +100,7 @@ Derived surfaces may never become truth by being convenient.
 - `tests/test_source_run_schema.py`
 - `tests/test_readiness_state_schema.py`
 - `tests/test_market_topology_state_schema.py`
+- `tests/state/test_write_coordinator.py`
 
 ## Planning lock
 

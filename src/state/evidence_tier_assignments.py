@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from src.contracts.evidence_tier import EvidenceTier
 SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
+_VALID_TIER_VALUES_SQL = ", ".join(str(int(tier)) for tier in EvidenceTier)
 
 
 @dataclass(frozen=True)
@@ -124,14 +125,14 @@ def current_evidence_tier_assignment(
         return None
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT id, strategy_id, tier, assigned_at, assignment_source,
                    verdict_kind, operator_ref, verdict_reason,
                    effective_from, effective_until, revoked_at, revoked_by,
                    supersedes_assignment_id
             FROM evidence_tier_assignments
             WHERE strategy_id = ?
-              AND tier IN (0, 1, 2, 3, 4, 5, 6, 7)
+              AND tier IN ({_VALID_TIER_VALUES_SQL})
               AND (effective_from IS NULL OR datetime(effective_from) <= datetime('now'))
               AND (effective_until IS NULL OR datetime(effective_until) > datetime('now'))
               AND revoked_at IS NULL

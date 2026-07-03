@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import pytest
@@ -36,6 +37,10 @@ def _conn_writer():
     # test_market_channel_can_write_feasibility_to_trade_connection.
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
     ensure_table(conn)
+    from src.state.schema.market_channel_connectivity_schema import (
+        ensure_table as ensure_connectivity_table,
+    )
+    ensure_connectivity_table(conn)
     return conn, EventWriter(conn)
 
 
@@ -64,6 +69,11 @@ def test_execution_feasibility_schema_indexes_token_created_at():
         for row in conn.execute("PRAGMA index_list('execution_feasibility_evidence')").fetchall()
     }
     assert "idx_execution_feasibility_evidence_token_created" in indexes
+    latest_indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list('execution_feasibility_latest')").fetchall()
+    }
+    assert "idx_execution_feasibility_latest_token_created" in latest_indexes
     columns = [
         row[2]
         for row in conn.execute(
@@ -123,22 +133,29 @@ def test_user_channel_is_only_fill_authority():
 def test_reconnect_gap_online_ingestor_no_stale_trade():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
-    event = ingestor.reconnect_gap_snapshot(
-        {
-            "event_type": "book",
-            "asset_id": "token-1",
-            "market": "0xcondition",
-            "bids": [{"price": "0.48", "size": "10"}],
-            "asks": [{"price": "0.52", "size": "10"}],
-            "hash": "hash-after-gap",
-            "timestamp": "1766789469958",
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=lambda _token_id: {})
+    service.connected = False
+    service.gap_start = "2026-05-24T09:59:00+00:00"
+    results = service.on_reconnect(
+        pre_captured_books={
+            "token-1": {
+                "event_type": "book",
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "hash-after-gap",
+                "timestamp": "1766789469958",
+            }
         },
+        token_ids={"token-1"},
         gap_start="2026-05-24T09:59:00+00:00",
         received_at="2026-05-24T10:00:00+00:00",
     )
-    assert event is not None
-    writer.write(event)
-    assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
+    assert len(results) == 1
+    assert results[0].inserted is True
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
 
 
 def test_market_message_ignores_inactive_token():
@@ -184,6 +201,13 @@ def test_insert_execution_feasibility_evidence():
         },
     )
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 1
+    latest = conn.execute(
+        """
+        SELECT token_id, direction, event_id, book_hash_before
+          FROM execution_feasibility_latest
+        """
+    ).fetchone()
+    assert latest == ("token-1", "buy_yes", "event-1", "hash-1")
 
 
 def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
@@ -238,6 +262,17 @@ def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
     assert rows[0][2] == "hash-2"
     assert rows[0][3] == pytest.approx(0.73)
     assert rows[0][4] == pytest.approx(0.76)
+    latest = conn.execute(
+        """
+        SELECT created_at, book_hash_before, best_bid_before, best_ask_before
+          FROM execution_feasibility_latest
+         WHERE token_id = 'token-1' AND direction = 'buy_no'
+        """
+    ).fetchone()
+    assert latest[0] == "2026-05-24T10:02:01+00:00"
+    assert latest[1] == "hash-2"
+    assert latest[2] == pytest.approx(0.73)
+    assert latest[3] == pytest.approx(0.76)
 
 
 def test_quote_cache_seeded_from_rest_on_connect():
@@ -264,7 +299,10 @@ def test_quote_cache_seeded_from_rest_on_connect():
 
     assert len(results) == 1
     assert cache.get("token-1") is not None
-    assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
+    assert results[0].inserted is True
+    assert results[0].opportunity_event_persisted is False
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
 
 
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
@@ -357,6 +395,181 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     assert commit_counts == [4, 8, 10]
 
 
+def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
+        for idx in range(3)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    class FlakyWorldMutex:
+        def __init__(self) -> None:
+            self.enters = 0
+
+        def __enter__(self):
+            self.enters += 1
+            if self.enters == 2:
+                raise TimeoutError("world write busy")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    written = service.seed_rest_books_in_chunks(
+        token_ids=[f"token-{idx}" for idx in range(3)],
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=FlakyWorldMutex(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        ),
+        chunk_size=1,
+    )
+
+    assert written == 1
+    assert fetch_calls == ["token-0", "token-1"]
+    assert commit_counts == [2]
+    assert service.rest_seed_backpressure_count == 1
+    assert service.rest_seed_backpressure_reason == "world write busy"
+    assert (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        == 2
+    )
+
+
+def test_rest_seed_uses_batch_orderbook_fetch_when_available():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[
+            f"token-{idx}"
+        ]
+        for idx in range(5)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=QuoteCache(),
+    )
+    batch_calls: list[list[str]] = []
+
+    def fetch_one(token_id: str) -> dict:
+        raise AssertionError(f"single-token fetch should not run for {token_id}")
+
+    def fetch_many(token_ids: list[str]) -> dict[str, dict]:
+        call = list(token_ids)
+        batch_calls.append(call)
+        return {
+            token_id: {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": f"hash-{token_id}",
+            }
+            for token_id in call
+        }
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=fetch_one,
+        fetch_orderbooks=fetch_many,
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=2,
+    )
+
+    assert written == 5
+    assert batch_calls == [["token-0", "token-1"], ["token-2", "token-3"], ["token-4"]]
+    assert (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        == 10
+    )
+
+
+def test_rest_seed_falls_back_for_partial_batch_orderbook_response():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-0": _metadata("token-0")["token-0"],
+        "token-1": _metadata("token-1")["token-1"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=QuoteCache(),
+    )
+    batch_calls: list[list[str]] = []
+    single_calls: list[str] = []
+
+    def _book(token_id: str) -> dict:
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    def fetch_one(token_id: str) -> dict:
+        single_calls.append(token_id)
+        return _book(token_id)
+
+    def fetch_many(token_ids: list[str]) -> dict[str, dict]:
+        batch_calls.append(list(token_ids))
+        return {"token-0": _book("token-0")}
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=fetch_one,
+        fetch_orderbooks=fetch_many,
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-0", "token-1"],
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=2,
+    )
+
+    assert written == 2
+    assert batch_calls == [["token-0", "token-1"]]
+    assert single_calls == ["token-1"]
+    assert (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        == 4
+    )
+
+
 def test_rest_seed_deadline_stops_before_fetching_more_tokens():
     from contextlib import nullcontext
 
@@ -393,12 +606,8 @@ def test_rest_seed_deadline_stops_before_fetching_more_tokens():
 
     assert written == 0
     assert fetch_calls == []
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
-        ).fetchone()[0]
-        == 0
-    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
 
 
 def test_rest_seed_preserves_ordered_priority_tokens():
@@ -480,14 +689,15 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
         received_at="2026-05-24T10:00:00+00:00",
         world_mutex=nullcontext(),
         commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
         ),
         chunk_size=2,
     )
 
     assert written == 5
     assert fetch_calls == [f"token-{idx}" for idx in range(5)]
-    assert commit_counts == [2, 4, 5]
+    assert commit_counts == [4, 8, 10]
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert service.connected is True
     assert service.gap_start is None
 
@@ -514,6 +724,73 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
         "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
     assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
+
+
+def test_market_channel_quote_notifies_inserted_event_sink_once():
+    conn, writer = _conn_writer()
+    seen: list[list[str]] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=lambda events: seen.append([event.event_id for event in events]),
+    )
+    message = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "outcome_label": "YES",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "hash-1",
+        "timestamp": "1766789469958",
+    }
+
+    first = ingestor.handle_message(message, received_at="2026-05-24T10:00:00+00:00")
+    second = ingestor.handle_message(message, received_at="2026-05-24T10:00:00+00:00")
+
+    assert first.inserted is True
+    assert second.inserted is False
+    assert len(seen) == 1
+    assert len(seen[0]) == 1
+
+
+def test_market_channel_same_top_of_book_bba_does_not_append_ignored_events():
+    conn, writer = _conn_writer()
+    seen: list[list[str]] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=lambda events: seen.append([event.event_id for event in events]),
+    )
+
+    base = {
+        "event_type": "best_bid_ask",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "outcome_label": "YES",
+        "best_bid": "0.48",
+        "best_ask": "0.52",
+        "hash": "hash-1",
+        "timestamp": "1766789469958",
+    }
+    first = ingestor.handle_message(base, received_at="2026-05-24T10:00:00+00:00")
+    same_touch = ingestor.handle_message(
+        {**base, "hash": "hash-2"},
+        received_at="2026-05-24T10:00:01+00:00",
+    )
+    moved = ingestor.handle_message(
+        {**base, "best_ask": "0.53", "hash": "hash-3"},
+        received_at="2026-05-24T10:00:02+00:00",
+    )
+
+    assert first.inserted is True
+    assert same_touch is None
+    assert moved.inserted is True
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 4
+    assert len(seen) == 2
 
 
 def test_market_channel_can_write_feasibility_to_trade_connection():
@@ -543,7 +820,7 @@ def test_market_channel_can_write_feasibility_to_trade_connection():
         received_at="2026-05-24T10:00:00+00:00",
     )
 
-    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert world_conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
     ).fetchone()[0] == 0
@@ -574,8 +851,7 @@ def test_market_channel_no_default_yes_for_no_token():
         received_at="2026-05-24T10:00:00+00:00",
     )
 
-    event_payload = conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0]
-    assert '"outcome_label":"NO"' in event_payload
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     rows = conn.execute(
         "SELECT direction, outcome_label FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
@@ -717,7 +993,7 @@ def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets
     assert _edli_filter_markets_for_condition(markets, "missing-condition") == []
 
 
-def test_tick_size_change_invalidates_bound_executable_snapshot_until_refreshed():
+def test_tick_size_change_records_append_only_snapshot_invalidation_until_refreshed():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -747,7 +1023,19 @@ def test_tick_size_change_invalidates_bound_executable_snapshot_until_refreshed(
     )
 
     assert count == 1
-    assert conn.execute("SELECT freshness_deadline FROM executable_market_snapshots").fetchone()[0] == "2026-05-24T11:59:59+00:00"
+    assert conn.execute("SELECT freshness_deadline FROM executable_market_snapshots").fetchone()[0] == "2026-05-24T12:05:00+00:00"
+    row = conn.execute(
+        """
+        SELECT condition_id, token_id, reason, invalidated_at
+          FROM executable_market_snapshot_invalidations
+        """
+    ).fetchone()
+    assert row == (
+        "condition-1",
+        "yes-1",
+        "tick_size_change",
+        "2026-05-24T12:00:00+00:00",
+    )
 
 
 def test_new_market_message_emits_discovery_event_without_shadow_module():
@@ -1102,6 +1390,7 @@ def test_universe_excludes_settled_markets_by_market_end_at():
     md = active_weather_token_metadata_from_snapshots(conn, now=now)
 
     assert "yes-live" in md and "no-live" in md, "live (future-ending) market must be covered"
+    assert md["yes-live"].market_end_at == "2026-06-05T12:00:00+00:00"
     assert "yes-dead" not in md, "settled market (market_end_at<=now) leaked into channel universe"
     assert "no-dead" not in md
 
@@ -1161,6 +1450,60 @@ def test_universe_includes_market_with_null_end_at():
 
     md = active_weather_token_metadata_from_snapshots(conn, now=now)
     assert "yes-null" in md, "NULL market_end_at must be kept (cannot prove settled)"
+
+
+def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
+    """A running market-channel thread must not keep yesterday's token universe forever."""
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-live": MarketTokenMetadata(
+            condition_id="0xcondition",
+            token_id="token-live",
+            outcome_label="YES",
+            min_tick_size="0.01",
+            min_order_size="5",
+            neg_risk=False,
+            executable_snapshot_id="snap-live",
+            market_end_at="2999-01-01T00:00:00+00:00",
+        ),
+        "token-expired": MarketTokenMetadata(
+            condition_id="0xcondition",
+            token_id="token-expired",
+            outcome_label="YES",
+            min_tick_size="0.01",
+            min_order_size="5",
+            neg_risk=False,
+            executable_snapshot_id="snap-expired",
+            market_end_at="2000-01-01T00:00:00+00:00",
+        ),
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+    )
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=_fake_book)
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        if token_id == "token-expired":
+            raise AssertionError("expired token must not be REST fetched")
+        return _fake_book(token_id)
+
+    service.fetch_orderbook = recording_fetch
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-expired", "token-live"],
+        received_at="2026-06-28T06:45:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+    )
+
+    assert written == 1
+    assert fetch_calls == ["token-live"]
+    assert ingestor.active_token_ids_open_at() == {"token-live"}
 
 
 def test_universe_filter_absent_market_end_at_column_is_noop():
@@ -1234,15 +1577,11 @@ def test_on_connect_with_pre_captured_books_seeds_cache_without_fetch_call():
         pre_captured_books=pre_captured,
     )
 
-    # Seed must still populate the book cache and write the event row
+    # Seed must still populate the book cache and write executable quote evidence.
     assert len(results) == 1
     assert cache.get("token-1") is not None
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
-        ).fetchone()[0]
-        == 1
-    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
     # The REST callable must NOT have been invoked — I/O happened before the lock
     assert fetch_calls == [], (
         "fetch_orderbook was called inside on_connect with pre_captured_books — "
@@ -1255,8 +1594,6 @@ def test_on_connect_pre_capture_failure_skips_seed_gracefully():
     contains no entry), seed_from_rest falls back to fetch_orderbook for that token.
     If that also fails, the token is skipped gracefully — no crash, no exception
     propagation, no WorldMutexIOViolation."""
-    from src.state.db import WorldMutexIOViolation
-
     conn, writer = _conn_writer()
     cache = QuoteCache()
     ingestor = MarketChannelIngestor(
@@ -1329,9 +1666,7 @@ def test_seed_from_rest_empty_pre_cached_under_world_mutex_raises_not_fetches():
     2. WorldMutexIOViolation is raised (not silently skipped).
     3. The token is caught by the except block → WARNING logged, results=[].
     """
-    import logging
-
-    from src.state.db import WorldMutexIOViolation, world_write_mutex
+    from src.state.db import world_write_mutex
 
     conn, writer = _conn_writer()
     cache = QuoteCache()
@@ -1410,3 +1745,93 @@ def test_on_reconnect_empty_pre_captured_under_world_mutex_raises_not_fetches():
         "fetch_orderbook was called under the world mutex in on_reconnect"
     )
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# W0.2 blind-window metric: on_connect/on_disconnect/on_reconnect must persist
+# a durable connectivity transition (the in-memory connected/gap_start fields
+# alone do not survive a daemon restart — see
+# src/state/schema/market_channel_connectivity_schema.py for the query that
+# derives blind-window intervals from these rows).
+# ---------------------------------------------------------------------------
+
+
+def test_on_disconnect_persists_durable_transition_row():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_disconnect(gap_start="2026-07-02T10:00:00+00:00")
+
+    rows = conn.execute(
+        "SELECT channel, transition, occurred_at FROM market_channel_connectivity_events"
+    ).fetchall()
+    assert rows == [("market_channel", "disconnected", "2026-07-02T10:00:00+00:00")]
+
+
+def test_on_connect_persists_durable_transition_row():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_connect(received_at="2026-07-02T10:00:00+00:00")
+
+    rows = conn.execute(
+        "SELECT channel, transition, occurred_at FROM market_channel_connectivity_events"
+    ).fetchall()
+    assert rows == [("market_channel", "connected", "2026-07-02T10:00:00+00:00")]
+
+
+def test_simulated_disconnect_reconnect_produces_queryable_blind_window():
+    """(b) from the W0.2 TDD acceptance: a simulated WS disconnect/reconnect
+    produces a blind-window interval, read back via BLIND_WINDOW_QUERY."""
+    from src.state.schema.market_channel_connectivity_schema import BLIND_WINDOW_QUERY
+
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_connect(received_at="2026-07-02T10:00:00+00:00")
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+    service.on_reconnect(received_at="2026-07-02T10:05:45+00:00", token_ids=[])
+
+    rows = conn.execute(BLIND_WINDOW_QUERY).fetchall()
+
+    assert len(rows) == 1
+    channel, blind_window_start, blind_window_end, blind_window_seconds = rows[0]
+    assert channel == "market_channel"
+    assert blind_window_start == "2026-07-02T10:05:00+00:00"
+    assert blind_window_end == "2026-07-02T10:05:45+00:00"
+    assert blind_window_seconds == pytest.approx(45.0)
+
+
+def test_disconnect_reconnect_idempotent_on_repeated_calls():
+    """Re-emitting the same transition at the same timestamp (e.g. a retried
+    call) must not fabricate extra blind-window rows."""
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+    service.on_disconnect(gap_start="2026-07-02T10:05:00+00:00")
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0]
+    assert count == 1

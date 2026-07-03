@@ -1,35 +1,30 @@
 # Created: 2026-06-17
 # Last audited: 2026-06-17
 # Authority basis: operator v4 NEA 2026-06-17 (zeus_problematic20_best_sources_v4
-#   .csv — Singapore NEA data.gov.sg air-temperature as a day0 SHADOW covariate).
+#   .csv — Singapore NEA data.gov.sg air-temperature context).
 #   API shape captured live 2026-06-17 from
 #   api-open.data.gov.sg/v2/real-time/api/air-temperature (nearest station to
 #   WSSS = S24 "Upper Changi Road North" at 0.040 km).
-"""Relationship tests for the Singapore NEA day0 SHADOW observation source.
+"""Relationship tests for the Singapore NEA observation parser.
 
 Asserts, against a captured NEA payload fixture:
   - nearest-station selection resolves S24 (Upper Changi, ~0.04 km from WSSS);
   - the parsed reading carries the correct value + full station provenance;
-  - NEA is SHADOW (is_settlement_faithful False) and can NEVER be marked
+  - NEA is not settlement-faithful and can NEVER be marked
     settlement truth — a hard constructor guard rejects faithful=True;
-  - nea_shadow_source_for_city returns None for non-Singapore cities;
   - fetch is fail-soft (a raising/garbage transport yields None, never a crash).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
-
 import pytest
 
 from src.data.nea_sg_obs import (
     NEA_SOURCE_ID,
-    NEA_SOURCE_ROLE,
     NeaObsReading,
     fetch_nea_reading,
     haversine_km,
     nea_obs_to_fusion_reading,
-    nea_shadow_source_for_city,
     nearest_station,
     parse_nea_payload,
 )
@@ -144,11 +139,10 @@ class TestParse:
         assert parse_nea_payload(payload, settlement_lat=WSSS_LAT, settlement_lon=WSSS_LON) is None
 
 
-class TestShadowInvariant:
+class TestSettlementInvariant:
     def test_reading_is_never_settlement_faithful(self):
         r = parse_nea_payload(NEA_FIXTURE_V2, settlement_lat=WSSS_LAT, settlement_lon=WSSS_LON)
         assert r.is_settlement_faithful is False
-        assert NEA_SOURCE_ROLE == "shadow_covariate"
 
     def test_constructing_a_faithful_nea_reading_is_rejected(self):
         with pytest.raises(ValueError, match="must be False"):
@@ -158,35 +152,13 @@ class TestShadowInvariant:
                 is_settlement_faithful=True,
             )
 
-    def test_fusion_adapter_carries_shadow_flag(self):
+    def test_fusion_adapter_carries_settlement_faithfulness_flag(self):
         r = parse_nea_payload(NEA_FIXTURE_V2, settlement_lat=WSSS_LAT, settlement_lon=WSSS_LON)
         kw = nea_obs_to_fusion_reading(r)
         assert kw["is_settlement_faithful"] is False
         assert kw["source_family"] == NEA_SOURCE_ID
         assert kw["station_id"] == "S24"
         assert kw["value"] == pytest.approx(26.1)
-
-
-class TestRegistration:
-    def test_singapore_resolves_shadow_source(self, monkeypatch):
-        # Avoid a live network call: stub the fetch with the fixture's nearest reading.
-        fixed = parse_nea_payload(NEA_FIXTURE_V2, settlement_lat=WSSS_LAT, settlement_lon=WSSS_LON)
-        monkeypatch.setattr(
-            "src.data.nea_sg_obs.fetch_nea_reading",
-            lambda *, settlement_lat, settlement_lon, **_: fixed,
-        )
-        src = nea_shadow_source_for_city(_singapore_city())
-        assert src is not None
-        assert src.source_id == NEA_SOURCE_ID
-        assert src.station_id == "S24"
-        assert src.is_settlement_faithful is False
-        assert src.distance_km < 0.5
-
-    def test_non_singapore_city_has_no_nea_source(self):
-        nyc = SimpleNamespace(name="New York City", lat=40.78, lon=-73.97,
-                              settlement_unit="F", settlement_source_type="wu_icao",
-                              wu_station="KLGA")
-        assert nea_shadow_source_for_city(nyc) is None
 
 
 class TestFailSoft:

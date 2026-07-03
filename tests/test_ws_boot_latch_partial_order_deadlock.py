@@ -246,6 +246,40 @@ def test_order_daemon_clean_boot_latch_uses_fresh_price_channel_sidecar_evidence
     ws_gap_guard.assert_ws_allows_submit("condition-ws")
 
 
+def test_user_ws_latch_ignores_market_quote_refresh_failure_when_reconcile_fresh(
+    conn, tmp_path, monkeypatch
+) -> None:
+    """Market quote refresh failure is not a user-channel submit gap."""
+
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_market_channel_ingestor": {
+                    "status": "FAILED",
+                    "last_failure_at": live_now.isoformat(),
+                    "last_failure_reason": "DB write lease timed out for candidate quote refresh",
+                },
+                "edli_user_channel_reconcile": {
+                    "status": "OK",
+                    "last_success_at": live_now.isoformat(),
+                },
+            }
+        )
+    )
+
+    summary = ws_gap_guard.summary(now=live_now + timedelta(seconds=5))
+    assert summary["entry"]["allow_submit"] is True
+    assert summary["gap_reason"] == "sidecar_durable_evidence"
+    ws_gap_guard.assert_ws_allows_submit("condition-ws")
+
+
 def test_order_daemon_clean_boot_latch_stays_closed_when_sidecar_evidence_stale(
     conn, tmp_path, monkeypatch
 ) -> None:

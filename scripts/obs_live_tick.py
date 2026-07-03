@@ -52,6 +52,8 @@ import argparse
 import hashlib
 import json
 import logging
+import os
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
@@ -91,6 +93,43 @@ LIVE_TICK_PARSER_VERSION = "obs_v2_live_tick_v1"
 WU_WINDOW_DAYS = DEFAULT_DAYS_BACK
 # Ogimet: 21s inter-request rate limit; we keep a single window per city.
 OGIMET_WINDOW_DAYS = DEFAULT_DAYS_BACK
+
+
+def _sqlite_busy_timeout_ms() -> int:
+    raw = os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000")
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("invalid ZEUS_DB_BUSY_TIMEOUT_MS=%r; using 30000ms", raw)
+        value = 30000.0
+    if value < 0:
+        raise ValueError(f"ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0; got {raw!r}")
+    return int(round(value))
+
+
+def _obs_tick_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_OBS_LIVE_TICK_SQLITE_LOCK_RETRY_SECONDS", "0.5,1.5,3.0")
+    delays: list[float] = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        try:
+            delays.append(max(0.0, float(text)))
+        except ValueError:
+            logger.warning("invalid obs live tick sqlite retry delay %r; skipping", text)
+    return tuple(delays)
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
+def _open_obs_tick_connection(db_path: Path):
+    busy_ms = _sqlite_busy_timeout_ms()
+    conn = sqlite3.connect(str(db_path), timeout=busy_ms / 1000.0)
+    conn.execute(f"PRAGMA busy_timeout = {busy_ms}")
+    return conn
 
 
 @dataclass
@@ -220,6 +259,29 @@ def _city_local_fetch_window(city_name: str, *, now_utc: datetime, days_back: in
     city = cities_by_name[city_name]
     return city_local_fetch_window(city.timezone, reference_time=now_utc, days_back=days_back)
 
+def _write_rows(conn_or_path, rows: list[ObsV2Row]) -> int:
+    """Persist one city's rows with the SQLite writer lock scoped to the write only."""
+    if not rows:
+        return 0
+    if isinstance(conn_or_path, sqlite3.Connection):
+        return insert_rows(conn_or_path, rows)
+    if conn_or_path is None:
+        return 0
+
+    db_path = Path(conn_or_path)
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = _open_obs_tick_connection(db_path)
+        try:
+            written = insert_rows(conn, rows)
+            conn.commit()
+            return written
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def _tick_wu_city(
     city_name: str,
     conn,
@@ -255,7 +317,7 @@ def _tick_wu_city(
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
-        result.rows_written = insert_rows(conn, rows)
+        result.rows_written = _write_rows(conn, rows)
     return result
 
 
@@ -298,8 +360,50 @@ def _tick_ogimet_city(
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
-        result.rows_written = insert_rows(conn, rows)
+        result.rows_written = _write_rows(conn, rows)
     return result
+
+
+def _run_city_with_sqlite_retry(
+    tick_fn,
+    city_name: str,
+    conn,
+    *,
+    start_date: date,
+    end_date: date,
+    dry_run: bool,
+) -> TickResult:
+    delays = _obs_tick_lock_retry_delays()
+    for attempt in range(len(delays) + 1):
+        try:
+            result = tick_fn(
+                city_name,
+                conn,
+                start_date=start_date,
+                end_date=end_date,
+                dry_run=dry_run,
+            )
+            if conn is not None and hasattr(conn, "commit"):
+                conn.commit()
+            return result
+        except Exception as exc:
+            if conn is not None and hasattr(conn, "rollback"):
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001 - preserve original city failure
+                    pass
+            if _is_sqlite_locked_error(exc) and attempt < len(delays):
+                delay = delays[attempt]
+                logger.warning(
+                    "obs_v2_live_tick: sqlite lock for %s; retrying in %.2fs (attempt %d/%d)",
+                    city_name,
+                    delay,
+                    attempt + 1,
+                    len(delays) + 1,
+                )
+                time.sleep(delay)
+                continue
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +423,6 @@ def run_live_tick(
     Returns one TickResult per city. Caller is responsible for the DB
     connection lifecycle when called from ingest_main.py scheduler.
     """
-    import sqlite3
-
     now_utc = datetime.now(timezone.utc)
 
     # Collect cities by tier
@@ -345,37 +447,46 @@ def run_live_tick(
         logger.debug("skip HKO_NATIVE city %s", name)
         _append_log(log_path, r, start_date=start_date, end_date=end_date)
 
-    with db_writer_lock(db_path, WriteClass.BULK):
-        conn = sqlite3.connect(str(db_path)) if not dry_run else None
+    conn = None if dry_run else db_path
+    # Fetch/build rows without a DB writer lock; _write_rows opens a short
+    # per-city locked connection only for insert_rows + commit.
+    for city_name in wu_names:
+        start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
         try:
-            # WU_ICAO cities
-            for city_name in wu_names:
-                start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
-                try:
-                    r = _tick_wu_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
-                except Exception as exc:
-                    r = TickResult(city=city_name, tier="WU_ICAO", failure_reason=f"unexpected: {exc}")
-                    logger.exception("Unexpected error for WU city %s", city_name)
-                results.append(r)
-                logger.info("%s", r)
-                _append_log(log_path, r, start_date=start_date, end_date=end_date)
-                time.sleep(0.5)  # modest rate-limit courtesy
+            r = _run_city_with_sqlite_retry(
+                _tick_wu_city,
+                city_name,
+                conn,
+                start_date=start_date,
+                end_date=end_date,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            r = TickResult(city=city_name, tier="WU_ICAO", failure_reason=f"unexpected: {exc}")
+            logger.exception("Unexpected error for WU city %s", city_name)
+        results.append(r)
+        logger.info("%s", r)
+        _append_log(log_path, r, start_date=start_date, end_date=end_date)
+        time.sleep(0.5)  # modest rate-limit courtesy
 
-            # OGIMET_METAR cities (21s inter-request limit enforced by client module)
-            for city_name in ogimet_names:
-                start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
-                try:
-                    r = _tick_ogimet_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
-                except Exception as exc:
-                    r = TickResult(city=city_name, tier="OGIMET_METAR", failure_reason=f"unexpected: {exc}")
-                    logger.exception("Unexpected error for Ogimet city %s", city_name)
-                results.append(r)
-                logger.info("%s", r)
-                _append_log(log_path, r, start_date=start_date, end_date=end_date)
-        finally:
-            if conn is not None:
-                conn.commit()
-                conn.close()
+    # OGIMET_METAR cities (21s inter-request limit enforced by client module)
+    for city_name in ogimet_names:
+        start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
+        try:
+            r = _run_city_with_sqlite_retry(
+                _tick_ogimet_city,
+                city_name,
+                conn,
+                start_date=start_date,
+                end_date=end_date,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            r = TickResult(city=city_name, tier="OGIMET_METAR", failure_reason=f"unexpected: {exc}")
+            logger.exception("Unexpected error for Ogimet city %s", city_name)
+        results.append(r)
+        logger.info("%s", r)
+        _append_log(log_path, r, start_date=start_date, end_date=end_date)
 
     return results
 

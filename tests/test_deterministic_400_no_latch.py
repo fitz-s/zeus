@@ -41,6 +41,15 @@ def test_invalid_amount_400_keeps_its_specific_reason():
     assert payload["reason"] == "venue_rejected_invalid_amount_400"
 
 
+def test_invalid_safe_signature_400_gets_auth_specific_reason():
+    exc = _poly_400("invalid POLY_GNOSIS_SAFE signature")
+    payload = _deterministic_submit_rejection_payload(exc, idempotency_key="idem-auth")
+    assert payload is not None
+    assert payload["reason"] == "venue_auth_invalid_signature_400"
+    assert payload["proof_class"] == "deterministic_venue_auth_signature_400"
+    assert payload["venue_order_created"] is False
+
+
 def test_non_poly_ambiguous_error_stays_unknown():
     # A genuinely ambiguous error (no status_code=400, order maybe placed) must NOT be
     # classified deterministic — it stays unknown so the reconcile path verifies via venue read.

@@ -183,14 +183,13 @@ def test_member_current_value_serving_single_authority() -> None:
 
 
 # ---------------------------------------------------------------------------------
-# 11. SETTLEMENT-COVERAGE LICENSING SET — "which coverage verdict statuses license a
-#     fused-bootstrap q_lcb for live" has ONE home (live_admission.SETTLEMENT_COVERAGE_
-#     LICENSING_STATUSES), read by BOTH the buy-NO admission gate and the adapter's cert
-#     credential. The admission gate and the cert layer read the SAME family verdict
-#     (computed once on the replacement path, threaded — never recomputed). (Twin-
-#     authority #7, 2026-06-11: the admission gate used the OLD source-brand vocabulary
-#     and never saw the verdict — 12 positive-EV families killed per burst; category
-#     inversion: record-BACKED bootstrap rejected, record-REFUTED-then-shrunk accepted.)
+# 11. SETTLEMENT-COVERAGE SEMANTIC SPLIT — the same family verdict is still computed once
+#     and threaded to proof + receipt, but certificate authority and material-bin buy-NO
+#     admission do NOT share one status set. The cert layer accepts typed verdicts
+#     (LICENSED / UNLICENSED-shrunk / INSUFFICIENT_DATA) so thin-history families reach
+#     ordinary live gates. The buy-NO material-bin waiver remains stricter and does not let
+#     INSUFFICIENT_DATA bypass native-NO evidence. This prevents the 2026-06-29 stall where
+#     the cert bridge blocked every thin-history candidate before trade-quality gates ran.
 # ---------------------------------------------------------------------------------
 def test_member_settlement_coverage_licensing_single_authority() -> None:
     member = ROOT / "tests" / "strategy" / "test_settlement_coverage_admission_licensing.py"
@@ -198,14 +197,19 @@ def test_member_settlement_coverage_licensing_single_authority() -> None:
     admission = _read("src/strategy/live_inference/live_admission.py")
     assert "SETTLEMENT_COVERAGE_LICENSING_STATUSES" in admission
     adapter = _read("src/engine/event_reactor_adapter.py")
-    # The cert-layer alias must POINT at the one home, never regrow an inline literal.
+    assert "_FUSED_BOOTSTRAP_CERT_COVERAGE_STATUSES" in adapter, (
+        "cert layer must own its typed-verdict coverage set instead of reusing the stricter "
+        "material buy-NO waiver set"
+    )
+    assert "INSUFFICIENT_DATA" in adapter, (
+        "cert typed-verdict set must admit INSUFFICIENT_DATA as thin-history, not no authority"
+    )
     assert (
         "_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES"
-        in adapter
-    ), "cert licensing set must alias live_admission's single home"
-    assert '_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = frozenset(' not in adapter, (
-        "cert layer regrew an inline licensing frozenset — the set lives ONLY in "
-        "live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES"
+        not in adapter
+    ), (
+        "cert bridge must not alias the material buy-NO licensing set; that alias caused "
+        "thin-history live entries to stall before normal gates"
     )
     # BOTH twin gate sites thread the verdict status (proof-generation + receipt-level).
     assert adapter.count("settlement_coverage_status=settlement_coverage_status") >= 1, (

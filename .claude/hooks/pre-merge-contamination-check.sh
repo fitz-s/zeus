@@ -1,1 +1,0 @@
-legacy/pre-merge-contamination-check.sh

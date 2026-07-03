@@ -1,0 +1,139 @@
+# Created: 2026-07-03
+# Last reused or audited: 2026-07-03
+# Authority basis: architecture doc §1 exits row (C5 marginal rule b·Σq_j/W_j > q_i/W_i;
+#   ExitContext plumbing REUSE, rule body replace); W3.EXIT brief (W_j state is greenfield,
+#   evaluate_exit precedence-chain split, exit q_version gap at executor.py:4394);
+#   CONSULT REV-2 rulings 2026-07-03 (wealth from the ledger snapshot on the joint atom axis;
+#   ZeroWealthOutcomeError typed fail-closed; ExitPrecheckResult tripwire precedence BEFORE
+#   economics run).
+"""Exits as the same solve — the C5 marginal interface.
+
+The exit decision is not a separate rule lane: a held position is an ENDOWMENT the solver
+re-evaluates every event. Selling holding h_i is menu item ``sell_holding``; the C5 marginal
+condition is the mathematical form of "does the solve want to move wealth out of outcome i":
+
+    sell one unit of outcome-i holding at bid b iff   b · Σ_j q_j / W_j  >  q_i / W_i
+
+(marginal log-utility of the cash proceeds spread over all outcomes exceeds the marginal
+log-utility of the held claim on outcome i).
+
+WHAT SURVIVES vs WHAT THIS REPLACES (W3.EXIT brief; portfolio.py:946-1467):
+* REUSE: ExitContext/ExitDecision dataclasses, _build_exit_context threading,
+  exit_lifecycle.py order mechanics, and the fail-closed PRECEDENCE TRIPWIRES that are axioms
+  not economics — RED force-exit, EVIDENCE_UNAVAILABLE, missing-authority, day0-zero-probability,
+  settlement-imminent routing. These run BEFORE the marginal rule, unchanged, and are now a
+  TYPED input (``ExitPrecheckResult``, consult REV-2) so the economic predicate can never run
+  after a hard tripwire fires.
+* REPLACE: the economic rule body — win-rate floor, forward_edge thresholds, 2-consecutive
+  EDGE_REVERSAL counters, HoldValue EV gates. NOTE the floor constant has 3 consumers OUTSIDE
+  portfolio.py (entry-side admission) — exits stop READING it; deleting the constant is the W5
+  taker-quality-floors packet, not this one.
+
+W_a STATE IS GREENFIELD (consult REV-2 blocker): no per-outcome-atom holdings vector exists
+today, and it must come from the CAS ledger snapshot — open positions grouped by joint atom
+PLUS spendable cash net of pending reservations, resting orders, and unsettled proceeds — not
+per-family bins. ``build_wealth_by_atom`` derives it per evaluation (derive-don't-store); a
+zero/negative-wealth atom is a typed ``ZeroWealthOutcomeError`` (log undefined), never a clamp.
+
+BODIES ARE A LATER SUB-SLICE: this module is interface-only at W3.2 (the marginal predicate
+and the ledger-aligned wealth builder land once the ledger snapshot state exists). Only the
+typed error and the precheck contract are provided now.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping, Optional
+
+from src.solve.types import WealthStateByAtom
+
+
+class ZeroWealthOutcomeError(ValueError):
+    """A wealth state implies a non-positive endowment in some outcome atom.
+
+    Log-utility is undefined at zero wealth, so a solve cannot proceed against such a
+    baseline. Fail-closed (typed error), never a silent clamp to epsilon — a position set
+    that zeroes an outcome's wealth is a data/derivation fault to surface (maps to a
+    deterministic no-trade / global-RED upstream), not to paper over (consult REV-2:
+    exits.py must define the typed error + fail-closed mapping before any log() call).
+    """
+
+
+@dataclass(frozen=True)
+class ExitPrecheckResult:
+    """The fail-closed tripwire verdict, computed BEFORE any economic marginal (consult REV-2).
+
+    When ``hard_tripwire_fired`` is True the economic predicate MUST NOT run — the exit is
+    decided by the axiom (``force_exit`` routes a RED/settlement-imminent close; a
+    missing-authority / evidence-unavailable gate routes no-trade). ``tripwire_reason`` names
+    the gate (RED / EVIDENCE_UNAVAILABLE / MISSING_AUTHORITY / DAY0_ZERO_PROB /
+    SETTLEMENT_IMMINENT).
+    """
+
+    hard_tripwire_fired: bool
+    tripwire_reason: Optional[str]
+    force_exit: bool
+
+
+def build_wealth_by_atom(
+    *,
+    family_key: str,
+    atom_ids: tuple[str, ...],
+    holdings_payout_by_atom_id: Mapping[str, float],
+    spendable_cash_usd: float,
+    reservations_usd: float = 0.0,
+    ledger_snapshot_id: Optional[str] = None,
+    source_positions: tuple[str, ...] = (),
+) -> WealthStateByAtom:
+    """Entry-side W_a: spendable cash (already NET of reservations) + per-atom holdings payout.
+
+    Pure core with INJECTED inputs (W3.3 ruling): the caller supplies ``spendable_cash_usd`` —
+    the CAS ledger's published spendable quantity, already net of pending-order reservations —
+    and ``holdings_payout_by_atom_id`` — the payout the family's currently-held claims deliver in
+    each joint outcome atom (shares × per-atom payout; a held YES on bin b pays in atom b, a held
+    NO pays in every atom but b). This module reaches NO ledger connection itself; the seam-swap
+    packet threads the real read at the bridge, and the shim/tests inject these values directly.
+
+    Contract: ``W_a = spendable_cash + holdings_payout(a)`` for every atom in ``atom_ids`` (missing
+    → 0 payout); wealth strictly positive in every atom (a zero/negative-wealth atom makes
+    log-utility undefined — surface ``ZeroWealthOutcomeError``, never a silent clamp);
+    ``ledger_snapshot_id`` stamped so the wealth state ties to the ledger read it came from.
+    """
+    cash = float(spendable_cash_usd)
+    wealth_by_atom = {a: cash + float(holdings_payout_by_atom_id.get(a, 0.0)) for a in atom_ids}
+    nonpos = [a for a in atom_ids if not wealth_by_atom[a] > 0.0]
+    if nonpos:
+        raise ZeroWealthOutcomeError(
+            f"non-positive endowment wealth in atoms {nonpos} for family {family_key!r} "
+            f"(spendable_cash={cash}); log-utility undefined — fail closed, never clamp"
+        )
+    return WealthStateByAtom(
+        atom_ids=tuple(atom_ids),
+        wealth_by_atom=wealth_by_atom,
+        cash_usd=cash,
+        reservations_usd=float(reservations_usd),
+        ledger_snapshot_id=ledger_snapshot_id,
+        source_positions=tuple(source_positions),
+    )
+
+
+def marginal_exit_condition(
+    *,
+    precheck: ExitPrecheckResult,
+    bid: float,
+    held_atom_id: str,
+    q_by_atom_id: Mapping[str, float],
+    wealth: WealthStateByAtom,
+) -> bool:
+    """The C5 marginal condition for ONE marginal unit: b·Σ_a q_a/W_a > q_i/W_i.
+
+    ``precheck`` is consumed FIRST (consult REV-2): if a hard tripwire fired the economic
+    predicate must not run. Pure predicate otherwise — the solver applies it implicitly through
+    the objective (a sell_holding menu item with positive marginal ΔU); this explicit form
+    exists for the monitor lane's cheap screen and for property tests (the two must agree on
+    marginal direction at the current holdings point).
+    """
+    raise NotImplementedError(
+        "W3 exits sub-slice: consume precheck precedence, then transcribe the C5 inequality "
+        "over the joint atom axis with validated inputs"
+    )

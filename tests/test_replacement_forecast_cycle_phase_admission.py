@@ -124,7 +124,7 @@ def _insert_posterior(
                 }
             ),
             json.dumps(_provenance(cycle_phase=cycle_phase)),
-            "SHADOW_VETO_ONLY",
+            "BLOCKED",
             0,
             _TOPO_HASH,
             "pid-hash",

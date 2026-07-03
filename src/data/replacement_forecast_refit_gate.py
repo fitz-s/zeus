@@ -125,7 +125,7 @@ def evaluate_replacement_forecast_refit_gate(
         reasons.append("REPLACEMENT_REFIT_MISSING_REQUIRED_EVIDENCE")
     product_specific_training_allowed = not reasons and evidence.data_refit_requested
     live_allowed = product_specific_training_allowed and evidence.live_promotion_requested
-    status = "PRODUCT_SPECIFIC_REFIT_READY" if product_specific_training_allowed else "SHADOW_REFIT_BLOCKED"
+    status = "PRODUCT_SPECIFIC_REFIT_READY" if product_specific_training_allowed else "BLOCKED"
     return ReplacementForecastRefitDecision(
         status=status,
         reason_codes=tuple(reasons or ("REPLACEMENT_REFIT_PRODUCT_SPECIFIC_EVIDENCE_READY",)),

@@ -20,8 +20,6 @@ import pytest
 from src.strategy.market_fusion import (
     LEGACY_POSTERIOR_MODE,
     MODEL_ONLY_POSTERIOR_MODE,
-    YES_FAMILY_DEVIG_SHADOW_MODE,
-    MarketPriorDistribution,
     compute_alpha,
     compute_posterior,
     vwmp,
@@ -196,62 +194,6 @@ class TestComputePosterior:
         np.testing.assert_allclose(cheap_case, p_cal)
         np.testing.assert_allclose(expensive_case, p_cal)
 
-    def test_corrected_market_prior_requires_named_distribution(self):
-        p_cal = np.array([0.70, 0.30])
-        raw_quote_vector = np.array([0.40, 0.60])
-
-        with pytest.raises(TypeError, match="MarketPriorDistribution"):
-            compute_posterior(
-                p_cal,
-                raw_quote_vector,
-                0.5,
-                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-            )
-
-        prior = MarketPriorDistribution(
-            probabilities=(0.40, 0.60),
-            bin_labels=("cold", "warm"),
-            prior_id="shadow-devig:test-family",
-            estimator_version="yes_family_devig_v1_shadow",
-            source_quote_hashes=("quote-hash-a", "quote-hash-b"),
-            family_complete=True,
-            side_convention="YES_FAMILY",
-            vig_treatment="yes_family_devig",
-            freshness_status="FRESH",
-            liquidity_filter_status="PASS",
-            neg_risk_policy="included",
-            validated_for_live=False,
-        )
-        result = compute_posterior(
-            p_cal,
-            prior,
-            0.5,
-            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-        )
-
-        np.testing.assert_allclose(result, [0.55, 0.45])
-
-    def test_market_prior_distribution_requires_quote_lineage_and_complete_family(self):
-        kwargs = {
-            "probabilities": (0.40, 0.60),
-            "bin_labels": ("cold", "warm"),
-            "prior_id": "shadow-devig:test-family",
-            "estimator_version": YES_FAMILY_DEVIG_SHADOW_MODE,
-            "source_quote_hashes": ("quote-hash-a", "quote-hash-b"),
-            "family_complete": True,
-            "side_convention": "YES_FAMILY",
-            "vig_treatment": "yes_family_devig",
-            "freshness_status": "FRESH",
-            "liquidity_filter_status": "PASS",
-            "neg_risk_policy": "included",
-            "validated_for_live": False,
-        }
-
-        with pytest.raises(ValueError, match="source_quote_hashes"):
-            MarketPriorDistribution(**{**kwargs, "source_quote_hashes": ()})
-        with pytest.raises(ValueError, match="complete YES-family"):
-            MarketPriorDistribution(**{**kwargs, "family_complete": False})
-
     def test_legacy_quote_prior_can_be_disabled_at_call_boundary(self):
         p_cal = np.array([0.70, 0.30])
         raw_quote_vector = np.array([0.40, 0.60])
@@ -312,18 +254,6 @@ class TestComputePosterior:
             f"{p_cal[0]/p_cal[2]:.4f}; got {result[0]/result[2]:.4f}. "
             "A different sibling source would produce a different ratio."
         )
-
-    def test_corrected_prior_rejects_sparse_monitor_vector(self):
-        p_cal = np.array([0.20, 0.50, 0.30])
-        held_token_only_quote = np.array([0.00, 0.95, 0.00])
-
-        with pytest.raises(TypeError, match="raw quote/VWMP vectors are forbidden"):
-            compute_posterior(
-                p_cal,
-                held_token_only_quote,
-                0.5,
-                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-            )
 
     def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
         bins = [
@@ -728,41 +658,6 @@ class TestMarketAnalysis:
         accepted = next(item for item in trace if item.decision == "yes_edge_accepted")
         assert accepted.ci_lower == pytest.approx(0.70)
         assert ma.forecast_context()["bootstrap_signal_type"] == "day0_observation_fused"
-
-    def test_market_analysis_corrected_prior_uses_named_distribution(self):
-        bins = [
-            Bin(low=30, high=31, label="30-31", unit="F"),
-            Bin(low=32, high=33, label="32-33", unit="F"),
-        ]
-        p_cal = np.array([0.70, 0.30])
-        prior = MarketPriorDistribution(
-            probabilities=(0.40, 0.60),
-            bin_labels=("30-31", "32-33"),
-            prior_id="shadow-devig:test-family",
-            estimator_version=YES_FAMILY_DEVIG_SHADOW_MODE,
-            source_quote_hashes=("quote-hash-a", "quote-hash-b"),
-            family_complete=True,
-            side_convention="YES_FAMILY",
-            vig_treatment="yes_family_devig",
-            freshness_status="FRESH",
-            liquidity_filter_status="PASS",
-            neg_risk_policy="included",
-            validated_for_live=False,
-        )
-
-        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
-            p_raw=p_cal,
-            p_cal=p_cal,
-            p_market=np.array([0.25, 0.75]),
-            alpha=0.5,
-            bins=bins,
-            member_maxes=np.array([30.0, 31.0, 32.0]),
-            unit="F",
-            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
-            market_prior=prior,
-        )
-
-        np.testing.assert_allclose(ma.p_posterior, [0.55, 0.45])
 
     def test_width_normalized_bootstrap_keeps_open_shoulders_raw(self):
         bins = [

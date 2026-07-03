@@ -11,17 +11,15 @@
 REFERENCE-ONLY (operator directive 2026-06-03). This module computes an
 independent cross-check: does OUR forecast AGREE with an external mainstream
 forecast, and is the traded direction consistent with both the mainstream-implied
-bin and our own modal bin? The verdict is RECORDED on every shadow receipt to
-inform the ARM decision — it lets the operator see, on the forecast's top
-candidate, whether internal and external signals independently agree.
+bin and our own modal bin? The verdict is recorded on no-submit receipts as
+display-only provenance.
 
 It takes NO part in production selection. Production trades on the FORECAST
 (trade_score / q_lcb / Kelly); the gate verdict can NEVER exclude a candidate
 (see event_reactor_adapter._selected_candidate_proof). Operator rationale: "if we
 use the forecast for calculation, none of these exist — we just use the forecast
-to trade; the only reason we are in shadow is the candidates do not yet reflect
-real Polymarket trades, not this gate." The real fix for cold/warm-bias false
-positives is the FORECAST (the bias correction itself), not a blocking gate.
+to trade." The real fix for cold/warm-bias false positives is the FORECAST
+(the bias correction itself), not a blocking gate.
 
 The four checks below still compute a meaningful pass/fail SIGNAL (the ARM
 reference); the #135-B independence flag records when a mainstream agreement was
@@ -86,7 +84,7 @@ PASS = "PASS"
 @dataclass(frozen=True)
 class MainstreamAgreementVerdict:
     """The per-candidate gate result (reference-only). Every field is recorded
-    on the shadow receipt as provenance annotation (Fitz provenance rule). The
+    on the no-submit receipt as provenance annotation. The
     verdict never gates or excludes candidates from selection — it is informational
     only."""
 
@@ -124,7 +122,7 @@ class MainstreamAgreementVerdict:
         Key `mainstream_delta` is the canonical receipt/DB field name (matching
         the EventSubmissionReceipt and edli_no_submit_receipts column names).
         Key `forecast_delta` is kept for back-compat with existing callers and
-        shadow receipt analysis scripts.
+        historical receipt analysis scripts.
         """
         return {
             "mainstream_agreement_pass": self.passed,

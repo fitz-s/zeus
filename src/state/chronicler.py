@@ -54,6 +54,9 @@ def log_event(
 
     if not _table_exists(conn, "chronicle"):
         if _canonical_position_surface_available(conn):
+            from src.state.db import _guard_legacy_position_events_schema
+
+            _guard_legacy_position_events_schema(conn)
             return
         raise sqlite3.OperationalError("no such table: chronicle")
 

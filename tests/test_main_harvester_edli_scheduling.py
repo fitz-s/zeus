@@ -9,13 +9,12 @@
 #   the redeem pollers (consumers) have nothing to consume.
 # Reuse: inspect src/main.py scheduler.add_job(_harvester_cycle, ...) registration
 #   site and src/engine/harvest_cycle.py before re-running; verify the job appears in
-#   the scheduler for edli_live, edli_submit_disabled_bridge modes.
+#   the scheduler for edli_live mode.
 """Antibody: harvester (settlement→redeem resolver) scheduled in EDLI modes.
 
 RED-first contract:
-  (a) _harvester_should_register(mode) is True for EVERY EDLI event-driven mode
-      (edli_shadow_no_submit, edli_submit_disabled_bridge, edli_live)
-      AND for legacy_cron. Before the fix the harvester was gated to
+  (a) _harvester_should_register(mode) is True for the EDLI event-driven mode
+      and for legacy_cron. Before the fix the harvester was gated to
       `live_execution_mode == "legacy_cron"` only, so this is RED for EDLI.
 
   (b) The scheduler.add_job(_harvester_cycle, ...) call in src/main.py is NOT
@@ -62,8 +61,8 @@ def test_harvester_should_register_predicate_covers_live_boot_recovery_modes():
             "already settled before restart should be drained immediately."
         )
 
-    assert pred("edli_shadow_no_submit") is False
-    assert pred("edli_submit_disabled_bridge") is False
+    assert pred("unsupported_event_mode_a") is False
+    assert pred("unsupported_event_mode_b") is False
     # 'disabled' mode does not run the trading scheduler — no harvester needed.
     assert pred("disabled") is False
 

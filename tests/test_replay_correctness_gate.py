@@ -3,21 +3,18 @@
 # Authority basis: IMPLEMENTATION_PLAN Phase 0.G; ADR-5; RISK_REGISTER R2
 """Seeded regression test for the replay-correctness gate (Phase 0.G).
 
-Injects a deliberate mismatch into a temp DB copy and verifies:
+Injects a deliberate mismatch into an isolated tiny temp DB and verifies:
   1. Gate returns 0 on clean match.
   2. Gate returns non-zero when projection differs from baseline.
   3. ritual_signal line is emitted on each invocation.
 
-The DB is opened read-only by the gate; the test uses copy_db_readonly_temp()
-to make a mutable copy for the mismatch injection.
+The DB is opened read-only by the gate; tests must not copy canonical Zeus DBs.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +61,94 @@ def _make_temp_baseline(tmp_path: Path, projection: dict) -> Path:
     return bdir
 
 
+def _make_replay_fixture_db(path: Path, *, extra_row: bool = False) -> Path:
+    """Create a tiny replay DB fixture with only the columns this gate reads."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE opportunity_fact (
+                decision_id TEXT PRIMARY KEY,
+                candidate_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                range_label TEXT,
+                direction TEXT,
+                strategy_key TEXT,
+                discovery_mode TEXT,
+                entry_method TEXT,
+                p_raw REAL,
+                p_cal REAL,
+                p_market REAL,
+                alpha REAL,
+                best_edge REAL,
+                should_trade INTEGER,
+                rejection_stage TEXT,
+                recorded_at TEXT
+            )
+            """
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (
+                "REPLAY_TEST_BASELINE",
+                "BASE_CANDIDATE",
+                "TestCity",
+                "2999-01-01",
+                "above",
+                "buy_yes",
+                "settlement_capture",
+                "test",
+                "test",
+                0.5,
+                0.5,
+                0.5,
+                0.05,
+                0.05,
+                0,
+                None,
+                now,
+            )
+        ]
+        if extra_row:
+            rows.append(
+                (
+                    "REPLAY_TEST_INJECTED",
+                    "FAKE_CANDIDATE",
+                    "TestCity",
+                    "2999-01-01",
+                    "above",
+                    "buy_yes",
+                    "settlement_capture",
+                    "test",
+                    "test",
+                    0.6,
+                    0.6,
+                    0.6,
+                    0.06,
+                    0.06,
+                    0,
+                    None,
+                    now,
+                )
+            )
+        conn.executemany(
+            """
+            INSERT INTO opportunity_fact
+              (decision_id, candidate_id, city, target_date, range_label,
+               direction, strategy_key, discovery_mode, entry_method,
+               p_raw, p_cal, p_market, alpha, best_edge, should_trade,
+               rejection_stage, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -96,14 +181,12 @@ def test_gate_clean_match(tmp_path, monkeypatch):
     reason="zeus_trades.db not present in this environment",
 )
 def test_gate_mismatch_returns_nonzero(tmp_path, monkeypatch):
-    """Gate returns non-zero when the DB has been tampered (deliberate mismatch).
+    """Gate returns non-zero when a tiny isolated DB fixture differs."""
+    baseline_db = _make_replay_fixture_db(tmp_path / "baseline.db")
+    tampered_db = _make_replay_fixture_db(tmp_path / "tampered.db", extra_row=True)
 
-    Injects a fake opportunity_fact row into a temp DB copy, then compares
-    that against the baseline derived from the original DB. The extra row
-    changes the content_hash, so the gate must detect the mismatch.
-    """
-    # --- Baseline: projection from the ORIGINAL DB ---
-    events_orig, excluded = extract_seed_events(CANONICAL_DB)
+    # --- Baseline: projection from the fixture DB ---
+    events_orig, excluded = extract_seed_events(baseline_db)
     projection_orig = _compute_projection(events_orig)
     bdir = _make_temp_baseline(tmp_path, projection_orig)
     signal_dir = tmp_path / "ritual_signal"
@@ -112,61 +195,25 @@ def test_gate_mismatch_returns_nonzero(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.replay_correctness_gate.BASELINE_DIR", bdir)
     monkeypatch.setattr("scripts.replay_correctness_gate.RITUAL_SIGNAL_DIR", signal_dir)
 
-    # --- Mismatch: copy DB, inject a fake row ---
-    tampered_db = copy_db_readonly_temp(CANONICAL_DB)
-    try:
-        conn = sqlite3.connect(str(tampered_db))
-        try:
-            # Ensure opportunity_fact exists (DB may be empty in worktree env).
-            # Check first to avoid running position_events migrations on live-DB copy.
-            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-            if "opportunity_fact" not in tables:
-                from src.state.db import init_schema
-                init_schema(conn)
-            conn.commit()
-            # Inject a synthetic opportunity_fact row with a future timestamp
-            # so it falls inside the 7-day seed window.
-            inject_ts = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """
-                INSERT INTO opportunity_fact
-                  (decision_id, candidate_id, city, target_date, range_label,
-                   direction, strategy_key, discovery_mode, entry_method,
-                   snapshot_id, p_raw, p_cal, p_market, alpha, best_edge,
-                   ci_width, rejection_stage, rejection_reason_json,
-                   availability_status, should_trade, recorded_at)
-                VALUES
-                  ('REPLAY_TEST_INJECTED', 'FAKE_CANDIDATE', 'TestCity',
-                   '2999-01-01', 'above', 'buy_yes', 'settlement_capture',
-                   'test', 'test', NULL,
-                   0.5, 0.5, 0.5, 0.05, 0.05,
-                   0.1, NULL, NULL,
-                   'ok', 0, ?)
-                """,
-                (inject_ts,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    # Gate should see more events -> different hash -> non-zero exit.
+    rc = main(["--db", str(tampered_db)])
+    assert rc != 0, (
+        "gate must return non-zero when projection differs from baseline"
+    )
 
-        # Gate should see more events → different hash → non-zero exit.
-        rc = main(["--db", str(tampered_db)])
-        assert rc != 0, (
-            "gate must return non-zero when projection differs from baseline"
-        )
+    # Confirm the ritual_signal records outcome=blocked.
+    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    signal_file = signal_dir / f"{month_key}.jsonl"
+    assert signal_file.exists(), "ritual_signal file must be created"
+    lines = [json.loads(l) for l in signal_file.read_text().splitlines() if l.strip()]
+    outcomes = [l["outcome"] for l in lines]
+    assert "blocked" in outcomes, f"expected 'blocked' in ritual_signal outcomes, got {outcomes}"
 
-        # Confirm the diff is recorded in output (gate prints JSON to stdout).
-        # The ritual_signal should have outcome=blocked.
-        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
-        signal_file = signal_dir / f"{month_key}.jsonl"
-        assert signal_file.exists(), "ritual_signal file must be created"
-        lines = [json.loads(l) for l in signal_file.read_text().splitlines() if l.strip()]
-        # At least one record should be a mismatch outcome.
-        outcomes = [l["outcome"] for l in lines]
-        assert "blocked" in outcomes, f"expected 'blocked' in ritual_signal outcomes, got {outcomes}"
 
-    finally:
-        tampered_db.unlink(missing_ok=True)
+def test_copy_db_readonly_temp_refuses_canonical_db():
+    """Regression: never make temp copies of canonical Zeus DBs."""
+    with pytest.raises(RuntimeError, match="refusing to copy canonical Zeus DB"):
+        copy_db_readonly_temp(CANONICAL_DB)
 
 
 @pytest.mark.skipif(

@@ -15,9 +15,8 @@ UTC), and on the Chicago host (UTC-5/UTC-6) it can silently return yesterday's d
 near UTC midnight, mislabelling data for markets in other timezones.
 
 MONEY-PATH INSTANCE FOUND (C6):
-`src/contracts/shoulder_strategy_vnext.py:118/:134` used `date.today()` to tag
+The removed shoulder vNext scaffold previously used `date.today()` to tag
 market families — a host-local date near UTC midnight mis-tags a non-US market.
-Fix: `datetime.now(timezone.utc).date()`.
 
 As of 2026-06-15 there were 10 call sites in src/ (see prevention_scaffolding_2026-06-15.md §4).
 This test blocks any new ones from entering the codebase.

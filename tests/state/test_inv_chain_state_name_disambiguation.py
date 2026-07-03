@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 7, PR B)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 7, PR B)
 """Invariants for Finding 7: chain snapshot completeness vs per-position venue visibility
 are distinct domains and must have distinct names.
 

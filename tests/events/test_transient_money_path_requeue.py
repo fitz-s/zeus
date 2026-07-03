@@ -35,7 +35,9 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
+    _is_executable_snapshot_refresh_reason,
     _is_transient_money_path_reason,
+    _snapshot_block_retry_delay_seconds,
 )
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -46,6 +48,10 @@ _PRICE_MOVED_REASON = (
 )
 _WOULD_CROSS_REASON = (
     "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PreSubmitRevalidated requires would_cross_book=false"
+)
+_TAKER_RESERVATION_CERT_REASON = (
+    "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+    "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43"
 )
 _OTHER_CERT_REASON = "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SOME_OTHER_ASSERTION_FAILED"
 
@@ -58,8 +64,33 @@ def test_price_moved_is_transient():
     assert _is_transient_money_path_reason(_PRICE_MOVED_REASON)
 
 
+def test_venue_rejected_400_is_submit_race_transient():
+    assert _is_transient_money_path_reason(
+        "venue_rejected_400: PolyApiException[status_code=400, "
+        "error_message={'error': 'invalid post-only order: order crosses book'}]"
+    )
+
+
+def test_invalid_safe_signature_400_is_terminal_for_event_no_verbatim_requeue():
+    assert not _is_transient_money_path_reason(
+        "venue_auth_invalid_signature_400: PolyApiException[status_code=400, "
+        "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+    )
+
+
+def test_idempotency_collision_is_terminal_for_event_no_verbatim_requeue():
+    assert not _is_transient_money_path_reason(
+        "idempotency_collision: prior attempt REJECTED"
+    )
+
+
 def test_would_cross_book_certificate_failure_is_transient():
     assert _is_transient_money_path_reason(_WOULD_CROSS_REASON)
+
+
+def test_taker_reservation_certificate_failure_is_transient():
+    assert _is_transient_money_path_reason(_TAKER_RESERVATION_CERT_REASON)
+    assert _is_executable_snapshot_refresh_reason(_TAKER_RESERVATION_CERT_REASON)
 
 
 def test_other_certificate_failures_stay_terminal():
@@ -79,18 +110,63 @@ def test_pre_submit_book_authority_gap_is_transient():
     assert _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_STALE"
     )
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:token_id=tok:book_hash=h:best_bid=0.99"
+    )
     assert not _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE"
     )
+
+
+def test_maker_book_fresh_witness_disagreement_is_transient_refresh():
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT:"
+        "quote_mid=0.070000:fresh_mid=0.995500:"
+        "divergence_ticks=92.55:tolerance_ticks=10.00"
+    )
+
+    assert _is_transient_money_path_reason(reason)
+    assert _is_executable_snapshot_refresh_reason(reason)
 
 
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
 
 
+def test_day0_remaining_day_members_unavailable_is_hourly_refresh_not_snapshot():
+    from src.events.reactor import _is_executable_snapshot_refresh_reason
+
+    reason = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+    old_wrapped_reason = "EXECUTABLE_SNAPSHOT_BLOCKED:DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+
+    assert _is_transient_money_path_reason(reason)
+    assert not _is_executable_snapshot_refresh_reason(reason)
+    assert _is_transient_money_path_reason(old_wrapped_reason)
+    assert not _is_executable_snapshot_refresh_reason(old_wrapped_reason)
+
+
+def test_snapshot_block_retry_floor_backs_off_without_attempt_cap(monkeypatch):
+    monkeypatch.delenv("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS", raising=False)
+
+    assert _snapshot_block_retry_delay_seconds(attempt_count=1) == 60.0
+    assert _snapshot_block_retry_delay_seconds(attempt_count=3) == 180.0
+    assert _snapshot_block_retry_delay_seconds(attempt_count=33) == 600.0
+
+
 def test_empty_reason_not_transient():
     assert not _is_transient_money_path_reason(None)
     assert not _is_transient_money_path_reason("")
+
+
+def test_pre_submit_collateral_failure_is_terminal():
+    assert not _is_transient_money_path_reason(
+        "pre_submit_collateral_reservation_failed: "
+        "pusd_allowance_insufficient: required_micro=6856200 "
+        "available_allowance_micro=0 allowance_micro=0"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +296,103 @@ def test_would_cross_book_requeues_not_terminal():
     assert _status(conn, event.event_id) == "pending"
 
 
+def test_pre_submit_book_authority_gap_queues_family_snapshot_refresh():
+    """A submit-time book-authority race must refresh the family, not retry old price data."""
+
+    conn, store = _store()
+    event = _event("snap-presubmit-book-gap")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
+        "token_id=tok:book_hash=h:best_bid=0.99"
+    )
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            reason=reason,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_maker_book_witness_disagreement_queues_family_snapshot_refresh():
+    """A JIT-vs-proof book split must refresh the family, not terminal-burn Day0."""
+
+    conn, store = _store()
+    event = _event("snap-maker-witness-split")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT:"
+        "quote_mid=0.070000:fresh_mid=0.995500:"
+        "divergence_ticks=92.55:tolerance_ticks=10.00"
+    )
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            reason=reason,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+
+
 def test_other_certificate_failure_stays_terminal():
     """Other certificate build failures keep today's terminal-consume semantics."""
     conn, store = _store()
@@ -268,12 +441,10 @@ def test_price_moved_requeues_indefinitely_until_timeliness_horizon():
 
 
 def test_horizon_dead_letter_carries_honest_horizon_and_cause():
-    """ANTIBODY (REWRITTEN from the exhaustion-label test): when a transient
-    terminalizes at its EVENT HORIZON the dead-letter must carry the horizon
-    (MARKET_VENUE_CLOSED — the F1 12:00-UTC venue close, which precedes the
-    local-day floor for Chicago 2026-06-05 at the 2026-06-07 decision_time) AND the
-    last honest transient cause — never an EXECUTABLE_SNAPSHOT_BLOCKED mask and
-    never an attempt count."""
+    """ANTIBODY: when a transient terminalizes at its EVENT HORIZON the
+    dead-letter must carry the horizon (TIMELINESS_FLOOR_PAST for this
+    strictly-past local day) AND the last honest transient cause — never an
+    EXECUTABLE_SNAPSHOT_BLOCKED mask and never an attempt count."""
     conn, store = _store()
     event = _event("snap-honest-label")
     store.insert_or_ignore(event)
@@ -303,7 +474,7 @@ def test_horizon_dead_letter_carries_honest_horizon_and_cause():
         "horizon terminal must be labeled MONEY_PATH_HORIZON_EXPIRED, never the "
         f"old count-based MONEY_PATH_TRANSIENT_EXHAUSTED: got {failure_stage!r}"
     )
-    assert "MARKET_VENUE_CLOSED" in (error_message or ""), error_message
+    assert "TIMELINESS_FLOOR_PAST" in (error_message or ""), error_message
     assert "SUBMIT_ABORTED_PRICE_MOVED" in (error_message or ""), (
         "the dead-letter must carry the last transient cause: "
         f"got {error_message!r}"
@@ -328,14 +499,15 @@ def test_mode_flipped_is_transient():
     assert _is_transient_money_path_reason(_MODE_FLIPPED_REASON)
 
 
+def test_mode_flipped_requires_executable_snapshot_refresh():
+    assert _is_executable_snapshot_refresh_reason(_MODE_FLIPPED_REASON)
+
+
 def test_mode_flipped_no_submit_state_requeues_not_consumed():
     """ANTIBODY (live 2026-06-11 17:30:20Z, Busan x2): MODE_FLIPPED arrives as a
-    VERIFIED NO_SUBMIT *state* (P0-1), not a rejection — it bypassed the
-    _reject_or_retry_post_submit classifier and was terminally consumed as
-    proof_accepted while the fresh ask carried +6.7% conservative EV
-    (q_lcb 0.828 vs ask 0.77). The NO_SUBMIT branch must classify transient
-    reasons BEFORE persisting the receipt: the event requeues PENDING and the
-    aborted attempt writes no receipt."""
+    typed no-side-effect NO_SUBMIT state (P0-1). It must be classified as a
+    transient stale-decision-vs-fresh-book abort before persistence: the event
+    requeues PENDING and the aborted attempt writes no receipt."""
     conn, store = _store()
     event = _event("snap-mf")
     store.insert_or_ignore(event)
@@ -343,7 +515,7 @@ def test_mode_flipped_no_submit_state_requeues_not_consumed():
     def _submit(ev, _decision_time):
         return EventSubmissionReceipt(
             submitted=False,
-            proof_accepted=True,
+            proof_accepted=False,
             event_id=ev.event_id,
             causal_snapshot_id=ev.causal_snapshot_id,
             city="Busan",
@@ -375,6 +547,100 @@ def test_mode_flipped_no_submit_state_requeues_not_consumed():
     assert _status(conn, event.event_id) == "pending"
     n_receipts = conn.execute("SELECT count(*) FROM edli_no_submit_receipts").fetchone()[0]
     assert n_receipts == 0, "the aborted attempt must not persist a receipt"
+
+
+def test_mode_flipped_no_submit_queues_family_snapshot_refresh():
+    """The requeue must make the promised fresh re-rank real, not retry the same book."""
+
+    conn, store = _store()
+    event = _event("snap-mf-refresh")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason=_MODE_FLIPPED_REASON,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_remaining_day_no_submit_queues_hourly_refresh_not_snapshot():
+    conn, store = _store()
+    event = _event("snap-day0-hourly")
+    store.insert_or_ignore(event)
+    snapshot_refreshed: list[tuple[str, str, str]] = []
+    hourly_refreshed: list[tuple[str, str, str]] = []
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        )
+
+    def _snapshot_refresh(*, city, target_date, metric):
+        snapshot_refreshed.append((city, target_date, metric))
+        return True
+
+    def _hourly_refresh(*, city, target_date, metric):
+        hourly_refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_snapshot_refresh,
+        day0_hourly_refresher=_hourly_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 0
+    assert result.day0_hourly_refreshes == 1
+    assert snapshot_refreshed == []
+    assert hourly_refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_pre_submit_error_terminal_is_visible_rejection_not_silent_proof():
@@ -670,12 +936,11 @@ def test_riskguard_block_requeues_indefinitely_then_horizon_terminal():
     row = conn.execute(
         "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
-    # _DT_HORIZON_PAST (2026-06-07) is past BOTH horizons for Chicago 2026-06-05;
-    # the venue-close floor (b, F1 12:00-UTC of target_date) is EARLIER than the
-    # local-day floor (a) and so fires first. The load-bearing invariant for THIS
-    # test is unchanged: a horizon terminal fires and the honest riskguard cause
-    # survives in the MONEY_PATH_HORIZON_EXPIRED label, never an attempt count.
-    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED:MARKET_VENUE_CLOSED:RISK_GUARD_BLOCKED", (
+    # _DT_HORIZON_PAST (2026-06-07) is past the local-day horizon for Chicago
+    # 2026-06-05. Static F1/Gamma endDate timing must not relabel it as venue
+    # closed. The load-bearing invariant is unchanged: a horizon terminal fires
+    # and the honest riskguard cause survives in the label, never an attempt count.
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED:TIMELINESS_FLOOR_PAST:RISK_GUARD_BLOCKED", (
         f"the riskguard cause must survive into the horizon label: got {row[0]!r}"
     )
     assert "attempt" not in row[0].lower()

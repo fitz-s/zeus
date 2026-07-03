@@ -1,3 +1,4 @@
+# Status: ACTIVE
 # Created: 2026-05-06
 # Authority basis: calibration/READ-path audit (critic-opus aa9c677ca10142a84)
 #                 and phased plan golden-knitting-wand.md Phase 0A
@@ -21,8 +22,8 @@ erratum_2026_05_07:
           downsampled 0.25°→0.5° via 4×4 spatial downsample (Tasks #208-216, commits
           610d8680 + 71207d5b). Code anchor: src/data/ecmwf_open_data.py:83-110.
       (2) Same-issue/member/step paired equivalence: A1+3h realignment (mx2t3/mn2t3
-          native stride) establishes consistent extract pipeline; diagnostic script
-          scripts/diagnose_opendata_tigge_equivalence.py exists and passes locally.
+          native stride) establishes consistent extract pipeline; proof is retained
+          in this authority file and the referenced source anchors.
       (3) LOW comparator: LOW data now ingested via mn2t3 track (commits 71207d5b +
           1d9859d9 + be302b91); LOW purity gates and contract-window authority closed.
       (4) Step horizon ≤240: STEP_HOURS ceiling raised 276→282h (commit df90cf64,
@@ -35,16 +36,14 @@ erratum_2026_05_07:
       future upgrade, not a current blocker.
   # — Original erratum body preserved below for history —
   reason: >
-    GO-precheck diagnostics found that current local OpenData and TIGGE
+    GO-precheck evidence found that current local OpenData and TIGGE
     extracted objects are not equivalent yet.  HIGH same-key cache rows share
     physical quantity signatures, but selected_step_ranges and member extrema
     vectors diverge under current local acquisition/extractor settings.  LOW
     has no same-key comparator in current local cache.  This file no longer
     authorizes live calibration transfer by assertion alone.
   evidence_report: /tmp/zeus_opendata_tigge_equivalence_report_2026-05-07.json
-  required_repo_gate: scripts/diagnose_opendata_tigge_equivalence.py
   latest_grib_probe:
-    command: "/Users/leofitz/miniconda3/bin/python scripts/diagnose_opendata_tigge_equivalence.py --include-grib-metadata --grib-scan-limit 900 --example-limit 3 --output /tmp/zeus_opendata_tigge_equivalence_report_2026-05-07.json"
     high_source_family_6h_quantity_match: true
     low_source_family_6h_quantity_match: true
     same_issue_member_step_pairs_in_current_cache: 0

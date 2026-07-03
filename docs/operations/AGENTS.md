@@ -22,19 +22,16 @@ index, or archive catalog.
 
 | File | Purpose |
 |------|---------|
-| `known_gaps.md` | Compatibility pointer; active known gaps now live at `docs/to-do-list/known_gaps.md` |
+| `known_gaps.md` | Canonical home for active known gaps (per-task open work also under `current/`) |
 | `current_data_state.md` | Active current-fact surface for audited data posture |
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 
 ### Standalone Reports / Evidence (top-level files, not packet-scoped)
 
-| File | Purpose |
-|------|---------|
-| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9); parent system review archived to `archive/2026-Q2/zeus_system_review_2026-05-16.md` |
-
-Top-level standalone reports must register in `architecture/docs_registry.yaml`
-under `doc_class: report` with explicit `freshness_class` and `next_action`.
+Do not add standalone historical reports at the top level. Route active work to
+`docs/operations/current/`; route closed historical reports to
+`docs/archive/<YYYY>-Q<N>/`.
 
 Current-fact files must stay summary-only, receipt/evidence-backed,
 expiry-bound, and fail-closed when stale. They are planning truth, not durable
@@ -61,7 +58,7 @@ Discrete `task_*` packet folders are agent-closeable by default once their
 work log, report, or committed code proves the task is complete or superseded.
 The closing agent must move the packet body to `docs/archive/<YYYY>-Q<N>/`,
 record the move in `docs/archive_registry.md`, remove active pointers,
-and promote any residual OPEN work into `docs/to-do-list/known_gaps.md` or a
+and promote any residual OPEN work into `docs/operations/known_gaps.md` or a
 new admitted packet. Do NOT leave a stub file in `docs/operations/`.
 Operator-only closeout is required only when the packet
 itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,
@@ -115,10 +112,6 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `packet_scope_protocol.md` | active support |
 | `INDEX.md` | directory index |
 | `POLICY.md` | operations policy |
-| `LIVE_LAUNCH_HANDOFF.md` | live launch handoff |
-| `PLIST_UPDATE_FOR_RELOCK.md` | packet evidence |
-| `tigge_daemon_integration.md` | packet evidence |
-| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | report |
 | `activation/` | active support (src/engine/dispatch.py + scripts/produce_activation_evidence.py refs) |
 | `live_egress/` | active support (src/venue/polymarket_v2_adapter.py ref) |
 | `edge_observation/` | active monitoring |
@@ -131,8 +124,8 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 
 Archived packet evidence (physically moved to `docs/archive/<YYYY>-Q<N>/`) is
 listed in `docs/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
-When a packet closes and is archived, move it to `docs/archive/<YYYY>-Q<N>/` (gitignored,
-untracked) and add a row to `docs/archive_registry.md`. Do NOT leave a stub file in
+When a packet closes and is archived, move it to `docs/archive/<YYYY>-Q<N>/`
+and add a row to `docs/archive_registry.md`. Do NOT leave a stub file in
 `docs/operations/`. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
 
 ## Single Operations Home

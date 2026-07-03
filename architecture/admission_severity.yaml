@@ -272,9 +272,8 @@ issue_severity:
     sunset_date: 2026-11-07
     rationale: >
       F5 fix. Write-target change is reversible by git rm + reroute; severity WORKING.
-      K1 default flip: ADVISORY. Verified at sibling worktree: diagnose_low_high_alignment.py
-      renamed to allowed diagnose_ prefix as workaround; this entry makes the workaround
-      unnecessary going forward.
+      K1 default flip: ADVISORY.
+      historical prefix workarounds are unnecessary going forward.
 
   # ─── BLOCKING list (intentionally short; TRUTH_REWRITE+ paths only) ──────────
 

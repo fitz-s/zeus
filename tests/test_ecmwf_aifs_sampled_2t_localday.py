@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect AIFS ENS sampled-2t city-local-day extraction for replacement shadow research.
+# Purpose: Protect AIFS ENS sampled-2t city-local-day extraction for replacement blocked-candidate research.
 # Reuse: Run before changing AIFS sampled-2t local-day extrema extraction or product identity.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked-candidate integration.
 """AIFS sampled-2t local-day extraction tests."""
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_aifs_sampled_2t_extracts_member_high_low_inside_city_local_day() -> Non
     assert extraction.low_data_version == LOW_DATA_VERSION
     assert extraction.physical_quantity == PHYSICAL_QUANTITY
     assert extraction.aggregation_window_policy == AGGREGATION_WINDOW_POLICY
-    assert extraction.trade_authority_status == "SHADOW_ONLY"
+    assert extraction.trade_authority_status == "BLOCKED"
     assert extraction.training_allowed is False
     assert extraction.target_window_start_utc == _dt(2026, 6, 5, 16)
     assert extraction.target_window_end_utc == _dt(2026, 6, 6, 16)

@@ -134,12 +134,13 @@ def test_every_mark_pending_exit_call_is_paired_with_canonical_writer():
     )
 
 
-def test_six_known_call_sites_all_paired():
-    """Regression pin on the 6 LIFECYCLE_FINDINGS_DEFERRED.md sites.
+def test_known_mark_pending_exit_call_sites_all_paired():
+    """Regression pin on the known LIFECYCLE_FINDINGS_DEFERRED.md sites.
 
-    The audit identified 6 _mark_pending_exit invocations as the structural
-    smell. After the WAVE-3 Batch B fix every one of them lives inside a
-    function that pairs with a canonical writer."""
+    The audit identified _mark_pending_exit invocations as the structural
+    smell. Every one must live inside a function that pairs with a canonical
+    writer; the current executable surface has seven call sites.
+    """
     source = EXIT_LIFECYCLE_PATH.read_text()
     tree = ast.parse(source)
 
@@ -161,8 +162,8 @@ def test_six_known_call_sites_all_paired():
         if func.name != "_mark_pending_exit"
     )
 
-    assert len(call_sites) == 6, (
-        f"Expected 6 _mark_pending_exit call sites (per "
+    assert len(call_sites) == 7, (
+        f"Expected 7 _mark_pending_exit call sites (per current "
         f"LIFECYCLE_FINDINGS_DEFERRED.md); found {len(call_sites)}: "
         f"{call_sites}"
     )
@@ -308,6 +309,189 @@ def test_transition_phase_is_noop_when_position_is_already_economically_closed()
         ).fetchone()[0]
         == 0
     )
+    conn.close()
+
+
+def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
+    """Real inventory quarantined for bad entry proof must not strand forever."""
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.canonical_write import transition_phase
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.portfolio import Position
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pos = Position(
+        trade_id="entry-authority-quarantine-1",
+        market_id="mkt-entry-authority-1",
+        city="Lucknow",
+        cluster="India",
+        target_date="2026-06-28",
+        bin_label="35C or below",
+        direction="buy_yes",
+        unit="C",
+        shares=19.88,
+        chain_shares=19.88,
+        cost_basis_usd=1.19,
+        entry_price=0.006,
+        p_posterior=0.11,
+        state="entered",
+        strategy_key="opening_inertia",
+        token_id="tok-entry-authority-yes",
+        no_token_id="tok-entry-authority-no",
+        condition_id="0xentryauthority000000000000000000000000000000000000000000000001",
+        chain_state="entry_authority_quarantined",
+        temperature_metric="high",
+        entered_at="2026-06-28T00:00:00+00:00",
+        order_posted_at="2026-06-28T00:00:00+00:00",
+        env="live",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="dec-entry-authority-1",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'entry_authority_quarantined',
+               updated_at = '2026-06-28T00:01:00+00:00'
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    )
+
+    pos.pre_exit_state = "quarantined"
+    pos.state = "pending_exit"
+    pos.exit_state = "exit_intent"
+    pos.exit_reason = "ENTRY_AUTHORITY_QUARANTINE_REDECISION_EXIT"
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_INTENT",
+        reason="ENTRY_AUTHORITY_QUARANTINE_REDECISION_EXIT",
+        error="",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    ) is True
+
+    row = conn.execute(
+        "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "phase": LifecyclePhase.PENDING_EXIT.value,
+        "chain_state": "entry_authority_quarantined",
+        "order_status": "exit_intent",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_INTENT",
+        "phase_before": LifecyclePhase.QUARANTINED.value,
+        "phase_after": LifecyclePhase.PENDING_EXIT.value,
+    }
+    conn.close()
+
+
+def test_chain_absent_confirmed_position_cannot_transition_to_pending_exit():
+    """Confirmed chain absence is not live inventory and must not emit exit intent."""
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.canonical_write import transition_phase
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.portfolio import Position
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pos = Position(
+        trade_id="chain-absence-quarantine-1",
+        market_id="mkt-chain-absence-1",
+        city="Chongqing",
+        cluster="China",
+        target_date="2026-07-01",
+        bin_label="24C",
+        direction="buy_yes",
+        unit="C",
+        shares=65.0,
+        chain_shares=65.0,
+        cost_basis_usd=0.20,
+        entry_price=0.003,
+        p_posterior=0.03,
+        state="entered",
+        strategy_key="opening_inertia",
+        token_id="tok-chain-absence-yes",
+        no_token_id="tok-chain-absence-no",
+        condition_id="0xchainabsence000000000000000000000000000000000000000000000001",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        temperature_metric="high",
+        entered_at="2026-06-28T00:00:00+00:00",
+        order_posted_at="2026-06-28T00:00:00+00:00",
+        env="live",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="dec-chain-absence-1",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'chain_absent_confirmed_position_unattributed',
+               chain_shares = 65.0,
+               updated_at = '2026-06-28T00:01:00+00:00'
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    )
+
+    pos.pre_exit_state = "quarantined"
+    pos.state = "pending_exit"
+    pos.exit_state = "exit_intent"
+    pos.exit_reason = "CHAIN_ABSENCE_QUARANTINE_REDECISION_EXIT"
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_INTENT",
+        reason="CHAIN_ABSENCE_QUARANTINE_REDECISION_EXIT",
+        error="",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    ) is False
+
+    row = conn.execute(
+        "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert row["phase"] == LifecyclePhase.QUARANTINED.value
+    assert row["chain_state"] == "chain_absent_confirmed_position_unattributed"
+    assert row["order_status"] != "exit_intent"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert event["event_type"] != "EXIT_INTENT"
     conn.close()
 
 

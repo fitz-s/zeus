@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from decimal import Decimal
 from collections.abc import Mapping
@@ -17,6 +18,8 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
 from src.decision_kernel.verifier import (
+    _entry_price_floor_decision_for_payload,
+    _entry_floor_applies,
     verify_execution_command,
     verify_execution_receipt,
     verify_executor_expressibility,
@@ -95,6 +98,22 @@ def build_final_intent_certificate_from_actionable(
             f"(c_fee_adjusted={reservation!r}, tick_size={float(tick_size)!r}); "
             "candidate reservation below minimum tradeable price — skip"
         )
+    if _entry_floor_applies(action):
+        declared_entry_floor = action.get("min_entry_price")
+        floor_decision = _entry_price_floor_decision_for_payload(
+            action,
+            declared_min_entry_price=declared_entry_floor,
+            limit_price=limit_price,
+        )
+        effective_entry_floor = floor_decision.effective_min_entry_price
+        if limit_price + 1e-12 < effective_entry_floor:
+            raise ValueError(
+                "CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+                f" limit_price={limit_price!r}"
+                f" min_entry_price={effective_entry_floor!r}"
+                f" strategy_key={action.get('strategy_key')!r}"
+                f" direction={action.get('direction')!r}"
+            )
     size = desired_shares_for_reserved_notional(min_order_size, reserved_notional, limit_price)
     # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
     # requested size to the crossable book depth so the FOK can fully fill on a thin
@@ -193,6 +212,49 @@ def build_final_intent_certificate_from_actionable(
         "maker_intent": order_spec.maker_intent,
         "order_mode": order_spec.mode,
         "limit_price": limit_price,
+        "q_live": action.get("q_live"),
+        "q_lcb_5pct": action.get("q_lcb_5pct"),
+        "trade_score": action.get("trade_score"),
+        "action_score": action.get("action_score"),
+        "min_entry_price": action.get("min_entry_price"),
+        "min_expected_profit_usd": action.get("min_expected_profit_usd"),
+        "min_submit_edge_density": action.get("min_submit_edge_density"),
+        "c_fee_adjusted": action.get("c_fee_adjusted"),
+        "c_cost_95pct": action.get("c_cost_95pct"),
+        "selection_authority_applied": action.get("selection_authority_applied"),
+        "qkernel_execution_economics": action.get("qkernel_execution_economics"),
+        "day0_probability_authority": action.get("day0_probability_authority"),
+        "_edli_q_source": action.get("_edli_q_source"),
+        "_edli_day0_q_mode": action.get("_edli_day0_q_mode"),
+        "_edli_day0_remaining_models": action.get("_edli_day0_remaining_models"),
+        "_edli_day0_remaining_model_names": action.get("_edli_day0_remaining_model_names"),
+        "_edli_day0_remaining_source_cycle_time_utc": action.get(
+            "_edli_day0_remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_capture_times_utc": action.get(
+            "_edli_day0_remaining_capture_times_utc"
+        ),
+        "_edli_day0_remaining_expected_models": action.get(
+            "_edli_day0_remaining_expected_models"
+        ),
+        "_edli_day0_exit_authority_status": action.get("_edli_day0_exit_authority_status"),
+        "_edli_day0_exit_authority_reason": action.get("_edli_day0_exit_authority_reason"),
+        "_edli_day0_bound_classification": action.get("_edli_day0_bound_classification"),
+        "_edli_day0_lcb_transform": action.get("_edli_day0_lcb_transform"),
+        "source_match_status": action.get("source_match_status"),
+        "local_date_status": action.get("local_date_status"),
+        "station_match_status": action.get("station_match_status"),
+        "dst_status": action.get("dst_status"),
+        "metric_match_status": action.get("metric_match_status"),
+        "rounding_status": action.get("rounding_status"),
+        "source_authorized_status": action.get("source_authorized_status"),
+        "live_authority_status": action.get("live_authority_status"),
+        "raw_value": action.get("raw_value"),
+        "rounded_value": action.get("rounded_value"),
+        "high_so_far": action.get("high_so_far"),
+        "low_so_far": action.get("low_so_far"),
+        "observation_time": action.get("observation_time"),
+        "observation_available_at": action.get("observation_available_at"),
         # WALL C (2026-06-01): for multi-level TAKER fills the sweep VWAP (average
         # fill price) differs from limit_price.  executor.py:1778 checks
         # sweep.average_price == intent.expected_fill_price_before_fee; storing the
@@ -369,6 +431,7 @@ def build_execution_command_certificate_from_final_intent(
         "submitted": False,
         "venue_order_id": None,
     }
+    payload.update(_runtime_identity_payload())
     return _build_cert(
         claims.EXECUTION_COMMAND,
         f"execution_command:{payload['event_id']}:{payload['execution_command_id']}",
@@ -416,6 +479,7 @@ def build_execution_receipt_certificate(
         "idempotency_key": command["idempotency_key"],
         "reason_code": reason_code,
     }
+    payload.update(_runtime_identity_payload())
     if reconciliation_followup_required is not None:
         payload["reconciliation_followup_required"] = reconciliation_followup_required
     if venue_call_started is not None:
@@ -502,6 +566,7 @@ def _build_cert(
     parents: Iterable[DecisionCertificate],
 ) -> DecisionCertificate:
     parent_tuple = tuple(parents)
+    _require_live_parent_certificates(certificate_type, parent_tuple)
     return build_certificate(
         certificate_type=certificate_type,
         semantic_key=semantic_key,
@@ -522,6 +587,40 @@ def _build_cert(
         algorithm_id="edli.event_bound_execution_certificate_builder",
         algorithm_version="v1",
     )
+
+
+def _runtime_identity_payload() -> dict[str, str]:
+    """Runtime identity stamped on live venue-bound certificates.
+
+    ``ZEUS_PROCESS_BOOT_SHA`` is set by the managed live daemon at startup. It
+    identifies the code loaded by this process; do not run git here or infer a
+    mutable worktree HEAD during certificate construction.
+    """
+
+    boot_sha = str(os.environ.get("ZEUS_PROCESS_BOOT_SHA") or "").strip()
+    if len(boot_sha) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in boot_sha):
+        return {}
+    normalized = boot_sha.lower()
+    return {
+        "process_boot_sha": normalized,
+        "runtime_sha": normalized,
+    }
+
+
+def _require_live_parent_certificates(
+    certificate_type: str,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    non_live = sorted(
+        f"{parent.certificate_type}:{parent.header.mode}"
+        for parent in parents
+        if parent.header.mode != "LIVE"
+    )
+    if non_live:
+        raise ValueError(
+            f"{certificate_type} LIVE certificate requires LIVE parent certificates: "
+            f"{', '.join(non_live)}"
+        )
 
 
 class _OrderSpec:

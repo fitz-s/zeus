@@ -731,7 +731,7 @@ def test_exit_telemetry_persists_to_recent_exits():
         trade_id="tx1",
         market_id="m1",
         direction="buy_no",
-        exit_trigger="MODEL_DIVERGENCE_PANIC",
+        exit_trigger="FLASH_CRASH_PANIC",
         exit_divergence_score=0.34,
         exit_market_velocity_1h=-0.12,
         exit_forward_edge=-0.08,
@@ -740,7 +740,7 @@ def test_exit_telemetry_persists_to_recent_exits():
 
     close_position(portfolio, "tx1", 0.12, "Model-Market divergence score 0.34 exceeds hard threshold")
     ex = portfolio.recent_exits[-1]
-    assert ex["exit_trigger"] == "MODEL_DIVERGENCE_PANIC"
+    assert ex["exit_trigger"] == "FLASH_CRASH_PANIC"
     assert ex["exit_divergence_score"] == pytest.approx(0.34)
     assert ex["exit_market_velocity_1h"] == pytest.approx(-0.12)
     assert ex["exit_forward_edge"] == pytest.approx(-0.08)
@@ -1483,7 +1483,7 @@ def test_inv_status_fallback_bankroll_uses_initial_bankroll(monkeypatch, tmp_pat
     assert status["portfolio"]["total_pnl"] == pytest.approx(expected_total)
     assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial)
     assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
-    assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
+    assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):
@@ -1537,9 +1537,9 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
                 "cycle": {"mode": "opening_hunt", "candidates": 0},
                 "execution_capability": {
                     "entry": {
-                        "status": "blocked",
+                        "status": "unavailable",
                         "global_allow_submit": False,
-                        "blocked_components": ["stale_ws_gap_guard"],
+                        "unavailable_components": ["stale_ws_gap_guard"],
                     }
                 },
             }
@@ -1555,7 +1555,7 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
             "entry": {
                 "status": "requires_intent",
                 "global_allow_submit": True,
-                "blocked_components": [],
+                "unavailable_components": [],
             },
         },
     )
@@ -1581,7 +1581,7 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     assert refreshed["portfolio"]["total_exposure_usd"] == 0.0
     assert refreshed["cycle"] == {"mode": "opening_hunt", "candidates": 3}
     assert refreshed["execution_capability"]["entry"]["global_allow_submit"] is True
-    assert refreshed["execution_capability"]["entry"]["blocked_components"] == []
+    assert refreshed["execution_capability"]["entry"]["unavailable_components"] == []
     assert refreshed["execution"]["current_open_entry_orders"]["status"] == "ok"
     assert refreshed["execution"]["current_open_entry_orders"]["count"] == 0
     assert refreshed["truth"]["authority"] == "VERIFIED"
@@ -4042,212 +4042,6 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
     assert "ensemble_snapshots" in result["stage2_missing_shared_tables"]
     assert settled_calls == [("NYC", "2026-04-01", "39-40°F")]
     assert not any("Harvester error" in record.getMessage() for record in caplog.records)
-
-
-def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_settlement_exists(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
-    _create_calibration_pairs(conn)  # Cluster A: FK dep needed post K1 split
-
-    snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
-    _insert_source_correct_harvester_obs(conn)
-    conn.commit()
-    conn.close()
-
-    event = {
-        "title": "Highest temperature in New York City on April 1 2026",
-        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
-        "markets": [
-            {
-                "question": "39-40°F",
-                "winningOutcome": "Yes",
-                "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps(["1", "0"]),
-                "outcomes": json.dumps(["Yes", "No"]),
-                "umaResolutionStatus": "resolved",
-                "conditionId": "m1",
-            },
-            {
-                "question": "41-42°F",
-                "winningOutcome": "No",
-                "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps(["0", "1"]),
-                "outcomes": json.dumps(["Yes", "No"]),
-                "umaResolutionStatus": "resolved",
-                "conditionId": "m2",
-            },
-        ],
-    }
-
-    _hconn = get_connection(db_path)
-    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
-    monkeypatch.setattr(
-        harvester_module,
-        "load_portfolio",
-        lambda: PortfolioState(
-            bankroll=211.37,
-            positions=[_position(
-                trade_id="trade-open-fallback",
-                target_date="2026-04-01",
-                bin_label="39-40°F",
-                decision_snapshot_id=snapshot_id,
-            )],
-        ),
-    )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
-    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
-    _enable_live_harvester_test_path(monkeypatch)
-
-    result = harvester_module.run_harvester()
-
-    assert result["pairs_created"] == 0
-
-    conn = get_connection(db_path)
-    snapshot_event = conn.execute(
-        """
-        SELECT details_json FROM chronicle
-        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
-        ORDER BY id DESC LIMIT 1
-        """
-    ).fetchone()
-    conn.close()
-    snapshot_details = json.loads(snapshot_event["details_json"])
-    assert snapshot_details["context_count"] == 1
-    assert snapshot_details["contexts"][0]["source"] == "portfolio_open_fallback"
-    assert snapshot_details["contexts"][0]["authority_level"] == "working_state_fallback"
-    assert snapshot_details["contexts"][0]["is_degraded"] is True
-    assert snapshot_details["contexts"][0]["degraded_reason"] == "no_durable_settlement_snapshot"
-    assert snapshot_details["contexts"][0]["learning_snapshot_ready"] is False
-
-
-def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
-    _create_calibration_pairs(conn)  # Cluster A: FK dep needed post K1 split
-
-    legacy_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
-    portfolio_snapshot_id = _insert_snapshot(
-        conn,
-        "NYC",
-        "2026-04-01",
-        [0.10, 0.90],
-        issue_time="2026-03-30T06:00:00Z",
-    )
-    store_settlement_records(conn, [
-        SettlementRecord(
-            trade_id="legacy-settle",
-            city="NYC",
-            target_date="2026-04-01",
-            range_label="39-40°F",
-            direction="buy_yes",
-            p_posterior=0.58,
-            outcome=1,
-            pnl=12.5,
-            decision_snapshot_id=legacy_snapshot_id,
-            edge_source="center_buy",
-            strategy="center_buy",
-            settled_at="2026-04-01T23:00:00Z",
-        )
-    ])
-    _insert_source_correct_harvester_obs(conn)
-    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
-    conn.close()
-
-    event = {
-        "title": "Highest temperature in New York City on April 1 2026",
-        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
-        "markets": [
-            {
-                "question": "39-40°F",
-                "winningOutcome": "Yes",
-                "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps(["1", "0"]),
-                "outcomes": json.dumps(["Yes", "No"]),
-                "umaResolutionStatus": "resolved",
-                "conditionId": "m1",
-            },
-            {
-                "question": "41-42°F",
-                "winningOutcome": "No",
-                "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps(["0", "1"]),
-                "outcomes": json.dumps(["Yes", "No"]),
-                "umaResolutionStatus": "resolved",
-                "conditionId": "m2",
-            },
-        ],
-    }
-
-    _hconn = get_connection(db_path)
-    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
-    monkeypatch.setattr(
-        harvester_module,
-        "load_portfolio",
-        lambda: PortfolioState(
-            bankroll=211.37,
-            positions=[_position(
-                trade_id="trade-open-ignored",
-                target_date="2026-04-01",
-                bin_label="39-40°F",
-                decision_snapshot_id=portfolio_snapshot_id,
-            )],
-        ),
-    )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
-    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
-    _enable_live_harvester_test_path(monkeypatch)
-    # Production hardens legacy records to learning_snapshot_ready=False to prevent
-    # unverified calibration learning. This patch opens the gate so the test can
-    # assert downstream learning wiring (pair creation) when the normalizer allows it.
-    import src.state.decision_chain as _decision_chain_module
-    _orig_normalize = _decision_chain_module._normalize_legacy_settlement_record
-    def _patched_normalize(record, **kwargs):
-        result = _orig_normalize(record, **kwargs)
-        if result is not None:
-            result["learning_snapshot_ready"] = True
-            result["metric_ready"] = True
-        return result
-    monkeypatch.setattr(_decision_chain_module, "_normalize_legacy_settlement_record", _patched_normalize)
-
-    result = harvester_module.run_harvester()
-
-    assert result["pairs_created"] == 2
-
-    conn = get_connection(db_path)
-    rows = conn.execute(
-        """
-        SELECT range_label, p_raw
-        FROM calibration_pairs
-        WHERE city = ? AND target_date = ?
-        ORDER BY range_label ASC
-        """,
-        ("NYC", "2026-04-01"),
-    ).fetchall()
-    snapshot_event = conn.execute(
-        """
-        SELECT details_json FROM chronicle
-        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
-        ORDER BY id DESC LIMIT 1
-        """
-    ).fetchone()
-    conn.close()
-
-    assert [row["range_label"] for row in rows] == ["39-40°F", "41-42°F"]
-    assert [row["p_raw"] for row in rows] == pytest.approx([0.65, 0.35])
-    snapshot_details = json.loads(snapshot_event["details_json"])
-    assert snapshot_details["contexts"][0]["source"] == "decision_log"
-    assert snapshot_details["contexts"][0]["authority_level"] == "legacy_decision_log_fallback"
-    assert snapshot_details["contexts"][0]["is_degraded"] is True
 
 
 def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch, tmp_path):

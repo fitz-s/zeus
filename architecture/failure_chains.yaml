@@ -409,9 +409,8 @@ chains:
     historical_evidence:
       prs: [304, 306, 319]
       commits: []
-      notes: "PR #306 stdlib shadowing demonstrates structural blocker; operations sprawl is advisory unless reader broken."
+      notes: "PR #306 stdlib name collision demonstrates structural blocker; operations sprawl is advisory unless reader broken."
     touched_surfaces:
-      - topology_v_next
       - operations_docs
     money_path_segments: []
     missed_guard_type:
@@ -419,12 +418,11 @@ chains:
       - MANIFEST_DRIFT
     required_context_packs:
       - operations_docs_topology
-      - topology_structural
     required_tests:
       - tests/topology/test_file_arrangement.py
     required_static_gates:
       - workflow_refs_exist
-      - stdlib_shadowing_gate
+      - stdlib_name_collision_gate
     required_ci_workflows:
       - topology-context-required.yml
       - topology-context-advisory.yml

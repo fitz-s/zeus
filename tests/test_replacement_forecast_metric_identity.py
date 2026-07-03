@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement forecast metric identity from B0/TIGGE calibration lineage contamination.
 # Reuse: Run before wiring replacement products into forecast skill, replay, calibration, or receipt attribution.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked integration.
 """Replacement forecast metric identity tests."""
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def test_aifs_sampled_2t_metric_identity_is_not_period_extrema_or_baseline() -> 
     assert high.measurement_object == "aifs_ens_member_sampled_2t_6h"
     assert high.raw_ensemble_eligible is True
     assert high.training_allowed is False
-    assert high.trade_authority_status == "SHADOW_ONLY"
+    assert high.trade_authority_status == "BLOCKED"
     assert low.data_version == "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min"
     assert low.physical_quantity == "sampled_2t_6h_local_calendar_day_min"
 
@@ -66,7 +66,7 @@ def test_openmeteo_anchor_and_derived_posterior_are_not_raw_ensemble_identities(
     assert anchor.raw_ensemble_eligible is False
 
     assert posterior.source_family == "derived_posterior"
-    assert posterior.product_class == "derived_shadow_posterior"
+    assert posterior.product_class == "derived_blocked_posterior"
     assert posterior.physical_quantity == (
         "aifs_sampled_2t_plus_openmeteo_ecmwf_ifs9_anchor_local_calendar_day_max"
     )

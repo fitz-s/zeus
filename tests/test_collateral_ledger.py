@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -854,6 +855,7 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
 
 
 def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeypatch):
+    from src.execution import executor as executor_module
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
     from src.state.db import init_schema
@@ -864,6 +866,15 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor_module,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda conn, *, token_id, shares: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "test_noop_refresh",
+        },
+    )
 
     class ClientShouldNotBeConstructed:
         def __init__(self, *args, **kwargs):  # pragma: no cover - assertion tripwire
@@ -881,6 +892,60 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
         with pytest.raises(CollateralInsufficient, match="ctf_tokens_insufficient"):
             execute_exit_order(intent, conn=conn, decision_id="z4-sell")
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        configure_global_ledger(None)
+
+
+def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkeypatch):
+    from src.execution import executor as executor_module
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import configure_global_ledger
+    from src.state.db import init_schema
+
+    init_schema(conn)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 0}))
+    configure_global_ledger(ledger)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+
+    def refresh_exit_collateral(conn, *, token_id, shares):
+        assert token_id == YES_TOKEN
+        assert shares == pytest.approx(5.0)
+        ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 5}))
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "refreshed_before_exit_submit",
+            "token_id": token_id,
+        }
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            return _fake_submit_result(self.bound_envelope, order_id="exit-refresh-order-1", success=True)
+
+    monkeypatch.setattr(executor_module, "_refresh_exit_collateral_snapshot_for_submit", refresh_exit_collateral)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    intent = create_exit_order_intent(
+        trade_id="z4-sell-refresh-before-preflight",
+        token_id=YES_TOKEN,
+        shares=5.0,
+        current_price=0.50,
+        best_bid=0.49,
+        **_exec_snapshot_kwargs(conn, token_id=YES_TOKEN),
+    )
+    try:
+        result = execute_exit_order(
+            intent,
+            conn=conn,
+            decision_id="z4-sell-refresh-before-preflight",
+        )
+        assert result.status == "pending"
+        assert "pre_submit_collateral_reservation_failed" not in (result.reason or "")
+        assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
     finally:
         configure_global_ledger(None)
 
@@ -1208,3 +1273,558 @@ def test_v2_adapter_redeem_forbidden_without_sdk_contact(monkeypatch):
 
     with pytest.raises(RedeemSubmissionAbandonedError, match="REDEEM_SUBMISSION_FORBIDDEN"):
         adapter.redeem("condition-1")
+
+
+# ---------------------------------------------------------------------------
+# SCH-W1.1-CAS-LEDGER: CAS reservation ledger, convert-on-fill, type-aware A4
+# identity acceptance tests.
+# ---------------------------------------------------------------------------
+
+
+def _insert_test_command(
+    conn,
+    command_id: str,
+    *,
+    # NOTE: intent_kind defaults to "EXIT" (not "ENTRY") even for BUY-side
+    # fixtures in this section — _validate_entry_submit_payload requires a
+    # full execution_capability/entry_economics proof payload for
+    # ENTRY+SUBMIT_REQUESTED that is orthogonal to what these collateral-seam
+    # tests exercise. intent_kind does not affect reservation/conversion
+    # logic (which reads reservation_type, size, price — not intent_kind).
+    intent_kind: str = "EXIT",
+    side: str = "BUY",
+    size: float = 10.0,
+    price: float = 0.5,
+    token_id: str = YES_TOKEN,
+) -> None:
+    """Minimal direct venue_commands row for collateral-ledger unit tests.
+
+    Bypasses insert_command's U1/U2 snapshot+envelope gates (no FK enforcement
+    on those two columns per the DDL) so tests can focus on the collateral
+    seam without standing up executable-market-snapshot/envelope fixtures.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_CREATED', ?, ?)
+        """,
+        (
+            command_id, f"snap-{command_id}", f"env-{command_id}", f"pos-{command_id}",
+            f"dec-{command_id}", f"idem-{command_id}", intent_kind, "z4-market",
+            token_id, side, size, price, now, now,
+        ),
+    )
+
+
+def _walk_to_acked(conn, command_id: str) -> None:
+    from src.state.venue_command_repo import append_event
+
+    now = datetime.now(timezone.utc).isoformat()
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=now,
+        payload={
+            "execution_capability": {
+                "allowed": True,
+                "components": [
+                    {"component": "entry_economics", "allowed": True},
+                    {"component": "entry_actionable_certificate", "allowed": True},
+                ],
+            }
+        },
+    )
+    append_event(conn, command_id=command_id, event_type="SUBMIT_ACKED", occurred_at=now)
+
+
+class _RaisingConn:
+    """Minimal conn stand-in exposing only .execute(), for unit-testing the
+    trigger-IntegrityError -> CollateralInsufficient mapping without racing."""
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.IntegrityError("CHECK constraint failed: COLLATERAL_OVERRESERVE")
+
+
+def test_cas_insert_pusd_reservation_maps_trigger_integrity_error_to_collateral_insufficient():
+    """Critic ruling 7b: RAISE(ABORT,'COLLATERAL_OVERRESERVE') (IntegrityError)
+    must never leak past the ledger API as a raw sqlite3 exception."""
+    with pytest.raises(CollateralInsufficient, match="pusd_insufficient_trigger"):
+        CollateralLedger._cas_insert_pusd_reservation(
+            _RaisingConn(), "cmd-x", 1_000_000, datetime.now(timezone.utc).isoformat()
+        )
+
+
+def test_cas_trigger_raises_on_raw_bypass_insert(conn):
+    """Belt-and-braces: the AFTER INSERT trigger independently enforces
+    non-overreserve even for a write path that bypasses the guarded CAS
+    WHERE clause (defense in depth for a future/other writer)."""
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=5_000_000))
+
+    with pytest.raises(sqlite3.IntegrityError, match="COLLATERAL_OVERRESERVE"):
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations
+              (command_id, reservation_type, token_id, amount, converted_amount, created_at)
+            VALUES (?, 'PUSD_BUY', NULL, ?, 0, ?)
+            """,
+            ("bypass-cmd", 10_000_000, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def test_cas_reserve_pusd_for_buy_blocks_second_racer_via_cas_not_preflight(conn):
+    """The CAS INSERT itself — not just buy_preflight — is the enforcement
+    authority: directly exercising the CAS bypassing preflight proves the
+    guarded statement alone closes the over-reserve window."""
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=10_000_000))
+    now = datetime.now(timezone.utc).isoformat()
+
+    CollateralLedger._cas_insert_pusd_reservation(conn, "cmd-a", 6_000_000, now)
+    with pytest.raises(CollateralInsufficient, match="pusd_insufficient_cas"):
+        CollateralLedger._cas_insert_pusd_reservation(conn, "cmd-b", 6_000_000, now)
+
+    total = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    assert total == 6_000_000
+
+
+@pytest.mark.parametrize("mode", ["memory", "caller_conn_file", "db_path"])
+def test_cas_reserve_correct_under_all_three_connection_modes(tmp_path, mode):
+    """tests_required: 'three connection modes: CAS correct under in-memory,
+    caller-owned-conn (insert_command-first pattern), and db_path modes.'"""
+    if mode == "memory":
+        raw = sqlite3.connect(":memory:")
+        raw.row_factory = sqlite3.Row
+        init_collateral_schema(raw)
+        ledger = CollateralLedger(raw)
+    elif mode == "caller_conn_file":
+        db_path = tmp_path / "caller.db"
+        raw = sqlite3.connect(db_path)
+        raw.row_factory = sqlite3.Row
+        init_collateral_schema(raw)
+        ledger = CollateralLedger(raw)
+    else:
+        db_path = tmp_path / "owned.db"
+        setup_conn = sqlite3.connect(db_path)
+        init_collateral_schema(setup_conn)
+        setup_conn.commit()
+        setup_conn.close()
+        ledger = CollateralLedger(db_path=db_path)
+
+    ledger.set_snapshot(_snapshot(pusd=10_000_000))
+    ledger.reserve_pusd_for_buy("cmd-a", 6_000_000)
+    with pytest.raises(CollateralInsufficient):
+        ledger.reserve_pusd_for_buy("cmd-b", 6_000_000)
+
+    assert ledger.snapshot().reserved_pusd_for_buys_micro == 6_000_000
+    ledger.close()
+
+
+def test_convert_reservation_on_fill_converts_filled_portion_and_releases_remainder(conn):
+    """PUSD_BUY FILLED with a partial cumulative fill: the filled fraction
+    converts to an unsettled OUTGOING_DEDUCTION row; the remainder releases.
+    Derivation uses MAX(matched_size) over the fact stream (critic ruling 1)."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-convert-fill"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-convert-fill",
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="4",
+        matched_size="6",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="a" * 64,
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="vo-convert-fill",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="b" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="FILL_CONFIRMED", occurred_at=now.isoformat())
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at, release_reason "
+        "FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000  # amount is immutable
+    assert row[1] == 5_000_000  # fully matched (10/10) -> fully converted
+    assert row[2] is not None
+    assert row[3] == "CONVERTED_ON_FILL"
+
+    unsettled = conn.execute(
+        "SELECT direction, reservation_type, token_id, amount_micro, settled_at "
+        "FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert tuple(unsettled) == ("OUTGOING_DEDUCTION", "PUSD_BUY", None, 5_000_000, None)
+
+    # spendable does NOT increase at conversion time (still reduced by the
+    # unsettled OUTGOING_DEDUCTION even though released_at is now set).
+    assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
+    spendable = 100_000_000 - 0 - 5_000_000
+    assert spendable == 95_000_000
+
+
+def test_convert_reservation_on_fill_idempotent_on_replayed_terminal_event(conn):
+    """Single idempotent terminal write guarded by WHERE released_at IS NULL:
+    a re-delivered terminal dispatch call is a safe no-op, never double-inserts
+    into collateral_unsettled_proceeds."""
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import convert_reservation_on_fill
+    from src.state.venue_command_repo import append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-idempotent-terminal"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-idem",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="c" * 64,
+    )
+
+    assert convert_reservation_on_fill(conn, command_id, "FILLED") is True
+    assert convert_reservation_on_fill(conn, command_id, "FILLED") is False
+
+    unsettled_count = conn.execute(
+        "SELECT COUNT(*) FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    assert unsettled_count == 1
+    converted_amount = conn.execute(
+        "SELECT converted_amount FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    assert converted_amount == 5_000_000
+
+
+def test_partial_then_cancel_converts_filled_releases_remainder(conn):
+    """tests_required: partial-then-cancel — matched>0 then CANCELLED: the
+    filled-notional portion converts, the unfilled remainder releases, ONE
+    idempotent terminal write."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-partial-cancel"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-partial-cancel",
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="6",
+        matched_size="4",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="d" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED", occurred_at=now.isoformat())
+    append_event(conn, command_id=command_id, event_type="CANCEL_REQUESTED", occurred_at=now.isoformat())
+    append_event(conn, command_id=command_id, event_type="CANCEL_ACKED", occurred_at=now.isoformat())
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at, release_reason "
+        "FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000
+    assert row[1] == 2_000_000  # floor(5_000_000 * 4/10)
+    assert row[2] is not None
+    assert row[3] == "CONVERTED_ON_FILL"
+
+    unsettled = conn.execute(
+        "SELECT amount_micro FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert unsettled[0] == 2_000_000
+
+    state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()[0]
+    assert state == "CANCELLED"
+
+
+def test_type_aware_identity_ctf_sell_proceeds_never_reduce_spendable_pusd(conn):
+    """CTF_SELL proceeds are INCOMING, recorded as INCOMING_PROCEEDS, and
+    tracked for the identity but never part of spendable_pusd while unsettled
+    — never uniform subtraction."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-sell-fill"
+    _insert_test_command(
+        conn, command_id, intent_kind="EXIT", side="SELL", size=10.0, price=0.6, token_id=YES_TOKEN
+    )
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, ctf={YES_TOKEN: 10}))
+    ledger.reserve_tokens_for_sell(command_id, YES_TOKEN, 10)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-sell-fill",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="e" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="FILL_CONFIRMED", occurred_at=now.isoformat())
+
+    unsettled = conn.execute(
+        "SELECT direction, reservation_type, token_id, amount_micro FROM collateral_unsettled_proceeds "
+        "WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert unsettled[0] == "INCOMING_PROCEEDS"
+    assert unsettled[1] == "CTF_SELL"
+    assert unsettled[2] == YES_TOKEN
+    assert unsettled[3] == 6_000_000  # 10 shares * 0.6 price * 1e6
+
+    # spendable_pusd formula excludes INCOMING_PROCEEDS entirely.
+    live_buy = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
+        "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL"
+    ).fetchone()[0]
+    unsettled_outgoing = conn.execute(
+        "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
+        "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL"
+    ).fetchone()[0]
+    spendable_pusd = 50_000_000 - live_buy - unsettled_outgoing
+    assert spendable_pusd == 50_000_000  # unaffected by the sell proceeds
+
+    # CTF token reservation itself released (tokens left the wallet, sold).
+    assert ledger.snapshot().reserved_tokens_for_sells == {}
+
+
+def test_clearing_settles_matured_unsettled_rows_inside_refresh_transaction(conn):
+    """Settlement-coordinated clearing (critic ruling 4): a balance snapshot
+    captured after converted_at + CLOCK_SKEW settles the row inside the same
+    write transaction as the new snapshot insert."""
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS
+
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds
+          (command_id, direction, reservation_type, token_id, amount_micro, created_at)
+        VALUES ('cmd-clear', 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, 3_000_000, ?)
+        """,
+        (old_time.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = CollateralLedger(conn)
+    fresh_time = old_time + timedelta(seconds=COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS + 30)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, captured_at=fresh_time))
+
+    row = conn.execute(
+        "SELECT settled_at, settle_reason FROM collateral_unsettled_proceeds WHERE command_id = 'cmd-clear'"
+    ).fetchone()
+    assert row[0] is not None
+    assert row[1] == "BALANCE_REFRESH_OBSERVED"
+
+
+def test_clearing_does_not_settle_row_within_clock_skew_tolerance(conn):
+    """Rows younger than converted_at + CLOCK_SKEW must NOT settle yet — the
+    venue has not had the chance to reflect the deduction."""
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=2)
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds
+          (command_id, direction, reservation_type, token_id, amount_micro, created_at)
+        VALUES ('cmd-too-fresh', 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, 3_000_000, ?)
+        """,
+        (old_time.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, captured_at=datetime.now(timezone.utc)))
+
+    row = conn.execute(
+        "SELECT settled_at FROM collateral_unsettled_proceeds WHERE command_id = 'cmd-too-fresh'"
+    ).fetchone()
+    assert row[0] is None
+
+
+def test_idempotent_derivation_replay_duplicate_partial_fact_stream(conn):
+    """tests_required: replay the same PARTIALLY_MATCHED fact stream (WS +
+    reconcile + recovery duplicates) — derived live remaining invariant under
+    replay; ZERO ledger writes on partial facts."""
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import _max_matched_size
+    from src.state.venue_command_repo import append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-replay-partial"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    for source in ("WS_USER", "REST", "OPERATOR"):  # WS + reconcile + recovery duplicate delivery
+        append_order_fact(
+            conn,
+            venue_order_id="vo-replay",
+            command_id=command_id,
+            state="PARTIALLY_MATCHED",
+            remaining_size="4",
+            matched_size="6",
+            source=source,
+            observed_at=now,
+            raw_payload_hash=hashlib.sha256(source.encode()).hexdigest(),
+        )
+
+    assert _max_matched_size(conn, command_id) == Decimal("6")
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000
+    assert row[1] == 0
+    assert row[2] is None
+    unsettled_count = conn.execute("SELECT COUNT(*) FROM collateral_unsettled_proceeds").fetchone()[0]
+    assert unsettled_count == 0
+
+
+def test_cas_concurrent_reserve_stress_zero_overreserve(tmp_path):
+    """CONCURRENCY PROOF (acceptance, LIVE topology per critic ruling 6): each
+    of >=20 threads on its OWN connection performs a command-row INSERT
+    (write lock) THEN the CAS reserve on the SAME conn, against one shared
+    bounded balance. Zero over-reserve at any commit point; every contended
+    failure surfaces as CollateralInsufficient, NEVER OperationalError.
+    """
+    import threading
+
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "cas_stress.db"
+    setup_conn = sqlite3.connect(db_path)
+    setup_conn.row_factory = sqlite3.Row
+    init_schema(setup_conn)
+    init_collateral_schema(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    ledger_seed = CollateralLedger(db_path=db_path)
+    ledger_seed.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger_seed.close()
+
+    n_threads = 25
+    reserve_amount = 5_000_000  # exactly 20 of 25 can succeed against 100M
+
+    results: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        conn_t = sqlite3.connect(db_path, timeout=30)
+        conn_t.row_factory = sqlite3.Row
+        conn_t.execute("PRAGMA journal_mode=WAL")
+        conn_t.execute("PRAGMA busy_timeout=30000")
+        command_id = f"stress-cmd-{i}"
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn_t.execute(
+                """
+                INSERT INTO venue_commands (
+                    command_id, snapshot_id, envelope_id, position_id, decision_id,
+                    idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                    state, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'INTENT_CREATED',?,?)
+                """,
+                (
+                    command_id, f"snap-{i}", f"env-{i}", f"pos-{i}", f"dec-{i}", f"idem-{i}",
+                    "ENTRY", "z4-market", YES_TOKEN, "BUY", 10.0, 0.5, now, now,
+                ),
+            )
+            try:
+                CollateralLedger._cas_insert_pusd_reservation(conn_t, command_id, reserve_amount, now)
+                conn_t.commit()
+                with lock:
+                    results.append(("ok", command_id))
+            except CollateralInsufficient:
+                conn_t.rollback()
+                with lock:
+                    results.append(("insufficient", command_id))
+        except Exception as exc:  # noqa: BLE001 — captured for the assertion below
+            with lock:
+                errors.append((type(exc).__name__, str(exc)))
+        finally:
+            conn_t.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"non-CollateralInsufficient errors under contention: {errors}"
+    ok_count = sum(1 for outcome, _ in results if outcome == "ok")
+    insufficient_count = sum(1 for outcome, _ in results if outcome == "insufficient")
+    assert ok_count + insufficient_count == n_threads
+    assert ok_count == 20, f"expected exactly 20 successes (100M/5M), got {ok_count}"
+
+    verify_conn = sqlite3.connect(db_path)
+    total_reserved = verify_conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    live_count = verify_conn.execute(
+        "SELECT COUNT(*) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    verify_conn.close()
+    assert total_reserved == ok_count * reserve_amount
+    assert total_reserved <= 100_000_000
+    assert live_count == ok_count

@@ -114,7 +114,6 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # ATTACH to zeus-forecasts.db (not world-DB writes).
         # ---------------------------------------------------------------------------
         "scripts/build_ft_staging_db.py",
-        "scripts/migrate_no_trade_events_rebuild_phase3_t2.py",
         "scripts/seed_isolated_calibration_db.py",
         "src/calibration/ens_bias_repo.py",
         "src/contracts/settlement_capture_verifier.py",

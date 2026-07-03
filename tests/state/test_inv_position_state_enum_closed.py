@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 2, PR A scaffold; flipped by PR C)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 2, PR A scaffold; flipped by PR C)
 """Antibody invariants: every literal assigned to `Position.state` is a legal LifecycleState value.
 
 Finding 2 (P1 likely bug): src/state/chain_reconciliation.py:1003 writes

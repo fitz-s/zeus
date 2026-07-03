@@ -4,8 +4,8 @@
 #   K1 antibody scope extension: scan all of src/ + scripts/ for bare
 #   FROM <WORLD_ONLY_TABLE> references — not just K1_FIXED_SCRIPTS.
 #
-#   Background (MIN-1): tests/test_k1_reader_isolation.py scans only
-#   bridge_oracle_to_calibration.py and evaluate_calibration_transfer_oos.py.
+#   Background (MIN-1): tests/test_k1_reader_isolation.py originally scanned
+#   the K1 fixed scripts.
 #   Bare `FROM validated_calibration_transfers` exists in:
 #     src/data/calibration_transfer_policy.py:854
 #     src/engine/evaluator.py:555

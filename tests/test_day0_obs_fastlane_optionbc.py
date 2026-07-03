@@ -4,17 +4,17 @@
 #   operator task brief /tmp/day0_obs_fastlane_plan.md.
 """Antibody tests for Day0 observation fast-lane Options B and C.
 
-Option B: _fetch_wu_observation falls through to METAR fast-lane in-process
-  memo when WU result is stale, absent, or coverage-incomplete.
+Option B: _fetch_wu_observation may use the same-station fast-tail in-process
+  memo when WU distribution is stale, absent, or coverage-incomplete.
 
 Option C: ingest_k2_obs_fast_tick scheduler registration + _active_window_cities
   city-predicate unit tests.
 
 Relationship contracts tested:
-  B1. stale WU + fresh memo → context served with metar_fast_lane source.
+  B1. stale WU + fresh memo → context served with same_station_fast_tail source.
   B2. stale WU + stale memo (cache > FAST_LANE_ENTRY_MAX_CACHE_AGE_S) → honest
       stale rejection unchanged (no context returned from fast lane).
-  B3. non-wu_icao city → fallback never fires (fast lane gate rejects it).
+  B3. non-wu_icao city → same-station source never serves.
   B4. station mismatch → fast lane returns None (faithfulness gate).
   B5. coverage-incomplete WU + fast lane has good first_obs_time →
       coverage_status reflects METAR-computed value.
@@ -112,21 +112,21 @@ def _make_fast_extremes(
 
 
 # ---------------------------------------------------------------------------
-# Option B: _wu_result_needs_fallback
+# Option B: _wu_result_needs_fast_tail
 # ---------------------------------------------------------------------------
 
-class TestWuResultNeedsFallback:
-    """Unit tests for the fallback-trigger predicate."""
+class TestWuResultNeedsFastTail:
+    """Unit tests for the same-station tail predicate."""
 
     def _fn(self, result, ref_utc):
-        from src.data.observation_client import _wu_result_needs_fallback
-        return _wu_result_needs_fallback(result, reference_utc=ref_utc)
+        from src.data.observation_client import _wu_result_needs_fast_tail
+        return _wu_result_needs_fast_tail(result, reference_utc=ref_utc)
 
-    def test_none_result_needs_fallback(self):
+    def test_none_result_needs_fast_tail(self):
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         assert self._fn(None, ref) == "wu_result_none"
 
-    def test_fresh_result_no_fallback(self):
+    def test_fresh_result_no_fast_tail(self):
         from src.data.observation_client import Day0ObservationContext
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         obs_time = (ref - timedelta(minutes=30)).isoformat()
@@ -138,7 +138,7 @@ class TestWuResultNeedsFallback:
         )
         assert self._fn(ctx, ref) is None
 
-    def test_stale_result_needs_fallback(self):
+    def test_stale_result_needs_fast_tail(self):
         from src.data.observation_client import Day0ObservationContext
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         obs_time = (ref - timedelta(hours=1, minutes=30)).isoformat()
@@ -152,7 +152,7 @@ class TestWuResultNeedsFallback:
         assert reason is not None
         assert "wu_stale" in reason
 
-    def test_coverage_incomplete_needs_fallback(self):
+    def test_coverage_incomplete_needs_fast_tail(self):
         from src.data.observation_client import Day0ObservationContext
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         obs_time = (ref - timedelta(minutes=20)).isoformat()
@@ -167,7 +167,7 @@ class TestWuResultNeedsFallback:
 
 
 # ---------------------------------------------------------------------------
-# Option B: _fetch_metar_fast_lane_observation
+# Option B: _fetch_same_station_fast_tail_observation
 # ---------------------------------------------------------------------------
 
 class TestFetchMetarFastLaneObservation:
@@ -178,12 +178,12 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter = MagicMock()
         mock_emitter.latest_extremes.return_value = extremes
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            return oc._fetch_metar_fast_lane_observation(
+            return oc._fetch_same_station_fast_tail_observation(
                 city, target_day=target_day, reference_utc=reference_utc
             )
 
     def test_returns_none_for_non_wu_icao_city(self):
-        """B3: non-wu_icao city → fallback never fires (fast_obs_source_for_city gate)."""
+        """B3: non-wu_icao city -> same-station source never serves."""
         city = _non_wu_city()
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         # fast_obs_source_for_city returns None for noaa settlement_source_type;
@@ -191,8 +191,8 @@ class TestFetchMetarFastLaneObservation:
         result = self._call(city, date(2026, 6, 12), ref, extremes=None)
         assert result is None
 
-    def test_returns_context_with_metar_fast_lane_source(self):
-        """B1: stale WU + fresh memo → context served with metar_fast_lane source."""
+    def test_returns_context_with_same_station_fast_tail_source(self):
+        """B1: stale WU + fresh memo → context served with same_station_fast_tail source."""
         city = _wu_icao_city()
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         extremes = _make_fast_extremes(reference_utc=ref)
@@ -203,12 +203,12 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter.latest_extremes.return_value = extremes
 
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            result = oc._fetch_metar_fast_lane_observation(
+            result = oc._fetch_same_station_fast_tail_observation(
                 city, target_day=date(2026, 6, 12), reference_utc=ref
             )
 
         assert result is not None
-        assert result.source == "metar_fast_lane"
+        assert result.source == "same_station_fast_tail"
         assert result.high_so_far == 85.0
         assert result.low_so_far == 62.0
         assert result.current_temp == 83.0
@@ -226,13 +226,13 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter.latest_extremes.return_value = extremes
 
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            result = oc._fetch_metar_fast_lane_observation(
+            result = oc._fetch_same_station_fast_tail_observation(
                 city, target_day=date(2026, 6, 12), reference_utc=ref
             )
 
         assert result is not None
         ann = result.provider_reported_time or ""
-        assert "day0_obs_source=metar_fast_lane" in ann
+        assert "day0_obs_source=same_station_fast_tail" in ann
         assert "KBKF" in ann
 
     def test_returns_none_when_extremes_is_none(self):
@@ -245,7 +245,7 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter.latest_extremes.return_value = None
 
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            result = oc._fetch_metar_fast_lane_observation(
+            result = oc._fetch_same_station_fast_tail_observation(
                 city, target_day=date(2026, 6, 12), reference_utc=ref
             )
 
@@ -267,7 +267,7 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter.latest_extremes.return_value = extremes
 
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            result = oc._fetch_metar_fast_lane_observation(
+            result = oc._fetch_same_station_fast_tail_observation(
                 city, target_day=date(2026, 6, 12), reference_utc=ref
             )
 
@@ -290,7 +290,7 @@ class TestFetchMetarFastLaneObservation:
         mock_emitter.latest_extremes.return_value = extremes
 
         with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
-            result = oc._fetch_metar_fast_lane_observation(
+            result = oc._fetch_same_station_fast_tail_observation(
                 city, target_day=date(2026, 6, 12), reference_utc=ref
             )
 
@@ -302,8 +302,8 @@ class TestFetchMetarFastLaneObservation:
 # Option B: get_current_observation fast-lane integration
 # ---------------------------------------------------------------------------
 
-class TestGetCurrentObservationFastLaneFallback:
-    """Integration tests: get_current_observation uses fast lane when WU stale."""
+class TestGetCurrentObservationFastTail:
+    """Integration tests: get_current_observation uses same-station tail when WU stale."""
 
     def _wu_stale_context(self, ref_utc):
         """Build a WU context whose observation_time is >1h old."""
@@ -316,8 +316,8 @@ class TestGetCurrentObservationFastLaneFallback:
             observation_available_at=ref_utc.isoformat(),
         )
 
-    def test_stale_wu_fresh_memo_returns_metar_context(self):
-        """B1 integration: stale WU + fresh memo → metar_fast_lane context returned."""
+    def test_stale_wu_fresh_memo_returns_fast_tail_context(self):
+        """B1 integration: stale WU + fresh memo → same_station_fast_tail context returned."""
         city = _wu_icao_city()
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         stale_wu = self._wu_stale_context(ref)
@@ -333,7 +333,7 @@ class TestGetCurrentObservationFastLaneFallback:
             from src.data.observation_client import get_current_observation
             result = get_current_observation(city, target_date=date(2026, 6, 12), reference_time=ref)
 
-        assert result.source == "metar_fast_lane"
+        assert result.source == "same_station_fast_tail"
 
     def test_stale_wu_stale_memo_returns_wu_context(self):
         """B2: stale WU + stale memo → WU context returned (no upgrade possible)."""
@@ -663,38 +663,38 @@ class TestWuPrefixMetarTailFusion:
         return Day0ObservationContext(**base)
 
     def test_fusion_unions_extremes_and_keeps_wu_coverage(self):
-        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        from src.data.observation_client import _fuse_wu_prefix_with_same_station_tail
         wu = self._ctx()  # stale tail, full prefix, max 90
         metar = self._ctx(
-            source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE",
+            source="same_station_fast_tail", coverage_status="WINDOW_INCOMPLETE",
             high_so_far=91.0, low_so_far=75.0, current_temp=91.0,
             observation_time="2026-06-12T22:05:00+00:00", sample_count=8,
             first_sample_time="2026-06-12T21:40:00+00:00",
-            provider_reported_time="day0_obs_source=metar_fast_lane;age_s=120",
+            provider_reported_time="day0_obs_source=same_station_fast_tail;age_s=120",
         )
-        fused = _fuse_wu_prefix_with_metar_tail(wu, metar)
+        fused = _fuse_wu_prefix_with_same_station_tail(wu, metar)
         assert fused is not None
         assert fused.high_so_far == 91.0       # union max (METAR tail higher)
         assert fused.low_so_far == 60.0        # union min (WU morning low)
         assert fused.coverage_status == "OK"   # WU proves the prefix
         assert fused.current_temp == 91.0      # METAR freshness
         assert fused.observation_time == "2026-06-12T22:05:00+00:00"
-        assert fused.source == "metar_fast_lane"
+        assert fused.source == "wu_api+same_station_fast_tail"
         assert "prefix=wu_api" in (fused.provider_reported_time or "")
         assert fused.sample_count == 22
 
     def test_no_fusion_when_wu_cannot_prove_prefix(self):
-        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        from src.data.observation_client import _fuse_wu_prefix_with_same_station_tail
         wu = self._ctx(coverage_status="WINDOW_INCOMPLETE")
-        metar = self._ctx(source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE")
-        assert _fuse_wu_prefix_with_metar_tail(wu, metar) is None
+        metar = self._ctx(source="same_station_fast_tail", coverage_status="WINDOW_INCOMPLETE")
+        assert _fuse_wu_prefix_with_same_station_tail(wu, metar) is None
 
     def test_no_fusion_on_unit_mismatch(self):
-        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        from src.data.observation_client import _fuse_wu_prefix_with_same_station_tail
         wu = self._ctx(unit="F")
-        metar = self._ctx(source="metar_fast_lane", unit="C",
+        metar = self._ctx(source="same_station_fast_tail", unit="C",
                           coverage_status="WINDOW_INCOMPLETE")
-        assert _fuse_wu_prefix_with_metar_tail(wu, metar) is None
+        assert _fuse_wu_prefix_with_same_station_tail(wu, metar) is None
 
     def test_get_current_observation_returns_fused_context(self, monkeypatch):
         """Integration: stale WU + incomplete METAR -> fused OK context, so the
@@ -710,14 +710,14 @@ class TestWuPrefixMetarTailFusion:
         ref = datetime(2026, 6, 12, 22, 10, tzinfo=UTC)
         wu = self._ctx()  # 20:00 obs -> 2.2h old (stale), coverage OK
         metar = self._ctx(
-            source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE",
+            source="same_station_fast_tail", coverage_status="WINDOW_INCOMPLETE",
             high_so_far=91.0, current_temp=91.0,
             observation_time="2026-06-12T22:05:00+00:00",
-            provider_reported_time="day0_obs_source=metar_fast_lane;age_s=120",
+            provider_reported_time="day0_obs_source=same_station_fast_tail;age_s=120",
         )
         monkeypatch.setattr(oc, "_fetch_wu_observation", lambda *a, **k: wu)
         monkeypatch.setattr(
-            oc, "_fetch_metar_fast_lane_observation", lambda *a, **k: metar
+            oc, "_fetch_same_station_fast_tail_observation", lambda *a, **k: metar
         )
         out = oc.get_current_observation(city, target_date=date(2026, 6, 12),
                                          reference_time=ref)

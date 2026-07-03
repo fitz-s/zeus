@@ -12,9 +12,9 @@
 #       window settlement std × k_default — the realized walk-forward floor source)
 #     - src/calibration/emos.py:501 emos_sigma_model (calibrated lead-aware EMOS
 #       dispersion — an internal model-dispersion CANDIDATE component)
-#     - src/data/replacement_forecast_materializer.py:1119
-#       predictive_sigma_c = max(1.0, sqrt(fused.sd² + σ_resid²)) — its constant
-#       1.0 becomes an INTERNAL day0/process candidate component, NEVER the served σ.
+#     - src/data/replacement_forecast_materializer.py:served_predictive_sigma_c
+#       predictive_sigma_c = max(1.0, σ_resid) — the realized fused-center residual
+#       is the served point width; fused.sd is center uncertainty for q_lcb/q_ucb.
 """SigmaAuthority — the single predictive-σ authority for the q-kernel forecast spine.
 
 This is Stage 5 of the q-kernel rebuild. It is the ONE place that decides the
@@ -22,10 +22,11 @@ predictive width σ a live q is served with. No live path may serve a σ below t
 realized walk-forward settlement error for the cell, and no soft-anchor path may
 serve member-vote q without a σ at all.
 
-The defect it replaces (spec lines 423, 1109-1125): the live replacement
-materializer computes ``predictive_sigma_c = max(1.0, sqrt(fused.sd² + σ_resid²))``
-and a constant 1.0°C floor is the final authority on thin substrate. The EMOS
-σ-model is systemically under-dispersed (median σ_emos/σ_settled ≈ 0.49) so a
+The defect it replaces (spec lines 423, 1109-1125): old live replacement
+materializer code computed ``predictive_sigma_c = max(1.0, sqrt(fused.sd² + σ_resid²))``,
+double-counting center uncertainty into the served point width, while a constant
+1.0°C floor was the final authority on thin substrate. The EMOS σ-model is
+systemically under-dispersed (median σ_emos/σ_settled ≈ 0.49) so a
 single under-dispersed degree spikes to ~47% modal one-degree-bin mass — an
 overconfident buy-NO-on-the-winner loss (iron rule 5: overconfidence = ruin).
 
@@ -377,10 +378,10 @@ def day0_remaining_process_sigma(
 ) -> float:
     """The remaining-day process σ (native unit), a CANDIDATE component.
 
-    This is where the live materializer's ``predictive_sigma_c = max(1.0,
-    sqrt(fused.sd² + σ_resid²))`` construction (replacement_forecast_materializer.py
-    :1119) is reproduced — as an INTERNAL candidate, NEVER the served authority. The
-    constant 1.0°C floor folds in here only so this candidate matches the live shape;
+    This is where the old live materializer's ``predictive_sigma_c = max(1.0,
+    sqrt(fused.sd² + σ_resid²))`` construction is retained — as an INTERNAL
+    candidate, NEVER the served authority. The constant 1.0°C floor folds in here
+    only so this candidate remains a conservative process fallback;
     the realized-floor ``max`` in ``build_sigma`` always dominates it on a cell with
     realized history, so the constant 1.0 can never be the final authority (spec line
     423). When neither fused sd nor residual σ is available, the thin-substrate

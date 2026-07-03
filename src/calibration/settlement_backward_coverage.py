@@ -1,10 +1,9 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-14
-# Authority basis: docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md C1+C2 #1 CRITICAL
-#   (live admission must HONOR the K3 INSUFFICIENT_DATA license-by-default; the explicit
-#   settlement_coverage_allows_arm / settlement_coverage_refutes_claim predicates below are the
-#   SINGLE vocabulary the live-admission credential reads, replacing a status-name allowlist that
-#   excluded INSUFFICIENT_DATA and rejected thin-settlement cold cells at submit).
+# Authority basis: K3 coverage measures whether settled history refutes a claimed q_lcb.
+#   ``settlement_coverage_allows_arm`` is an ARM/shrink predicate, not the whole
+#   live-submit license. Thin history does not license settlement coverage, but live
+#   entry may still use a separate conservative-bootstrap q_lcb credential.
 #   docs/evidence/deadloop_2026-06-14/qlcb_suppression.md + operator
 #   RULE 1 (every q_lcb<price rejection is OUR DEFECT until settlement proves otherwise).
 #   2026-06-14 REBUILD: the prior check measured CLIMATOLOGY, not CALIBRATION. The live
@@ -26,11 +25,9 @@
 #   buy_no WIN iff !=. The win/loss STREAM this module consumes is produced there.
 #
 #   RULE-1 INERT-DEFAULT: INSUFFICIENT_DATA (too few independent settled CLAIM days, OR
-#   the per-day claimed-q_lcb history is unavailable) is now LICENSED-BY-DEFAULT: q_lcb
-#   UNCHANGED and the ARM gate does NOT block. The EMOS/MC q_lcb already carries a
-#   conservative LCB floor + N_eff width correction + sigma-shape; this gate is a
-#   PROVEN-OVERCONFIDENCE catch, NOT a default-deny. A gate that blocks for LACK of data
-#   is the suppression RULE 1 forbids.
+#   the per-day claimed-q_lcb history is unavailable) leaves q_lcb unchanged and the ARM
+#   gate does not block because thin data is not proof of overconfidence. This does not
+#   make thin data a live-money submit credential.
 #
 #   K<<N FOLD: the coverage verdict is the EMOS k_cov INPUT (see emos_ci_license),
 #   NOT a 7th coverage flag bolted atop the calibration layers.
@@ -57,9 +54,9 @@ at the claimed band, and return one of:
                       rate minus a 1pp honesty margin; source becomes SETTLEMENT_ISOTONIC.
   INSUFFICIENT_DATA — fewer than ``min_n`` independent settled CLAIM days (or the
                       per-day claimed-q_lcb history is unavailable): q_lcb UNCHANGED
-                      + a WARN. LICENSED-BY-DEFAULT: we never shrink AND never block
-                      arming on thin data — that would be the default-deny suppression
-                      RULE 1 forbids.
+                      + a WARN. The ARM gate does not block on thin data because it is
+                      not proof of overconfidence; live entry may still require stronger
+                      realized evidence.
 
 WHAT CHANGED (2026-06-14): the observation stream now carries the per-day ACTUAL
 claimed q_lcb (varying day to day), NOT one constant stamped on every day. With a
@@ -69,9 +66,7 @@ to its bin's all-history frequency. Measuring the per-day claimed->realized curv
 a CALIBRATION test (P(realize | claimed X)), not a climatology test (P(bin | any day)).
 
 The SHRINK is HIGH risk (it moves the live decision). It is applied to the live
-LCB ONLY through ``apply_settlement_coverage(..., enabled=<flag>)`` with the flag
-``edli.q_lcb_settlement_coverage_gate_enabled``. With the flag OFF the verdict is
-computed but the LCB is byte-identical to today. The shrink is SHRINK-ONLY (one-sided,
+LCB through ``apply_settlement_coverage``. The shrink is SHRINK-ONLY (one-sided,
 only ever LOWERS): there is NO UP arm (P3_architecture.md KILL: N7 bidirectional rewrite).
 
 The ARM gate (``arm_gate_coverage_blocks``) reads the verdict UNCONDITIONALLY — you
@@ -102,22 +97,15 @@ CoverageStatus = Literal["LICENSED", "UNLICENSED", "INSUFFICIENT_DATA"]
 
 
 # ---------------------------------------------------------------------------
-# SINGLE-VOCABULARY ADMISSION PREDICATES (pr408 review C1+C2 #1 CRITICAL, 2026-06-14).
+# SINGLE-VOCABULARY ARM/REFUTATION PREDICATES.
 #
 # The K3 design is explicit (module docstring + arm_gate_coverage_blocks): a settled-record
 # verdict that is LICENSED (calibrated/conservative) or INSUFFICIENT_DATA (thin/absent
 # claim history) is NON-BLOCKING; only UNLICENSED (PROVEN overconfident) refutes a claim.
-# These two predicates ARE that contract — every live-admission consumer (the buy-NO
-# conservative-evidence gate AND the replacement calibration credential in
-# event_reactor_adapter) reads THESE, never a re-derived status-name allowlist. A prior
-# allowlist `{LICENSED, UNLICENSED}` EXCLUDED INSUFFICIENT_DATA and so rejected every
-# thin-settlement cold cell at submit (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) — the exact
-# blocker this contract kills.
 #
-# allows_arm: the status does NOT refute the claim → arming/admission may proceed on the
-#   (possibly shrunk) q_lcb. {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA is
-#   license-by-default: lack of per-day claim history is NOT proof of overconfidence
-#   (RULE 1; blocking on it is the default-deny suppression the rebuild forbids).
+# allows_arm: the status does NOT refute the claim → arming may proceed on the
+#   (possibly shrunk) q_lcb. {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA means
+#   lack of per-day claim history is NOT proof of overconfidence.
 # refutes_claim: the settled record PROVED the claim overconfident → block. {UNLICENSED}.
 #
 # They are EXHAUSTIVE + MUTUALLY EXCLUSIVE over the three real statuses (one is True, the
@@ -131,11 +119,11 @@ _CLAIM_REFUTING_STATUSES = frozenset({"UNLICENSED"})
 
 
 def settlement_coverage_allows_arm(status: str | None) -> bool:
-    """True iff a settled-record VERDICT status permits arming/admission (non-refuting).
+    """True iff a settled-record VERDICT status permits arming (non-refuting).
 
-    {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA is license-by-default (thin/absent
-    claim history is not proof of overconfidence — RULE 1). None / UNEVALUATED / unknown
-    → False (no admitting verdict), but that is NOT a refutation (see ``refutes_claim``).
+    {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA means thin/absent claim history is
+    not proof of overconfidence. None / UNEVALUATED / unknown → False, but that is NOT
+    a refutation (see ``refutes_claim``).
     """
     return str(status or "").strip() in _ARM_ALLOWING_STATUSES
 
@@ -167,8 +155,8 @@ class CoverageObservation:
 class CoverageVerdict:
     """The settlement-backward-coverage verdict for one (city, metric, season).
 
-    Frozen truth object. ``q_lcb_out`` is the shrink TARGET (only applied to the
-    live LCB when the shadow flag is ON, via ``apply_settlement_coverage``).
+    Frozen truth object. ``q_lcb_out`` is the shrink TARGET applied to the live
+    LCB by ``apply_settlement_coverage``.
     ``coverage_ratio`` = realized / claimed (None when INSUFFICIENT). The ARM gate
     reads ``status`` + ``coverage_ratio`` directly.
     """
@@ -238,19 +226,18 @@ def settlement_backward_coverage_check(
 
     Returns:
         A ``CoverageVerdict``. INSUFFICIENT_DATA when n < min_n (q_lcb unchanged + WARN,
-        LICENSED-by-default: never shrink, never block arming — proven-overconfidence is
-        the only thing this gate refuses, and thin data is not proof). UNLICENSED ONLY on
-        PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
-        realized-1pp). LICENSED when realized >= claimed - tol (calibrated or conservative;
-        q_lcb unchanged).
+        non-refuting for ARM/shrink; not a settlement-coverage license). UNLICENSED ONLY
+        on PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
+        realized-1pp). LICENSED when realized >= claimed - tol (calibrated or
+        conservative; q_lcb unchanged).
     """
     obs = list(observations)
     n = len(obs)
     if n < min_n:
         logger.warning(
-            "settlement coverage INSUFFICIENT_DATA (LICENSED-by-default; q_lcb unchanged, "
-            "ARM not blocked) city=%s metric=%s season=%s q_lcb=%.4f: n=%d < min_n=%d — "
-            "MC LCB stands; this gate is a proven-overconfidence catch, not a default-deny",
+            "settlement coverage INSUFFICIENT_DATA (non-refuting; not a "
+            "settlement-coverage license) city=%s metric=%s season=%s q_lcb=%.4f: "
+            "n=%d < min_n=%d — conservative q_lcb remains its own credential",
             city, metric, season, float(q_lcb), n, min_n,
         )
         return CoverageVerdict(
@@ -301,20 +288,12 @@ def apply_settlement_coverage(
     *,
     q_lcb: float,
     verdict: CoverageVerdict,
-    enabled: bool,
 ) -> float:
-    """Apply the coverage verdict to a live q_lcb — gated by the shadow flag.
-
-    SHADOW SAFETY: when ``enabled`` is False the shrink is NOT applied; the input
-    q_lcb is returned unchanged (byte-identical to legacy) even on an UNLICENSED
-    verdict. The verdict is still computed and observable — it just does not move
-    the live decision. Only ``enabled=True`` + ``status == "UNLICENSED"`` shrinks.
+    """Apply the coverage verdict to a live q_lcb.
 
     The 1-arg verdict is trusted to be for THIS q_lcb (verdict.q_lcb_in == q_lcb);
     LICENSED / INSUFFICIENT_DATA are no-ops by construction (q_lcb_out == q_lcb_in).
     """
-    if not enabled:
-        return float(q_lcb)
     if verdict.status == "UNLICENSED":
         # Never widen: the shrink only ever LOWERS the LCB (one-sided honesty).
         return float(min(float(q_lcb), float(verdict.q_lcb_out)))
@@ -349,9 +328,8 @@ def arm_gate_coverage_blocks(verdict: CoverageVerdict) -> tuple[bool, str]:
     Returns (blocked, reason). blocked=False + reason="" means the gate passes.
     """
     # SINGLE-VOCABULARY dispatch (pr408 #1): the refutation rule lives in ONE predicate,
-    # shared with the live-admission credential, so the two seams can never diverge on what
-    # "the settled record refutes the claim" means. UNLICENSED is the only refuting status;
-    # LICENSED / INSUFFICIENT_DATA do NOT block (license-by-default on thin data).
+    # UNLICENSED is the only refuting status; LICENSED / INSUFFICIENT_DATA do not block
+    # the ARM gate because thin data is not proof of overconfidence.
     if settlement_coverage_refutes_claim(verdict.status):
         return (
             True,

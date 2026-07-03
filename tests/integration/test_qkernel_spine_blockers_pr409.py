@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-29
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -10,8 +10,8 @@
 #     2. route identity: PROOF-NATIVE single-leg routing (maker AND taker), edge from
 #        the proof's own execution_price (NOT the negrisk ask ladder); synthetic/arb
 #        disabled; non-direct selection refused.
-#     3. day0 hard-block: QKERNEL_DAY0_NOT_WIRED on _DAY0_LANE_EVENT_TYPES BEFORE the
-#        spine call.
+#     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
+#        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
@@ -46,6 +46,43 @@ DECISION_TIME = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
 def _fast_band_draws(monkeypatch):
     """Lower the band draw count for a fast, deterministic smoke (logic unchanged)."""
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fully_licensed_selection_calibrator(monkeypatch):
+    """Keep qkernel integration fixtures independent from the generated live artifact.
+
+    The q_lcb OOF reliability guard and the selection calibrator are separate live gates. These
+    tests exercise qkernel route math, so they install a deep YES/NO selection artifact unless an
+    individual test intentionally monkeypatches ``family_decision_engine.apply_selection_calibrator``.
+    """
+
+    from src.decision import selection_calibrator as sc
+
+    cells: dict[str, dict[str, float | int]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for bin_class in ("modal", "nonmodal"):
+                for pb in range(len(sc.RAW_PROB_BUCKET_EDGES) - 1):
+                    cells[f"{side}|{lead}|{bin_class}|pb{pb}"] = {
+                        "n": 1000,
+                        "hit_rate": 0.95,
+                    }
+    artifact = {
+        "_meta": {
+            "authority": "selection_calibrator_v1_walkforward",
+            "version": "sel_v1",
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+            "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
+        },
+        "cells": cells,
+    }
+    monkeypatch.setattr(sc, "load_artifact", lambda: artifact)
+    sc.reset_artifact_cache()
+    yield
+    sc.reset_artifact_cache()
 
 
 def _install_sigma_floor_artifact(monkeypatch, tmp_path, *, sigma_floor_c: float = 1.0):
@@ -295,11 +332,20 @@ def _payload(*, mu, sigma, members, source_cycle=SOURCE_CYCLE_TIME_UTC):
     return p
 
 
-def _drive(family, proofs, payload, *, decision_time=DECISION_TIME, extra_exposure=None):
+def _drive(
+    family,
+    proofs,
+    payload,
+    *,
+    decision_time=DECISION_TIME,
+    extra_exposure=None,
+    selection_proofs=None,
+):
     return bridge.decide_family_via_spine(
         family=family,
         payload=payload,
         proofs=proofs,
+        selection_proofs=selection_proofs,
         decision_time=decision_time,
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         candidate_bin_id=era._candidate_bin_id,
@@ -409,7 +455,8 @@ def test_forecast_lead_buckets_beyond_24h_are_admitted():
     spine's own edge_lcb>0 gate is a strictly HIGHER edge bar). The prior 24h-only restriction
     was tied to the settlement-EV replay the operator DELETED; calibration is validated by the
     settlement-σ coverage + edge_lcb>0, not a bucket whitelist. day0 (lead<24h) stays excluded
-    (no Day0Reader; routes to legacy) — covered by the day0→legacy seam test.
+    (no Day0Reader; routes to the Day0 observation lane) — covered by the
+    day0 seam test.
 
     RED-on-revert: re-adding the `!= REPLAYED_LEAD_BUCKET` restriction makes a 96h_plus case a
     lead-bucket no-trade again, failing the assertion below.
@@ -538,8 +585,8 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
         # YES mids are coherent with the live sigma-floor distribution around 20C.
         yes_asks=[0.13, 0.24, 0.27, 0.24, 0.13],
         no_asks=[0.87, 0.76, 0.73, 0.76, 0.87],
-        q_by_bin=[0.12, 0.23, 0.30, 0.23, 0.12],
-        q_lcb_by_bin=[0.08, 0.18, 0.25, 0.18, 0.08],
+        q_by_bin=[0.0, 0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.0, 0.999, 0.0, 0.0],
         no_execution_prices=[0.87, 0.74, 0.73, 0.74, 0.87],
     )
     payload = _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20])
@@ -565,7 +612,7 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
 def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypatch, tmp_path):
     """Empirical q_lcb guard is the model-superiority license consumed by coherence.
 
-    Regression: market coherence used the default "license nothing" predicate, so a cheap
+    Regression: market coherence used the default "license nothing" predicate, so a live-floor
     center YES with positive guarded edge/Delta-U could be blocked solely because the deep
     market disagreed. That preserved the all-NO failure mode in Shanghai-style families.
     """
@@ -581,10 +628,10 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
     family, _bins = _three_bin_family()
     proofs = _proofs_for(
         family,
-        yes_asks=[0.90, 0.05, 0.90, 0.90],
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
         no_asks=[0.79, 0.90, 0.80, 0.95],
-        q_by_bin=[0.10, 0.80, 0.10, 0.00],
-        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
         no_execution_prices=[0.79, 0.90, 0.80, 0.95],
     )
 
@@ -607,18 +654,33 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
     assert selected_decision.coherence_allows is True
 
 
-def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypatch):
-    """Point-bin q uses the reactor-served sigma, not a rebuilt generic fallback.
+def test_sparse_pooled_oof_does_not_crush_strong_modal_yes_qkernel_edge(monkeypatch):
+    """Sparse pooled-tail OOF evidence must not turn a superior center YES into adjacent NO.
 
-    Regression: the bridge threaded ``sigma=0.05`` but the generic predictive builder
-    rebuilt a 1.5C fallback width before q integration. That spread most mass out of the
-    center point-bin preimage, making adjacent NO legs look better than the cheap center
-    YES in Shanghai-style families.
+    This is the Shanghai-class live failure: the served qkernel proof says the
+    modal point bin has q=0.80 and qLCB=0.65 at a 0.27 YES cost, while adjacent
+    NO substitutes have only thin positive edges. A sparse high-qLCB OOF table
+    may license the modal YES as a known claim family, but it must not overwrite
+    the exact served qLCB with a much lower pooled bucket and thereby force the
+    selector back into an inferior NO expression.
     """
+
     from src.decision import qlcb_reliability_guard as guard_mod
 
-    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
-    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    sparse_cells: dict[str, tuple[int, float]] = {}
+    for precision in ("fine_nest", "coarse_global"):
+        sparse_cells.update(
+            {
+                f"high|L2_3|YES|modal|qb5|{precision}": (64, 0.3125),
+                f"high|L2_3|YES|modal|qb6|{precision}": (23, 0.391304347826087),
+                f"high|L2_3|YES|modal|qb7|{precision}": (10, 0.4),
+            }
+        )
+        for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+            sparse_cells[f"high|L2_3|NO|nonmodal|qb{qb}|{precision}"] = (1000, 0.95)
+            sparse_cells[f"high|L2_3|YES|nonmodal|qb{qb}|{precision}"] = (1000, 0.95)
+
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", sparse_cells)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
 
@@ -639,6 +701,54 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
     )
 
     assert result.no_trade_reason is None
+    assert result.selected_proof is not None
+    assert result.selected_proof.direction == "buy_yes"
+    assert result.selected_proof.candidate.bin.label == "20C"
+    center_yes = next(
+        d
+        for d in result.decision.candidate_decisions
+        if d.route.side == "YES"
+        and d.route.bin_id == era._candidate_bin_id(result.selected_proof)
+    )
+    assert center_yes.q_lcb_guard_basis == "OOF_WILSON_95_POOLED_TAIL"
+    assert center_yes.coherence_allows is True
+    assert center_yes.economics.payoff_q_lcb == pytest.approx(0.65)
+    assert center_yes.economics.edge_lcb == pytest.approx(0.38)
+    assert center_yes.economics.optimal_delta_u > 0.0
+
+
+def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypatch):
+    """Point-bin q uses the reactor-served sigma, not a rebuilt generic fallback.
+
+    Regression: the bridge threaded ``sigma=0.05`` but the generic predictive builder
+    rebuilt a 1.5C fallback width before q integration. That spread most mass out of the
+    center point-bin preimage, making adjacent NO legs look better than the cheap center
+    YES in Shanghai-style families.
+    """
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20]),
+    )
+
+    assert result.no_trade_reason is None
     assert result.decision is not None
     assert result.decision.predictive.sigma_native == pytest.approx(0.05)
     q_by_label = {
@@ -649,6 +759,74 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
     assert result.selected_proof is not None
     assert result.selected_proof.direction == "buy_yes"
     assert result.selected_proof.candidate.bin.label == "20C"
+
+
+def test_unarmed_nonmodal_yes_tail_is_abstained_before_selection(monkeypatch):
+    """Cheap nonmodal YES tails require selected-side evidence before live submit.
+
+    Regression: legacy selection artifacts were NO-only, but returned an identity
+    q_safe for unarmed YES. The qkernel then treated a very cheap tail YES as
+    executable alpha even though no selected-side empirical evidence licensed it.
+    """
+    from src.decision import family_decision_engine as fde
+    from src.decision import qlcb_reliability_guard as guard_mod
+    from src.decision.selection_calibrator import CalibratorVerdict
+
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    def _fake_selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+        return CalibratorVerdict(
+            q_safe=float(raw_side_prob),
+            trade=True,
+            abstained=False,
+            cell_key=f"fake|{side}|{bin_class}",
+            L_g=float("nan"),
+            n_g=0,
+            basis="SIDE_NOT_ARMED" if str(side).upper() == "YES" else "SELECTION_BETA_95",
+        )
+
+    monkeypatch.setattr(fde, "apply_selection_calibrator", _fake_selection_guard)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.90, 0.90, 0.01],
+        no_asks=[0.99, 0.99, 0.99, 0.99],
+        q_by_bin=[0.04, 0.42, 0.41, 0.13],
+        q_lcb_by_bin=[0.02, 0.28, 0.27, 0.08],
+        no_execution_prices=[0.99, 0.99, 0.99, 0.99],
+    )
+    tail_proof = next(
+        proof
+        for proof in proofs
+        if proof.direction == "buy_yes" and proof.candidate.bin.label == "22C or above"
+    )
+    tail_bin_id = era._candidate_bin_id(tail_proof)
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.5, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 21.2]),
+    )
+
+    assert result.decision is not None
+    tail_decisions = [
+        decision
+        for decision in result.decision.candidate_decisions
+        if decision.route.side == "YES" and decision.route.bin_id == tail_bin_id
+    ]
+    assert tail_decisions
+    tail_decision = tail_decisions[0]
+    assert tail_decision.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert tail_decision.selection_guard_abstained is True
+    assert tail_decision.selection_guard_q_safe == 0.0
+    assert tail_decision.economics.edge_lcb < 0.0
+    assert float(tail_decision.economics.optimal_stake_usd) == 0.0
+    if result.selected_proof is not None:
+        assert result.selected_proof.token_id != tail_proof.token_id
 
 
 def test_non_direct_selection_is_refused_as_typed_no_trade():
@@ -677,29 +855,17 @@ def test_non_direct_selection_is_refused_as_typed_no_trade():
 
 
 # ===========================================================================
-# BLOCKER 3 — day0 routes to LEGACY, never to the spine (no day0 revenue-lane
-# regression). The spine bridge reads no day0 observation (_NoDay0Reader), so a
-# day0 family must NOT be decided by the spine — but it MUST still trade via the
-# existing, tested legacy day0 lane. The earlier hard-block (a typed
-# QKERNEL_DAY0_NOT_WIRED no-trade) both killed the day0 lane and churned the
-# money-path requeue every cycle (live monitor: QKERNEL_DAY0_NOT_WIRED storm),
-# so it is replaced by day0 -> legacy fall-through.
+# BLOCKER 3 — day0 is an observed-boundary input to the same qkernel family optimizer.
 # ===========================================================================
-def test_day0_event_type_is_in_day0_lane_and_excluded_from_forecast_lane():
-    """The reactor's module-level lanes: DAY0_EXTREME_UPDATED is the day0 lane and is NOT
-    a forecast decision type. The seam routes the day0 lane to LEGACY (not the spine).
-    """
+def test_day0_event_type_is_in_day0_lane_not_forecast_event_type():
+    """DAY0 remains a distinct authority lane while still being qkernel-decidable."""
     assert "DAY0_EXTREME_UPDATED" in era._DAY0_LANE_EVENT_TYPES
     assert "DAY0_EXTREME_UPDATED" not in era._FORECAST_DECISION_EVENT_TYPES
     assert "FORECAST_SNAPSHOT_READY" in era._FORECAST_DECISION_EVENT_TYPES
 
 
-def test_reactor_seam_routes_day0_to_legacy_not_spine():
-    """Structural RED-on-revert: the reactor seam EXCLUDES the day0 lane from the spine
-    (so day0 falls through to the legacy ``_selected_candidate_proof`` decision path) and
-    no longer emits the QKERNEL_DAY0_NOT_WIRED hard-block. If the hard-block is
-    re-introduced — or the ``not _is_day0_event`` exclusion is dropped — this fails.
-    """
+def test_reactor_seam_routes_day0_through_qkernel_with_observed_boundary():
+    """Day0 uses the same qkernel selector with a live observed-boundary input."""
     import inspect
 
     src = inspect.getsource(era)
@@ -707,20 +873,144 @@ def test_reactor_seam_routes_day0_to_legacy_not_spine():
     assert "_is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES" in src, (
         "the day0 lane gate is missing from the reactor seam"
     )
-    # The spine runs ONLY on a forecast-eligible, NON-day0 event — day0 is excluded
-    # and falls through to the legacy decision path.
-    assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" in src, (
-        "the day0 exclusion from the spine call is missing (day0 would regress to the spine)"
+    assert "_FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES" in src
+    assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" not in src
+    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src
+    assert "event_bound_legacy_selector" not in src
+    # Forecast/Day0 flag-off must no-trade; neither may use the legacy selector as fallback.
+    assert "if _spine_eligible_event and not _spine_flag_on" in src
+    assert '_spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"' in src
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
     )
-    # The QKERNEL_DAY0_NOT_WIRED hard-block no-trade must NOT be emitted at the seam.
-    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src, (
-        "the QKERNEL_DAY0_NOT_WIRED hard-block was re-introduced — day0 must route to legacy, "
-        "not to a typed no-trade (that killed the day0 lane and churned the money-path requeue)"
+    payload = _payload(mu=20.0, sigma=1.0, members=[19.8, 20.0, 20.2])
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-14T10:00:00Z",
+            "observation_available_at": "2026-06-14T10:01:00Z",
+        }
     )
-    # The legacy selector is the fall-through decision authority (day0 + flag-off both use it).
-    assert "_selected_candidate_proof(" in src, (
-        "the legacy decision path day0 falls through to is missing from the seam"
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    assert result.decision.predictive.day0.active is True
+    assert result.decision.predictive.day0.status == "HIGH_CLAMPED"
+    assert result.selected_proof is not None
+    assert result.selected_proof.qkernel_execution_economics["source"] == "qkernel_spine"
+
+
+def test_day0_single_remaining_member_threads_process_sigma_to_spine():
+    """A single remaining-day hourly model is valid Day0 evidence and must still carry sigma.
+
+    Live failure being guarded: remaining-day q often had one global fallback model, so the
+    empirical member std branch never wrote ``_edli_spine_sigma_native`` and qkernel emitted
+    ``SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED`` before the legacy Day0 selector wrote a
+    misleading legacy selection fact.
+    """
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    payload = _payload(mu=20.0, sigma=0.0, members=[20.0], source_cycle=DECISION_TIME.isoformat())
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-13T11:30:00Z",
+            "observation_available_at": "2026-06-13T11:31:00Z",
+            "_edli_q_source": "day0_remaining_day",
+        }
     )
+    sigma = era._day0_process_sigma_native(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=DECISION_TIME,
+    )
+    assert sigma is not None and sigma > 0.0
+    payload["_edli_spine_sigma_native"] = sigma
+    payload["_edli_spine_day0_sigma_basis"] = "remaining_day_member_spread_plus_obs_process"
+    payload["_edli_spine_source_cycle_time_utc"] = DECISION_TIME.isoformat()
+
+    assert bridge._spine_inputs_missing_reason(payload) == "UNKNOWN"
+
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
+    )
+    result = _drive(family, proofs, payload)
+    assert result.no_trade_reason is None or "MU_SIGMA_NOT_STASHED" not in result.no_trade_reason
+    assert result.decision is not None
+
+
+def test_spine_accepts_day0_event_type_from_payload_when_family_event_type_is_generic():
+    """The live event payload is enough to activate the Day0 observed-boundary input."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
+    )
+    payload = _payload(mu=20.0, sigma=1.0, members=[19.8, 20.0, 20.2])
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-14T10:00:00Z",
+            "observation_available_at": "2026-06-14T10:01:00Z",
+        }
+    )
+
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    assert result.decision.predictive.day0.active is True
+    assert result.selected_proof is not None
 
 
 # ===========================================================================
@@ -816,23 +1106,322 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
         assert exposure[bin_id] == 12.0
 
 
+def test_selection_exposure_includes_quarantined_chain_backed_position():
+    """Quarantined chain-backed exposure must still shape family selection.
+
+    A local quarantine label is not proof that the venue exposure is gone when
+    chain_state still asserts current money risk. The selection exposure map
+    must see that old NO payoff before choosing a sibling route.
+    """
+    from types import SimpleNamespace
+
+    from src.state.portfolio import Position
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    position = Position(
+        trade_id="munich-30c",
+        market_id="m",
+        city=family.city,
+        cluster="eu",
+        target_date=family.target_date,
+        bin_label="30C",
+        direction="buy_no",
+        state="quarantined",
+        chain_state="entry_authority_quarantined",
+        condition_id="cond-1",
+        chain_shares=29.14,
+        chain_cost_basis_usd=21.27,
+        chain_avg_price=0.73,
+        fill_authority="venue_position_observed",
+    )
+    state = SimpleNamespace(positions=[position])
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(21.27)
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == pytest.approx(21.27)
+
+
+def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
+    """The canonical trade DB path must not depend on an in-memory portfolio provider.
+
+    Restart/recovery adapter constructions can have ``held_position_conn`` but no
+    provider. Munich-style chain-backed NO exposure must still shape the next
+    family selection in that shape.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+            CREATE TABLE position_current (
+                condition_id TEXT,
+                direction TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_cost_basis_usd REAL
+            )
+        """
+    )
+    conn.execute(
+        """
+            INSERT INTO position_current (
+                condition_id, direction, phase, chain_state, chain_shares, chain_cost_basis_usd
+            ) VALUES ('cond-1', 'buy_no', 'quarantined', 'entry_authority_quarantined', 29.14, 21.27)
+            """
+        )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(21.27)
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == pytest.approx(21.27)
+
+
+def test_opportunity_book_receipt_records_selection_exposure():
+    """The live receipt must prove which family exposure shaped qkernel selection."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    exposure = {
+        era._candidate_bin_id(proofs[0]): 12.0,
+        utility_ranker.OUTSIDE_OUTCOME: 12.0,
+    }
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt-selection-exposure",
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proofs[0],
+        selection_exposure_by_outcome=exposure,
+    )
+
+    summary = book.to_receipt_dict()["cache_summary"]["selection_exposure"]
+    assert summary["source"] == "position_current_family_selection_exposure"
+    assert summary["nonzero_outcome_count"] == 2
+    assert summary["total_exposure_usd"] == pytest.approx(24.0)
+    assert summary["max_outcome_exposure_usd"] == pytest.approx(12.0)
+    assert summary["by_outcome_usd"][utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(12.0)
+
+
+def test_opportunity_book_receipt_records_checked_empty_selection_exposure():
+    """Empty family exposure is explicit evidence, not an omitted receipt field."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt-selection-exposure-empty",
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proofs[0],
+        selection_exposure_by_outcome={},
+    )
+
+    summary = book.to_receipt_dict()["cache_summary"]["selection_exposure"]
+    assert summary["source"] == "position_current_family_selection_exposure"
+    assert summary["status"] == "checked_empty"
+    assert summary["nonzero_outcome_count"] == 0
+    assert summary["total_exposure_usd"] == pytest.approx(0.0)
+    assert summary["by_outcome_usd"] == {}
+
+
+def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():
+    """Same city/date/metric exposure cannot flatten to zero when topology split hides it.
+
+    Munich-style adjacent-NO losses can happen when an already-held sibling
+    position belongs to the same weather family but its condition_id is absent
+    from the current bound topology/proof set. That is not an empty portfolio;
+    it is missing family-risk evidence, so live selection must fail closed.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                direction TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_cost_basis_usd REAL
+            )
+        """
+    )
+    conn.execute(
+        """
+            INSERT INTO position_current (
+                city, target_date, temperature_metric, condition_id, direction,
+                phase, chain_state, chain_shares, chain_cost_basis_usd
+            ) VALUES (?, ?, ?, 'foreign-cond', 'buy_no', 'active', 'synced', 29.14, 21.27)
+        """,
+        (family.city, family.target_date, family.metric),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "EDLI_SELECTION_EXPOSURE_UNAVAILABLE:RuntimeError:"
+            "SAME_FAMILY_POSITION_NOT_IN_TOPOLOGY"
+        ),
+    ):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
+def test_selection_exposure_excludes_chain_absent_quarantine():
+    """Confirmed chain absence must not be reintroduced as live family exposure."""
+    from types import SimpleNamespace
+
+    from src.state.portfolio import Position
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    position = Position(
+        trade_id="munich-30c-chain-absent",
+        market_id="m",
+        city=family.city,
+        cluster="eu",
+        target_date=family.target_date,
+        bin_label="30C",
+        direction="buy_no",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        condition_id="cond-1",
+        chain_shares=29.14,
+        chain_cost_basis_usd=21.27,
+        chain_avg_price=0.73,
+        fill_authority="venue_position_observed",
+    )
+    state = SimpleNamespace(positions=[position])
+
+    assert era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    ) == {}
+
+
+def test_selection_exposure_fails_closed_when_trade_db_truth_unreadable():
+    """A supplied canonical trade DB must not flatten to empty exposure on schema loss."""
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE position_current (phase TEXT)")
+
+    with pytest.raises(RuntimeError, match="EDLI_SELECTION_EXPOSURE_UNAVAILABLE"):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
 # ===========================================================================
-# BLOCKER 5 — the spine->legacy overlay must not write payoff-space economics into
-# receipt-facing selected-side probability fields. qkernel is the selection authority, but
-# q_posterior/q_lcb_5pct remain the reactor proof's selected-side probability contract.
-# Writing q_dot_payoff/edge_lcb+cost into those fields created Milan-style contradictions
-# where a buy_yes proof carried a NO-like lower bound. The overlay updates selection score
-# provenance only.
+# BLOCKER 5 — the spine->legacy overlay must write one coherent qkernel-selected
+# probability authority into the proof fields consumed by receipts, submit, monitor, and
+# redecision. ``payoff_q_lcb`` is produced by the payoff-vector layer itself; the bridge
+# must not reverse-derive probability by adding cost back to an edge.
 # ===========================================================================
-def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
+def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev, side="NO"):
     """A minimal spine ``CandidateEconomics`` for the overlay."""
     from decimal import Decimal as _D
 
     from src.contracts.execution_price import ExecutionPrice
     from src.decision.payoff_vector import CandidateEconomics
 
+    route_side = "YES" if str(side).upper() == "YES" else "NO"
     return CandidateEconomics(
-        candidate_id="NO:b1:DIRECT_NO:b1@proof",
+        candidate_id=f"{route_side}:b1:DIRECT_{route_side}:b1@proof",
         point_ev=float(point_ev),
         edge_lcb=float(edge_lcb),
         delta_u_at_min=0.01,
@@ -843,11 +1432,24 @@ def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
             float(cost), price_type="fee_adjusted", fee_deducted=True,
             currency="probability_units",
         ),
-        route_id="DIRECT_NO:b1@proof",
+        route_id=f"DIRECT_{route_side}:b1@proof",
+        payoff_q_lcb=float(edge_lcb) + float(cost),
     )
 
 
-def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", missing_reason=None):
+def _overlay_proof(
+    *,
+    q_posterior,
+    q_lcb_5pct,
+    economics,
+    direction="buy_no",
+    missing_reason=None,
+    direction_law_ok=True,
+    coherence_allows=True,
+    q_lcb_guard_basis="OOF_WILSON_95",
+    q_lcb_guard_abstained=False,
+    q_lcb_guard_cell_key=None,
+):
     """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
     from dataclasses import replace
     from types import SimpleNamespace
@@ -879,9 +1481,20 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", mi
     selected_decision = SimpleNamespace(
         economics=economics,
         route=selected_route,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="cell",
+        q_lcb_guard_basis=q_lcb_guard_basis,
+        q_lcb_guard_abstained=q_lcb_guard_abstained,
+        q_lcb_guard_cell_key=(
+            q_lcb_guard_cell_key
+            if q_lcb_guard_cell_key is not None
+            else f"high|L2_3|{selected_route.side}|test|qb1|coarse_global"
+        ),
+        direction_law_ok=direction_law_ok,
+        coherence_allows=coherence_allows,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key=f"{selected_route.side}|L2_3|modal|pb4",
+        selection_guard_n=80,
+        selection_guard_q_safe=max(float(economics.q_dot_payoff) - 0.01, 0.001),
     )
     decision = SimpleNamespace(
         selected=economics,
@@ -891,53 +1504,715 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", mi
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 
-def test_overlay_preserves_probability_fields_and_updates_score():
-    """qkernel controls selection score, not receipt-facing probability authority.
-
-    The observed live Milan bug was created by writing payoff-space spine economics into
-    q_posterior/q_lcb_5pct, producing a buy_yes receipt with a NO-like lower bound. The
-    overlay must preserve the reactor proof's selected-side probability fields.
-    """
+def test_overlay_uses_qkernel_probability_fields_and_updates_score():
+    """qkernel route economics may tighten the lower bound on the same served belief."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
-    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+    new_proof = _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.10, economics=economics)
 
-    assert new_proof.q_posterior == pytest.approx(0.80)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.990)
+    assert new_proof.q_posterior == pytest.approx(0.202)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
     assert new_proof.trade_score == pytest.approx(0.050)
     assert new_proof.q_source != "qkernel_spine"
     assert new_proof.selection_authority_applied == "qkernel_spine"
     assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
         0.052
     )
+    assert new_proof.qkernel_execution_economics["payoff_q_point"] == pytest.approx(
+        0.202
+    )
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
-
-
-def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
-    """A spine-positive selected proof must not remain a legacy-rejected loser.
-
-    Shanghai-style regressions had qkernel choose the center YES, but the proof
-    still carried a pre-spine direction/capital veto. CandidateEvaluation.admitted
-    requires missing_reason is None, so the opportunity book serialized the live
-    qkernel winner as a rejected loser.
-    """
-    economics = _selected_economics(
-        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
+        0.202
     )
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
+        0.10
+    )
+    assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
+    assert new_proof.qkernel_execution_economics["probability_authority"] == (
+        "qkernel_payoff_direct_route"
+    )
+
+
+def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():
+    """A direct route cannot mint a qkernel probability from a different q-space."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+    )
+
     new_proof = _overlay_proof(
         q_posterior=0.80,
-        q_lcb_5pct=0.65,
+        q_lcb_5pct=0.001,
+        economics=economics,
+    )
+
+    assert new_proof is None
+
+
+def test_overlay_rejects_qkernel_lcb_that_loosens_served_belief():
+    """A qkernel direct route can tighten, but not raise, the served lower bound."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+    )
+
+    new_proof = _overlay_proof(
+        q_posterior=0.202,
+        q_lcb_5pct=0.02,
+        economics=economics,
+    )
+
+    assert new_proof is None
+
+
+def test_overlay_live_direct_no_uses_qkernel_probability_authority():
+    """Direct NO sizing uses the qkernel payoff pair after served-belief identity guards."""
+
+    economics = _selected_economics(
+        edge_lcb=0.22226499587493073,
+        cost=0.65,
+        q_dot_payoff=0.9154395759428866,
+        point_ev=0.26543957594288655,
+        side="NO",
+    )
+
+    new_proof = _overlay_proof(
+        q_posterior=0.9154395759428866,
+        q_lcb_5pct=0.90,
+        economics=economics,
+        direction="buy_no",
+    )
+
+    assert new_proof is not None
+    assert new_proof.q_posterior == pytest.approx(0.9154395759428866)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.8722649958749307)
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
+        0.9154395759428866
+    )
+
+
+def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
+    """No-trade receipts must not show stale scalar gates after qkernel scores a leg."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-qk-reject",
+        yes_token="yes-qk-reject",
+        no_token="no-qk-reject",
+        yes_ask=0.01,
+        no_ask=0.99,
+        snapshot_id="snap-qk-reject",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-reject",
+        q_posterior=0.02,
+        q_lcb_5pct=0.000001,
+        bin_obj=Bin(low=33.0, high=33.0, unit="C", label="33C"),
+    )
+    proof = replace(
+        proof,
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.9",
+        passed_prefilter=False,
+        trade_score=0.0,
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-reject",
+        "receipt_hash": "receipt-qk-reject",
+        "candidate_id": "YES:b33:DIRECT_YES:b33@proof",
+        "route_id": "DIRECT_YES:b33@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.061,
+        "payoff_q_lcb": 0.012,
+        "edge_lcb": 0.002,
+        "point_ev": 0.051,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "2.5",
+        "optimal_delta_u": 0.001,
+        "q_dot_payoff": 0.061,
+        "cost": 0.270,
+        "direction_law_ok": False,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb0|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.q_posterior == pytest.approx(0.02)
+    assert annotated.q_lcb_5pct == pytest.approx(0.000001)
+    assert annotated.trade_score == 0.0
+    assert annotated.passed_prefilter is False
+    assert annotated.missing_reason == "QKERNEL_DIRECTION_LAW_REJECTED:side=YES"
+    assert annotated.selection_authority_applied is None
+    assert annotated.qkernel_execution_economics == {
+        **cert,
+        "pre_qkernel_q_posterior": pytest.approx(0.02),
+        "pre_qkernel_q_lcb_5pct": pytest.approx(0.000001),
+        "q_lcb_authority": "qkernel_payoff_bound",
+        "probability_authority": "qkernel_payoff_direct_route",
+    }
+
+
+def test_qkernel_receipt_annotation_uses_direct_no_qkernel_probability():
+    """Non-selected receipt annotations record qkernel economics in the same q-space."""
+
+    row = _row(
+        condition_id="cond-qk-loosened-no",
+        yes_token="yes-qk-loosened-no",
+        no_token="no-qk-loosened-no",
+        yes_ask=0.36,
+        no_ask=0.65,
+        snapshot_id="snap-qk-loosened-no",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-qk-loosened-no",
+        q_posterior=0.9154395759428866,
+        q_lcb_5pct=0.90,
+        bin_obj=Bin(low=29.0, high=29.0, unit="C", label="29C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-loosened-no",
+        "receipt_hash": "receipt-qk-loosened-no",
+        "candidate_id": "NO:b29:DIRECT_NO:b29@proof",
+        "route_id": "DIRECT_NO:b29@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.9154395759428866,
+        "payoff_q_lcb": 0.8722649958749307,
+        "edge_lcb": 0.22226499587493073,
+        "point_ev": 0.26543957594288655,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "20.0",
+        "optimal_delta_u": 0.012,
+        "q_dot_payoff": 0.9154395759428866,
+        "cost": 0.65,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb8|coarse_global",
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "NO|L2_3|nonmodal|pb8",
+        "selection_guard_n": 80,
+        "selection_guard_q_safe": 0.85,
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
+    )
+
+    assert annotated.passed_prefilter is True
+    assert annotated.trade_score == pytest.approx(0.22226499587493073)
+    assert annotated.missing_reason is None
+    assert annotated.q_posterior == pytest.approx(0.9154395759428866)
+    assert annotated.q_lcb_5pct == pytest.approx(0.8722649958749307)
+    assert annotated.qkernel_execution_economics["probability_authority"] == (
+        "qkernel_payoff_direct_route"
+    )
+
+
+def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_candidate():
+    """Receipt annotation must not preserve the removed 5% direct-ROI hard hurdle.
+
+    Regression: live 2026-06-30 produced NO_ROI_FRONTIER_USEFUL_CANDIDATE for a candidate
+    with positive edge_lcb, positive DeltaU, positive min-order DeltaU, q_lcb around 0.779,
+    and about $2.13 lower-bound profit. The selected-spine engine now admits this shape into
+    the ROI frontier, so the non-selected receipt annotation must use the same predicate.
+    """
+
+    row = _row(
+        condition_id="cond-qk-live-profit-no",
+        yes_token="yes-qk-live-profit-no",
+        no_token="no-qk-live-profit-no",
+        yes_ask=0.25,
+        no_ask=0.76,
+        snapshot_id="snap-qk-live-profit-no",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-qk-live-profit-no",
+        q_posterior=0.85972,
+        q_lcb_5pct=0.77877,
+        bin_obj=Bin(low=25.0, high=25.0, unit="C", label="25C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-live-profit-no",
+        "receipt_hash": "receipt-qk-live-profit-no",
+        "candidate_id": "NO:b25:DIRECT_NO:b25@proof",
+        "route_id": "DIRECT_NO:b25@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.85972,
+        "payoff_q_lcb": 0.77877,
+        "edge_lcb": 0.01877,
+        "point_ev": 0.09972,
+        "delta_u_at_min": 0.000083,
+        "optimal_stake_usd": "86.2839573930664062500",
+        "optimal_delta_u": 0.000983,
+        "q_dot_payoff": 0.85972,
+        "cost": 0.76,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb7|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
+    )
+
+    assert annotated.passed_prefilter is True
+    assert annotated.missing_reason is None
+    assert annotated.trade_score == pytest.approx(0.01877)
+    assert annotated.q_lcb_5pct == pytest.approx(0.77877)
+
+
+def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_safe_q():
+    """Receipt overlay must mirror the live ROI frontier low-price YES floor."""
+
+    row = _row(
+        condition_id="cond-qk-kl-tail-yes",
+        yes_token="yes-qk-kl-tail-yes",
+        no_token="no-qk-kl-tail-yes",
+        yes_ask=0.031,
+        no_ask=0.970,
+        snapshot_id="snap-qk-kl-tail-yes",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-kl-tail-yes",
+        q_posterior=0.12180248510788458,
+        q_lcb_5pct=0.06052567908958011,
+        bin_obj=Bin(low=34.0, high=34.0, unit="C", label="34C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-kl-tail-yes",
+        "receipt_hash": "receipt-qk-kl-tail-yes",
+        "candidate_id": "YES:b34:DIRECT_YES:b34@proof",
+        "route_id": "DIRECT_YES:b34@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.12180248510788458,
+        "payoff_q_lcb": 0.06052567908958011,
+        "edge_lcb": 0.020510409830349664,
+        "point_ev": 0.08178721584865413,
+        "delta_u_at_min": 0.00009152233738979263,
+        "optimal_stake_usd": "1.4412832709285736083984375",
+        "optimal_delta_u": 0.0006333828915951036,
+        "q_dot_payoff": 0.12180248510788458,
+        "cost": 0.04001526925923045,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb1|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason.startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert "q_lcb=0.0605" in annotated.missing_reason
+
+
+def test_qkernel_receipt_annotation_rejects_nonpositive_min_order_utility():
+    row = _row(
+        condition_id="cond-qk-negative-min-du",
+        yes_token="yes-qk-negative-min-du",
+        no_token="no-qk-negative-min-du",
+        yes_ask=0.40,
+        no_ask=0.61,
+        snapshot_id="snap-qk-negative-min-du",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-negative-min-du",
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        bin_obj=Bin(low=30.0, high=30.0, unit="C", label="30C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-negative-min-du",
+        "receipt_hash": "receipt-qk-negative-min-du",
+        "candidate_id": "YES:b30:DIRECT_YES:b30@proof",
+        "route_id": "DIRECT_YES:b30@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": 0.60,
+        "edge_lcb": 0.20,
+        "point_ev": 0.30,
+        "delta_u_at_min": -0.01,
+        "optimal_stake_usd": "10",
+        "optimal_delta_u": 0.01,
+        "q_dot_payoff": 0.70,
+        "cost": 0.40,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|modal|qb6|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason.startswith("QKERNEL_DELTA_U_AT_MIN_NON_POSITIVE:")
+
+
+def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
+    """A non-native YES cannot become live through qkernel overlay without direction law."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
+    )
+
+    assert (
+        _overlay_proof(
+            q_posterior=0.06,
+            q_lcb_5pct=0.06,
+            economics=economics,
+            direction="buy_yes",
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            direction_law_ok=False,
+            coherence_allows=True,
+            q_lcb_guard_abstained=True,
+            q_lcb_guard_cell_key="",
+        )
+        is None
+    )
+
+
+def test_overlay_rejects_oof_reliability_direction_override():
+    """OOF reliability cannot turn a structurally illegal route into a live proof."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
+    )
+
+    assert (
+        _overlay_proof(
+            q_posterior=0.06,
+            q_lcb_5pct=0.06,
+            economics=economics,
+            direction="buy_yes",
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            direction_law_ok=False,
+            coherence_allows=True,
+            q_lcb_guard_cell_key="high|L2_3|YES|nonmodal|qb2|coarse_global",
+        )
+        is None
+    )
+
+
+def test_overlay_rejects_nonfinite_qkernel_execution_economics():
+    """A non-finite qkernel value must not reach canonical JSON receipt hashing."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        delta_u_at_min=float("-inf"),
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+        is None
+    )
+
+
+def test_overlay_requires_first_class_payoff_q_lcb():
+    """The bridge must not reverse-derive route qLCB from edge_lcb + cost."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        payoff_q_lcb=None,
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.052, economics=economics)
+        is None
+    )
+
+
+def test_overlay_rejects_payoff_q_lcb_edge_split():
+    """The qkernel cert qLCB and edge must be one coherent pair."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        payoff_q_lcb=0.040,
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.040, economics=economics)
+        is None
+    )
+
+
+def test_qkernel_execution_economics_requires_direction_law_and_coherence():
+    """Tokyo-class regression: positive qkernel edge is not enough without live structural proofs."""
+
+    cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "YES:b24:DIRECT_YES:b24@proof",
+        "route_id": "DIRECT_YES:b24@proof",
+        "side": "YES",
+        "bin_id": "b24",
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": 0.60,
+        "edge_lcb": 0.20,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "5.00",
+        "optimal_delta_u": 0.02,
+        "cost": 0.40,
+        "false_edge_rate": 0.05,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "low|L2_3|YES|nonmodal|qb2|coarse_global",
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "YES|L2_3|modal|pb2",
+        "selection_guard_n": 80,
+        "selection_guard_q_safe": 0.60,
+        "direction_law_ok": False,
+        "coherence_allows": True,
+    }
+
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "q_lcb_guard_abstained": True,
+            "q_lcb_guard_cell_key": "",
+        },
+        direction="buy_yes",
+    ) is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {**cert, "direction_law_ok": True},
+        direction="buy_yes",
+    ) is not None
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "direction_law_ok": False,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
+        },
+        direction="buy_yes",
+    ) is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "candidate_id": "NO:b24:DIRECT_NO:b24@proof",
+            "route_id": "DIRECT_NO:b24@proof",
+            "side": "NO",
+            "direction_law_ok": False,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb2|coarse_global",
+        },
+        direction="buy_no",
+    ) is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {**cert, "direction_law_ok": True, "coherence_allows": False},
+        direction="buy_yes",
+    ) is None
+
+
+def test_qkernel_direct_route_receipt_probability_must_match_monitor_belief():
+    """Jeddah-class regression: direct NO cannot size on qkernel q above receipt q."""
+
+    from types import SimpleNamespace
+
+    receipt = SimpleNamespace(q_live=0.986261171798223, q_lcb_5pct=0.986261171798223)
+    cert = {
+        "route_id": "DIRECT_NO:b24@proof",
+        "payoff_q_point": 0.9999999257352632,
+        "payoff_q_lcb": 0.998678563135879,
+    }
+
+    assert era._qkernel_direct_route_matches_receipt_probability(receipt, cert) is False
+    assert era._qkernel_direct_route_matches_receipt_probability(
+        receipt,
+        {**cert, "payoff_q_point": receipt.q_live, "payoff_q_lcb": receipt.q_lcb_5pct},
+    ) is True
+
+
+def test_overlay_clears_legacy_rounded_mu_direction_veto_for_qkernel_selected_candidate():
+    """A spine-positive route may clear the old rounded-mu direction veto.
+
+    ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` was a pre-spine modal-bin heuristic. The
+    qkernel selector owns payoff-vector economics now, so a selected direct native route
+    with positive edge/DeltaU must not stay blocked by that legacy missing reason.
+    """
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.32,
+        q_lcb_5pct=0.32,
         economics=economics,
         direction="buy_yes",
         missing_reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH:legacy-pre-spine",
     )
 
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.passed_prefilter is True
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+
+
+def test_overlay_clears_scalar_admission_missing_reason_for_qkernel_selected_candidate():
+    """A spine-positive selected proof may clear stale scalar admission vetoes."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.32,
+        q_lcb_5pct=0.32,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy-pre-spine",
+    )
+
+    assert new_proof is not None
     assert new_proof.missing_reason is None
     assert new_proof.passed_prefilter is True
     assert new_proof.trade_score == pytest.approx(0.05)
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+
+
+def test_overlay_clears_center_buy_ultra_low_legacy_blocker():
+    """Qkernel ROI/submit proof supersedes the old center-buy low-price scalar veto."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.08,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="CENTER_BUY_ULTRA_LOW_PRICE(0.0150<=0.02)",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+
+
+def test_overlay_clears_legacy_win_rate_floor_for_qkernel_yes():
+    """Exact-bin YES can be ROI-valid below the old binary 51% win-rate floor."""
+
+    economics = _selected_economics(
+        edge_lcb=0.08, cost=0.12, q_dot_payoff=0.20, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="ADMISSION_WIN_RATE_FLOOR:q_lcb=0.2000:min=0.5100",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.passed_prefilter is True
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.q_lcb_5pct == pytest.approx(0.20)
+
+
+def test_overlay_allows_center_buy_yes_below_strategy_floor_without_legacy_blocker():
+    """Qkernel selection does not hide cheap YES before submit authority sees it."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.08,
+        economics=economics,
+        direction="buy_yes",
+    )
+
+    assert new_proof is not None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["cost"] == pytest.approx(0.015)
+
+
+def test_overlay_allows_center_buy_yes_live_tail_lottery_price_for_downstream_gate():
+    """Submit authority, not qkernel selection, blocks 0.0x center-buy YES live entries."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.07, q_dot_payoff=0.15, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.15,
+        q_lcb_5pct=0.15,
+        economics=economics,
+        direction="buy_yes",
+    )
+
+    assert new_proof is not None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["cost"] == pytest.approx(0.07)
+
+
+def test_overlay_allows_center_buy_yes_when_live_floor_clears():
+    """Shanghai-style center-bin YES remains live-eligible above the tail floor."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.35, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.35,
+        q_lcb_5pct=0.35,
+        economics=economics,
+        direction="buy_yes",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
     assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
@@ -946,7 +2221,55 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
 
     A qkernel-selected proof must not keep the legacy proof p-value after the
     qkernel band has selected a different payoff-space route. The p-value is the
-    finite-sample-corrected share of band route edges <= 0.
+    finite-sample-corrected share of band route edges <= 0 when no active
+    settlement reliability guard has re-authored the served lower bound.
+    """
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.01, cost=0.05, q_dot_payoff=0.08, point_ev=0.03
+    )
+    selected_route = SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0]))
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="INERT_TEST",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="UNGUARDED_TEST",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.07,
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.03], [0.06], [0.08]])),
+        candidate_decisions=(selected_decision,),
+    )
+    base = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.06,
+        economics=economics,
+    )
+    new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
+
+    assert new_proof is not None
+    assert new_proof.trade_score == pytest.approx(0.01)
+    assert new_proof.p_value == pytest.approx(0.5)  # (one failure + 1) / (three draws + 1)
+    assert new_proof.passed_prefilter is True
+    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
+
+
+def test_overlay_uses_guarded_false_edge_rate_when_guard_authors_edge():
+    """FDR must consume the same guarded q_safe authority as the selected edge.
+
+    Regression: after OOF/selection guards recomputed edge_lcb as q_safe-cost, the
+    bridge still recomputed p_value from the raw q-band samples. That made live
+    receipts self-contradictory: strong positive guarded edge but p=0.5, so every
+    qkernel-selected route died FDR_REJECTED.
     """
     from types import SimpleNamespace
 
@@ -960,6 +2283,13 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
         q_lcb_guard_basis="OOF_WILSON_95",
         q_lcb_guard_abstained=False,
         q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.06,
     )
     decision = SimpleNamespace(
         selected=economics,
@@ -967,17 +2297,146 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
         candidate_decisions=(selected_decision,),
     )
     base = _overlay_proof(
-        q_posterior=0.80,
-        q_lcb_5pct=0.70,
+        q_posterior=0.08,
+        q_lcb_5pct=0.06,
         economics=economics,
     )
     new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
 
     assert new_proof is not None
     assert new_proof.trade_score == pytest.approx(0.01)
-    assert new_proof.p_value == pytest.approx(0.5)  # (one failure + 1) / (three draws + 1)
+    assert new_proof.p_value == pytest.approx(0.05)
     assert new_proof.passed_prefilter is True
-    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
+    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.05)
+
+
+def test_candidate_economics_selection_cert_carries_false_edge_rate():
+    """Every qkernel candidate cert consumed by live selection must satisfy the validator."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30
+    )
+    candidate_decision = SimpleNamespace(
+        economics=economics,
+        route=SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0])),
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.60,
+        robust_trade_score=0.20,
+    )
+    decision = SimpleNamespace(
+        decision_id="decision-selection-cert",
+        receipt_hash="receipt-selection-cert",
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.70], [0.70], [0.70]])),
+        candidate_decisions=(candidate_decision,),
+    )
+
+    payload = bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "NO")]
+
+    assert payload["false_edge_rate"] == pytest.approx(0.05)
+    assert era._valid_qkernel_execution_economics_payload(
+        payload,
+        direction="buy_no",
+    ) is not None
+
+
+def test_day0_observed_boundary_does_not_mint_guarded_false_edge_rate():
+    """Observed-boundary is not a statistical lower-bound guard for live entry."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30, side="YES"
+    )
+    candidate_decision = SimpleNamespace(
+        economics=economics,
+        route=SimpleNamespace(side="YES", bin_id="b1", payoff_vector=np.array([1.0])),
+        q_lcb_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="day0_observed_boundary",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="DAY0_OBSERVED_BOUNDARY",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="day0_observed_boundary",
+        selection_guard_n=1,
+        selection_guard_q_safe=0.60,
+        robust_trade_score=0.20,
+    )
+    decision = SimpleNamespace(
+        decision_id="decision-observed-boundary-fdr",
+        receipt_hash="receipt-observed-boundary-fdr",
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.70], [0.70]])),
+        candidate_decisions=(candidate_decision,),
+    )
+
+    payload = bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "YES")]
+
+    assert payload["false_edge_rate"] == pytest.approx(1.0 / 3.0)
+    assert era._valid_qkernel_execution_economics_payload(
+        payload,
+        direction="buy_yes",
+    ) is None
+
+
+def test_day0_remaining_day_guard_mints_false_edge_rate_from_remaining_window_guard():
+    """Day0 remaining-window q_lcb is a 95% guard; support is payload authority."""
+
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.20, cost=0.40, q_dot_payoff=0.70, point_ev=0.30, side="YES"
+    )
+
+    def _payload(selection_guard_n: int) -> dict:
+        candidate_decision = SimpleNamespace(
+            economics=economics,
+            route=SimpleNamespace(side="YES", bin_id="b1", payoff_vector=np.array([1.0])),
+            q_lcb_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+            q_lcb_guard_abstained=False,
+            q_lcb_guard_cell_key="day0_remaining_day_q_lcb",
+            direction_law_ok=True,
+            coherence_allows=True,
+            selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+            selection_guard_abstained=False,
+            selection_guard_cell_key="day0_remaining_day_q_lcb",
+            selection_guard_n=selection_guard_n,
+            selection_guard_q_safe=0.60,
+            robust_trade_score=0.20,
+        )
+        decision = SimpleNamespace(
+            decision_id=f"decision-day0-remaining-{selection_guard_n}",
+            receipt_hash=f"receipt-day0-remaining-{selection_guard_n}",
+            selected=economics,
+            band=SimpleNamespace(samples=np.array([[0.70], [0.70]])),
+            candidate_decisions=(candidate_decision,),
+        )
+        return bridge.qkernel_candidate_economics_by_bin_side(decision)[("b1", "YES")]
+
+    producer_shape = _payload(0)
+    supported = _payload(80)
+
+    assert producer_shape["false_edge_rate"] == pytest.approx(0.05)
+    assert era._valid_qkernel_execution_economics_payload(
+        producer_shape,
+        direction="buy_yes",
+    ) is not None
+    assert supported["false_edge_rate"] == pytest.approx(0.05)
+    assert era._valid_qkernel_execution_economics_payload(
+        supported,
+        direction="buy_yes",
+    ) is not None
 
 
 def test_fdr_maps_consume_selected_qkernel_overlay_authority():
@@ -987,8 +2446,8 @@ def test_fdr_maps_consume_selected_qkernel_overlay_authority():
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
     )
     base = _overlay_proof(
-        q_posterior=0.80,
-        q_lcb_5pct=0.70,
+        q_posterior=0.052,
+        q_lcb_5pct=0.052,
         economics=economics,
     )
     stale_base = era.dataclass_replace(base, p_value=1.0, passed_prefilter=False)
@@ -1004,6 +2463,226 @@ def test_fdr_maps_consume_selected_qkernel_overlay_authority():
     hypothesis_id = f"family-qkernel:{selected.token_id}"
     assert p_values[hypothesis_id] == pytest.approx(0.00025)
     assert prefilter[hypothesis_id] is True
+
+
+def test_qkernel_selected_route_fdr_is_not_legacy_bh_denominator():
+    """Qkernel FDR consumes the selected route's empirical false-edge rate.
+
+    The spine selects a coherent family payoff route. Re-running legacy BH over
+    many sibling binary hypotheses can reject a selected route whose own
+    payoff-band false-edge rate is inside the configured FDR budget.
+    """
+
+    from dataclasses import replace
+
+    from src.events.money_path_adapters import evaluate_fdr_full_family
+
+    economics = _selected_economics(
+        edge_lcb=0.30, cost=0.30, q_dot_payoff=0.70, point_ev=0.40
+    )
+    selected = _overlay_proof(
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        economics=economics,
+    )
+    assert selected is not None
+    bin_id = era._candidate_bin_id(selected)
+    selected = replace(
+        selected,
+        p_value=0.02,
+        qkernel_execution_economics={
+            **selected.qkernel_execution_economics,
+            "candidate_id": f"NO:{bin_id}:DIRECT_NO:{bin_id}@proof",
+            "route_id": f"DIRECT_NO:{bin_id}@proof",
+            "bin_id": bin_id,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+    family_id = "family-qkernel-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+    all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
+        f"{family_id}:sibling-{idx}" for idx in range(19)
+    )
+    p_values = {hypothesis_id: 1.0 for hypothesis_id in all_hypothesis_ids}
+    p_values[selected_hypothesis_id] = 0.02
+    prefilter = {hypothesis_id: True for hypothesis_id in all_hypothesis_ids}
+
+    legacy_bh = evaluate_fdr_full_family(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_ids=(selected_hypothesis_id,),
+        hypothesis_p_values=p_values,
+        passed_prefilter=prefilter,
+    )
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert legacy_bh.passed is False
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is True
+    assert qkernel_fdr.selected_post_fdr == (selected_hypothesis_id,)
+
+
+def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
+    """The qkernel route gate remains fail-closed when the payoff band is weak."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.30, cost=0.30, q_dot_payoff=0.70, point_ev=0.40
+    )
+    selected = _overlay_proof(
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        economics=economics,
+    )
+    assert selected is not None
+    bin_id = era._candidate_bin_id(selected)
+    selected = replace(
+        selected,
+        p_value=0.50,
+        qkernel_execution_economics={
+            **selected.qkernel_execution_economics,
+            "candidate_id": f"NO:{bin_id}:DIRECT_NO:{bin_id}@proof",
+            "route_id": f"DIRECT_NO:{bin_id}@proof",
+            "bin_id": bin_id,
+            "false_edge_rate": 0.50,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+    family_id = "family-qkernel-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=(selected_hypothesis_id,),
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is False
+    assert qkernel_fdr.selected_post_fdr == ()
+
+
+def test_day0_selected_route_fdr_uses_hard_fact_q_lcb_not_legacy_p_value():
+    """Day0 observation routes must not be rejected by legacy p-value machinery.
+
+    A same-day observed-fact route is one family decision conditioned on the running
+    extreme. Legacy BH over every sibling YES/NO hypothesis can reject a selected
+    Day0 route even when the selected hard-fact q_lcb implies the selected route's
+    false-edge probability is inside the FDR budget.
+    """
+
+    from dataclasses import replace
+
+    from src.events.money_path_adapters import evaluate_fdr_full_family
+
+    row = _row(
+        condition_id="cond-day0",
+        yes_token="yes-day0",
+        no_token="no-day0",
+        yes_ask=0.70,
+        no_ask=0.34,
+        snapshot_id="snap-day0",
+    )
+    selected = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-day0",
+        q_posterior=0.959,
+        q_lcb_5pct=0.952,
+        bin_obj=Bin(low=12.0, high=12.0, unit="C", label="12C"),
+        execution_price=0.70,
+    )
+    selected = replace(
+        selected,
+        p_value=0.50,
+        passed_prefilter=True,
+        trade_score=0.238,
+        qkernel_execution_economics=None,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    family_id = "family-day0-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+    all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
+        f"{family_id}:sibling-{idx}" for idx in range(21)
+    )
+    p_values = {hypothesis_id: 1.0 for hypothesis_id in all_hypothesis_ids}
+    p_values[selected_hypothesis_id] = 0.50
+    prefilter = {hypothesis_id: True for hypothesis_id in all_hypothesis_ids}
+
+    legacy_bh = evaluate_fdr_full_family(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_ids=(selected_hypothesis_id,),
+        hypothesis_p_values=p_values,
+        passed_prefilter=prefilter,
+    )
+    day0_fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert legacy_bh.passed is False
+    assert day0_fdr is not None
+    assert day0_fdr.passed is True
+    assert day0_fdr.selected_post_fdr == (selected_hypothesis_id,)
+
+
+def test_day0_selected_route_fdr_rejects_high_false_edge_rate():
+    """Day0 route-FDR remains fail-closed when selected evidence is weak."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-day0-weak",
+        yes_token="yes-day0-weak",
+        no_token="no-day0-weak",
+        yes_ask=0.70,
+        no_ask=0.34,
+        snapshot_id="snap-day0-weak",
+    )
+    selected = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-day0-weak",
+        q_posterior=0.80,
+        q_lcb_5pct=0.74,
+        bin_obj=Bin(low=12.0, high=12.0, unit="C", label="12C"),
+        execution_price=0.70,
+    )
+    selected = replace(
+        selected,
+        p_value=0.50,
+        passed_prefilter=True,
+        trade_score=0.04,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    family_id = "family-day0-weak"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+
+    day0_fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=(selected_hypothesis_id,),
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert day0_fdr is not None
+    assert day0_fdr.passed is False
+    assert day0_fdr.selected_post_fdr == ()
 
 
 def test_overlay_failure_returns_none_instead_of_original_proof():
@@ -1031,6 +2710,7 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
         cost=0.41,
         q_dot_payoff=0.199009684818666,
         point_ev=-0.220821533,
+        side="YES",
     )
     new_proof = _overlay_proof(
         q_posterior=0.199009684818666,
@@ -1039,10 +2719,7 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
         direction="buy_yes",
     )
 
-    assert new_proof.direction == "buy_yes"
-    assert new_proof.q_posterior == pytest.approx(0.199009684818666)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.04625961651748593)
-    assert new_proof.q_lcb_5pct <= new_proof.q_posterior
+    assert new_proof is None
 
 
 def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypatch, tmp_path):
@@ -1125,15 +2802,77 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypat
     assert center_yes[0].economics.optimal_delta_u > 0.0
 
 
-def test_qkernel_scope_rescores_legacy_distance_direction_law_rejections():
-    """The spine must not inherit the old distance-threshold direction law.
+def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
+    """Qkernel can score low-cost YES by ROI instead of legacy q_lcb >= 51% admission."""
 
-    Regression: the reactor stamped ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` before the
-    qkernel call, and ``honor_admission_rejections=False`` still treated that reason as
-    unrecoverable. Live logs then showed positive-edge YES candidates with ``dlok=0
-    adm=0``. The qkernel owns the forecast-family direction law now, so legacy
-    distance-law rejections enter the spine and are judged by the settlement/q/OOF
-    family law there.
+    family, bins = _three_bin_family()
+    row = _row(
+        condition_id="cond-center",
+        yes_token="yes-center",
+        no_token="no-center",
+        yes_ask=0.27,
+        no_ask=0.73,
+        snapshot_id="snap-center",
+    )
+    center_yes = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-center",
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        bin_obj=bins[1],
+        execution_price=0.27,
+    )
+
+    legacy_scoped = era._selection_scoped_proofs(proofs=(center_yes,))
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=(center_yes,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    )
+
+    assert legacy_scoped == ()
+    assert qkernel_scoped == (center_yes,)
+    assert family.family_id
+
+
+def test_qkernel_scope_allows_center_yes_below_static_price_floor_for_optimizer():
+    """Qkernel selection must see low-price YES; evidence gates decide quality."""
+
+    _family, bins = _three_bin_family()
+    row = _row(
+        condition_id="cond-cheap",
+        yes_token="yes-cheap",
+        no_token="no-cheap",
+        yes_ask=0.01,
+        no_ask=0.99,
+        snapshot_id="snap-cheap",
+    )
+    cheap_yes = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-cheap",
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        bin_obj=bins[1],
+        execution_price=0.01,
+    )
+
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=(cheap_yes,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    )
+
+    assert qkernel_scoped == (cheap_yes,)
+
+
+def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence():
+    """Old rounded-mu direction vetoes may enter qkernel, then fail on real gates.
+
+    The old ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` reason is not structural authority.
+    It must not delete a proof before qkernel can score the family. Market coherence must
+    still block the offending bins, while non-offending live-selectable bins remain eligible.
     """
     from dataclasses import replace
 
@@ -1174,3 +2913,195 @@ def test_qkernel_scope_rescores_legacy_distance_direction_law_rejections():
         proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
         for proof in qkernel_scoped
     )
+
+    res = _drive(
+        family,
+        qkernel_scoped,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+    )
+    legacy_vetoed_bin_id = era._candidate_bin_id(
+        next(
+            proof
+            for proof in qkernel_scoped
+            if proof.direction == "buy_no" and proof.candidate.bin.label == "21C"
+        )
+    )
+
+    assert res.decision is not None
+    legacy_vetoed_decisions = [
+        decision
+        for decision in res.decision.candidate_decisions
+        if decision.route.side == "NO" and decision.route.bin_id == legacy_vetoed_bin_id
+    ]
+    assert legacy_vetoed_decisions
+    assert all(decision.direction_law_ok is True for decision in legacy_vetoed_decisions)
+    assert res.decision.market_coherence.status == "INCOHERENT_BLOCK_LIVE"
+    assert res.decision.market_coherence.offending_bins
+    assert any(
+        decision.coherence_allows is False
+        for decision in res.decision.candidate_decisions
+        if decision.route.bin_id in res.decision.market_coherence.offending_bins
+    )
+    assert res.selected_proof is not None
+    assert res.no_trade_reason is None
+    assert era._candidate_bin_id(res.selected_proof) not in res.decision.market_coherence.offending_bins
+    selected_decision = next(
+        decision
+        for decision in res.decision.candidate_decisions
+        if decision.route.bin_id == era._candidate_bin_id(res.selected_proof)
+        and decision.route.side == ("YES" if res.selected_proof.direction == "buy_yes" else "NO")
+    )
+    assert selected_decision.coherence_allows is True
+
+
+def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_normal():
+    """Live qkernel must score the same point q served by admission proof.
+
+    Regression: the bridge formerly fed proof/admission from the replacement posterior but
+    let FamilyDecisionEngine rebuild ``joint_q`` from raw members + sigma.  A narrow member
+    Normal around 20C then produced a different point q than the proof vector, tripping
+    QKERNEL_SERVED_BELIEF_POINT_MISMATCH and leaving live entry stalled.  The bridge now
+    rehydrates the served proof vector into ``decision.joint_q`` and injects each
+    side-specific proof q_lcb into candidate economics.
+    """
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.05, members=[20.0, 20.0, 20.0, 20.0, 20.0]),
+    )
+
+    assert res.decision is not None
+    assert res.decision.joint_q is not None
+    assert list(res.decision.joint_q.q) == pytest.approx(served_yes_q)
+    for decision in res.decision.candidate_decisions:
+        proof = next(
+            p
+            for p in proofs
+            if era._candidate_bin_id(p) == decision.route.bin_id
+            and (("YES" if p.direction == "buy_yes" else "NO") == decision.route.side)
+        )
+        assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
+        assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
+
+
+def test_qkernel_modal_guards_follow_served_joint_q_not_predictive_mu(monkeypatch):
+    """Modal/nonmodal guard cells must use the same served q surface as selection.
+
+    Regression: the bridge rehydrated qkernel point probabilities from proof posterior
+    but ``FamilyDecisionEngine`` still keyed modal YES guard cells from
+    ``predictive.mu_native``. When those disagreed, a high-quality center YES could be
+    treated as nonmodal/sparse while adjacent NO substitutes stayed licensed.
+    """
+
+    from src.decision import family_decision_engine as fde
+    from src.decision import qlcb_reliability_guard as guard_mod
+    from src.decision.selection_calibrator import CalibratorVerdict
+
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    def _selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+        cell = f"{str(side).upper()}|L2_3|{bin_class}|test"
+        if str(side).upper() == "YES" and bin_class != "modal":
+            return CalibratorVerdict(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key=cell,
+                L_g=0.0,
+                n_g=0,
+                basis="SIDE_NOT_ARMED",
+            )
+        return CalibratorVerdict(
+            q_safe=float(raw_side_prob),
+            trade=True,
+            abstained=False,
+            cell_key=cell,
+            L_g=float(raw_side_prob),
+            n_g=1000,
+            basis="SELECTION_BETA_95",
+        )
+
+    monkeypatch.setattr(fde, "apply_selection_calibrator", _selection_guard)
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    # Predictive center points at 21C, but the served posterior's modal bin is 20C.
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=21.0, sigma=0.05, members=[21.0, 21.0, 21.0, 21.0, 21.0]),
+    )
+
+    assert res.no_trade_reason is None
+    assert res.selected_proof is not None
+    assert res.selected_proof.direction == "buy_yes"
+    assert res.selected_proof.candidate.bin.label == "20C"
+    selected_decision = next(
+        d for d in res.decision.candidate_decisions
+        if d.economics.candidate_id == res.decision.selected.candidate_id
+    )
+    assert selected_decision.selection_guard_cell_key == "YES|L2_3|modal|test"
+
+
+def test_qkernel_belief_rehydration_uses_full_family_not_selection_scoped_subset():
+    """Selection filtering must not delete bins from the served belief vector.
+
+    Live regression: the adapter passed `_selection_scoped_proofs` as the only spine
+    proof input. If selection scoping removed both sides of one family bin (locked,
+    held, limit-untradeable, etc.), `_served_joint_belief_from_proofs` saw an
+    incomplete Omega and blocked the whole family with SERVED_BELIEF_Q_MISSING.
+    The full proof tuple is the probability authority; the scoped tuple is only
+    the executable route surface.
+    """
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    selection_proofs = tuple(
+        proof for proof in proofs if proof.candidate.bin.label != "22C or above"
+    )
+
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+        selection_proofs=selection_proofs,
+    )
+
+    assert res.decision is not None
+    assert list(res.decision.joint_q.q) == pytest.approx(served_yes_q)
+    assert "SERVED_BELIEF_Q_MISSING" not in str(res.no_trade_reason or "")

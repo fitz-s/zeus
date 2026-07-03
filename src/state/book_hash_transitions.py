@@ -49,7 +49,8 @@ def write_transition(
     transition_seq: derived atomically under caller-provided conn using
     SAVEPOINT + SELECT COALESCE(MAX(transition_seq), 0) + 1 pattern.
     SAVEPOINT provides rollback-on-error atomicity within the caller's
-    connection scope; the caller's db_writer_lock serialises cross-process.
+    connection scope; live snapshot callers serialize cross-process through
+    the runtime write coordinator lease for the trade DB.
 
     delta_ms: milliseconds since the prior hash for this market.
     cycle_id: live producer cycle context; None for scanner-path rows.

@@ -98,7 +98,7 @@ _EVALUATOR_SRC = _EVALUATOR_PATH.read_text(encoding="utf-8")
 
 
 # Phase 2.5 transfer-gate tests removed during PR #56 merge: the
-# evaluate_calibration_transfer + CALIBRATION_TRANSFER_SHADOW_ONLY/BLOCKED
+# evaluate_calibration_transfer + BLOCKED
 # rejection stack was replaced by PR #56's MarketPhaseEvidence +
 # oracle_evidence_status.  The evidence-based gate now lives in those
 # modules; tests for it belong with PR #56's

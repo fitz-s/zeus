@@ -15,8 +15,8 @@ These tests pin the contracts that A4 ships:
 2. The pre-A4 LIVE_SAFE / _LIVE_ALLOWED divergence (Bug review §E:
    shoulder_sell in LIVE_SAFE but not _LIVE_ALLOWED) is RESOLVED by the
    live_status field. The current registry preserves the divergence
-   semantically (shoulder_sell is shadow → boots but doesn't enter)
-   but the two sets now derive from one source — un-driftable.
+   semantically (shoulder_sell is blocked) and the two sets now derive
+   from one source — un-driftable.
 
 3. Schema enforcement at load time. A typo in a constraint field
    (e.g., ``allowed_market_phazes``) raises RegistrySchemaError at
@@ -63,17 +63,18 @@ def test_all_registered_strategies():
     assert keys == frozenset({
         "settlement_capture",
         "center_buy",
+        "forecast_qkernel_entry",
         "opening_inertia",
         "shoulder_sell",
         "shoulder_buy",
         "center_sell",
         "imminent_open_capture",  # added 2026-05-19: D+1 / re-opened market capture
-        # Phase 4 shadow candidates (T2/T3) — added 2026-05-21
+        # Phase 4 blocked candidates (T2/T3) — added 2026-05-21
         "stale_quote_detector",
         "resolution_window_maker",
         "liquidity_provision_with_heartbeat",
         "weather_event_arbitrage",
-        # Phase 4 shadow candidates (T4) — added 2026-05-21
+        # Phase 4 blocked candidates (T4) — added 2026-05-21
         "cross_market_correlation_hedge",
         "neg_risk_basket",
         # P1 architecture review (2026-05-22) — settlement-day upside strategy
@@ -112,27 +113,17 @@ def test_kelly_default_for_unknown_key_is_zero():
 
 def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
     """Pre-A4 LIVE_SAFE_STRATEGIES = {opening_inertia, center_buy,
-    settlement_capture, shoulder_sell}. Boot-allowable = live OR shadow.
+    settlement_capture, shoulder_sell}. Boot-allowable = live.
     imminent_open_capture added 2026-05-19 (live status → included here).
     """
     assert sp.live_safe_keys() == frozenset({
         "opening_inertia",
         "center_buy",
+        "forecast_qkernel_entry",
         "settlement_capture",
+        "day0_nowcast_entry",
         # shoulder_sell removed: D6 (2026-05-22) set live_status=blocked (REFUTED)
         "imminent_open_capture",  # added 2026-05-19
-        # Phase 4 shadow candidates boot-allowed (live_status: shadow) — added 2026-05-21
-        "stale_quote_detector",
-        "resolution_window_maker",
-        "liquidity_provision_with_heartbeat",
-        "weather_event_arbitrage",
-        # Phase 4 shadow candidates (T4) — added 2026-05-21
-        "cross_market_correlation_hedge",
-        "neg_risk_basket",
-        # P1 architecture review (2026-05-22) — settlement-day upside strategy
-        "day0_nowcast_entry",
-        # D6 (2026-05-22) — shoulder_sell successor, live_status=shadow
-        "shoulder_impossible_tail_capture",
     })
 
 
@@ -144,7 +135,9 @@ def test_live_allowed_keys_match_pre_A4__LIVE_ALLOWED_STRATEGIES():
     assert sp.live_allowed_keys() == frozenset({
         "settlement_capture",
         "center_buy",
+        "forecast_qkernel_entry",
         "opening_inertia",
+        "day0_nowcast_entry",
         "imminent_open_capture",  # added 2026-05-19
     })
 
@@ -161,8 +154,8 @@ def test_shoulder_sell_resolves_pre_A4_divergence():
     """Bug review §E: shoulder_sell was in LIVE_SAFE but not _LIVE_ALLOWED
     (a divergence between two hardcoded sets that nominally meant the
     same thing). Post-A4 the two sets derive from live_status; shoulder_sell
-    was ``shadow`` pre-D6. D6 (2026-05-22) refuted and retired it: live_status
-    is now ``blocked`` — not boot-allowed, routing disabled.
+    D6 (2026-05-22) refuted and retired it: live_status is now ``blocked`` —
+    not boot-allowed, routing disabled.
     """
     profile = sp.get("shoulder_sell")
     assert profile.live_status == "blocked"  # D6: REFUTED, tombstoned
@@ -207,10 +200,7 @@ def test_cycle_runner_KNOWN_STRATEGIES_matches_live_safe_keys():
 
 
 def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
-    """shoulder_sell is shadow → boots OK but runtime entry blocked.
-    The cutover preserves the pre-A4 ``shoulder_sell not in
-    _LIVE_ALLOWED_STRATEGIES`` semantics through is_strategy_enabled.
-    """
+    """shoulder_sell is blocked at runtime entry."""
     from src.control import control_plane
     control_plane._control_state["live_allowed_strategies"] = sp.live_allowed_keys()
     control_plane._control_state["live_allowed_strategies_status"] = "ok"
@@ -219,6 +209,7 @@ def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
     assert is_strategy_enabled("shoulder_sell") is False
     assert is_strategy_enabled("settlement_capture") is True
     assert is_strategy_enabled("center_buy") is True
+    assert is_strategy_enabled("forecast_qkernel_entry") is True
     assert is_strategy_enabled("opening_inertia") is True
     assert is_strategy_enabled("shoulder_buy") is False
     assert is_strategy_enabled("center_sell") is False
@@ -295,9 +286,48 @@ def test_kelly_for_phase_None_returns_default():
 
 def test_live_quality_floors_are_registry_backed() -> None:
     profile = sp.get("opening_inertia")
-    assert profile.min_entry_price == pytest.approx(0.05)
+    assert profile.min_entry_price == pytest.approx(0.10)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
-    assert profile.min_expected_profit_usd == pytest.approx(0.05)
+    assert profile.min_expected_profit_usd == pytest.approx(1.0)
+    assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert profile.allow_ultra_low_tail is False
+
+
+def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
+    """Fast-decay live entry profiles must not admit sub-dollar thin-edge churn."""
+
+    expected_min_entry_prices = {
+        "settlement_capture": 0.10,
+        "day0_nowcast_entry": 0.10,
+        "center_buy": 0.02,
+        "opening_inertia": 0.10,
+        "imminent_open_capture": 0.10,
+    }
+    for strategy_key, expected_min_entry_price in expected_min_entry_prices.items():
+        profile = sp.get(strategy_key)
+        assert profile.min_entry_price == pytest.approx(expected_min_entry_price)
+        assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("day0_nowcast_entry").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("forecast_qkernel_entry").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
+    assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
+
+
+def test_center_buy_profit_floor_aligns_with_qkernel_roi_frontier() -> None:
+    """Center-buy uses qkernel ROI frontier quality, not a flat $1 submit cliff."""
+
+    profile = sp.get("center_buy")
+    assert profile.min_expected_profit_usd == pytest.approx(0.25)
+    assert profile.min_entry_price == pytest.approx(0.02)
+    assert profile.min_submit_edge_density == pytest.approx(0.05)
+
+
+def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:
+    """Center-buy is a forecast-accuracy strategy, not an ultra-low tail strategy."""
+
+    profile = sp.get("center_buy")
+    assert profile.min_entry_price == pytest.approx(0.02)
     assert profile.allow_ultra_low_tail is False
 
 
@@ -335,7 +365,6 @@ def test_schema_load_rejects_unknown_field(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -357,7 +386,6 @@ def test_schema_load_rejects_invalid_live_status(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -379,7 +407,6 @@ def test_schema_load_rejects_kelly_default_out_of_range(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.5\n"  # > 1.0
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -401,7 +428,6 @@ def test_schema_load_rejects_kelly_phase_override_out_of_range(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {settlement_day: 2.0}\n"  # > 1.0
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -423,7 +449,6 @@ def test_schema_load_rejects_invalid_metric_support(tmp_path: Path):
         "  metric_support: {high: maybe, low: blocked}\n"  # INVALID
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )

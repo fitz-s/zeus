@@ -21,6 +21,18 @@ from src.state.db import init_schema
 def _conn_writer():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
+    # W0.2 (2026-07-02): market_channel_connectivity_events is trade-class,
+    # wired into init_schema_trade_only only. init_schema(conn) alone is
+    # world-class + legacy ghost tables and does not include it (same pattern
+    # as tests/events/test_market_channel_ingestor.py::_conn_writer).
+    from src.state.schema.market_channel_connectivity_schema import (
+        ensure_table as ensure_connectivity_table,
+    )
+
+    ensure_connectivity_table(conn)
     return conn, EventWriter(conn)
 
 

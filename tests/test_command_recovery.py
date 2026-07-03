@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-02
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-24
+# Last reused/audited: 2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -44,6 +44,560 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def test_filled_projection_repair_voids_absorbed_chain_only_stub(conn):
+    from src.execution.command_recovery import _void_absorbed_chain_only_projection
+
+    token = "tok-canonical-fill"
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, updated_at, temperature_metric,
+            token_id, condition_id, chain_state, shares, cost_basis_usd,
+            chain_shares, chain_cost_basis_usd
+        ) VALUES (
+            'chain-only-fill', 'quarantined', 'chain_only_reconciliation',
+            '2026-07-02T02:23:43+00:00', 'high',
+            ?, 'cond-fill', 'entry_authority_quarantined', 40.25, 17.71,
+            40.25, 17.71
+        )
+        """,
+        (token,),
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, 'cond-fill', 'chain_only_quarantined', 'test',
+                  '2026-07-02T02:23:43+00:00',
+                  '2026-07-02T02:23:43+00:00', '{}')
+        """,
+        (token,),
+    )
+
+    cleared = _void_absorbed_chain_only_projection(
+        conn,
+        position=SimpleNamespace(
+            trade_id="canonical-fill",
+            direction="buy_yes",
+            token_id=token,
+            no_token_id="",
+            condition_id="cond-fill",
+            decision_id="decision-fill",
+            decision_snapshot_id="snapshot-fill",
+            order_id="order-fill",
+            command_id="command-fill",
+        ),
+    )
+
+    row = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_cost_basis_usd,
+               exit_reason
+          FROM position_current
+         WHERE position_id = 'chain-only-fill'
+        """
+    ).fetchone()
+    suppression = conn.execute(
+        """
+        SELECT suppression_reason, source_module, evidence_json
+          FROM token_suppression
+         WHERE token_id = ?
+        """,
+        (token,),
+    ).fetchone()
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, command_id
+          FROM position_events
+         WHERE position_id = 'chain-only-fill'
+        """
+    ).fetchone()
+
+    assert cleared == 1
+    assert dict(row) == {
+        "phase": "voided",
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "chain_shares": 0.0,
+        "chain_cost_basis_usd": 0.0,
+        "exit_reason": "chain_only_absorbed_by_canonical_filled_entry",
+    }
+    assert suppression["suppression_reason"] == "operator_quarantine_clear"
+    assert suppression["source_module"] == "src.execution.command_recovery"
+    assert json.loads(suppression["evidence_json"])["canonical_position_id"] == "canonical-fill"
+    assert event["event_type"] == "ADMIN_VOIDED"
+    assert event["phase_after"] == "voided"
+    assert event["command_id"] == "command-fill"
+
+
+def _valid_day0_pre_submit_payload(**overrides):
+    payload = {
+        "event_id": "evt-day0-presubmit",
+        "final_intent_id": "intent-day0-presubmit",
+        "condition_id": "cond-day0-presubmit",
+        "token_id": "tok-day0-presubmit",
+        "side": "BUY",
+        "direction": "buy_yes",
+        "order_type": "GTC",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": "2026-06-30T17:18:36+00:00",
+        "quote_seen_at": "2026-06-30T17:18:34+00:00",
+        "quote_age_ms": 2000,
+        "max_quote_age_ms": 5000,
+        "book_hash": "book-hash",
+        "current_best_bid": 0.68,
+        "current_best_ask": 0.72,
+        "limit_price": 0.70,
+        "size": 10.0,
+        "q_live": 0.96,
+        "q_lcb_5pct": 0.95,
+        "expected_edge": 0.25,
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.02,
+        "expected_edge_source_certificate_hash": "edge-cert",
+        "cost_basis_source_certificate_hash": "cost-cert",
+        "would_cross_book": False,
+        "tick_size": "0.01",
+        "tick_aligned": True,
+        "min_order_size": 1.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "book_authority_id": "book-auth",
+        "book_captured_at": "2026-06-30T17:18:34+00:00",
+        "heartbeat_authority_id": "heartbeat-auth",
+        "heartbeat_checked_at": "2026-06-30T17:18:35+00:00",
+        "user_ws_authority_id": "user-ws-auth",
+        "user_ws_checked_at": "2026-06-30T17:18:35+00:00",
+        "venue_connectivity_authority_id": "venue-auth",
+        "venue_connectivity_checked_at": "2026-06-30T17:18:35+00:00",
+        "balance_allowance_authority_id": "balance-auth",
+        "balance_allowance_checked_at": "2026-06-30T17:18:35+00:00",
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.96,
+            "payoff_q_lcb": 0.95,
+            "cost": 0.70,
+            "edge_lcb": 0.25,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+            "q_lcb_guard_abstained": False,
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
+        },
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "live_authority_status": "live",
+        "source_authorized_status": "AUTHORIZED",
+        "day0_q_source": "day0_remaining_day",
+        "day0_q_mode": "remaining_day",
+        "day0_remaining_models": 37,
+        "rounded_value": 72.0,
+        "observation_time": "2026-06-30T17:18:00+00:00",
+        "day0_lcb_transform": {
+            "yes_lcb_by_condition": {"cond-day0-presubmit": 0.95},
+            "no_lcb_by_condition": {"cond-day0-presubmit": 0.05},
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_day0_presubmit_revalidation_uses_observation_authority_with_qkernel():
+    from src.events.live_order_aggregate import _validate_pre_submit_revalidation_payload
+
+    _validate_pre_submit_revalidation_payload(_valid_day0_pre_submit_payload())
+
+
+def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():
+    from src.events.live_order_aggregate import (
+        LiveOrderAggregateError,
+        _validate_pre_submit_revalidation_payload,
+    )
+
+    payload = _valid_day0_pre_submit_payload(
+        event_type="FORECAST_SNAPSHOT_READY",
+        qkernel_execution_economics=None,
+    )
+
+    with pytest.raises(
+        LiveOrderAggregateError,
+        match="PreSubmitRevalidated requires qkernel_execution_economics",
+    ):
+        _validate_pre_submit_revalidation_payload(payload)
+
+
+def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
+    from src.execution.command_recovery import _event_bound_strategy_key_from_payload
+
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_yes"}
+        )
+        == "day0_nowcast_entry"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+        )
+        == "settlement_capture"
+    )
+
+
+def test_forecast_strategy_fallback_preserves_qkernel_semantics():
+    from src.execution.command_recovery import _event_bound_strategy_key_from_payload
+
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "FORECAST_SNAPSHOT_READY", "direction": "buy_yes"}
+        )
+        == "forecast_qkernel_entry"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "FORECAST_SNAPSHOT_READY", "direction": "buy_no"}
+        )
+        == "forecast_qkernel_entry"
+    )
+
+
+def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatch):
+    """Boot-fast recovery must not block scheduler startup on CLOB reads."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    seed.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+            p_posterior, decision_snapshot_id, entry_method, strategy_key,
+            edge_source, discovery_mode, chain_state, token_id, no_token_id,
+            condition_id, order_id, order_status, updated_at, temperature_metric,
+            chain_shares, exit_retry_count, next_exit_retry_at, exit_reason
+        ) VALUES (
+            'pos-boot-chain-zero-stale', 'voided', 'condition-test', 'Manila', 'Manila',
+            '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+            'buy_yes', 'C', 0.15, 9.7, 0.15, 0.015,
+            0.13, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+            'center_buy', 'opening_hunt', 'chain_confirmed_zero', 'tok-001', 'tok-001-no',
+            'condition-test', NULL, 'retry_pending',
+            '2026-06-29T17:33:25+00:00', 'high',
+            9.7, 6, '2026-06-29T17:45:00+00:00', 'CHAIN_CONFIRMED_ZERO'
+        )
+        """
+    )
+    seed.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (
+            'evt-boot-chain-zero-stale', 'pos-boot-chain-zero-stale', 11, 'ADMIN_VOIDED',
+            '2026-06-29T17:33:25+00:00', 'pending_exit', 'voided',
+            'center_buy', 'dec-1', 'snap-1', NULL, NULL,
+            'chain_truth_balance_zero', 'idem-boot-chain-zero-stale', 'voided',
+            'src.execution.exit_lifecycle',
+            '{"evidence_source":"CHAIN_BALANCEOF","chain_state":"chain_confirmed_zero","reason":"CHAIN_CONFIRMED_ZERO"}',
+            'live'
+        )
+        """
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["deferred_full_sweep"] is True
+    assert summary["hard_terminal_position_projection_repair"]["advanced"] == 1
+    client.get_order.assert_not_called()
+    client.get_open_orders.assert_not_called()
+    client.get_trades.assert_not_called()
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT chain_shares, order_status, exit_retry_count, next_exit_retry_at
+              FROM position_current
+             WHERE position_id = 'pos-boot-chain-zero-stale'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert row["chain_shares"] == 0.0
+    assert row["order_status"] == "voided"
+    assert row["exit_retry_count"] == 0
+    assert row["next_exit_retry_at"] is None
+
+
+def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
+    tmp_path,
+    monkeypatch,
+):
+    """Boot-fast must clear local REVIEW_REQUIRED exit mutex debt without venue reads."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.execution.exit_safety import ExitMutex
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast-review-mutex.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    _insert(
+        seed,
+        command_id="cmd-review-exit",
+        position_id="pos-review",
+        intent_kind="EXIT",
+        token_id="tok-review",
+        side="SELL",
+    )
+    _advance_to_review_required(seed, "cmd-review-exit")
+    mutex = ExitMutex(seed)
+    assert mutex.acquire("pos-review", "tok-review", "cmd-review-exit") is True
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["review_required_exit_mutex_release"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT m.released_at, m.release_reason, c.state
+              FROM exit_mutex_holdings m
+              JOIN venue_commands c ON c.command_id = m.command_id
+             WHERE m.command_id = 'cmd-review-exit'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "REVIEW_REQUIRED_RECOVERY"
+    assert row["state"] == "REVIEW_REQUIRED"
+
+
+def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
+    tmp_path,
+    monkeypatch,
+):
+    """Boot-fast must clear chain-absent positive projection debt before schedulers start."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast-chain-absence.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    seed.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+            p_posterior, decision_snapshot_id, entry_method, strategy_key,
+            edge_source, discovery_mode, chain_state, token_id, no_token_id,
+            condition_id, order_id, order_status, updated_at, temperature_metric,
+            chain_shares, chain_avg_price, chain_cost_basis_usd, exit_reason
+        ) VALUES (
+            'pos-boot-chain-absent-positive', 'quarantined', 'condition-munich',
+            'Munich', 'Europe', '2026-06-30',
+            'Will the highest temperature in Munich be 30C on June 30?',
+            'buy_no', 'C', 21.27, 29.14, 21.27, 0.73,
+            0.1449, 'forecast-snap-munich', 'qkernel_spine', 'center_buy',
+            'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+            'tok-yes', 'tok-no', 'condition-munich', 'ord-entry', 'filled',
+            '2026-06-30T00:22:00+00:00', 'high', 29.14, 0.73, 21.27,
+            'chain_absent_confirmed_position_unattributed'
+        )
+        """
+    )
+    seed.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (
+            'evt-boot-chain-absent-positive', 'pos-boot-chain-absent-positive',
+            4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+            'active', 'quarantined', 'center_buy', 'dec-1', 'snap-1',
+            'ord-entry', NULL, 'chain_absent_confirmed_position_unattributed',
+            'idem-boot-chain-absent-positive', 'review_required',
+            'src.state.chain_reconciliation',
+            '{"reason":"chain_absent_confirmed_position_unattributed"}',
+            'live'
+        )
+        """
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["confirmed_chain_absence_projection_repair"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT chain_shares, chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-boot-chain-absent-positive'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert dict(row) == {
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
+    }
+
+
+def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
+    tmp_path,
+    monkeypatch,
+):
+    """Boot-fast recovery must defer slow local repairs instead of blocking boot."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast-budget.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    def _slow_db_pass(conn):
+        conn.execute(
+            """
+            WITH RECURSIVE cnt(x) AS (
+                SELECT 0
+                UNION ALL
+                SELECT x + 1 FROM cnt WHERE x < 100000000
+            )
+            SELECT max(x) FROM cnt
+            """
+        ).fetchone()
+        return {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+
+    monkeypatch.setenv("ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS", "0.001")
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_edli_confirmed_legacy_command_repairs",
+        _slow_db_pass,
+    )
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["deferred_full_sweep"] is True
+    assert summary["boot_fast_budget_exhausted"] is True
+    assert "edli_confirmed_legacy_command_repair" in summary["boot_fast_deferred_passes"]
+    assert summary["boot_fast_defer_reasons"]["edli_confirmed_legacy_command_repair"] == (
+        "budget_exhausted_during_pass"
+    )
+    client.get_order.assert_not_called()
+    client.get_open_orders.assert_not_called()
+    client.get_trades.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -51,6 +605,39 @@ def mock_client():
 # 32 hex chars — satisfies IdempotencyKey length validation.
 _DEFAULT_IDEM_KEY = "a" * 32
 _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
+
+
+def _entry_submit_payload() -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.62,
+                        "q_lcb_5pct": 0.55,
+                        "expected_edge": 0.05,
+                        "limit_price": 0.50,
+                        "submit_edge": 0.05,
+                        "expected_profit_usd": 1.00,
+                        "min_entry_price": 0.05,
+                        "min_expected_profit_usd": 1.00,
+                        "submit_edge_density": 0.10,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 20.0,
+                        "qkernel_side": "YES",
+                    },
+                },
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "details": {"certificate_id": "cert-recovery"},
+                },
+            ],
+        },
+    }
 
 
 def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
@@ -177,6 +764,9 @@ def _ensure_envelope(
     side: str = "BUY",
     price: float | Decimal = 0.5,
     size: float | Decimal = 10.0,
+    raw_response_json: str | None = None,
+    order_id: str | None = None,
+    transaction_hashes: tuple[str, ...] = (),
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -218,10 +808,10 @@ def _ensure_envelope(
             signed_order=None,
             signed_order_hash=None,
             raw_request_hash="e" * 64,
-            raw_response_json=None,
-            order_id=None,
+            raw_response_json=raw_response_json,
+            order_id=order_id,
             trade_ids=(),
-            transaction_hashes=(),
+            transaction_hashes=transaction_hashes,
             error_code=None,
             error_message=None,
             captured_at=_NOW.isoformat(),
@@ -237,8 +827,18 @@ def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
     If venue_order_id provided, set it on the command row after advancing.
     """
     from src.state.venue_command_repo import append_event
-    append_event(conn, command_id=command_id, event_type="SUBMIT_REQUESTED",
-                 occurred_at="2026-04-26T00:01:00Z")
+    row = conn.execute(
+        "SELECT intent_kind FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    payload = _entry_submit_payload() if row is not None and row["intent_kind"] == "ENTRY" else None
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload=payload,
+    )
     if venue_order_id is not None:
         conn.execute(
             "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
@@ -281,12 +881,155 @@ def _insert_edli_live_order_event(
     )
 
 
+def _seed_abandoned_unsubmitted_edli_ghost(
+    conn,
+    *,
+    aggregate_id: str = "agg-abandoned-ghost",
+    event_id: str = "event-abandoned-ghost",
+    final_intent_id: str = "intent-abandoned-ghost",
+    execution_command_id: str = "exec-abandoned-ghost",
+    usage_id: str = "cap-abandoned-ghost",
+) -> None:
+    command_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "execution_receipt_hash": "receipt-abandoned-ghost",
+    }
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="PreSubmitRevalidated",
+        payload={**command_payload, "direction": "buy_yes", "limit_price": 0.01},
+        occurred_at="2026-04-26T00:00:00Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload=command_payload,
+        occurred_at="2026-04-26T00:00:01Z",
+    )
+    last_hash = conn.execute(
+        """
+        SELECT event_hash
+          FROM edli_live_order_events
+         WHERE aggregate_id = ? AND event_sequence = 2
+        """,
+        (aggregate_id,),
+    ).fetchone()["event_hash"]
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, 'EXECUTION_COMMAND_CREATED',
+                  2, 'ExecutionCommandCreated', ?, 0, NULL,
+                  '2026-04-26T00:00:01Z', 1)
+        """,
+        (aggregate_id, event_id, final_intent_id, last_hash),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (?, ?, '2026-04-26T00:00:00Z', 'tiny_live_canary',
+                  5.0, 1, 5.0, 1, 'RESERVED', ?, ?,
+                  '2026-04-26T00:00:00Z', 1)
+        """,
+        (usage_id, event_id, final_intent_id, execution_command_id),
+    )
+
+
 def _advance_to_unknown(conn, command_id="cmd-001", venue_order_id=None):
     """Advance to UNKNOWN state (INTENT_CREATED u2192 SUBMITTING u2192 UNKNOWN)."""
     from src.state.venue_command_repo import append_event
     _advance_to_submitting(conn, command_id=command_id, venue_order_id=venue_order_id)
     append_event(conn, command_id=command_id, event_type="SUBMIT_UNKNOWN",
                  occurred_at="2026-04-26T00:02:00Z")
+
+
+def test_abandoned_unsubmitted_ghost_recovery_requires_visible_venue_commands(conn):
+    from src.execution.command_recovery import reconcile_abandoned_unsubmitted_ghosts
+
+    _seed_abandoned_unsubmitted_edli_ghost(conn)
+    conn.execute("DROP TABLE venue_commands")
+
+    summary = reconcile_abandoned_unsubmitted_ghosts(
+        conn,
+        updated_before="2026-04-26T00:10:00Z",
+    )
+
+    assert {k: summary[k] for k in ("scanned", "advanced", "stayed", "errors")} == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["continuations"] == []
+    event_types = [
+        row["event_type"]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM edli_live_order_events
+             WHERE aggregate_id = 'agg-abandoned-ghost'
+             ORDER BY event_sequence
+            """
+        )
+    ]
+    assert event_types == ["PreSubmitRevalidated", "ExecutionCommandCreated"]
+
+
+def test_abandoned_unsubmitted_ghost_recovery_terminalizes_only_without_command_row(conn):
+    from src.execution.command_recovery import reconcile_abandoned_unsubmitted_ghosts
+
+    _seed_abandoned_unsubmitted_edli_ghost(conn)
+
+    summary = reconcile_abandoned_unsubmitted_ghosts(
+        conn,
+        updated_before="2026-04-26T00:10:00Z",
+    )
+
+    assert {k: summary[k] for k in ("scanned", "advanced", "stayed", "errors")} == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert len(summary["continuations"]) == 1
+    assert summary["continuations"][0]["aggregate_id"] == "agg-abandoned-ghost"
+    event_types = [
+        row["event_type"]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM edli_live_order_events
+             WHERE aggregate_id = 'agg-abandoned-ghost'
+             ORDER BY event_sequence
+            """
+        )
+    ]
+    assert event_types == [
+        "PreSubmitRevalidated",
+        "ExecutionCommandCreated",
+        "SubmitRejected",
+    ]
+    projection = conn.execute(
+        """
+        SELECT current_state
+          FROM edli_live_order_projection
+         WHERE aggregate_id = 'agg-abandoned-ghost'
+        """
+    ).fetchone()
+    assert projection["current_state"] == "SUBMIT_REJECTED"
 
 
 def _advance_to_unknown_side_effect(conn, command_id="cmd-001", venue_order_id=None):
@@ -415,6 +1158,9 @@ def _seed_pending_entry_projection(
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
         "last_monitor_market_price_is_fresh": None,
+        "last_monitor_best_bid": None,
+        "last_monitor_best_ask": None,
+        "last_monitor_market_vig": None,
         "decision_snapshot_id": "snap-pos-001",
         "entry_method": "ens_member_counting",
         "strategy_key": "opening_inertia",
@@ -433,7 +1179,7 @@ def _seed_pending_entry_projection(
         "fill_authority": None,
         "recovery_authority": None,
         "chain_shares": None,
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28).
         "chain_avg_price": None,
         "chain_cost_basis_usd": None,
         "chain_seen_at": None,
@@ -461,9 +1207,11 @@ def _append_order_fact(
     matched_size="0",
     remaining_size="0",
     source="REST",
+    raw_payload_json=None,
 ):
     from src.state.venue_command_repo import append_order_fact
 
+    payload = raw_payload_json or {"status": state, "order_id": order_id}
     return append_order_fact(
         conn,
         venue_order_id=order_id,
@@ -475,7 +1223,7 @@ def _append_order_fact(
         observed_at="2026-04-26T00:05:00Z",
         venue_timestamp="2026-04-26T00:05:00Z",
         raw_payload_hash="f" * 64,
-        raw_payload_json={"status": state, "order_id": order_id},
+        raw_payload_json=payload,
     )
 
 
@@ -508,6 +1256,7 @@ def _append_trade_fact(
     state="CONFIRMED",
     filled_size="1.25",
     fill_price="0.50",
+    tx_hash: str | None = None,
 ):
     from src.state.venue_command_repo import append_trade_fact
 
@@ -522,12 +1271,14 @@ def _append_trade_fact(
         source="REST",
         observed_at="2026-04-26T00:06:00Z",
         venue_timestamp="2026-04-26T00:06:00Z",
+        tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(
-            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}".encode()
+            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}".encode()
         ).hexdigest(),
         raw_payload_json={
             "id": trade_id,
             "status": state,
+            "tx_hash": tx_hash,
             "maker_orders": [
                 {
                     "order_id": order_id,
@@ -604,22 +1355,65 @@ def _insert_actionable_certificate_for_recovery(
     token_id: str = "tok-001",
     q_live: float = 0.37,
     direction: str = "buy_yes",
+    payoff_q_point: float | None = None,
+    quarantine: bool = False,
 ) -> str:
+    q_lcb = max(0.0, q_live - 0.05)
+    side = "YES" if direction == "buy_yes" else "NO"
+    payoff_q_point = q_live if payoff_q_point is None else payoff_q_point
+    payoff_q_lcb = q_lcb
+    cost = min(0.01, max(0.001, payoff_q_lcb / 2.0)) if payoff_q_lcb > 0 else 0.01
+    edge_lcb = payoff_q_lcb - cost
     payload = {
         "event_id": event_id,
         "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "forecast-snap-edli",
+        "family_id": "family-test",
+        "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
         "condition_id": "condition-test",
         "token_id": token_id,
         "city": "Karachi",
         "target_date": "2026-05-17",
         "bin_label": "Will the highest temperature in Karachi be 40C on May 17?",
         "direction": direction,
-        "strategy_key": "center_buy" if direction == "buy_yes" else "opening_inertia",
+        "strategy_key": "forecast_qkernel_entry",
         "metric": "high",
         "unit": "C",
         "q_live": q_live,
-        "q_lcb_5pct": max(0.0, q_live - 0.05),
-        "causal_snapshot_id": "forecast-snap-edli",
+        "q_lcb_5pct": q_lcb,
+        "c_fee_adjusted": 0.51,
+        "c_cost_95pct": 0.51,
+        "p_fill_lcb": 0.5,
+        "trade_score": max(edge_lcb, 0.01),
+        "action_score": max(edge_lcb, 0.01),
+        "executable_snapshot_id": "ems-test",
+        "fdr_family_id": "fdr-family-test",
+        "kelly_decision_id": "kelly-test",
+        "risk_decision_id": "risk-test",
+        "live_cap_usage_id": "live-cap-test",
+        "native_quote_available": True,
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": side,
+            "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
+            "route_id": f"DIRECT_{side}:bin-test@proof",
+            "bin_id": "bin-test",
+            "payoff_q_point": payoff_q_point,
+            "payoff_q_lcb": payoff_q_lcb,
+            "cost": cost,
+            "edge_lcb": edge_lcb,
+            "delta_u_at_min": max(edge_lcb, 0.01),
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": max(edge_lcb, 0.01),
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": payoff_q_lcb,
+        },
         "final_intent_id": f"intent:{event_id}:{token_id}",
     }
     payload_json = json.dumps(payload, sort_keys=True)
@@ -645,6 +1439,28 @@ def _insert_actionable_certificate_for_recovery(
             cert_hash,
         ),
     )
+    if quarantine:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+        from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+
+        ensure_table(conn)
+
+        conn.execute(
+            """
+            INSERT INTO decision_integrity_quarantine
+                (table_name, row_id, reason_code, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                DECISION_CERTIFICATES_TABLE,
+                cert_hash,
+                REASON_INVALID_LIVE_ACTIONABLE,
+                "2026-04-26T00:00:02Z",
+            ),
+        )
     return cert_hash
 
 
@@ -666,7 +1482,7 @@ def _insert_final_intent_certificate_for_recovery(
         "target_date": "2026-05-17",
         "bin_label": "Will the highest temperature in Karachi be 40C on May 17?",
         "direction": direction,
-        "strategy_key": "center_buy" if direction == "buy_yes" else "opening_inertia",
+        "strategy_key": "forecast_qkernel_entry",
         "metric": "high",
         "unit": "C",
         "q_live": q_live,
@@ -963,33 +1779,190 @@ class TestRecoveryResolutionTable:
         assert payload["venue_order_created"] is False
         assert payload["safe_replay_permitted"] is True
 
-    # Case 2: SUBMITTING + no venue_order_id -> REVIEW_REQUIRED
-    # Grammar note: SUBMITTING->EXPIRED is not a legal transition (_TRANSITIONS
-    # has no such edge). Recovery uses REVIEW_REQUIRED (legal from SUBMITTING)
-    # so the operator can resolve: was this never placed, or was the ack lost?
-    def test_submitting_without_order_id_resolves_to_expired(self, conn, mock_client):
+    # Case 2: SUBMITTING + no venue_order_id -> idempotency/absence recovery
+    # A deterministic venue 400 can fail to persist SUBMIT_REJECTED if the local
+    # DB is locked after the HTTP response. Recovery must not park that row in
+    # manual review; it proves venue absence and releases the command.
+    def test_submitting_without_order_id_safe_absence_resolves_to_rejected(self, conn):
         _insert(conn)
-        # Advance to SUBMITTING without setting venue_order_id
         _advance_to_submitting(conn, venue_order_id=None)
-        mock_client.get_order.return_value = None  # shouldn't be called
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = None
 
         from src.execution.command_recovery import reconcile_unresolved_commands
-        summary = reconcile_unresolved_commands(conn, mock_client)
+        summary = reconcile_unresolved_commands(conn, client)
 
-        # EXPIRED is not a legal grammar transition from SUBMITTING;
-        # recovery emits REVIEW_REQUIRED instead (operator-handoff).
-        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert _get_state(conn, "cmd-001") == "REJECTED"
         assert summary["advanced"] == 1
-        # get_order should NOT be called when venue_order_id is missing
-        mock_client.get_order.assert_not_called()
+        client.get_order.assert_not_called()
         events = _get_events(conn, "cmd-001")
         event_types = [e["event_type"] for e in events]
-        assert "REVIEW_REQUIRED" in event_types
-        # verify payload has expected reason
-        import json
-        rr_event = next(e for e in events if e["event_type"] == "REVIEW_REQUIRED")
-        payload = json.loads(rr_event["payload_json"])
-        assert payload["reason"] == "recovery_no_venue_order_id"
+        assert "SUBMIT_REJECTED" in event_types
+        rejected = next(e for e in events if e["event_type"] == "SUBMIT_REJECTED")
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "safe_replay_permitted_no_order_found"
+        assert payload["safe_replay_permitted"] is True
+        assert payload["recovered_from_state"] == "SUBMITTING"
+        assert payload["lookup_method"] == "idempotency_key"
+
+    def test_submitting_without_order_id_waits_for_safe_replay_window(self, conn):
+        created_at = datetime.now(timezone.utc).isoformat()
+        _insert(conn, created_at=created_at)
+        _advance_to_submitting(conn, venue_order_id=None)
+        conn.execute(
+            "UPDATE venue_commands SET updated_at = ? WHERE command_id = 'cmd-001'",
+            (created_at,),
+        )
+        conn.commit()
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = None
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert _get_state(conn, "cmd-001") == "SUBMITTING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] >= 1
+        assert "SUBMIT_REJECTED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
+    def test_restart_preflight_recovers_no_venue_exit_into_retry_projection(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+
+        db_path = tmp_path / "restart-preflight.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _seed_pending_entry_projection(
+            seed,
+            position_id="pos-exit",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 21.42,
+                   chain_shares = 21.42,
+                   cost_basis_usd = 14.35,
+                   entry_price = 0.67,
+                   order_status = 'filled',
+                   exit_reason = 'FAMILY_DIRECT_SELL_DOMINATES_HOLD',
+                   chain_state = 'synced',
+                   updated_at = '2026-06-29T05:08:33+00:00'
+             WHERE position_id = 'pos-exit'
+            """
+        )
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-exit",
+            decision_id="exit:pos-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            size=21.42,
+            price=0.58,
+            created_at="2026-06-29T05:08:33+00:00",
+        )
+        _advance_to_submitting(seed, command_id="cmd-exit", venue_order_id=None)
+        _insert(
+            seed,
+            command_id="cmd-review-old",
+            position_id="pos-review-old",
+            decision_id="dec-review-old",
+            intent_kind="ENTRY",
+            side="BUY",
+            size=8.0,
+            price=0.56,
+            created_at="2026-06-23T19:13:43+00:00",
+        )
+        _advance_to_submitting(seed, command_id="cmd-review-old", venue_order_id=None)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            seed,
+            command_id="cmd-review-old",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-06-23T19:13:47+00:00",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope="restart_preflight",
+        )
+
+        check = sqlite3.connect(db_path)
+        check.row_factory = sqlite3.Row
+        current = check.execute(
+            """
+            SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+              FROM position_current
+             WHERE position_id = 'pos-exit'
+            """
+        ).fetchone()
+        command_state = _get_state(check, "cmd-exit")
+        latest_event = check.execute(
+            """
+            SELECT event_type, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-exit'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        check.close()
+
+        assert summary["scope"] == "restart_preflight"
+        assert summary["restart_preflight_narrow"] is True
+        assert summary["scanned"] == 1
+        assert summary["restart_no_venue_exit_retry_projection"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert command_state == "REJECTED"
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_status": "retry_pending",
+            "exit_retry_count": 1,
+            "next_exit_retry_at": current["next_exit_retry_at"],
+        }
+        assert current["next_exit_retry_at"]
+        assert latest_event["event_type"] == "EXIT_ORDER_REJECTED"
+        assert latest_event["venue_status"] == "retry_pending"
+        event_payload = json.loads(latest_event["payload_json"])
+        assert event_payload["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        assert "submit absence for exit command cmd-exit" in event_payload["error"]
 
     def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
         self, conn, mock_client
@@ -1747,7 +2720,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert _get_state(conn, "cmd-001") == "FILLED"
-        assert summary["advanced"] == 1
+        assert summary["advanced"] >= 1
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])
@@ -2469,6 +3442,48 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
 
+    def test_maker_rest_cancel_pending_live_order_waits_inside_cancel_grace(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        import src.execution.command_recovery as recovery
+        from src.state.venue_command_repo import append_event
+
+        monkeypatch.setattr(recovery, "_now_iso", lambda: "2026-04-26T00:03:05+00:00")
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+            "matched_size": "0",
+        }
+
+        summary = recovery.reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        event_types = [event["event_type"] for event in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_REQUESTED"
+
     def test_maker_rest_cancel_pending_live_order_restores_acked(self, conn, mock_client):
         from src.state.venue_command_repo import append_event
 
@@ -2510,6 +3525,46 @@ class TestRecoveryResolutionTable:
         assert cancel_payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
         assert cancel_payload["requires_m5_reconcile"] is True
         assert clear_payload["proof_class"] == "cancel_unknown_venue_order_live"
+
+    def test_maker_rest_cancel_pending_live_order_missing_matched_size_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        event_types = [event["event_type"] for event in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_REQUESTED"
 
     def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
         self,
@@ -2555,6 +3610,109 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_acked_terminal_no_fill_order_fact_projects_edli_lifecycle_terminal(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        aggregate_id = "event-1:intent-1"
+        command_payload = {
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "dec-001",
+            "command_id": "cmd-001",
+        }
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="ExecutionCommandCreated",
+            payload=command_payload,
+            occurred_at="2026-04-26T00:01:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="VenueSubmitAcknowledged",
+            payload={**command_payload, "venue_order_id": "ord-001"},
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="CapTransitioned",
+            payload={
+                **command_payload,
+                "venue_order_id": "ord-001",
+                "to_status": "CONSUMED",
+                "execution_receipt_hash": "receipt-hash",
+            },
+            occurred_at="2026-04-26T00:02:01Z",
+        )
+        last_hash = conn.execute(
+            """
+            SELECT event_hash
+              FROM edli_live_order_events
+             WHERE aggregate_id = ?
+             ORDER BY event_sequence DESC
+             LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()["event_hash"]
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-1', 'intent-1', 'CAP_TRANSITIONED',
+                      3, 'CapTransitioned', ?, 0, 'ord-001',
+                      '2026-04-26T00:02:01Z', 1)
+            """,
+            (aggregate_id, last_hash),
+        )
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.engine.event_reactor_adapter import _TERMINAL_EVENT_SQL
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, pending_reconcile, venue_order_id
+              FROM edli_live_order_projection
+             WHERE aggregate_id = ?
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "TERMINAL_NO_FILL",
+            "last_event_type": "OrderLifecycleProjected",
+            "pending_reconcile": 0,
+            "venue_order_id": "ord-001",
+        }
+        lifecycle = conn.execute(
+            """
+            SELECT payload_json
+              FROM edli_live_order_events
+             WHERE aggregate_id = ?
+               AND event_type = 'OrderLifecycleProjected'
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        payload = json.loads(lifecycle["payload_json"])
+        assert payload["order_lifecycle_state"] == "TERMINAL_NO_FILL"
+        assert payload["exposure_created"] is False
+        assert payload["matched_size"] == "0"
+        assert conn.execute(_TERMINAL_EVENT_SQL, (aggregate_id,)).fetchone() is not None
+
     def test_cancel_pending_terminal_no_fill_order_fact_cancels_command_and_voids_pending_entry(
         self,
         conn,
@@ -2597,6 +3755,160 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
+
+    def test_terminal_no_fill_order_fact_can_collect_redecision_continuation(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+
+    def test_terminal_no_fill_continuation_uses_snapshot_family_without_market_events(
+        self,
+        conn,
+        mock_client,
+    ):
+        conn.execute("DROP TABLE IF EXISTS market_events")
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            event_slug="highest-temperature-in-boston-on-june-23-2026",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "city": "Boston",
+                "target_date": "2026-06-23",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+
+    def test_terminal_no_fill_recovery_writes_redecision_event_in_same_pass(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Terminal no-fill projection must durably requeue EDLI before main bridge."""
+        import src.events.triggers.forecast_snapshot_ready as fsr_trigger
+        from src.events.opportunity_event import make_opportunity_event
+        from src.execution import command_recovery
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        class FakeTrigger:
+            def __init__(self, writer, *, live_eligibility_reader):
+                self.writer = writer
+                self.live_eligibility_reader = live_eligibility_reader
+
+            def build_committed_snapshot_events(self, **kwargs):
+                assert kwargs["event_type"] == "EDLI_REDECISION_PENDING"
+                assert kwargs["restrict_to_families"] == {("Karachi", "2026-05-17", "high")}
+                assert kwargs["source"] == "terminal-no-fill:cmd-001"
+                received_at = kwargs["received_at"]
+                return [
+                    make_opportunity_event(
+                        event_type="EDLI_REDECISION_PENDING",
+                        entity_key="Karachi|2026-05-17|high|snap-terminal-no-fill",
+                        source=kwargs["source"],
+                        observed_at=received_at,
+                        available_at=received_at,
+                        received_at=received_at,
+                        causal_snapshot_id="snap-terminal-no-fill",
+                        payload={
+                            "city": "Karachi",
+                            "target_date": "2026-05-17",
+                            "metric": "high",
+                            "snapshot_id": "snap-terminal-no-fill",
+                        },
+                        priority=50,
+                    )
+                ]
+
+        monkeypatch.setattr(fsr_trigger, "ForecastSnapshotReadyTrigger", FakeTrigger)
+        monkeypatch.setattr(
+            fsr_trigger,
+            "executable_forecast_live_eligible_reader",
+            lambda forecasts_conn: "reader",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_recovery_forecasts_read_connection",
+            lambda recovery_conn: (recovery_conn, False),
+        )
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == []
+        assert summary["immediate_redecision_events"] == 1
+        row = conn.execute(
+            """
+            SELECT e.event_type, e.source, e.payload_json, p.processing_status
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE e.event_type = 'EDLI_REDECISION_PENDING'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["source"] == "terminal-no-fill:cmd-001"
+        assert row["processing_status"] == "pending"
+        payload = json.loads(row["payload_json"])
+        assert payload["redecision_origin"] == "terminal_no_fill"
+        assert payload["terminal_no_fill_command_id"] == "cmd-001"
 
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
@@ -2642,6 +3954,128 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "point_order_terminal_no_fill"
         assert payload["required_predicates"]["no_matching_open_orders"] is True
         assert payload["required_predicates"]["no_matching_trades"] is True
+
+    def test_live_tick_primes_acked_order_before_projection_creates_terminal_candidate(
+        self,
+        conn,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-late-candidate")
+
+        from src.execution.command_recovery import _collect_recovery_priming_keys
+
+        priming = _collect_recovery_priming_keys(conn, scope="live_tick")
+
+        assert "ord-late-candidate" in priming["order_ids"]
+
+    def test_live_tick_clears_terminal_cancel_fact_before_venue_snapshot(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+        from src.execution import venue_sync_contract
+        from src.state.db import init_schema
+
+        db_path = tmp_path / "live-tick-terminal-before-snapshot.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-001")
+        _seed_pending_entry_projection(seed)
+        _append_order_fact(
+            seed,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="12.44",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        def _fail_capture(*args, **kwargs):
+            raise RuntimeError("venue snapshot blocked after local cleanup")
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+        client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+        with pytest.raises(RuntimeError, match="venue snapshot blocked after local cleanup"):
+            command_recovery.reconcile_unresolved_commands(client=client, scope="live_tick")
+
+        verified = _conn_factory()
+        try:
+            command = verified.execute(
+                "SELECT state FROM venue_commands WHERE command_id = 'cmd-001'"
+            ).fetchone()
+            latest_event = verified.execute(
+                """
+                SELECT event_type
+                  FROM venue_command_events
+                 WHERE command_id = 'cmd-001'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            current = verified.execute(
+                """
+                SELECT phase, shares, cost_basis_usd, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            verified.close()
+
+        assert command["state"] == "CANCELLED"
+        assert latest_event["event_type"] == "CANCEL_ACKED"
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
+    def test_acked_terminal_point_order_missing_matched_size_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-001",
+            "status": "CANCELED",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_point_orders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {"phase": "pending_entry", "shares": 0.0, "cost_basis_usd": 0.0}
+        latest_fact = conn.execute(
+            """
+            SELECT state, matched_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_fact) == {"state": "LIVE", "matched_size": "0"}
 
     def test_cancelled_terminal_no_fill_order_without_pending_projection_recovers_and_voids(
         self,
@@ -3166,6 +4600,202 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
 
+    def test_cancelled_command_with_late_matched_point_order_projects_without_illegal_event(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A post-cancel matched order fact is venue truth, not a CANCELLED->FILLED command transition."""
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-late-match")
+        _seed_pending_entry_projection(conn, order_id="ord-late-match")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"reason": "maker_redecision_reprice"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-late-match", "venue_status": "CANCELED"},
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-late-match",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="5",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-late-match",
+            "status": "MATCHED",
+            "size_matched": "5",
+            "price": "0.34",
+            "associate_trades": ["trade-late-match"],
+            "transactionsHashes": ["0xhash-late-match"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_ACKED"
+        assert "FILL_CONFIRMED" not in event_types
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "5",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-late-match",
+            "venue_order_id": "ord-late-match",
+            "state": "MATCHED",
+            "filled_size": "5",
+            "fill_price": "0.34",
+            "tx_hash": "0xhash-late-match",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, entry_price, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("5")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("1.7")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.34")
+        assert current["order_status"] == "filled"
+
+    def test_acked_unknown_point_order_recovers_from_maker_trade_facts(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=10.58, price=0.67)
+        _advance_to_acked(conn, venue_order_id="ord-maker-fill")
+        _seed_pending_entry_projection(conn, order_id="ord-maker-fill")
+        _append_order_fact(
+            conn,
+            order_id="ord-maker-fill",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.58",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-maker-fill",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-maker-a",
+                "status": "CONFIRMED",
+                "market": "market-1",
+                "transaction_hash": "0xhash-a",
+                "maker_orders": [
+                    {
+                        "order_id": "ord-maker-fill",
+                        "matched_amount": "4.48",
+                        "price": "0.67",
+                        "asset_id": "token-no-1",
+                        "outcome": "No",
+                        "side": "BUY",
+                    }
+                ],
+            },
+            {
+                "id": "trade-maker-b",
+                "status": "CONFIRMED",
+                "market": "market-1",
+                "transaction_hash": "0xhash-b",
+                "maker_orders": [
+                    {
+                        "order_id": "ord-maker-fill",
+                        "matched_amount": "6.10",
+                        "price": "0.67",
+                        "asset_id": "token-no-1",
+                        "outcome": "No",
+                        "side": "BUY",
+                    }
+                ],
+            },
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "10.58",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-maker-a",
+            "state": "MATCHED",
+            "filled_size": "10.58",
+            "fill_price": "0.67",
+            "tx_hash": "0xhash-a",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, entry_price, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("10.58")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("7.0886")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.67")
+        assert current["order_status"] == "filled"
+
     def test_exit_point_order_matched_uses_sell_making_amount_as_share_size(
         self,
         conn,
@@ -3228,6 +4858,141 @@ class TestRecoveryResolutionTable:
             "tx_hash": "0xhash-sell-matched",
         }
 
+    def test_review_required_exit_matched_order_fact_finalizes_exit_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-exit-review")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-exit-review",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   direction = 'buy_yes',
+                   shares = 85.17,
+                   chain_shares = 85.17,
+                   cost_basis_usd = 4.34367,
+                   entry_price = 0.050999,
+                   token_id = 'tok-001',
+                   no_token_id = 'tok-001-no',
+                   order_status = 'retry_pending',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-exit-review'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-review",
+            position_id="pos-exit-review",
+            intent_kind="EXIT",
+            side="SELL",
+            size=85.17,
+            price=0.04,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-review",
+            venue_order_id="ord-exit-review",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-review",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "ord-exit-review"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-review",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:03:01Z",
+            payload={
+                "venue_order_id": "ord-exit-review",
+                "reason": "matched orders can't be canceled",
+                "cancel_outcome": {
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit-review",
+            order_id="ord-exit-review",
+            state="MATCHED",
+            matched_size="85.17",
+            remaining_size="0",
+            raw_payload_json={
+                "id": "ord-exit-review",
+                "status": "MATCHED",
+                "size_matched": "85.17",
+                "price": "0.04",
+                "associate_trades": ["trade-exit-review"],
+            },
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-exit-review",
+            "status": "MATCHED",
+            "size_matched": "85.17",
+            "price": "0.04",
+            "associate_trades": ["trade-exit-review"],
+            "transactionsHashes": ["0xhash-exit-review"],
+        }
+        before_cancel_requested = sum(
+            1
+            for event in _get_events(conn, "cmd-exit-review")
+            if event["event_type"] == "CANCEL_REQUESTED"
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-exit-review") == "FILLED"
+        events = _get_events(conn, "cmd-exit-review")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        assert sum(1 for event in events if event["event_type"] == "CANCEL_REQUESTED") == before_cancel_requested
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit-review'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-review",
+            "venue_order_id": "ord-exit-review",
+            "state": "MATCHED",
+            "filled_size": "85.17",
+            "fill_price": "0.04",
+            "tx_hash": "0xhash-exit-review",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, chain_shares, order_status, exit_price
+              FROM position_current
+             WHERE position_id = 'pos-exit-review'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "chain_shares": 0.0,
+            "order_status": "sell_filled",
+            "exit_price": 0.04,
+        }
+
     def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
         self,
         conn,
@@ -3270,6 +5035,79 @@ class TestRecoveryResolutionTable:
             "matched_size": "4.99",
             "source": "REST",
         }
+
+    def test_live_point_order_with_positive_size_matched_projects_partial_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Polymarket can keep an order LIVE after a maker partial fill."""
+        _insert(conn, size=10.58, price=0.67)
+        _advance_to_acked(conn, venue_order_id="ord-live-partial")
+        _seed_pending_entry_projection(conn, order_id="ord-live-partial")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-partial",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.58",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-live-partial",
+            "status": "LIVE",
+            "size_matched": "4.484847",
+            "original_size": "10.58",
+            "price": "0.67",
+            "associate_trades": ["trade-live-partial"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "6.095153",
+            "matched_size": "4.484847",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "state": "MATCHED",
+            "filled_size": "4.484847",
+            "fill_price": "0.67",
+        }
+        projection = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert projection["phase"] == "active"
+        assert Decimal(str(projection["shares"])) == Decimal("4.484847")
+        assert Decimal(str(projection["cost_basis_usd"])) == Decimal("3.00484749")
+        assert Decimal(str(projection["entry_price"])) == Decimal("0.67")
+        assert projection["order_status"] == "partial"
 
     def test_partial_entry_finalizes_when_latest_order_fact_is_fully_matched(
         self,
@@ -3478,6 +5316,570 @@ class TestRecoveryResolutionTable:
         assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
         assert _get_state(conn, "cmd-001") == "FILLED"
 
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_projects_filled_exit_trade_fact_to_closed(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-filled-exit-projection.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(
+            seed,
+            command_id="cmd-entry",
+            position_id="pos-exit",
+            size=10.01,
+            price=0.12,
+            token_id="tok-exit",
+        )
+        _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(
+            seed,
+            position_id="pos-exit",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 10.0102,
+                   chain_shares = 10.0102,
+                   cost_basis_usd = 1.2012,
+                   entry_price = 0.12,
+                   order_status = 'sell_placed',
+                   exit_reason = 'DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-exit'
+            """
+        )
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.01,
+            price=0.01,
+            token_id="tok-exit",
+        )
+        _advance_to_acked(seed, command_id="cmd-exit", venue_order_id="ord-exit")
+        append_event(
+            seed,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "place_exit_order_matched_submit",
+                "venue_order_id": "ord-exit",
+                "trade_id": "trade-exit",
+                "filled_size": "10.01",
+                "fill_price": "0.01",
+                "tx_hash": "0xexit",
+            },
+        )
+        _append_trade_fact(
+            seed,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit",
+            state="MATCHED",
+            filled_size="10.01",
+            fill_price="0.01",
+            tx_hash="0xexit",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT phase, order_status, exit_price, chain_shares
+                  FROM position_current
+                 WHERE position_id = 'pos-exit'
+                """
+            ).fetchone()
+            lifecycle_event = check.execute(
+                """
+                SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "exit_price": 0.01,
+            "chain_shares": 0.0,
+        }
+        assert dict(lifecycle_event) == {
+            "event_type": "EXIT_ORDER_FILLED",
+            "phase_before": "pending_exit",
+            "phase_after": "economically_closed",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "sell_filled",
+        }
+
+        retear = _conn_factory()
+        try:
+            first_count = retear.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                   AND order_id = 'ord-exit'
+                """
+            ).fetchone()["n"]
+            retear.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'pending_exit',
+                       chain_shares = 10.0102,
+                       order_status = 'retry_pending',
+                       updated_at = '2026-04-26T00:09:00Z'
+                 WHERE position_id = 'pos-exit'
+                """
+            )
+            retear.commit()
+        finally:
+            retear.close()
+
+        second_summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+        second_check = _conn_factory()
+        try:
+            second_count = second_check.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM position_events
+                 WHERE position_id = 'pos-exit'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                   AND order_id = 'ord-exit'
+                """
+            ).fetchone()["n"]
+            repaired = second_check.execute(
+                """
+                SELECT phase, order_status, chain_shares
+                  FROM position_current
+                 WHERE position_id = 'pos-exit'
+                """
+            ).fetchone()
+        finally:
+            second_check.close()
+
+        assert second_summary["exit_pending_projections"]["errors"] == 0
+        assert second_count == first_count == 1
+        assert dict(repaired) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "chain_shares": 0.0,
+        }
+
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_clears_matched_cancel_entry_review(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Narrow live scopes must not leave matched held entries stranded."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="CONFIRMED",
+            filled_size="4.995",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            state="PARTIALLY_MATCHED",
+            matched_size="4.995",
+            remaining_size="0.005",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 4.995,
+                   chain_shares = 4.995,
+                   cost_basis_usd = 1.6983,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-001", "source": "maker_rest_escalation"},
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:08:02Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-001",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            events = _get_events(check, "cmd-001")
+            state = _get_state(check, "cmd-001")
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        assert state == "FILLED"
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
+
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_clears_terminal_positive_entry_review(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Terminal venue order truth plus held chain projection clears review."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-terminal-positive.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-partial",
+            state="CONFIRMED",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            order_id="ord-001",
+            state="MATCHED",
+            matched_size="5.0",
+            remaining_size="0",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 5.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.70,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": "ord-001",
+                "proof_class": "point_order_filled_requires_complete_fill_fact_authority",
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            events = _get_events(check, "cmd-001")
+            state = _get_state(check, "cmd-001")
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        assert state == "FILLED"
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == (
+            "review_required_terminal_order_fact_with_held_projection"
+        )
+        assert dict(current) == {
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "entry_price": 0.34,
+            "order_status": "filled",
+        }
+
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_repairs_terminal_positive_entry_projection_size(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-terminal-positive-projection.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _insert(seed, size=5.0, price=0.34)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-partial",
+            state="CONFIRMED",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _append_order_fact(
+            seed,
+            order_id="ord-001",
+            state="MATCHED",
+            matched_size="5.0",
+            remaining_size="0",
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+                "command_id": "cmd-001",
+                "venue_order_id": "ord-001",
+                "trade_id": "trade-partial",
+                "filled_size": "3.0",
+                "fill_price": "0.34",
+                "required_predicates": {
+                    "latest_event_is_cancel_replace_blocked": True,
+                    "semantic_cancel_status_cancel_unknown": True,
+                    "requires_m5_reconcile": True,
+                    "positive_trade_fact": True,
+                },
+                "source_proof": {
+                    "source_commit": "test",
+                    "source_function": (
+                        "command_recovery._review_required_cancel_unknown_live_order_recovery"
+                    ),
+                    "source_reason": "cancel_unknown_confirmed_trade_fill",
+                },
+                "cleared_at": "2026-04-26T00:08:00Z",
+            },
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 3.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.02,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:08:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, entry_price, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert summary["scope"] == scope
+        assert summary["terminal_positive_entry_projection_repair"]["advanced"] == 1
+        assert dict(current) == {
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "entry_price": 0.34,
+            "order_status": "filled",
+        }
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,
@@ -3657,7 +6059,7 @@ class TestRecoveryResolutionTable:
             "command_id": "cmd-001",
             "shares": 5.0,
             "fill_price": 0.34,
-            "venue_status": "FILLED",
+            "venue_status": "MATCHED",
             "terminal_exec_status": "filled",
         }
         second_summary = reconcile_unresolved_commands(conn, mock_client)
@@ -3667,6 +6069,313 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_partial_entry_trade_fact_projects_active_exposure_immediately(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A real partial fill is active exposure even while the remainder rests."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-entry")
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-entry",
+            state="PARTIALLY_MATCHED",
+            matched_size="2.127658",
+            remaining_size="7.172342",
+            source="WS_USER",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "source": "WS_USER",
+                "venue_order_id": "ord-partial-entry",
+                "trade_id": "trade-partial-entry",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-entry",
+            trade_id="trade-partial-entry",
+            state="MATCHED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+
+    def test_partial_entry_repair_promotes_zero_share_pending_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Existing 0-share pending projection must not hide a positive venue fill."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-entry")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-partial-entry",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-entry",
+            state="PARTIALLY_MATCHED",
+            matched_size="2.127658",
+            remaining_size="7.172342",
+            source="WS_USER",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "source": "WS_USER",
+                "venue_order_id": "ord-partial-entry",
+                "trade_id": "trade-partial-entry",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-entry",
+            trade_id="trade-partial-entry",
+            state="MATCHED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import reconcile_filled_entry_projection_repairs
+
+        summary = reconcile_filled_entry_projection_repairs(conn, mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        events = conn.execute(
+            """
+            SELECT sequence_no, event_type, phase_before, phase_after
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [dict(row) for row in events] == [
+            {
+                "sequence_no": 1,
+                "event_type": "POSITION_OPEN_INTENT",
+                "phase_before": None,
+                "phase_after": "pending_entry",
+            },
+            {
+                "sequence_no": 2,
+                "event_type": "ENTRY_ORDER_POSTED",
+                "phase_before": "pending_entry",
+                "phase_after": "pending_entry",
+            },
+            {
+                "sequence_no": 3,
+                "event_type": "ENTRY_ORDER_FILLED",
+                "phase_before": "pending_entry",
+                "phase_after": "active",
+            },
+        ]
+
+    def test_cancel_failed_already_canceled_positive_entry_fill_releases_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Already-canceled cancel responses must not hide a real partial fill."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-canceled")
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-canceled",
+            trade_id="trade-partial-canceled",
+            state="CONFIRMED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-partial-canceled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-partial-canceled",
+                "reason": "ord-partial-canceled: the order is already canceled",
+                "cancel_outcome": {
+                    "canceled": [],
+                    "not_canceled": {
+                        "ord-partial-canceled": "the order is already canceled",
+                    },
+                },
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        command_events = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM venue_command_events
+                 WHERE command_id = 'cmd-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert command_events[-1] == "FILL_CONFIRMED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "matched_size": "2.127658",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
+            "entry_price": pytest.approx(0.5300001222000904),
+            "order_status": "filled",
+        }
+
+    def test_matched_cancel_review_required_pass_clears_already_canceled_positive_trade_fact(
+        self,
+        conn,
+    ):
+        """DB-only boot recovery must clear already-canceled REVIEW_REQUIRED fills."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-partial-canceled")
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial-canceled",
+            trade_id="trade-partial-canceled",
+            state="CONFIRMED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-partial-canceled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-partial-canceled",
+                "reason": "ord-partial-canceled: the order is already canceled",
+                "cancel_outcome": {
+                    "orderID": "ord-partial-canceled",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "ord-partial-canceled: the order is already canceled"
+                    ),
+                },
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["source_proof"]["source_reason"] == (
+            "cancel_failed_already_canceled_positive_entry_fill"
+        )
 
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
@@ -3764,7 +6473,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=5.0,
             price=0.34,
         )
@@ -3807,7 +6516,7 @@ class TestRecoveryResolutionTable:
             "no_token_id": "tok-001-no",
             "shares": 5.0,
             "cost_basis_usd": 1.7,
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
             "unit": "C",
         }
@@ -4066,11 +6775,49 @@ class TestRecoveryResolutionTable:
             {
                 "event_id": event_id,
                 "event_type": "FORECAST_SNAPSHOT_READY",
+                "causal_snapshot_id": "source-run-1",
+                "family_id": "family-condition-1",
+                "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                 "condition_id": "condition-1",
                 "direction": "buy_no",
                 "token_id": token_id,
+                "strategy_key": "opening_inertia",
                 "q_live": 0.81,
-                "causal_snapshot_id": "source-run-1",
+                "q_lcb_5pct": 0.76,
+                "c_fee_adjusted": 0.55,
+                "c_cost_95pct": 0.55,
+                "p_fill_lcb": 0.5,
+                "trade_score": 0.75,
+                "action_score": 0.75,
+                "executable_snapshot_id": "ems-token-bound",
+                "fdr_family_id": "fdr-token-bound",
+                "kelly_decision_id": "kelly-token-bound",
+                "risk_decision_id": "risk-token-bound",
+                "live_cap_usage_id": "cap-token-bound",
+                "final_intent_id": final_intent_id,
+                "native_quote_available": True,
+                "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+                "selection_authority_applied": "qkernel_spine",
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                    "route_id": "DIRECT_NO:bin-33@proof",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.81,
+                    "payoff_q_lcb": 0.76,
+                    "cost": 0.01,
+                    "edge_lcb": 0.75,
+                    "delta_u_at_min": 0.75,
+                    "optimal_stake_usd": 10.0,
+                    "optimal_delta_u": 0.75,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.76,
+                },
             },
             "2026-06-07T00:00:00Z",
         )
@@ -4110,7 +6857,185 @@ class TestRecoveryResolutionTable:
         assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
         assert trade_case["direction"] == "buy_no"
         assert trade_case["strategy_key"] == "opening_inertia"
+        assert trade_case["entry_method"] == "qkernel_spine"
+        assert trade_case["discovery_mode"] == "update_reaction"
         assert trade_case["p_posterior"] == pytest.approx(0.81)
+        assert trade_case["entry_ci_width"] == pytest.approx(0.10)
+
+    def test_edli_trade_case_recovers_from_live_order_events_without_certificates(
+        self,
+        conn,
+    ):
+        """ACK-time projection may see EDLI aggregate events before certificates."""
+        from src.execution.command_recovery import _edli_trade_case_for_command
+
+        event_id = "edli_evt_event_only_projection"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "delta_u_at_min": 0.21,
+                    "optimal_stake_usd": 10.0,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        trade_case = _edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": no_token_id,
+                "env_condition_id": "condition-test",
+                "env_yes_token_id": yes_token_id,
+                "env_no_token_id": no_token_id,
+            },
+        )
+
+        assert trade_case["trade_id"] == "pos-edli"
+        assert trade_case["city"] == "Madrid"
+        assert trade_case["target_date"] == "2026-06-08"
+        assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
+        assert trade_case["direction"] == "buy_no"
+        assert trade_case["strategy_key"] == "forecast_qkernel_entry"
+        assert trade_case["unit"] == "C"
+        assert trade_case["entry_method"] == "qkernel_spine"
+        assert trade_case["p_posterior"] == pytest.approx(0.91)
+        assert trade_case["entry_ci_width"] == pytest.approx(0.18)
+
+    def test_edli_trade_case_marks_non_qkernel_actionable_as_venue_fact_recovery(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import _edli_trade_case_for_command
+
+        event_id = "edli_evt_legacy_actionable"
+        token_id = "tok-no"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:{token_id}:{token_id}:buy_no"
+
+        def insert_certificate(certificate_type: str, semantic_key: str, payload: dict, created_at: str) -> None:
+            payload_json = json.dumps(payload, sort_keys=True)
+            payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO decision_certificates (
+                    certificate_id, certificate_type, schema_version, canonicalization_version,
+                    semantic_key, claim_type, mode, decision_time, authority_id,
+                    authority_version, algorithm_id, algorithm_version, payload_json,
+                    payload_hash, certificate_hash, verifier_status, created_at
+                ) VALUES (?, ?, 1, 'test', ?, 'test', 'LIVE', ?, 'test',
+                          'test', 'test', 'test', ?, ?, ?, 'VERIFIED', ?)
+                """,
+                (
+                    f"cert:{certificate_type}:{semantic_key}",
+                    certificate_type,
+                    semantic_key,
+                    created_at,
+                    payload_json,
+                    payload_hash,
+                    hashlib.sha256(f"{certificate_type}:{payload_hash}".encode()).hexdigest(),
+                    created_at,
+                ),
+            )
+
+        insert_certificate(
+            "ActionableTradeCertificate",
+            f"actionable:{event_id}:family:condition-1",
+            {
+                "event_id": event_id,
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "condition_id": "condition-1",
+                "direction": "buy_no",
+                "token_id": token_id,
+                "q_live": 0.81,
+                "causal_snapshot_id": "source-run-1",
+            },
+            "2026-06-07T00:00:00Z",
+        )
+        insert_certificate(
+            "FinalIntentCertificate",
+            f"final_intent:{event_id}:intent:{token_id}",
+            {
+                "event_id": event_id,
+                "final_intent_id": f"intent:{token_id}",
+                "condition_id": "condition-1",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "temperature_metric": "high",
+                "unit": "C",
+                "decision_source_context": {
+                    "city": "Madrid",
+                    "target_date": "2026-06-08",
+                },
+            },
+            "2026-06-07T00:00:01Z",
+        )
+
+        trade_case = _edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": token_id,
+                "env_condition_id": "condition-1",
+                "env_yes_token_id": "tok-yes",
+                "env_no_token_id": token_id,
+            },
+        )
+
+        assert trade_case == {}
 
     def test_edli_filled_entry_repair_recovers_missing_bin_label_from_clob_market_identity(
         self,
@@ -4185,11 +7110,49 @@ class TestRecoveryResolutionTable:
             {
                 "event_id": event_id,
                 "event_type": "FORECAST_SNAPSHOT_READY",
+                "causal_snapshot_id": "source-run-clob",
+                "family_id": "family-condition-test",
+                "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                 "condition_id": condition_id,
                 "direction": "buy_no",
                 "token_id": no_token_id,
+                "strategy_key": "opening_inertia",
                 "q_live": 0.82,
-                "causal_snapshot_id": "source-run-clob",
+                "q_lcb_5pct": 0.77,
+                "c_fee_adjusted": 0.55,
+                "c_cost_95pct": 0.55,
+                "p_fill_lcb": 0.5,
+                "trade_score": 0.76,
+                "action_score": 0.76,
+                "executable_snapshot_id": "ems-clob",
+                "fdr_family_id": "fdr-clob",
+                "kelly_decision_id": "kelly-clob",
+                "risk_decision_id": "risk-clob",
+                "live_cap_usage_id": "cap-clob",
+                "final_intent_id": final_intent_id,
+                "native_quote_available": True,
+                "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+                "selection_authority_applied": "qkernel_spine",
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                    "route_id": "DIRECT_NO:bin-33@proof",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.82,
+                    "payoff_q_lcb": 0.77,
+                    "cost": 0.01,
+                    "edge_lcb": 0.76,
+                    "delta_u_at_min": 0.76,
+                    "optimal_stake_usd": 10.0,
+                    "optimal_delta_u": 0.76,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.77,
+                },
             },
             "2026-06-07T00:00:00Z",
         )
@@ -4417,7 +7380,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.37,
+            q_live=0.62,
             direction="buy_yes",
         )
 
@@ -4432,8 +7395,207 @@ class TestRecoveryResolutionTable:
         assert dict(current) == {
             "phase": "pending_entry",
             "direction": "buy_yes",
-            "p_posterior": pytest.approx(0.37),
+            "p_posterior": pytest.approx(0.62),
         }
+
+    def test_live_edli_entry_projection_refuses_missing_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-missing-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-missing-cert")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-missing-cert",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_live_edli_entry_projection_refuses_quarantined_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-quarantined-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-quarantined")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-quarantined",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.62,
+            direction="buy_yes",
+            quarantine=True,
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_live_edli_entry_projection_refuses_current_invalid_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-invalid-current-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-invalid-current")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-invalid-current",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.06,
+            direction="buy_yes",
+            payoff_q_point=0.20,
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_invalid_pending_entry_authority_cancel_voids_zero_fill_rest_and_continues_redecision(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-invalid-pending-authority"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id, size=13.45, price=0.40)
+        _advance_to_acked(conn, venue_order_id="ord-invalid-pending")
+        _seed_pending_entry_projection(conn, order_id="ord-invalid-pending")
+        _append_order_fact(
+            conn,
+            order_id="ord-invalid-pending",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.06,
+            direction="buy_yes",
+            payoff_q_point=0.20,
+        )
+
+        class FakeClob:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
+            def cancel_order(self, order_id: str):
+                self.cancelled.append(order_id)
+                return {"canceled": [order_id], "not_canceled": []}
+
+        from src.execution.command_recovery import (
+            reconcile_invalid_pending_entry_authority_cancels,
+        )
+
+        clob = FakeClob()
+        summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
+
+        assert clob.cancelled == ["ord-invalid-pending"]
+        assert summary["scanned"] == 1
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-invalid-pending",
+                "condition_id": "condition-test",
+                "token_id": "tok-001",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "invalid_pending_entry_authority_cancel",
+            }
+        ]
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        position = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+        events = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert events[-1] == "ENTRY_ORDER_VOIDED"
 
     def test_edli_entry_posterior_projection_repair_backfills_existing_zero(
         self,
@@ -4448,7 +7610,7 @@ class TestRecoveryResolutionTable:
             conn,
             event_id=event_id,
             token_id="tok-001",
-            q_live=0.42,
+            q_live=0.62,
             direction="buy_yes",
         )
         conn.execute(
@@ -4479,9 +7641,184 @@ class TestRecoveryResolutionTable:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
-            "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
-        assert current["p_posterior"] == pytest.approx(0.42)
+        assert current["p_posterior"] == pytest.approx(0.62)
+        assert current["entry_method"] == "qkernel_spine"
+
+    def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-existing-quarantined"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-existing-quarantined")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.62,
+            direction="buy_yes",
+            quarantine=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
+                0.0, 'forecast-snap-old', 'ens_member_counting', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-existing-quarantined', 'partial',
+                '2026-04-26T00:05:00Z', 'high'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        current = conn.execute(
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["p_posterior"] == 0.0
+        assert current["entry_method"] == "ens_member_counting"
+
+    def test_invalid_open_entry_authority_repair_reviews_active_position_without_quarantine(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-active-invalid-authority"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-active-invalid-authority")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.62,
+            direction="buy_yes",
+            quarantine=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
+                0.62, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-active-invalid-authority', 'partial',
+                '2026-04-26T00:05:00Z', 'high', 5.0
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            INVALID_ENTRY_AUTHORITY_REVIEW_REASON,
+            reconcile_invalid_open_entry_authority_reviews,
+        )
+
+        summary = reconcile_invalid_open_entry_authority_reviews(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "chain_state": "synced",
+            "exit_reason": None,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, caused_by, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "active"
+        assert event["phase_after"] == "active"
+        assert event["command_id"] == "cmd-001"
+        assert event["caused_by"] == INVALID_ENTRY_AUTHORITY_REVIEW_REASON
+        assert payload["proof_class"] == "open_position_entry_actionable_certificate_not_current_valid"
+
+    def test_edli_entry_authority_projection_repair_backfills_legacy_method(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-existing-method"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-existing-method")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.914,
+            direction="buy_yes",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Hong Kong', 'Hong Kong',
+                '2026-06-26', 'Will the lowest temperature in Hong Kong be 28C on June 26?',
+                'buy_yes', 'C', 3.05, 5.0, 3.05, 0.61,
+                0.914, 'forecast-snap-old', 'ens_member_counting', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-existing-method', 'filled',
+                '2026-06-24T05:27:15Z', 'low'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["p_posterior"] == pytest.approx(0.914)
+        assert current["entry_method"] == "qkernel_spine"
 
     def test_edli_entry_posterior_projection_repair_rejects_final_intent_q_live(
         self,
@@ -4539,6 +7876,201 @@ class TestRecoveryResolutionTable:
             "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == 0.0
+
+    def test_hard_terminal_position_projection_repair_restores_voided_phase(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-terminal-drift', 'active', 'condition-test', 'Hong Kong', 'Hong Kong',
+                '2026-06-09', 'Will the highest temperature in Hong Kong be 32C on June 9?',
+                'buy_no', 'C', 17.67, 19.0, 17.67, 0.93,
+                1.0, 'forecast-snap-old', 'ens_member_counting', 'opening_inertia',
+                'opening_inertia', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-terminal-drift', 'filled',
+                '2026-06-25T00:00:00Z', 'high', 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-terminal-drift', 'pos-terminal-drift', 7, 'ADMIN_VOIDED',
+                '2026-06-12T11:45:30+00:00', 'pending_exit', 'voided',
+                'opening_inertia', 'dec-1', 'snap-1', 'ord-terminal-drift',
+                'cmd-1', 'operator_review', 'idem-terminal-drift', 'VOIDED',
+                'src.execution.command_recovery', '{}', 'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            "SELECT phase, chain_shares FROM position_current WHERE position_id = 'pos-terminal-drift'"
+        ).fetchone()
+        assert row["phase"] == "voided"
+        assert row["chain_shares"] == 0.0
+
+    def test_hard_terminal_position_projection_repair_ignores_stale_terminal_event(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares, exit_reason
+            ) VALUES (
+                'pos-stale-terminal', 'pending_exit', 'condition-test', 'Miami', 'US',
+                '2026-06-30', 'Will the highest temperature in Miami be between 96-97F on June 30?',
+                'buy_yes', 'F', 4.34, 85.17, 4.34, 0.051,
+                0.34, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-yes', 'tok-no',
+                'condition-test', 'ord-open-exit', 'sell_placed',
+                '2026-06-29T18:00:50+00:00', 'high', 85.17,
+                'ENTRY_SELECTION_GUARD_INVALID_EXIT'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES
+              ('evt-stale-terminal-void', 'pos-stale-terminal', 7, 'ADMIN_VOIDED',
+               '2026-06-29T13:38:50+00:00', 'active', 'voided',
+               'center_buy', 'dec-1', 'snap-1', 'ord-entry', NULL,
+               'chain_reconciliation', 'idem-stale-terminal-void', 'voided',
+               'src.state.chain_reconciliation',
+               '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-yes","chain_state":"synced"}',
+               'live'),
+              ('evt-stale-terminal-exit-posted', 'pos-stale-terminal', 8, 'EXIT_ORDER_POSTED',
+               '2026-06-29T18:00:45+00:00', 'active', 'pending_exit',
+               'center_buy', 'dec-1', 'snap-1', 'ord-open-exit', NULL,
+               'transition_phase', 'idem-stale-terminal-exit-posted', 'sell_pending',
+               'src.execution.exit_lifecycle',
+               '{"last_exit_order_id":"ord-open-exit","status":"sell_pending"}',
+               'live')
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            """
+            SELECT phase, chain_state, chain_shares, order_status, order_id
+              FROM position_current
+             WHERE position_id = 'pos-stale-terminal'
+            """
+        ).fetchone()
+        assert dict(row) == {
+            "phase": "pending_exit",
+            "chain_state": "synced",
+            "chain_shares": 85.17,
+            "order_status": "sell_placed",
+            "order_id": "ord-open-exit",
+        }
+
+    def test_hard_terminal_position_projection_repair_clears_chain_zero_void_fields(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares, exit_retry_count, next_exit_retry_at, exit_reason
+            ) VALUES (
+                'pos-chain-zero-stale', 'voided', 'condition-test', 'Manila', 'Manila',
+                '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+                'buy_yes', 'C', 0.15, 9.7, 0.15, 0.015,
+                0.13, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'chain_confirmed_zero', 'tok-001', 'tok-001-no',
+                'condition-test', NULL, 'retry_pending',
+                '2026-06-29T17:33:25+00:00', 'high',
+                9.7, 6, '2026-06-29T17:45:00+00:00', 'CHAIN_CONFIRMED_ZERO'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-chain-zero-stale', 'pos-chain-zero-stale', 11, 'ADMIN_VOIDED',
+                '2026-06-29T17:33:25+00:00', 'pending_exit', 'voided',
+                'center_buy', 'dec-1', 'snap-1', NULL, NULL,
+                'chain_truth_balance_zero', 'idem-chain-zero-stale', 'voided',
+                'src.execution.exit_lifecycle',
+                '{"evidence_source":"CHAIN_BALANCEOF","chain_state":"chain_confirmed_zero","reason":"CHAIN_CONFIRMED_ZERO"}',
+                'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            """
+            SELECT phase, chain_state, chain_shares, order_status, exit_retry_count,
+                   next_exit_retry_at, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-chain-zero-stale'
+            """
+        ).fetchone()
+        assert dict(row) == {
+            "phase": "voided",
+            "chain_state": "chain_confirmed_zero",
+            "chain_shares": 0.0,
+            "order_status": "voided",
+            "exit_retry_count": 0,
+            "next_exit_retry_at": None,
+            "exit_reason": "CHAIN_CONFIRMED_ZERO",
+        }
 
     def test_live_entry_repair_prefers_forecasts_market_events_over_trade_ghost(
         self,
@@ -4613,7 +8145,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
             price=0.01,
         )
@@ -4653,7 +8185,7 @@ class TestRecoveryResolutionTable:
             "token_id": "tok-001",
             "no_token_id": "tok-001-no",
             "order_id": "ord-live",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
         }
 
@@ -4732,7 +8264,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
             price=0.01,
         )
@@ -4781,7 +8313,7 @@ class TestRecoveryResolutionTable:
             "token_id": "tok-001",
             "no_token_id": "tok-001-no",
             "order_id": "ord-terminal",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "forecast_qkernel_entry",
             "temperature_metric": "high",
         }
         after_count, after_markets = count_unknown_side_effects(conn)
@@ -4875,7 +8407,299 @@ class TestRecoveryResolutionTable:
             "order_status": "pending",
         }
         event_types = [
-            row[0]
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT event_type, venue_status, payload_json
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert [row["event_type"] for row in event_types] == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+        ]
+        assert [row["venue_status"] for row in event_types] == ["LIVE", "LIVE"]
+        assert all(json.loads(row["payload_json"])["venue_status"] == "LIVE" for row in event_types)
+
+    def test_ensure_live_entry_projection_for_command_uses_edli_events_before_certificates(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "edli_evt_ack_event_only"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=no_token_id,
+            outcome_label="NO",
+            decision_id=decision_id,
+            size=12.29,
+            price=0.61,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-edli")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-edli",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="12.29",
+            source="REST",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, token_id, no_token_id,
+                   order_id, order_status, entry_method, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "direction": "buy_no",
+            "token_id": yes_token_id,
+            "no_token_id": no_token_id,
+            "order_id": "ord-live-edli",
+            "order_status": "pending",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "forecast_qkernel_entry",
+        }
+
+    def test_filled_day0_edli_entry_projects_from_nested_receipt_qkernel(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Live Day0 FOK fills must become active positions from real receipt shape."""
+
+        event_id = "edli_evt_day0_nested_qkernel"
+        yes_token_id = "tok-yes-day0"
+        no_token_id = "tok-no-day0"
+        final_intent_id = f"edli_intent:{event_id}:{yes_token_id}"
+        decision_id = (
+            f"edli_exec_cmd:{event_id}:{final_intent_id}:"
+            f"{yes_token_id}:{yes_token_id}:buy_yes"
+        )
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=yes_token_id,
+            outcome_label="YES",
+            decision_id=decision_id,
+            size=40.25,
+            price=0.44,
+            created_at="2026-07-02T02:18:11+00:00",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-day0-fok")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-07-02T02:18:17+00:00",
+            payload={
+                "source": "REST",
+                "venue_order_id": "ord-day0-fok",
+                "trade_id": "trade-day0-fok",
+                "filled_size": "40.25",
+                "fill_price": "0.44",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-day0-fok",
+            trade_id="trade-day0-fok",
+            state="MATCHED",
+            filled_size="40.25",
+            fill_price="0.44",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-day0-fok",
+            state="MATCHED",
+            matched_size="40.25",
+            remaining_size="0",
+            source="REST",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="DecisionProofAccepted",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "decision_audit": {
+                    "event_id": event_id,
+                    "event_type": "DAY0_EXTREME_UPDATED",
+                    "final_intent_id": final_intent_id,
+                    "actual_bin_label": (
+                        "Will the highest temperature in Manila be 32°C on July 2?"
+                    ),
+                    "actual_condition_id": "condition-test",
+                    "actual_direction": "buy_yes",
+                    "actual_token_id": yes_token_id,
+                    "city": "Manila",
+                    "target_date": "2026-07-02",
+                    "metric": "high",
+                    "strategy_key": "day0_nowcast_entry",
+                    "opportunity_book": {
+                        "cache_summary": {
+                            "selected_qkernel_execution_economics": {
+                                "source": "qkernel_spine",
+                                "side": "YES",
+                                "candidate_id": "YES:bin-32:DIRECT_YES:bin-32",
+                                "route_id": "DIRECT_YES:bin-32",
+                                "bin_id": "bin-32",
+                                "payoff_q_point": 0.9614944294185659,
+                                "payoff_q_lcb": 0.96,
+                                "cost": 0.44,
+                                "edge_lcb": 0.52,
+                                "optimal_delta_u": 0.52,
+                                "false_edge_rate": 0.01,
+                                "direction_law_ok": True,
+                                "coherence_allows": True,
+                            }
+                        }
+                    },
+                },
+            },
+            occurred_at="2026-07-02T02:17:51+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": yes_token_id,
+                "direction": "buy_yes",
+                "city": "Manila",
+                "target_date": "2026-07-02",
+                "metric": "high",
+                "strategy_key": "day0_nowcast_entry",
+                "bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+                "q_live": 0.9614944294185659,
+                "limit_price": 0.44,
+                "size": 40.25,
+            },
+            occurred_at="2026-07-02T02:18:08+00:00",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, shares, entry_price,
+                   order_status, entry_method, strategy_key, p_posterior, entry_ci_width
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Manila",
+            "target_date": "2026-07-02",
+            "direction": "buy_yes",
+            "shares": pytest.approx(40.25),
+            "entry_price": pytest.approx(0.44),
+            "order_status": "filled",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "day0_nowcast_entry",
+            "p_posterior": pytest.approx(0.9614944294185659),
+            "entry_ci_width": pytest.approx(0.0029888588371318),
+        }
+        event_types = [
+            row["event_type"]
             for row in conn.execute(
                 """
                 SELECT event_type
@@ -4885,7 +8709,233 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchall()
         ]
-        assert event_types == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"]
+        assert event_types == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+            "ENTRY_ORDER_FILLED",
+        ]
+
+    def test_partial_edli_entry_without_projection_recovers_active_partial_position_from_events(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "edli_evt_partial_event_only"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=no_token_id,
+            outcome_label="NO",
+            decision_id=decision_id,
+            size=12.29,
+            price=0.61,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-edli")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-06-07T00:03:00Z",
+            payload={
+                "venue_order_id": "ord-live-edli",
+                "trade_id": "trade-partial-edli",
+                "filled_size": "5.128204",
+                "fill_price": "0.6100001092",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-live-edli",
+            trade_id="trade-partial-edli",
+            state="CONFIRMED",
+            filled_size="5.128204",
+            fill_price="0.6100001092",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-live-edli",
+            state="PARTIALLY_MATCHED",
+            matched_size="5.128204",
+            remaining_size="7.161796",
+            source="WS_USER",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, shares, entry_price,
+                   order_status, entry_method, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "direction": "buy_no",
+            "shares": pytest.approx(5.128204),
+            "entry_price": pytest.approx(0.6100001092),
+            "order_status": "partial",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "forecast_qkernel_entry",
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": pytest.approx(5.128204),
+            "fill_price": pytest.approx(0.6100001092),
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+
+    def test_live_buy_no_projection_repair_event_payload_uses_selected_no_token(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            size=13.45,
+            price=0.74,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-no")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-no",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            direction="buy_no",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT direction, token_id, no_token_id, order_id
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "direction": "buy_no",
+            "token_id": "tok-yes",
+            "no_token_id": "tok-no",
+            "order_id": "ord-live-no",
+        }
+        payloads = [
+            json.loads(row["payload_json"])
+            for row in conn.execute(
+                """
+                SELECT payload_json
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED')
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert payloads
+        for payload in payloads:
+            assert payload["token_id"] == "tok-no"
+            assert payload["selected_token_id"] == "tok-no"
+            assert payload["yes_token_id"] == "tok-yes"
+            assert payload["no_token_id"] == "tok-no"
 
     def test_live_acked_entry_order_with_positive_trade_fact_waits_for_fill_reconciliation(
         self,
@@ -5188,17 +9238,46 @@ class TestRecoveryResolutionTable:
         }
         execution = conn.execute(
             """
-            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+            SELECT command_id, posted_at, filled_at, shares, fill_price,
+                   venue_status, terminal_exec_status
               FROM execution_fact
              WHERE intent_id = 'pos-001:entry'
             """
         ).fetchone()
         assert dict(execution) == {
             "command_id": "cmd-001",
+            "posted_at": "2026-04-26T00:00:00Z",
+            "filled_at": "2026-04-26T00:06:00Z",
             "shares": 5.116278,
             "fill_price": 0.429999894454523,
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
+        }
+        conn.execute(
+            """
+            UPDATE execution_fact
+               SET posted_at = '2026-07-02T12:12:18.608703+00:00',
+                   filled_at = '2026-07-02T12:12:18.608703+00:00'
+             WHERE intent_id = 'pos-001:entry'
+            """
+        )
+        timestamp_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert timestamp_summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        repaired_timestamps = conn.execute(
+            """
+            SELECT posted_at, filled_at
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(repaired_timestamps) == {
+            "posted_at": "2026-04-26T00:00:00Z",
+            "filled_at": "2026-04-26T00:06:00Z",
         }
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_execution_fact_repair"] == {
@@ -5936,6 +10015,81 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_m5_local_orphan_acked_no_order_fact_terminalizes_zero_exposure_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A submit ACK can persist before any order fact arrives.
+
+        If a later fresh M5 sweep proves the order is absent/terminal, recovery
+        must not wait for a LIVE order fact that will never exist.
+        """
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
+        _insert(conn, size=22.0)
+        _advance_to_acked(conn, venue_order_id="ord-no-fact")
+        _seed_pending_entry_projection(conn, order_id="ord-no-fact")
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-no-fact",
+            context="periodic",
+            evidence={
+                "reason": "local_open_order_absent_from_exchange_open_orders",
+                "exchange_open_order_ids": [],
+                "trade_enumeration_available": True,
+                "point_order_status": "CANCELED",
+                "point_order_surface": "get_order",
+            },
+            recorded_at="2026-04-26T00:06:00Z",
+        )
+        mock_client.get_order.return_value = {"orderID": "ord-no-fact", "status": "CANCELED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["local_orphan_no_fill_findings"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        latest_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "remaining_size": "0",
+            "matched_size": "0",
+            "source": "REST",
+        }
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_terminal_no_fill",
+            "resolved_by": "src.execution.command_recovery",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
     def test_acked_terminal_order_fact_with_matched_size_waits_for_fill_reconciliation(
         self,
         conn,
@@ -5957,6 +10111,83 @@ class TestRecoveryResolutionTable:
             "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["phase"] == "pending_entry"
+
+    def test_cancelled_terminal_order_fact_with_matched_size_recovers_entry_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0, price=0.50)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+        )
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="1.25",
+            remaining_size="8.75",
+            source="WS_USER",
+            raw_payload_json={
+                "id": "ord-001",
+                "orderID": "ord-001",
+                "status": "CANCELED",
+                "size_matched": "1.25",
+                "price": "0.50",
+                "associate_trades": ["trade-terminal-positive"],
+            },
+        )
+        mock_client.get_order.return_value = None
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        trade = conn.execute(
+            """
+            SELECT trade_id, filled_size, fill_price, source
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade) == {
+            "trade_id": "trade-terminal-positive",
+            "filled_size": "1.25",
+            "fill_price": "0.50",
+            "source": "WS_USER",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, chain_state
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("1.25")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0.625")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.5")
+        assert current["order_status"] == "partial"
+        assert current["chain_state"] == "synced"
+        events = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert events[-1] == "CANCEL_ACKED"
+        position_events = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM position_events WHERE position_id = 'pos-001' ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        assert "ENTRY_ORDER_FILLED" in position_events
 
     def test_acked_terminal_order_fact_order_id_mismatch_does_not_void_command_position(
         self,
@@ -6324,6 +10555,280 @@ class TestRecoveryResolutionTable:
         ]
         assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
 
+    def test_edli_gate_runtime_unknown_reconcile_releases_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-gate:intent-gate:token-gate:token-gate:buy_no"
+        aggregate_id = "event-gate:intent-gate:token-gate"
+        reason_code = (
+            "EXECUTOR_SUBMIT_UNKNOWN:[gate_runtime] BLOCKED cap='live_venue_submit': "
+            "condition 'deployment_freshness_mismatch' is active"
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": "event-gate",
+                "final_intent_id": "intent-gate",
+                "execution_command_id": execution_command_id,
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+            occurred_at="2026-04-26T00:02:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-gate",
+                "final_intent_id": "intent-gate",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-gate",
+                "reason_code": reason_code,
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-gate', 'intent-gate', 'PENDING_RECONCILE',
+                      2, 'SubmitUnknown', 'hash-gate', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-gate', 'event-gate', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 10.0, 1, 'RESERVED',
+                      'intent-gate', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-gate'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        reconciled_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                FROM edli_live_order_events
+                WHERE aggregate_id = ? AND event_type = 'Reconciled'
+                ORDER BY event_sequence DESC LIMIT 1
+                """,
+                (aggregate_id,),
+            ).fetchone()["payload_json"]
+        )
+        assert reconciled_payload["proof_class"] == "pre_venue_gate_runtime_block_no_command_no_venue_order"
+        assert reconciled_payload["required_predicates"]["reason_code"] == reason_code
+
+    def test_edli_post_submit_unknown_without_command_releases_on_authenticated_absence(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-2:intent-2:token-2:token-2:buy_no"
+        aggregate_id = "event-2:intent-2:token-2"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "condition_id": "condition-2",
+                "token_id": "token-2",
+                "direction": "buy_no",
+                "city": "Ankara",
+                "target_date": "2026-06-29",
+                "metric": "high",
+            },
+            occurred_at="2026-04-26T00:01:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "execution_command_id": execution_command_id,
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+            occurred_at="2026-04-26T00:02:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-2",
+                "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:[gate_runtime] BLOCKED deployment_freshness_mismatch",
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-2', 'intent-2', 'PENDING_RECONCILE',
+                      3, 'SubmitUnknown', 'hash-3', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-2', 'event-2', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-2', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-2'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+
+    def test_edli_post_submit_unknown_without_command_stays_when_venue_exposure_matches(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-3:intent-3:token-3:token-3:buy_no"
+        aggregate_id = "event-3:intent-3:token-3"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": "event-3",
+                "final_intent_id": "intent-3",
+                "condition_id": "condition-3",
+                "token_id": "token-3",
+                "direction": "buy_no",
+            },
+            occurred_at="2026-04-26T00:01:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-3",
+                "final_intent_id": "intent-3",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-3",
+                "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:timeout",
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-3', 'intent-3', 'PENDING_RECONCILE',
+                      2, 'SubmitUnknown', 'hash-3', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-3', 'event-3', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-3', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+        mock_client.get_open_orders.return_value = [{"id": "order-3", "asset_id": "token-3"}]
+        mock_client.get_trades.return_value = []
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 0
+        assert summary["edli_post_submit_unknown_absence"]["stayed"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "PENDING_RECONCILE"
+        assert bool(projection["pending_reconcile"]) is True
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-3'").fetchone()
+        assert cap["reservation_status"] == "RESERVED"
+
     def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
         self,
         conn,
@@ -6484,6 +10989,264 @@ class TestRecoveryResolutionTable:
             "venue_status": "MATCHED",
         }
         assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
+
+    def test_exit_matched_trade_fact_over_dust_tolerance_stays_pending_exit_without_economic_close(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 10.03,
+                   chain_shares = 10.03,
+                   cost_basis_usd = 1.2036,
+                   entry_price = 0.12,
+                   order_id = 'ord-entry',
+                   order_status = 'retry_pending',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.03,
+            price=0.04,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="10.018",
+            fill_price="0.04",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 10.03,
+            "chain_shares": 10.03,
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        lifecycle_events = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert dict(lifecycle_events[-1]) == {
+            "event_type": "EXIT_ORDER_POSTED",
+            "phase_before": "pending_exit",
+            "phase_after": "pending_exit",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "MATCHED",
+        }
+        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
+
+    def test_live_exit_order_restores_quarantined_position_to_pending_exit(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=12.03, price=0.44)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'quarantined',
+                   shares = 12.03,
+                   chain_shares = 12.03,
+                   cost_basis_usd = 5.2932,
+                   entry_price = 0.44,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=12.03,
+            price=0.49,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="12.03",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_lifecycle_alignment_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, order_id, order_status, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+            "exit_reason": "COMMAND_RECOVERY_RESTING_EXIT_ORDER",
+        }
+        lifecycle_event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, order_id, command_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(lifecycle_event) == {
+            "event_type": "EXIT_ORDER_POSTED",
+            "phase_before": "quarantined",
+            "phase_after": "pending_exit",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+        }
+
+    def test_matched_exit_order_fact_without_trade_fact_closes_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=15.23, price=0.51)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'quarantined',
+                   shares = 15.23,
+                   chain_shares = 15.23,
+                   cost_basis_usd = 7.7673,
+                   entry_price = 0.51,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=15.23,
+            price=0.60,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="15.23",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="f" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "15.23",
+                    "takingAmount": "9.2903",
+                    "transactionsHashes": ["0xexitfill"],
+                }
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_lifecycle_alignment_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "FILLED"
+        trade = conn.execute(
+            """
+            SELECT trade_id, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit'
+            """
+        ).fetchone()
+        assert dict(trade) == {
+            "trade_id": "0xexitfill",
+            "filled_size": "15.23",
+            "fill_price": "0.61",
+            "tx_hash": "0xexitfill",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, order_status, exit_price
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] == "economically_closed"
+        assert current["order_status"] == "sell_filled"
+        assert Decimal(str(current["exit_price"])) == Decimal("0.61")
 
     def test_spurious_model_divergence_pending_exit_without_exit_command_releases_active(
         self,
@@ -6844,10 +11607,10 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(current) == {
             "phase": "quarantined",
-            "chain_state": "chain_absent_confirmed_position_unattributed",
-            "exit_reason": "chain_absent_confirmed_position_unattributed",
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": "entry_authority_chain_absence_conflict",
             "shares": 5.06,
-            "chain_shares": 5.0599,
+            "chain_shares": pytest.approx(5.0599),
         }
         event = conn.execute(
             """
@@ -6867,6 +11630,673 @@ class TestRecoveryResolutionTable:
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["held_token_id"] == "tok-no"
         assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
+
+    def test_confirmed_phantom_void_repair_uses_trade_facts_when_fill_authority_missing(
+        self,
+        conn,
+    ):
+        position_id = "pos-confirmed-phantom-fill-authority-none"
+        command_id = _insert(
+            conn,
+            command_id="cmd-phantom-fill-authority-none",
+            position_id=position_id,
+            token_id="tok-yes",
+            selected_token_id="tok-yes",
+            side="BUY",
+            size=135.89,
+            price=0.05,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-positive-1', 'ord-entry', ?, 'CONFIRMED', '85.17',
+                '0.05', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-29T11:16:07.840000+00:00',
+                '2026-06-29T11:16:07.840000+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "a" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_seen_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-miami', 'Miami', 'US',
+                '2026-06-30',
+                'Will the highest temperature in Miami be between 96-97°F on June 30?',
+                'buy_yes', 'F', 4.3436, 85.17, 4.3436, 0.05, 0.339,
+                'snap-miami', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-yes',
+                'tok-no', 'cond-miami', 'ord-entry', 'partial',
+                '2026-06-29T13:38:50+00:00', 'high',
+                'ENTRY_SELECTION_GUARD_INVALID_EXIT',
+                'none', 85.17, '2026-06-29T11:16:48+00:00'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-29T13:38:50+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-miami', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-yes","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason, fill_authority, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "fill_authority": "cancelled_remainder",
+            "chain_shares": pytest.approx(85.17),
+        }
+
+    def test_confirmed_phantom_void_repair_uses_trade_fact_when_local_shares_zero(
+        self,
+        conn,
+    ):
+        position_id = "pos-phantom-zero-local-chain-positive"
+        command_id = _insert(
+            conn,
+            command_id="cmd-phantom-zero-local-chain-positive",
+            position_id=position_id,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            side="BUY",
+            size=5.07,
+            price=0.75,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-zero-local-chain-positive', 'ord-entry', ?, 'CONFIRMED',
+                '5.07', '0.75', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-17T11:17:11+00:00',
+                '2026-06-17T11:17:11+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "d" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_seen_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-houston', 'Houston', 'US',
+                '2026-06-17',
+                'Will the highest temperature in Houston be between 88-89°F on June 17?',
+                'buy_no', 'F', 0, 0, 0, 0.75, 0.12,
+                'snap-houston', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'synced', 'tok-yes',
+                'tok-no', 'cond-houston', 'ord-entry', 'filled',
+                '2026-06-17T12:00:00+00:00', 'high',
+                'PHANTOM_NOT_ON_CHAIN', 'none', 5.07, 0.75, 3.8025,
+                '2026-06-17T11:17:11+00:00'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-17T12:00:00+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-houston', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-no","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, fill_authority, exit_reason,
+                   shares, chain_shares, chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "fill_authority": "cancelled_remainder",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "shares": 0.0,
+            "chain_shares": 5.07,
+            "chain_avg_price": 0.75,
+            "chain_cost_basis_usd": 3.8025,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "voided"
+        assert event["phase_after"] == "quarantined"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
+        assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
+
+    def test_confirmed_phantom_void_repair_clears_stale_chain_projection_without_trade_fact(
+        self,
+        conn,
+    ):
+        position_id = "pos-phantom-stale-chain-projection"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-karachi', 'Karachi', 'Asia',
+                '2026-06-25',
+                'Will the highest temperature in Karachi be 35°C on June 25?',
+                'buy_no', 'C', 5.61, 8.25, 5.61, 0.68, 0.14,
+                'snap-karachi', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'synced', 'tok-yes',
+                'tok-no', 'cond-karachi', 'ord-entry', 'filled',
+                '2026-06-25T19:12:48+00:00', 'high',
+                'PHANTOM_NOT_ON_CHAIN', 'none', 8.25, 0.68, 5.61, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-25T19:12:48+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-karachi', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-no","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason, shares, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd,
+                   COALESCE(chain_absence_at, '') AS chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "exit_reason": "PHANTOM_NOT_ON_CHAIN",
+            "shares": 8.25,
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
+            "chain_absence_at": current["chain_absence_at"],
+        }
+        assert current["chain_absence_at"]
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "voided"
+        assert event["phase_after"] == "voided"
+        assert event["venue_status"] == "projection_repaired"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is False
+        assert payload["proof_class"] == "confirmed_phantom_void_chain_projection_fields_cleared"
+
+    def test_confirmed_chain_absence_projection_repair_clears_stale_chain_fields(
+        self,
+        conn,
+    ):
+        position_id = "pos-chain-absent-positive-projection"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                '2026-06-30',
+                'Will the highest temperature in Munich be 30°C on June 30?',
+                'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
+                'snap-munich', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+                'tok-yes', 'tok-no', 'cond-munich', 'ord-entry', 'filled',
+                '2026-06-30T00:22:00+00:00', 'high',
+                'chain_absent_confirmed_position_unattributed',
+                'venue_confirmed_full', 29.14, 0.73, 21.27, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+                      'active', 'quarantined', 'center_buy', NULL,
+                      'snap-munich', 'ord-entry', NULL,
+                      'chain_absent_confirmed_position_unattributed',
+                      ?, 'review_required', 'src.state.chain_reconciliation',
+                      '{"reason":"chain_absent_confirmed_position_unattributed"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_absent_review:4",
+                position_id,
+                f"{position_id}:chain_absent_review:4",
+            ),
+        )
+
+        from src.execution.command_recovery import (
+            repair_confirmed_chain_absence_positive_projections,
+        )
+
+        summary = repair_confirmed_chain_absence_positive_projections(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, shares, cost_basis_usd, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd,
+                   COALESCE(chain_absence_at, '') AS chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "shares": 29.14,
+            "cost_basis_usd": 21.27,
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
+            "chain_absence_at": current["chain_absence_at"],
+        }
+        assert current["chain_absence_at"]
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after,
+                   source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["sequence_no"] == 5
+        assert event["phase_before"] == "quarantined"
+        assert event["phase_after"] == "quarantined"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["previous_chain_shares"] == 29.14
+        assert payload["proof_class"] == "confirmed_chain_absence_projection_chain_fields_cleared"
+
+    def test_confirmed_chain_absence_projection_with_trade_fact_stays_monitorable(
+        self,
+        conn,
+    ):
+        position_id = "pos-chain-absent-positive-trade-fact"
+        command_id = _insert(
+            conn,
+            command_id="cmd-chain-absent-positive-trade-fact",
+            position_id=position_id,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            side="BUY",
+            size=29.14,
+            price=0.73,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-chain-absent-positive', 'ord-entry', ?, 'CONFIRMED',
+                '29.14', '0.73', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-30T00:22:15+00:00',
+                '2026-06-30T00:22:15+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "b" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                '2026-06-30',
+                'Will the highest temperature in Munich be 30°C on June 30?',
+                'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
+                'snap-munich', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+                'tok-yes', 'tok-no', 'cond-munich', 'ord-entry', 'filled',
+                '2026-06-30T00:22:00+00:00', 'high',
+                'chain_absent_confirmed_position_unattributed',
+                'none', 29.14, 0.73, 21.27, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+                      'active', 'quarantined', 'center_buy', NULL,
+                      'snap-munich', 'ord-entry', NULL,
+                      'chain_absent_confirmed_position_unattributed',
+                      ?, 'review_required', 'src.state.chain_reconciliation',
+                      '{"reason":"chain_absent_confirmed_position_unattributed"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_absent_review:4",
+                position_id,
+                f"{position_id}:chain_absent_review:4",
+            ),
+        )
+
+        from src.execution.command_recovery import (
+            repair_confirmed_chain_absence_positive_projections,
+        )
+
+        summary = repair_confirmed_chain_absence_positive_projections(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, fill_authority, exit_reason,
+                   shares, cost_basis_usd, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "fill_authority": "venue_confirmed_full",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "shares": 29.14,
+            "cost_basis_usd": 21.27,
+            "chain_shares": 29.14,
+            "chain_avg_price": 0.73,
+            "chain_cost_basis_usd": 21.27,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after,
+                   source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["sequence_no"] == 5
+        assert event["phase_before"] == "quarantined"
+        assert event["phase_after"] == "quarantined"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
+        assert (
+            payload["proof_class"]
+            == "confirmed_fill_chain_absence_projection_preserved_current_money_risk"
+        )
+
+    def test_confirmed_chain_absence_trade_fact_repairs_after_chain_fields_cleared(
+        self,
+        conn,
+    ):
+        position_id = "pos-chain-absent-trade-fact-cleared-chain-fields"
+        command_id = _insert(
+            conn,
+            command_id="cmd-chain-absent-trade-fact-cleared-chain-fields",
+            position_id=position_id,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            side="BUY",
+            size=29.14,
+            price=0.73,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-chain-absent-cleared-fields', 'ord-entry', ?, 'CONFIRMED',
+                '29.14', '0.73', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-30T00:22:15+00:00',
+                '2026-06-30T00:22:15+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "c" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                '2026-06-30',
+                'Will the highest temperature in Munich be 30°C on June 30?',
+                'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
+                'snap-munich', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+                'tok-yes', 'tok-no', 'cond-munich', 'ord-entry', 'filled',
+                '2026-06-30T00:22:00+00:00', 'high',
+                'chain_absent_confirmed_position_unattributed',
+                'none', 0, 0, 0, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+                      'active', 'quarantined', 'center_buy', NULL,
+                      'snap-munich', 'ord-entry', NULL,
+                      'chain_absent_confirmed_position_unattributed',
+                      ?, 'review_required', 'src.state.chain_reconciliation',
+                      '{"reason":"chain_absent_confirmed_position_unattributed"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_absent_review:4",
+                position_id,
+                f"{position_id}:chain_absent_review:4",
+            ),
+        )
+
+        from src.execution.command_recovery import (
+            repair_confirmed_chain_absence_positive_projections,
+        )
+
+        summary = repair_confirmed_chain_absence_positive_projections(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, fill_authority, exit_reason,
+                   shares, cost_basis_usd, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "fill_authority": "venue_confirmed_full",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "shares": 29.14,
+            "cost_basis_usd": 21.27,
+            "chain_shares": 29.14,
+            "chain_avg_price": 0.73,
+            "chain_cost_basis_usd": 21.27,
+        }
 
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,
@@ -6967,6 +12397,191 @@ class TestRecoveryResolutionTable:
             "order_id": "ord-exit",
             "command_id": "cmd-exit",
             "venue_status": "sell_filled",
+        }
+
+    def test_acked_exit_order_fact_uses_submission_envelope_tx_hash(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Matched exit recovery must not lose tx hashes carried only by the submit envelope."""
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=6.0, price=0.31)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 6.0,
+                   cost_basis_usd = 1.86,
+                   entry_price = 0.31,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=6.0,
+            price=0.29,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="MATCHED",
+            matched_size="6",
+            remaining_size="0",
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-final-exit-submit",
+            side="SELL",
+            price=Decimal("0.29"),
+            size=Decimal("6.0"),
+            order_id="ord-exit",
+            transaction_hashes=("0xhash-exit-envelope",),
+            raw_response_json=json.dumps(
+                {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "transactionsHashes": ["0xhash-exit-envelope"],
+                },
+                sort_keys=True,
+            ),
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-exit",
+            "status": "MATCHED",
+            "size_matched": "6",
+            "price": "0.29",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "FILLED"
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "0xhash-exit-envelope",
+            "venue_order_id": "ord-exit",
+            "state": "MATCHED",
+            "filled_size": "6",
+            "fill_price": "0.29",
+            "tx_hash": "0xhash-exit-envelope",
+        }
+
+    def test_filled_exit_trade_fact_missing_tx_uses_submission_envelope_tx_hash(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Already-FILLED exits with tx-less trade facts must still repair from final envelope."""
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=33.15,
+            price=0.55,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="MATCHED",
+            matched_size="33.15",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-existing",
+            state="MATCHED",
+            filled_size="33.15",
+            fill_price="0.55",
+            tx_hash=None,
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "trade_id": "trade-exit-existing",
+                "filled_size": "33.15",
+                "fill_price": "0.55",
+            },
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-final-filled-exit-submit",
+            side="SELL",
+            price=Decimal("0.55"),
+            size=Decimal("33.15"),
+            order_id="ord-exit",
+            transaction_hashes=("0xhash-filled-exit-envelope",),
+            raw_response_json=json.dumps(
+                {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "transactionsHashes": ["0xhash-filled-exit-envelope"],
+                },
+                sort_keys=True,
+            ),
+        )
+
+        from src.execution.command_recovery import reconcile_filled_exit_trade_fact_tx_repairs
+
+        summary = reconcile_filled_exit_trade_fact_tx_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-existing",
+            "venue_order_id": "ord-exit",
+            "state": "MATCHED",
+            "filled_size": "33.15",
+            "fill_price": "0.55",
+            "tx_hash": "0xhash-filled-exit-envelope",
         }
 
     def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
@@ -7180,6 +12795,42 @@ class TestRecoveryResolutionTable:
 
         assert _latest_terminal_remainder_order_fact_exists(conn, command_id="cmd-001") is True
 
+    def test_cancel_confirmed_remainder_outranks_later_partial_order_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Lucknow-class regression: cancel truth closes the unfilled remainder."""
+
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="CANCEL_CONFIRMED",
+            matched_size="1.25",
+            remaining_size="3.75",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="1.25",
+            remaining_size="3.75",
+        )
+
+        from src.execution.command_recovery import _latest_terminal_remainder_order_fact_exists
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        assert _latest_terminal_remainder_order_fact_exists(conn, command_id="cmd-001") is True
+        mock_client.get_open_orders.return_value = []
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+
     def test_legacy_filled_command_with_partial_economic_coverage_records_terminal_remainder_fact(
         self,
         conn,
@@ -7390,6 +13041,71 @@ class TestRecoveryResolutionTable:
         assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
         assert "REVIEW_REQUIRED" in [e["event_type"] for e in _get_events(conn, "cmd-001")]
 
+    def test_partial_remainder_matched_point_order_does_not_degrade_held_fill(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="3.0",
+            fill_price="0.34",
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 5.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.70,
+                   chain_cost_basis_usd = 1.70,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+                "filled_size": "3.0",
+                "venue_order_id": "ord-partial",
+            },
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": "ord-partial",
+            "status": "MATCHED",
+            "size_matched": "5.0",
+            "price": "0.34",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_events(conn, "cmd-001")[-1]["event_type"] == "FILL_CONFIRMED"
+
     def test_partial_remainder_without_point_reader_fails_closed(
         self,
         conn,
@@ -7495,6 +13211,7 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
     execution_command_id="edli-exec-ack-stalled",
     token_id="tok-ack-stalled",
     usage_id="cap-ack-stalled",
+    include_venue_attempt=True,
 ):
     plan_payload = {
         "schema_version": 1,
@@ -7521,14 +13238,23 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
         payload=plan_payload,
         occurred_at="2026-04-26T00:00:01Z",
     )
-    _insert_edli_live_order_event(
-        conn,
-        aggregate_id=aggregate_id,
-        sequence=3,
-        event_type="VenueSubmitAttempted",
-        payload=plan_payload,
-        occurred_at="2026-04-26T00:00:02Z",
-    )
+    projection_sequence = 2
+    projection_event_type = "ExecutionCommandCreated"
+    projection_state = "EXECUTION_COMMAND_CREATED"
+    projection_updated_at = "2026-04-26T00:00:01Z"
+    if include_venue_attempt:
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="VenueSubmitAttempted",
+            payload=plan_payload,
+            occurred_at="2026-04-26T00:00:02Z",
+        )
+        projection_sequence = 3
+        projection_event_type = "VenueSubmitAttempted"
+        projection_state = "VENUE_SUBMIT_ATTEMPTED"
+        projection_updated_at = "2026-04-26T00:00:02Z"
     conn.execute(
         """
         INSERT INTO edli_live_order_projection (
@@ -7536,13 +13262,23 @@ def _seed_edli_stalled_attempt_with_reserved_cap(
             last_sequence, last_event_type, last_event_hash,
             pending_reconcile, venue_order_id, updated_at, schema_version
         )
-        SELECT ?, ?, ?, 'VENUE_SUBMIT_ATTEMPTED',
-               3, 'VenueSubmitAttempted', event_hash,
-               0, NULL, '2026-04-26T00:00:02Z', 1
+        SELECT ?, ?, ?, ?,
+               ?, ?, event_hash,
+               0, NULL, ?, 1
         FROM edli_live_order_events
-        WHERE aggregate_id = ? AND event_sequence = 3
+        WHERE aggregate_id = ? AND event_sequence = ?
         """,
-        (aggregate_id, event_id, final_intent_id, aggregate_id),
+        (
+            aggregate_id,
+            event_id,
+            final_intent_id,
+            projection_state,
+            projection_sequence,
+            projection_event_type,
+            projection_updated_at,
+            aggregate_id,
+            projection_sequence,
+        ),
     )
     conn.execute(
         """
@@ -7797,7 +13533,7 @@ class TestEdliAbsenceVenueCommandSync:
             (seeded["aggregate_id"],),
         ).fetchone()
         assert dict(projection) == {
-            "current_state": "CAP_TRANSITIONED",
+            "current_state": "VENUE_SUBMIT_ACKED",
             "last_event_type": "CapTransitioned",
             "venue_order_id": "0xackedvenueorder",
             "pending_reconcile": 0,
@@ -7815,6 +13551,113 @@ class TestEdliAbsenceVenueCommandSync:
             ).fetchall()
         ]
         assert event_types[-2:] == ["VenueSubmitAcknowledged", "CapTransitioned"]
+
+    def test_rejected_command_sync_releases_stalled_edli_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.state.venue_command_repo import append_event
+
+        seeded = _seed_edli_stalled_attempt_with_reserved_cap(
+            conn,
+            aggregate_id="agg-rejected-stalled",
+            event_id="edli-event-rejected-stalled",
+            final_intent_id="edli-intent-rejected-stalled",
+            execution_command_id="edli-exec-rejected-stalled",
+            token_id="tok-rejected-stalled",
+            usage_id="cap-rejected-stalled",
+            include_venue_attempt=False,
+        )
+        _insert(
+            conn,
+            command_id="cmd-rejected-edli-stall",
+            decision_id=seeded["execution_command_id"],
+            token_id=seeded["token_id"],
+            side="BUY",
+            price=0.01,
+            size=569.08,
+        )
+        _advance_to_submitting(conn, command_id="cmd-rejected-edli-stall")
+        append_event(
+            conn,
+            command_id="cmd-rejected-edli-stall",
+            event_type="SUBMIT_REJECTED",
+            occurred_at="2026-04-26T00:00:03Z",
+            payload={
+                "reason": "safe_replay_permitted_no_order_found",
+                "safe_replay_permitted": True,
+                "lookup_method": "idempotency_key",
+                "recovered_from_state": "SUBMITTING",
+                "venue_absence_proof": {
+                    "schema_version": 1,
+                    "token_id": seeded["token_id"],
+                    "matching_open_order_count": 0,
+                    "matching_trade_count": 0,
+                    "matching_open_orders": [],
+                    "matching_trades": [],
+                },
+            },
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_rejected_venue_command_sync"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        cap = conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, venue_order_id, pending_reconcile
+            FROM edli_live_order_projection
+            WHERE aggregate_id = ?
+            """,
+            (seeded["aggregate_id"],),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "CAP_TRANSITIONED",
+            "last_event_type": "CapTransitioned",
+            "venue_order_id": None,
+            "pending_reconcile": 0,
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                FROM edli_live_order_events
+                WHERE aggregate_id = ?
+                ORDER BY event_sequence
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchall()
+        ]
+        assert event_types == [
+            "SubmitPlanBuilt",
+            "ExecutionCommandCreated",
+            "VenueSubmitAttempted",
+            "SubmitRejected",
+            "CapTransitioned",
+        ]
+        rejected_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                FROM edli_live_order_events
+                WHERE aggregate_id = ? AND event_type = 'SubmitRejected'
+                ORDER BY event_sequence DESC
+                LIMIT 1
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchone()["payload_json"]
+        )
+        assert rejected_payload["proof_class"] == "venue_command_authenticated_absence_rejected"
+        assert rejected_payload["safe_replay_permitted"] is True
 
 
 # ---------------------------------------------------------------------------

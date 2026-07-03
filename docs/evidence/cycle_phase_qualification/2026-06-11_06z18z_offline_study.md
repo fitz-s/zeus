@@ -1,7 +1,7 @@
 # 06Z/18Z Cycle-Phase Qualification — Offline Settlement-Graded Study
 <!-- Created: 2026-06-11 -->
 <!-- Authority basis: operator directive 2026-06-11 ~05:00Z (cycle policy + 06/18Z deep offline
-     investigation); docs/operations/consolidated_systemic_overhaul_2026-06-11.md
+     investigation); docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md
      §OPERATOR DIRECTIVES + K4.0b(d); docs/evidence/rule1_audits/2026-06-10_post_restart_stall_audit.md -->
 <!-- Method: PURE OFFLINE. Live DBs READ-ONLY. No daemon/flag/src-live edits. Scratch DB only
      (state/cycle_phase_study.db). Producer: scripts/cycle_phase_offline_study.py
@@ -54,7 +54,7 @@ settled day.
 ### Faithfulness
 
 Posteriors were re-materialized through the **exact live code path**
-(`src.data.replacement_forecast_materializer.materialize_replacement_forecast_shadow`, imported and
+(`src.data.replacement_forecast_materializer.materialize_replacement_forecast`, imported and
 pointed at a scratch SQLite DB) under the **live config flags** (`replacement_0_1_u0r_fusion_enabled=True`,
 `replacement_0_1_fused_q_shape_enabled=True`, `edli_settlement_sigma_floor_enabled=True`,
 `replacement_0_1_member_vote_smoothing_enabled=True`, EB-bias OFF). The scratch DB

@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 5, PR C3)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 5, PR C3)
 """Antibody invariants: rescue authority discriminated by linked venue trade fact.
 
 Finding 5 (P1 likely bug): chain_reconciliation rescue previously promoted a

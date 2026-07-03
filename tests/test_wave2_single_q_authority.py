@@ -1,7 +1,7 @@
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
 # Authority basis: operator law 2026-06-12 ("需要测试的现在就测试好，然后依次全执行")
-#   + Wave-2 of docs/operations/overengineering_simplification_plan_2026-06-12.md
+#   + Wave-2 of docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md
 #   (items 1, 5, 6, 7, 8). Standing law: feature correct -> always-on + delete OFF
 #   branch; feature refuted -> delete code AND key; never leave deprecated keys.
 """Wave-2 antibody suite: single q authority + collapsed/merged/deleted knobs.
@@ -9,7 +9,7 @@
 Pins the Wave-2 simplifications so a re-introduction is a RED test, not a note:
 
   item 1  baseline LCB no longer caps the replacement (live) q — single q authority.
-          The baseline is diagnostics-only (baseline_q_lcb_reference), never min()-joined.
+          The comparison reference is never min()-joined.
   item 5  live_execution_mode collapses to "edli_live" (canary string deleted; mapped
           old->new at the read boundary so persisted data stays readable).
   item 6  the settlement σ-floor applies by PER-CELL DATA AVAILABILITY (no flag); the
@@ -34,8 +34,6 @@ _SRC = _REPO / "src"
 
 # The Wave-2 deleted settings keys (literal scan over settings.json).
 _DELETED_SETTINGS_KEYS = (
-    # item 5
-    "edli_live_canary_artifact_path",
     # item 6 (three σ-floor knobs merged to one data-availability rule)
     "edli_settlement_sigma_floor_enabled",
     "edli_settlement_sigma_floor_required",
@@ -275,26 +273,17 @@ def test_item5_routing_tables_use_edli_live_only():
     import src.main as main
 
     assert "edli_live" in main.LIVE_EXECUTION_MODES
-    assert "edli_live_canary" not in main.LIVE_EXECUTION_MODES
-    assert "edli_live_canary" not in main.EDLI_EVENT_DRIVEN_MODES
-    assert "edli_live_canary" not in main.REACTOR_MODE_BY_LIVE_STAGE
     assert main.REACTOR_MODE_BY_LIVE_STAGE["edli_live"] == "live"
-    # The remaining modes that route real behavior are kept; shadow/submit-disabled
-    # bridge modes must not be valid live execution modes.
+    # The remaining modes that route real behavior are kept.
     for kept in ("legacy_cron", "disabled"):
         assert kept in main.LIVE_EXECUTION_MODES
-    assert "edli_shadow_no_submit" not in main.LIVE_EXECUTION_MODES
-    assert "edli_submit_disabled_bridge" not in main.LIVE_EXECUTION_MODES
 
 
-def test_item5_old_canary_mode_string_in_persisted_data_still_readable():
-    """A persisted/config row carrying the historical 'edli_live_canary' must map to
-    'edli_live' at the read boundary (data tolerance), never raise UNSUPPORTED."""
+def test_item5_unknown_mode_string_fails_closed():
+    """Unknown event-driven mode strings must fail closed."""
     import src.main as main
 
-    assert main._live_execution_mode({"live_execution_mode": "edli_live_canary"}) == "edli_live"
-    # A genuinely unknown mode still fails closed.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:totally_unknown_mode"):
         main._live_execution_mode({"live_execution_mode": "totally_unknown_mode"})
 
 

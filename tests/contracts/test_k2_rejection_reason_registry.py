@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K2.1
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K2.1
 """K2.1 antibody: every rejection-reason emit site uses a registered base.
 
 The disease: no_trade_regret_events.rejection_reason was free text — 3042
@@ -111,10 +111,32 @@ def test_registry_lookup_strips_detail_suffix():
         ("TRADE_SCORE_NON_POSITIVE", RejectionCategory.HONEST_MARKET),
         ("QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE", RejectionCategory.HONEST_MARKET),
         ("LIVE_INFERENCE_INPUTS_MISSING:READINESS_EXPIRED", RejectionCategory.HONEST_DATA),
-        ("DAY0_SCOPE_SHADOW_ONLY", RejectionCategory.DESIGNED_GATE),
         ("UNSUPPORTED_EDLI_LIVE_SCOPE:forecast_only", RejectionCategory.DESIGNED_GATE),
         ("EVENT_TYPE_OUT_OF_LIVE_SCOPE", RejectionCategory.DESIGNED_GATE),
         ("entry_cooldown:same_token_entry_cooling_down", RejectionCategory.DESIGNED_GATE),
+        (
+            "entry_cooldown:same_token_terminal_no_fill_cooling_down",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated entry price below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated submit edge density below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "entry_actionable_certificate:actionable_certificate_fails_current_verifier",
+            RejectionCategory.ARTIFICIAL_SUSPECT,
+        ),
         ("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:cost_basis_hash missing", RejectionCategory.ARTIFICIAL_SUSPECT),
         # The exception-leak class: NEVER classifies as honest.
         ("UNIQUE constraint failed: platt_models.x", RejectionCategory.ARTIFICIAL_SUSPECT),
@@ -147,7 +169,6 @@ def test_known_db_history_bases_are_registered():
         "SOURCE_TRUTH_BLOCKED",
         "EXECUTABLE_NATIVE_ASK_MISSING",
         "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
-        "DAY0_SCOPE_SHADOW_ONLY",
         "UNSUPPORTED_EDLI_LIVE_SCOPE",
         "EVENT_TYPE_OUT_OF_LIVE_SCOPE",
         "entry_cooldown",

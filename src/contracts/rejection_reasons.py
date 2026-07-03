@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K2.1
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K2.1
 # (rejection-reason taxonomy) + /tmp/funnel_autopsy.md (operator-ratified categories).
 """Typed registry for no_trade_regret_events.rejection_reason (K2.1).
 
@@ -31,7 +31,7 @@ Categories (operator-ratified framework, funnel autopsy 2026-06-10):
   source runs incomplete). Self-resolving on data cadence; actionable only if
   chronically dominant.
 - DESIGNED_GATE: a deliberate protection fired as designed (riskguard, Kelly,
-  FDR, direction law, shadow scopes, submit-time fail-closed aborts).
+  FDR, direction law, non-tradeable scopes, submit-time fail-closed aborts).
 - ARTIFICIAL_SUSPECT: pipeline-defect signal (build failures, missing proofs
   that the pipeline should have produced, connection/boundary errors, raw
   exception text). Every sustained ARTIFICIAL_SUSPECT stream is a bug hunt.
@@ -130,13 +130,19 @@ class RejectionReason(str, Enum):
         RejectionCategory.HONEST_DATA,
         "Selected executable snapshot expired between decision and use.",
     )
+    MONEY_PATH_HORIZON_EXPIRED = (
+        "MONEY_PATH_HORIZON_EXPIRED",
+        RejectionCategory.HONEST_MARKET,
+        "A horizon-bounded money-path transient reached a real event or execution "
+        "window boundary (operator disarm, venue closed/not listed, selection "
+        "deadline past, or local timeliness floor past). This is not an attempt "
+        "cap; recurring volume is an operations/cadence signal.",
+    )
     MONEY_PATH_TRANSIENT_EXHAUSTED = (
         "MONEY_PATH_TRANSIENT_EXHAUSTED",
         RejectionCategory.ARTIFICIAL_SUSPECT,
-        "A money-path transient (price race / mode flip / stale snapshot) was still "
-        "unresolved after the bounded requeue cap; the terminal label carries the "
-        "last transient reason. Recurring volume here = a structural cadence or "
-        "race defect, never an honest market verdict.",
+        "Legacy durable rows only. The live reactor no longer emits attempt-count "
+        "exhaustion; current terminal transients use MONEY_PATH_HORIZON_EXPIRED.",
     )
     EXECUTOR_PRE_VENUE_REJECTED = (
         "EXECUTOR_PRE_VENUE_REJECTED",
@@ -220,13 +226,6 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "FDR requires the full-family proof; absent proof fails closed.",
     )
-    DAY0_SCOPE_SHADOW_ONLY = (
-        "DAY0_SCOPE_SHADOW_ONLY",
-        RejectionCategory.DESIGNED_GATE,
-        "day0-lane event under edli_live_scope=day0_shadow: full pipeline runs, "
-        "enriched no-submit receipt, NEVER submits. The shadow comparator's source "
-        "of truth.",
-    )
     UNSUPPORTED_EDLI_LIVE_SCOPE = (
         "UNSUPPORTED_EDLI_LIVE_SCOPE",
         RejectionCategory.DESIGNED_GATE,
@@ -248,6 +247,12 @@ class RejectionReason(str, Enum):
         "DAY0_HARD_FACT_AUTHORITY_BLOCKED",
         RejectionCategory.DESIGNED_GATE,
         "day0 hard-fact authority (observed extreme) contradicts the candidate.",
+    )
+    DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE = (
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        RejectionCategory.HONEST_DATA,
+        "Day0 remaining-day probability cannot be computed because the hourly "
+        "remaining-window member substrate is unavailable or insufficient.",
     )
     ENTRY_COOLDOWN = (
         "entry_cooldown",
@@ -344,6 +349,78 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "Fresh-book mode witness diverged from the proven execution_mode_intent; "
         "fail-closed abort + re-rank (never an inline mode rebuild).",
+    )
+    SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found the chosen entry price below the "
+        "strategy floor. This is a no-side-effect submit abort for low-price "
+        "lottery dust, not a certificate build defect.",
+    )
+    SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found the fee-adjusted expected profit "
+        "below the strategy floor. No order is posted; the next event re-decides "
+        "from fresh price and belief evidence.",
+    )
+    SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found submit edge density below the "
+        "strategy floor. This rejects capital-inefficient micro-edge orders without "
+        "misclassifying the decision as a system build failure.",
+    )
+    ENTRY_ACTIONABLE_CERTIFICATE = (
+        "entry_actionable_certificate",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Executor pre-venue authority guard rejected the persisted live actionable "
+        "certificate. After final-intent snapshot recapture is represented separately, "
+        "remaining failures are structural certificate/persistence defects, not "
+        "market no-edge and not a reason to requeue the same event.",
+    )
+    FILL_UP_PRESUBMIT_REREAD_ABORT = (
+        "FILL_UP_PRESUBMIT_REREAD_ABORT",
+        RejectionCategory.DESIGNED_GATE,
+        "A same-token fill-up passed admission, but the pre-submit reread found fresh "
+        "family exposure that makes the residual unsafe. No venue call has occurred; "
+        "the fill-up lease is aborted and the next live event must re-decide from "
+        "current position truth.",
+    )
+    FILL_UP_NO_SUBMIT = (
+        "FILL_UP_NO_SUBMIT",
+        RejectionCategory.DESIGNED_GATE,
+        "Continuous redecision evaluated a held same-token fill-up and deliberately "
+        "submitted no order (for example belief did not strengthen, target exposure "
+        "is already reached, residual is below venue minimum, or a family lease is "
+        "already active).",
+    )
+    SHIFT_BIN_EXIT_OLD_LEG_PENDING = (
+        "SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-to-better-bin decision found the old family leg still live. The "
+        "correct action is close-before-open: submit or await the old-leg exit, not "
+        "open the new bin in parallel.",
+    )
+    SHIFT_BIN_EXIT_ONLY_COMPLETE = (
+        "SHIFT_BIN_EXIT_ONLY_COMPLETE",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-bin old-leg exit completed, but the fresh family selection changed "
+        "before the new entry. The shift lease is closed without submitting the stale "
+        "new-bin entry.",
+    )
+    SHIFT_BIN_ENTRY_IN_FLIGHT = (
+        "SHIFT_BIN_ENTRY_IN_FLIGHT",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-bin entry is already submitted, unknown, partially filled, or under "
+        "review. The existing command owns the family until venue/chain truth advances.",
+    )
+    SHIFT_BIN_NO_SUBMIT = (
+        "SHIFT_BIN_NO_SUBMIT",
+        RejectionCategory.DESIGNED_GATE,
+        "Continuous redecision evaluated a sibling-bin shift and deliberately "
+        "submitted no order because the shift lease or family exposure made a new "
+        "action unsafe or unnecessary.",
     )
     LEGACY_INJECTED_TEST_SUBMIT = (
         "legacy_injected_test_submit",

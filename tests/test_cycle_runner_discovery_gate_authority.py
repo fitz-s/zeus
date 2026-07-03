@@ -18,17 +18,15 @@ Antibody contracts (sed-flip verifiable):
   T-sentinel: def line must be kwargs-only with all required arg names.
   T-parametrized (≥12): each single blocker active → gate returns False.
   T-clean: all-clear kwargs → gate returns True.
-  T-fail-closed: block_registry=None → gate returns False.
+  T-registry-independence: block registry snapshots are not hidden entry gates.
   T-comment-rot: "observability only; not consulted" must be gone from cycle_runner.py.
 """
 
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock
 
 from src.engine.cycle_runner import _discovery_gates_allow_entries
-from src.control.entries_block_registry import BlockStage
 from src.riskguard.risk_level import RiskLevel
 
 
@@ -50,12 +48,12 @@ def test_gate_signature_is_kwargs_only():
         "governor_status",
         "entry_bankroll",
         "entries_paused",
-        "block_registry",
         "force_exit",
         "current_posture",
         "chain_ready",
         "exposure_gate_hit",
         "has_quarantine",
+        "freshness_allows_entries",
         "risk_level",
         "heartbeat_status",
         "ws_gap_status",
@@ -89,13 +87,6 @@ def test_no_misleading_observability_comment():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_clear_registry() -> MagicMock:
-    """Registry mock where is_clear(DISCOVERY) returns True."""
-    r = MagicMock()
-    r.is_clear.return_value = True
-    return r
-
-
 def _ok_kwargs() -> dict:
     """Return an all-clear kwargs dict that produces gate=True."""
     return dict(
@@ -108,10 +99,10 @@ def _ok_kwargs() -> dict:
         chain_ready=True,
         has_quarantine=False,
         force_exit=False,
+        freshness_allows_entries=True,
         entry_bankroll=1000.0,
         exposure_gate_hit=False,
         entries_paused=False,
-        block_registry=_make_clear_registry(),
     )
 
 
@@ -120,28 +111,6 @@ def _ok_kwargs() -> dict:
 def test_gate_passes_when_all_clear():
     """T-clean: all-clear kwargs → gate returns True."""
     assert _discovery_gates_allow_entries(**_ok_kwargs()) is True
-
-
-# ── T-Fail-Closed ─────────────────────────────────────────────────────────────
-
-def test_fail_closed_when_registry_none():
-    """T-fail-closed: block_registry=None (construction failed) → gate returns False.
-
-    Registry-unavailable is itself a blocking condition; the gate must not allow
-    discovery when it cannot verify the block registry is clear.
-    """
-    kwargs = _ok_kwargs()
-    kwargs["block_registry"] = None
-    assert _discovery_gates_allow_entries(**kwargs) is False
-
-
-def test_fail_closed_when_registry_not_clear():
-    """T-fail-closed: block_registry.is_clear(DISCOVERY)=False → gate returns False."""
-    kwargs = _ok_kwargs()
-    r = MagicMock()
-    r.is_clear.return_value = False
-    kwargs["block_registry"] = r
-    assert _discovery_gates_allow_entries(**kwargs) is False
 
 
 # ── T-Parametrized (one test per blocker) ─────────────────────────────────────
@@ -179,6 +148,13 @@ def test_gate_blocks_on_force_exit():
     """T-force-exit: force_exit=True → gate returns False."""
     kwargs = _ok_kwargs()
     kwargs["force_exit"] = True
+    assert _discovery_gates_allow_entries(**kwargs) is False
+
+
+def test_gate_blocks_on_degraded_freshness():
+    """T-freshness: degraded/unknown forecast freshness → gate returns False."""
+    kwargs = _ok_kwargs()
+    kwargs["freshness_allows_entries"] = False
     assert _discovery_gates_allow_entries(**kwargs) is False
 
 
@@ -252,12 +228,6 @@ def test_gate_blocks_on_governor_not_allowing():
     assert _discovery_gates_allow_entries(**kwargs) is False
 
 
-def test_gate_blocks_on_block_registry_discovery_not_clear():
-    """T-registry-not-clear: block_registry.is_clear(DISCOVERY)=False → False."""
-    kwargs = _ok_kwargs()
-    r = MagicMock()
-    r.is_clear.return_value = False
-    kwargs["block_registry"] = r
-    result = _discovery_gates_allow_entries(**kwargs)
-    assert result is False
-    r.is_clear.assert_called_with(BlockStage.DISCOVERY)
+def test_gate_signature_has_no_registry_snapshot_argument():
+    """Registry failures are snapshot errors, not entry blockers."""
+    assert "block_registry" not in _ok_kwargs()

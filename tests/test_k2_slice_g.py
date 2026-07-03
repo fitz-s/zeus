@@ -1,7 +1,6 @@
 """K2 Slice G: Signal Quality — fail-fast and status distinction tests.
 
 Bug #24: provenance registry load failure must set REGISTRY_DEGRADED
-Bug #16: bias correction failure must report applied=False
 Bug #4: missing diurnal amplitude must raise ValueError
 Bug #41: unparseable endDate must skip market (return None)
 Bug #66: Day0 temporal context must log distinct failure reasons
@@ -12,7 +11,6 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 
@@ -55,49 +53,6 @@ class TestProvenanceRegistryDegraded:
         registry, degraded = _load_registry(yaml_file)
         assert registry == {}
         assert degraded is True
-
-
-# ── Bug #16: bias correction status ────────────────────────────────────
-
-
-class TestBiasCorrectionStatus:
-    """_apply_bias_correction returns status or fails closed on DB faults."""
-
-    def test_correction_database_fault_raises(self):
-        from src.signal.ensemble_signal import EnsembleSignal
-
-        maxes = np.array([30.0, 31.0, 32.0])
-        city = MagicMock()
-        city.name = "Chicago"
-        city.lat = 41.8
-
-        with patch("src.signal.ensemble_signal.EnsembleSignal._apply_bias_correction",
-                    wraps=EnsembleSignal._apply_bias_correction):
-            # Force exception by patching the DB import
-            with patch.dict("sys.modules", {"src.state.db": None}):
-                with pytest.raises(ModuleNotFoundError):
-                    EnsembleSignal._apply_bias_correction(maxes, city, date(2026, 7, 15))
-
-    def test_correction_success_returns_true(self):
-        from src.signal.ensemble_signal import EnsembleSignal
-
-        maxes = np.array([30.0, 31.0, 32.0])
-        city = MagicMock()
-        city.name = "Chicago"
-        city.lat = 41.8
-
-        mock_conn = MagicMock()
-        mock_row = {"bias": 2.0, "discount_factor": 0.7, "n_samples": 50}
-        mock_conn.execute.return_value.fetchone.return_value = mock_row
-
-        with patch("src.calibration.manager.season_from_date", return_value="summer"):
-            with patch("src.state.db.get_world_connection", return_value=mock_conn):
-                result, applied = EnsembleSignal._apply_bias_correction(
-                    maxes, city, date(2026, 7, 15)
-                )
-                assert applied is True
-                expected = maxes - (2.0 * 0.7)
-                np.testing.assert_array_almost_equal(result, expected)
 
 
 # ── Bug #4: diurnal amplitude fail-fast ────────────────────────────────

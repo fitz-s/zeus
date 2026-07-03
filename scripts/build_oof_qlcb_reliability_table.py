@@ -7,7 +7,7 @@
 #   so a validation build can target a TEMP artifact without touching the live one.
 # Purpose: Build the generated side-aware OOF q_lcb reliability artifact for live guard serving.
 # Reuse: Run when rebuilding the q_lcb OOF reliability artifact or changing guard cell schema.
-# Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
+# Authority basis: coarse-global removal single-serving-rule evidence packet.
 #   §"THE q_lcb RELIABILITY GUARD" + src/decision/qlcb_reliability_guard.py (the LIVE guard:
 #   cell scheme, QLCB_BUCKET_EDGES, lead_bucket, cell_key). Operator task ("两个都做"): build the
 #   OFFLINE OOF reliability table that ACTIVATES the RAW q_lcb reliability guard — across BOTH

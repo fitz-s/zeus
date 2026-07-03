@@ -41,6 +41,13 @@ def test_execution_command_requires_live_mode():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_rejects_no_submit_parent_certificate():
+    parents, command = execution_graph(parent_modes={claims.PRE_SUBMIT_REVALIDATION: "NO_SUBMIT"})
+
+    with pytest.raises(CertificateVerificationError, match="requires LIVE parent certificates"):
+        verify_execution_command(command, parents)
+
+
 def test_execution_command_requires_actionable_parent():
     parents, command = execution_graph(drop_parent=claims.ACTIONABLE_TRADE)
 
@@ -105,9 +112,97 @@ def test_execution_command_rejects_wrong_direction():
 
 
 def test_execution_command_rejects_size_below_min_order():
-    parents, command = execution_graph(command_payload={"size": 0.01, "min_order_size": 1.0})
+    parents, command = execution_graph(
+        actionable_payload={"strategy_key": "unit_test_entry_floor"},
+        final_payload={"size": 0.5, "notional_usd": 0.2},
+        command_payload={"size": 0.5, "min_order_size": 1.0},
+    )
 
     with pytest.raises(CertificateVerificationError, match="min_order_size"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
+    parents, command = execution_graph(
+        final_payload={
+            "limit_price": 0.003,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "notional_usd": 1.15437,
+            "selection_authority_applied": None,
+        },
+        command_payload={
+            "limit_price": 0.003,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "expected_edge": 0.597,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "min_expected_profit_usd": 1.0,
+            "min_submit_edge_density": 0.05,
+            "selection_authority_applied": None,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.70,
+                "payoff_q_lcb": 0.60,
+                "cost": 0.003,
+                "edge_lcb": 0.597,
+                "optimal_delta_u": 0.005,
+                "delta_u_at_min": 0.005,
+                "optimal_stake_usd": 5.0,
+                "false_edge_rate": 0.001,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.60,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="below strategy entry floor"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_low_price_with_qkernel_authority_and_profit_floor():
+    parents, command = execution_graph(
+        final_payload={
+            "limit_price": 0.01,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "notional_usd": 3.8479,
+        },
+        command_payload={
+            "limit_price": 0.01,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "expected_edge": 0.59,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "min_expected_profit_usd": 1.0,
+            "min_submit_edge_density": 0.05,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.70,
+                "payoff_q_lcb": 0.60,
+                "cost": 0.01,
+                "edge_lcb": 0.59,
+                "optimal_delta_u": 0.005,
+                "delta_u_at_min": 0.005,
+                "optimal_stake_usd": 5.0,
+                "false_edge_rate": 0.001,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.60,
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="below strategy entry floor"):
         verify_execution_command(command, parents)
 
 
@@ -116,7 +211,10 @@ def test_execution_command_has_no_max_notional_ceiling():
     # verifier no longer rejects a size whose notional exceeds any max_notional —
     # order size is governed solely by structural fractional-Kelly sizing upstream.
     # A size that the old cap would have rejected (20 * 0.40 = 8.0) now verifies.
-    parents, command = execution_graph(command_payload={"size": 20.0, "limit_price": 0.40})
+    parents, command = execution_graph(
+        final_payload={"size": 20.0, "notional_usd": 8.0},
+        command_payload={"size": 20.0, "limit_price": 0.40},
+    )
 
     verify_execution_command(command, parents)
 
@@ -161,12 +259,118 @@ def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
     assert native.size_kind == "shares"
     assert native.size_value == native.submitted_shares
     assert native.submitted_shares == Decimal("5.06")
+    assert native.actionable_certificate_hash == final_intent.payload["actionable_certificate_hash"]
+
+
+def test_day0_final_intent_preserves_observation_authority_fields():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+
+    assert final_intent.payload["event_type"] == "DAY0_EXTREME_UPDATED"
+    assert final_intent.payload["selection_authority_applied"] == "qkernel_spine"
+    assert final_intent.payload["qkernel_execution_economics"]["source"] == "qkernel_spine"
+    assert final_intent.payload["source_match_status"] == "MATCH"
+    assert final_intent.payload["local_date_status"] == "MATCH"
+    assert final_intent.payload["station_match_status"] == "MATCH"
+    assert final_intent.payload["dst_status"] == "UNAMBIGUOUS"
+    assert final_intent.payload["metric_match_status"] == "MATCH"
+    assert final_intent.payload["rounding_status"] == "MATCH"
+    assert final_intent.payload["source_authorized_status"] == "AUTHORIZED"
+    assert final_intent.payload["live_authority_status"] == "live"
+
+
+def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": None},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_accepts_day0_observation_authority_with_qkernel():
+    day0_authority = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    parents, command = execution_graph(
+        actionable_payload=day0_authority,
+        command_payload=day0_authority,
+    )
+
+    verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_day0_missing_qkernel_economics():
+    day0_authority = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "selection_authority_applied": None,
+        "qkernel_execution_economics": None,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    parents, command = execution_graph(
+        actionable_payload=day0_authority,
+        command_payload=day0_authority,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_missing_qkernel_selection_guard():
+    economics = dict(_actionable_payload()["qkernel_execution_economics"])
+    economics.pop("selection_guard_basis")
+    economics.pop("selection_guard_abstained")
+    economics.pop("selection_guard_q_safe")
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": economics},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_side_not_armed_qkernel_selection_guard():
+    economics = dict(_actionable_payload()["qkernel_execution_economics"])
+    economics["selection_guard_basis"] = "SIDE_NOT_ARMED"
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": economics},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis blocks side"):
+        verify_execution_command(command, parents)
 
 
 def test_execution_command_verifies_without_cap_flag():
     # The cap-enabled flag is gone from both the live_cap and actionable payloads;
     # verification does not depend on it and still passes.
     parents, command = execution_graph(
+        final_payload={"size": 20.0, "notional_usd": 8.0},
         command_payload={"size": 20.0, "limit_price": 0.40},
     )
 
@@ -174,7 +378,10 @@ def test_execution_command_verifies_without_cap_flag():
 
 
 def test_execution_command_rejects_tick_misaligned_price():
-    parents, command = execution_graph(command_payload={"limit_price": 0.333, "tick_size": 0.01})
+    parents, command = execution_graph(
+        final_payload={"limit_price": 0.333, "notional_usd": 3.33},
+        command_payload={"limit_price": 0.333, "tick_size": 0.01},
+    )
 
     with pytest.raises(CertificateVerificationError, match="tick-aligned"):
         verify_execution_command(command, parents)
@@ -199,6 +406,13 @@ def test_final_intent_requires_actionable_parent():
 
     with pytest.raises(CertificateVerificationError, match="ActionableTradeCertificate"):
         verify_final_intent(final_intent, ())
+
+
+def test_final_intent_rejects_no_submit_parent_certificate():
+    parents, final_intent = final_intent_graph(parent_modes={claims.ACTIONABLE_TRADE: "NO_SUBMIT"})
+
+    with pytest.raises(CertificateVerificationError, match="requires LIVE parent certificates"):
+        verify_final_intent(final_intent, parents)
 
 
 def test_final_intent_matches_actionable_event_token_condition_direction():
@@ -240,6 +454,33 @@ def test_final_intent_rejects_venue_order_id_before_submit():
 
     with pytest.raises(CertificateVerificationError, match="venue_order_id"):
         verify_final_intent(final_intent, parents)
+
+
+def test_final_intent_rejects_price_below_current_live_entry_floor():
+    parents, final_intent = final_intent_graph(
+        final_payload={
+            "limit_price": 0.019,
+            "min_entry_price": 0.01,
+            "notional_usd": 0.19,
+            "selection_authority_applied": None,
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="limit_price below strategy entry floor"):
+        verify_final_intent(final_intent, parents)
+
+
+def test_final_intent_allows_price_equal_current_live_entry_floor():
+    parents, final_intent = final_intent_graph(
+        final_payload={
+            "limit_price": 0.10,
+            "min_entry_price": 0.10,
+            "notional_usd": 1.0,
+            "selection_authority_applied": None,
+        }
+    )
+
+    verify_final_intent(final_intent, parents)
 
 
 def test_final_intent_notional_must_not_exceed_reserved_integrity_guard():
@@ -353,17 +594,50 @@ def test_executor_expressibility_requires_can_express_true():
 
 
 def test_executor_expressibility_rejects_tick_misaligned_price():
-    parents, expressibility = executor_expressibility_graph(express_payload={"limit_price": 0.333})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"limit_price": 0.333, "notional_usd": 3.33},
+        express_payload={"limit_price": 0.333},
+    )
 
     with pytest.raises(CertificateVerificationError, match="tick-aligned"):
         verify_executor_expressibility(expressibility, parents)
 
 
 def test_executor_expressibility_rejects_size_below_min_order():
-    parents, expressibility = executor_expressibility_graph(express_payload={"size": 0.1, "min_order_size": 1.0})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"size": 0.1, "notional_usd": 0.04},
+        express_payload={"size": 0.1, "min_order_size": 1.0},
+    )
 
     with pytest.raises(CertificateVerificationError, match="min_order_size"):
         verify_executor_expressibility(expressibility, parents)
+
+
+def test_executor_expressibility_rejects_price_below_final_intent_live_floor():
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={
+            "limit_price": 0.07,
+            "min_entry_price": 0.05,
+            "notional_usd": 0.70,
+            "selection_authority_applied": None,
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="limit_price below strategy entry floor"):
+        verify_executor_expressibility(expressibility, parents)
+
+
+def test_executor_expressibility_allows_price_equal_final_intent_live_floor():
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={
+            "limit_price": 0.10,
+            "min_entry_price": 0.10,
+            "notional_usd": 1.0,
+            "selection_authority_applied": None,
+        }
+    )
+
+    verify_executor_expressibility(expressibility, parents)
 
 
 def test_executor_expressibility_rejects_neg_risk_mismatch():
@@ -377,7 +651,10 @@ def test_executor_expressibility_rejects_neg_risk_mismatch():
 
 
 def test_executor_expressibility_rejects_taker_order_when_executor_law_requires_maker():
-    parents, expressibility = executor_expressibility_graph(express_payload={"post_only": False})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"post_only": False},
+        express_payload={"post_only": False},
+    )
 
     with pytest.raises(CertificateVerificationError, match="passive maker"):
         verify_executor_expressibility(expressibility, parents)
@@ -401,6 +678,174 @@ def test_execution_command_builder_preserves_event_token_condition_direction():
     assert command.payload["condition_id"] == actionable.payload["condition_id"]
     assert command.payload["direction"] == actionable.payload["direction"]
     verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
+
+
+def test_execution_command_and_receipt_stamp_process_boot_sha(monkeypatch):
+    boot_sha = "a" * 40
+    monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", boot_sha)
+    actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
+
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=actionable,
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
+        decision_time=NOW,
+    )
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+    )
+
+    assert command.payload["process_boot_sha"] == boot_sha
+    assert command.payload["runtime_sha"] == boot_sha
+    assert receipt.payload["process_boot_sha"] == boot_sha
+    assert receipt.payload["runtime_sha"] == boot_sha
+    verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
+    verify_execution_receipt(receipt, (command,))
+
+
+def test_execution_command_rejects_command_price_drift_from_final_intent():
+    parents, command = execution_graph(
+        command_payload={
+            "limit_price": 0.39,
+            "expected_edge": 0.21,
+            "q_lcb_5pct": 0.60,
+            "qkernel_execution_economics": {
+                **_actionable_payload()["qkernel_execution_economics"],
+                "cost": 0.39,
+                "edge_lcb": 0.21,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="final_intent.limit_price"):
+        verify_execution_command(command, parents)
+
+
+def test_final_intent_builder_rejects_no_submit_parent_certificate():
+    with pytest.raises(ValueError, match="requires LIVE parent certificates"):
+        builder_chain(parent_modes={claims.QUOTE_FEASIBILITY: "NO_SUBMIT"})
+
+
+def test_final_intent_builder_rejects_entry_price_below_current_live_floor():
+    with pytest.raises(ValueError, match="CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR"):
+        builder_chain(
+            actionable_payload={
+                "c_fee_adjusted": 0.02,
+                "c_cost_95pct": 0.02,
+                "q_lcb_5pct": 0.30,
+                "trade_score": 0.28,
+                "action_score": 0.28,
+                "min_entry_price": 0.02,
+                "selection_authority_applied": None,
+                "qkernel_execution_economics": {
+                    **_actionable_payload()["qkernel_execution_economics"],
+                    "cost": 0.02,
+                    "edge_lcb": 0.28,
+                },
+            }
+        )
+
+
+def test_final_intent_builder_allows_price_equal_current_live_floor():
+    actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "c_fee_adjusted": 0.10,
+            "c_cost_95pct": 0.10,
+            "q_lcb_5pct": 0.40,
+            "trade_score": 0.30,
+            "action_score": 0.30,
+            "kelly_size_usd": 1.0,
+            "min_entry_price": 0.10,
+            "selection_authority_applied": None,
+            "qkernel_execution_economics": None,
+        }
+    )
+
+    assert final_intent.payload["limit_price"] == pytest.approx(0.10)
+    assert final_intent.payload["min_entry_price"] == pytest.approx(0.10)
+
+
+def test_final_intent_builder_allows_center_buy_yes_above_micro_tail_floor():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "c_fee_adjusted": 0.03,
+            "c_cost_95pct": 0.03,
+            "q_live": 0.12,
+            "q_lcb_5pct": 0.08,
+            "trade_score": 0.05,
+            "action_score": 0.05,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": {
+                **_actionable_payload()["qkernel_execution_economics"],
+                "payoff_q_point": 0.12,
+                "payoff_q_lcb": 0.08,
+                "cost": 0.03,
+                "edge_lcb": 0.05,
+                "selection_guard_q_safe": 0.08,
+            },
+        }
+    )
+
+    assert final_intent.payload["strategy_key"] == "center_buy"
+    assert final_intent.payload["direction"] == "buy_yes"
+    assert final_intent.payload["limit_price"] == pytest.approx(0.03)
+    assert final_intent.payload["min_entry_price"] == pytest.approx(0.02)
+
+
+def test_final_intent_builder_rejects_direct_qkernel_yes_below_strategy_floor():
+    with pytest.raises(ValueError, match="CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR"):
+        builder_chain(
+            actionable_payload={
+                "c_fee_adjusted": 0.01,
+                "c_cost_95pct": 0.01,
+                "q_live": 0.82,
+                "q_lcb_5pct": 0.72,
+                "trade_score": 0.71,
+                "action_score": 0.71,
+                "min_entry_price": 0.10,
+                "qkernel_execution_economics": {
+                    **_actionable_payload()["qkernel_execution_economics"],
+                    "candidate_id": "YES:b20:DIRECT_YES:b20@proof",
+                    "bin_id": "b20",
+                    "route_id": "DIRECT_YES:b20@proof",
+                    "route_type": "direct",
+                    "payoff_q_point": 0.82,
+                    "payoff_q_lcb": 0.72,
+                    "cost": 0.01,
+                    "edge_lcb": 0.71,
+                    "delta_u_at_min": 0.01,
+                    "optimal_stake_usd": 100.0,
+                    "optimal_delta_u": 0.01,
+                    "selection_guard_q_safe": 0.72,
+                },
+            }
+        )
+
+
+def test_execution_command_builder_rejects_no_submit_parent_certificate():
+    actionable, final_intent, expressibility, live_cap = builder_chain()
+    live_pre_submit = _pre_submit_cert(final_intent, live_cap)
+    no_submit_pre_submit = _cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        "pre-submit:event-1:intent-1:no-submit",
+        live_pre_submit.payload,
+        mode="NO_SUBMIT",
+        parents=(final_intent, live_cap),
+    )
+
+    with pytest.raises(ValueError, match="requires LIVE parent certificates"):
+        build_execution_command_certificate_from_final_intent(
+            actionable_cert=actionable,
+            final_intent_cert=final_intent,
+            executor_expressibility_cert=expressibility,
+            live_cap_cert=live_cap,
+            pre_submit_revalidation_cert=no_submit_pre_submit,
+            decision_time=NOW,
+        )
 
 
 def test_execution_command_builder_deterministic_idempotency_key():
@@ -609,31 +1054,33 @@ def test_ledger_rejects_execution_command_with_generic_verifier_only_path():
 def execution_graph(
     *,
     mode: str = "LIVE",
+    parent_modes: dict[str, str] | None = None,
     actionable_payload: dict | None = None,
     live_cap_payload: dict | None = None,
+    final_payload: dict | None = None,
     command_payload: dict | None = None,
     drop_parent: str | None = None,
 ):
+    parent_modes = parent_modes or {}
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
         {**_actionable_payload(), **(actionable_payload or {})},
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
     )
     final_intent = _cert(
         claims.FINAL_INTENT,
         "final-intent:intent-1",
-        {
-            "event_type": "FORECAST_SNAPSHOT_READY",
-            "final_intent_id": "intent-1",
-            "strategy_key": "center_buy",
-            "token_id": "yes-1",
-            "condition_id": "condition-1",
-        },
+        {**_final_intent_payload(actionable), **(final_payload or {})},
+        mode=parent_modes.get(claims.FINAL_INTENT, "LIVE"),
+        parents=(actionable,),
     )
     expressibility = _cert(
         claims.EXECUTOR_EXPRESSIBILITY,
         "executor-expressibility:intent-1",
-        {"passed": True, "strategy_key": "center_buy"},
+        _expressibility_payload(final_intent),
+        mode=parent_modes.get(claims.EXECUTOR_EXPRESSIBILITY, "LIVE"),
+        parents=(final_intent,),
     )
     live_cap = _cert(
         claims.LIVE_CAP,
@@ -645,9 +1092,18 @@ def execution_graph(
             "max_notional_usd": 5.0,
             **(live_cap_payload or {}),
         },
+        mode=parent_modes.get(claims.LIVE_CAP, "LIVE"),
     )
     payload = {**_command_payload(actionable), **(command_payload or {})}
     pre_submit = _pre_submit_cert(final_intent, live_cap, payload)
+    if pre_submit_mode := parent_modes.get(claims.PRE_SUBMIT_REVALIDATION):
+        pre_submit = _cert(
+            claims.PRE_SUBMIT_REVALIDATION,
+            "pre-submit:event-1:intent-1:parent-mode",
+            pre_submit.payload,
+            mode=pre_submit_mode,
+            parents=(final_intent, live_cap),
+        )
     parents = tuple(
         parent
         for parent in (actionable, final_intent, expressibility, live_cap, pre_submit)
@@ -657,8 +1113,19 @@ def execution_graph(
     return parents, command
 
 
-def final_intent_graph(*, final_payload: dict | None = None, drop_parent: str | None = None):
-    actionable = _cert(claims.ACTIONABLE_TRADE, "actionable:event-1", _actionable_payload())
+def final_intent_graph(
+    *,
+    final_payload: dict | None = None,
+    parent_modes: dict[str, str] | None = None,
+    drop_parent: str | None = None,
+):
+    parent_modes = parent_modes or {}
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        _actionable_payload(),
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
+    )
     parents = tuple(parent for parent in (actionable,) if parent.certificate_type != drop_parent)
     payload = {**_final_intent_payload(actionable), **(final_payload or {})}
     final_intent = _cert(claims.FINAL_INTENT, "final-intent:intent-1", payload, parents=parents)
@@ -668,10 +1135,11 @@ def final_intent_graph(*, final_payload: dict | None = None, drop_parent: str | 
 def executor_expressibility_graph(
     *,
     express_payload: dict | None = None,
+    final_payload: dict | None = None,
     executable_payload: dict | None = None,
     drop_parent: str | None = None,
 ):
-    final_parents, final_intent = final_intent_graph()
+    final_parents, final_intent = final_intent_graph(final_payload=final_payload)
     executable = _cert(
         claims.EXECUTABLE_SNAPSHOT,
         "executable:exec-1",
@@ -689,7 +1157,9 @@ def executor_expressibility_graph(
 def builder_chain(
     final_payload: dict | None = None,
     actionable_payload: dict | None = None,
+    parent_modes: dict[str, str] | None = None,
 ):
+    parent_modes = parent_modes or {}
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
@@ -699,6 +1169,7 @@ def builder_chain(
             "neg_risk": False,
             **(actionable_payload or {}),
         },
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
     )
     forecast = _cert(
         claims.FORECAST_AUTHORITY,
@@ -724,6 +1195,7 @@ def builder_chain(
             "zeus_submit_intent_time": NOW.isoformat(),
             "venue_ack_time": NOW.isoformat(),
         },
+        mode=parent_modes.get(claims.FORECAST_AUTHORITY, "LIVE"),
     )
     quote = _cert(
         claims.QUOTE_FEASIBILITY,
@@ -741,6 +1213,7 @@ def builder_chain(
             "neg_risk": False,
             "fill_claim": False,
         },
+        mode=parent_modes.get(claims.QUOTE_FEASIBILITY, "LIVE"),
     )
     cost = _cert(
         claims.COST_MODEL,
@@ -755,6 +1228,7 @@ def builder_chain(
             "forbidden_cost_source": False,
             "execution_price_type": "ExecutionPrice",
         },
+        mode=parent_modes.get(claims.COST_MODEL, "LIVE"),
     )
     executable = _cert(
         claims.EXECUTABLE_SNAPSHOT,
@@ -765,6 +1239,7 @@ def builder_chain(
             "token_id": "yes-1",
             "neg_risk": False,
         },
+        mode=parent_modes.get(claims.EXECUTABLE_SNAPSHOT, "LIVE"),
     )
     final_intent = build_final_intent_certificate_from_actionable(
         actionable_cert=actionable,
@@ -828,6 +1303,27 @@ def _actionable_payload() -> dict:
         "p_fill_lcb": 0.1,
         "trade_score": 0.2,
         "action_score": 0.2,
+        "min_entry_price": 0.05,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 5.0,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
+        },
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",
         "kelly_size_usd": 3.0,
@@ -893,10 +1389,63 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
         "current_best_bid": 0.39,
         "current_best_ask": 0.41,
         "limit_price": command_payload.get("limit_price", 0.4),
+        "q_live": command_payload.get("q_live", final_intent.payload.get("q_live", 0.7)),
+        "q_lcb_5pct": command_payload.get(
+            "q_lcb_5pct",
+            final_intent.payload.get("q_lcb_5pct", 0.6),
+        ),
+        "expected_edge": command_payload.get(
+            "expected_edge",
+            final_intent.payload.get("trade_score", 0.2),
+        ),
+        "action_score": command_payload.get(
+            "action_score",
+            final_intent.payload.get("action_score", 0.2),
+        ),
+        "min_entry_price": command_payload.get(
+            "min_entry_price",
+            final_intent.payload.get("min_entry_price", 0.05),
+        ),
+        "min_expected_profit_usd": command_payload.get(
+            "min_expected_profit_usd",
+            0.0,
+        ),
+        "min_submit_edge_density": command_payload.get(
+            "min_submit_edge_density",
+            final_intent.payload.get("min_submit_edge_density", 0.02),
+        ),
+        "selection_authority_applied": command_payload.get(
+            "selection_authority_applied",
+            final_intent.payload.get("selection_authority_applied"),
+        ),
+        "qkernel_execution_economics": command_payload.get(
+            "qkernel_execution_economics",
+            final_intent.payload.get(
+                "qkernel_execution_economics",
+                {
+                    "source": "qkernel_spine",
+                    "side": "YES",
+                    "payoff_q_point": 0.7,
+                    "payoff_q_lcb": 0.6,
+                    "cost": 0.4,
+                    "edge_lcb": 0.2,
+                    "optimal_delta_u": 0.01,
+                    "delta_u_at_min": 0.01,
+                    "optimal_stake_usd": 5.0,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.6,
+                },
+            ),
+        ),
         "would_cross_book": False,
         "tick_size": command_payload.get("tick_size", 0.01),
         "tick_aligned": command_payload.get("tick_aligned", True),
         "min_order_size": command_payload.get("min_order_size", 1.0),
+        "size": command_payload.get("size", final_intent.payload.get("size", 10.0)),
         "size_ok": command_payload.get("size_ok", True),
         "neg_risk": command_payload.get("neg_risk", False),
         "heartbeat_status": "OK",
@@ -919,6 +1468,20 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
         "final_intent_certificate_hash": final_intent.certificate_hash,
         "live_cap_usage_id": live_cap.payload["usage_id"],
     }
+    for key in (
+        "source_match_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+        "source_authorized_status",
+        "live_authority_status",
+    ):
+        if key in command_payload:
+            payload[key] = command_payload[key]
+        elif key in final_intent.payload:
+            payload[key] = final_intent.payload[key]
     return _cert(
         claims.PRE_SUBMIT_REVALIDATION,
         "pre-submit:event-1:intent-1",
@@ -929,7 +1492,7 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
 
 def _final_intent_payload(actionable) -> dict:
     payload = actionable.payload
-    return {
+    result = {
         "event_id": payload["event_id"],
         "event_type": payload.get("event_type", "FORECAST_SNAPSHOT_READY"),
         "actionable_certificate_hash": actionable.certificate_hash,
@@ -946,6 +1509,15 @@ def _final_intent_payload(actionable) -> dict:
         "post_only": True,
         "maker_intent": True,
         "limit_price": 0.4,
+        "q_live": payload.get("q_live"),
+        "q_lcb_5pct": payload.get("q_lcb_5pct"),
+        "trade_score": payload.get("trade_score"),
+        "action_score": payload.get("action_score"),
+        "min_entry_price": payload.get("min_entry_price"),
+        "min_expected_profit_usd": payload.get("min_expected_profit_usd"),
+        "min_submit_edge_density": payload.get("min_submit_edge_density"),
+        "selection_authority_applied": payload.get("selection_authority_applied"),
+        "qkernel_execution_economics": payload.get("qkernel_execution_economics"),
         "size": 10.0,
         "notional_usd": 4.0,
         "executable_snapshot_id": payload["executable_snapshot_id"],
@@ -991,6 +1563,19 @@ def _final_intent_payload(actionable) -> dict:
         "submitted": False,
         "venue_order_id": None,
     }
+    for key in (
+        "source_match_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+        "source_authorized_status",
+        "live_authority_status",
+    ):
+        if key in payload:
+            result[key] = payload[key]
+    return result
 
 
 def _expressibility_payload(final_intent) -> dict:

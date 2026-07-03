@@ -11,6 +11,7 @@ Queries Polymarket's Gamma API for temperature events.
 Parses bin structure, token IDs, and prices from market data.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import httpx
 
@@ -77,7 +78,26 @@ def _set_busy_timeout_ms(conn: sqlite3.Connection, timeout_ms: int | None) -> No
         return
 
 
-def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
+def _configured_batch_orderbook_getter(clob: Any) -> Callable[[list[str]], dict] | None:
+    """Return a real batch orderbook getter, excluding mock/autovivified stubs."""
+
+    getter = getattr(clob, "get_orderbook_snapshots", None)
+    if not callable(getter):
+        return None
+    if type(getter).__module__.startswith("unittest.mock"):
+        side_effect = getattr(getter, "side_effect", None)
+        return_value = getattr(getter, "return_value", None)
+        if side_effect is None and not isinstance(return_value, dict):
+            return None
+    return getter
+
+
+def _snapshot_capture_busy_timeout_ms(
+    remaining_seconds: float,
+    *,
+    remaining_candidates: int | None = None,
+    priority_candidate: bool = False,
+) -> int:
     """Return the per-row SQLite wait budget for background substrate capture.
 
     Fitz #5 lock-CATEGORY kill (2026-06-08): this is the load-bearing budget that
@@ -115,10 +135,59 @@ def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
     # out, not fail-fasted. Still bounded by the wall-clock per-cycle deadline.
     configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
     floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
+    progress_floor_ms = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
+    )
+    priority_floor_candidate_cap = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
+    )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
+    if remaining_candidates is not None and remaining_candidates > 1:
+        priority_floor_scope = bool(
+            priority_candidate
+            and remaining_candidates <= max(1, priority_floor_candidate_cap)
+        )
+        split_priority_scope = bool(
+            priority_candidate
+            and remaining_candidates > max(1, priority_floor_candidate_cap)
+        )
+        split_batch_scope = bool(
+            not priority_candidate
+            or remaining_candidates > max(1, priority_floor_candidate_cap)
+        )
+    else:
+        priority_floor_scope = False
+        split_priority_scope = False
+        split_batch_scope = False
+    if priority_floor_scope:
+        # Live money-path scoped refreshes must wait out normal WAL contention even
+        # late in the cycle. Splitting a 2-row priority refresh down to 150ms after
+        # Gamma/CLOB prefetch consumed the reserve reproduced coverage=NONE.
+        share_ms = max(floor_ms, remaining_ms // max(1, remaining_candidates or 1))
+        return max(1, min(configured, share_ms))
+    if split_priority_scope or split_batch_scope:
+        # Live 2026-06-25: the batch warmer had 46 selected candidates and one
+        # locked insert consumed the 8s per-row ceiling, producing
+        # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
+        # coverage producer, not a single critical recapture; no one condition may
+        # spend the whole capture reserve. Split the remaining wall-clock budget
+        # across the remaining selected candidates while preserving a small
+        # non-zero wait so transient locks can still clear. Large priority batches
+        # are still batches: a broad redecision confirmation scope must make
+        # progress across families instead of letting the first locked row consume
+        # the whole tick.
+        #
+        # Live 2026-06-26: money-path confirmation refreshes commonly carry a
+        # family-sized priority scope (roughly 17-21 YES/NO orderbook rows). The
+        # old cap of 4 misclassified those scoped recaptures as broad batches,
+        # split the wait budget down to a few hundred ms, then failed every
+        # contended write with "database is locked". Keep the durable floor for
+        # normal priority scopes and split only oversized priority batches.
+        share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
+        return max(1, min(configured, share_ms))
     capped = min(configured, max(floor_ms, remaining_ms))
     return max(floor_ms, capped)
 
@@ -128,6 +197,23 @@ def _snapshot_capture_sqlite_lock_retries() -> int:
         return max(0, int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_SQLITE_LOCK_RETRIES", "2")))
     except ValueError:
         return 2
+
+
+def _snapshot_capture_effective_lock_retries(
+    *,
+    configured_retries: int,
+    remaining_candidates: int | None,
+) -> int:
+    """Do not let one locked row spend the whole multi-row capture window."""
+
+    retries = max(0, int(configured_retries or 0))
+    try:
+        remaining = int(remaining_candidates or 0)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining > 1:
+        return 0
+    return retries
 
 
 def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> int | None:
@@ -143,10 +229,97 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     if per_city_limit != 0:
         return None
     try:
-        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "66"))
+        configured = int(
+            os.environ.get(
+                "ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK",
+                "32",
+            )
+        )
     except ValueError:
-        configured = 66
-    return configured if configured > 0 else None
+        configured = 32
+    if configured <= 0:
+        return None
+    return configured
+
+
+def _snapshot_market_refresh_urgency(market: dict[str, Any]) -> int:
+    try:
+        return int(market.get("_zeus_refresh_urgency") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _snapshot_group_refresh_urgency(group_list: list[tuple]) -> int:
+    if not group_list:
+        return 0
+    try:
+        market = group_list[0][3]
+    except (IndexError, TypeError):
+        return 0
+    if not isinstance(market, dict):
+        return 0
+    return _snapshot_market_refresh_urgency(market)
+
+
+def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
+    """Bound direct CLOB fill for targeted full-family refreshes.
+
+    Broad background completion can span hundreds of direction candidates; that
+    path should keep leaning on price-channel evidence and defer misses. A
+    decision-triggered or small pending-family refresh is different: if the live
+    price-channel has only partial books, deferring the missing siblings leaves
+    the family undecidable and submit recapture fails with no fresh executable
+    snapshot.
+    """
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+                "128",
+            )
+        )
+    except ValueError:
+        configured = 128
+    return max(0, configured)
+
+
+def _priority_direct_clob_prefetch_condition_limit() -> int:
+    """Return max priority conditions to service with synchronous CLOB fill.
+
+    A small held/rest family recapture may need direct CLOB books to complete
+    both sides in the same tick.  A broad entry/redecision confirmation scope
+    can contain dozens of priority conditions; serving all of them synchronously
+    turns the warm path into a venue HTTP sweep.  Serving none of them is worse:
+    the money path sees perpetual EXECUTABLE_SNAPSHOT_BLOCKED/STALE.  The limit
+    is therefore a per-tick service cap, not an all-or-nothing admission gate.
+    """
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
+                "32",
+            )
+        )
+    except ValueError:
+        configured = 32
+    return max(0, configured)
+
+
+def _feasibility_prefetch_busy_timeout_ms() -> int:
+    """Bound local price-witness reads so they cannot starve snapshot writes."""
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_FEASIBILITY_PREFETCH_BUSY_TIMEOUT_MS",
+                "50",
+            )
+        )
+    except ValueError:
+        configured = 50
+    return max(1, configured)
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -155,7 +328,13 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
 # B017: data-provenance types. See also src/data/__init__.py note.
 # Authority literal follows the house pattern established in
 # src/contracts/observation_atom.py::ObservationAtom.authority.
-ScanAuthority = Literal["VERIFIED", "STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"]
+ScanAuthority = Literal[
+    "VERIFIED",
+    "STALE",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
+    "NEVER_FETCHED",
+]
 SourceContractStatus = Literal[
     "MATCH",
     "MISSING",
@@ -174,9 +353,11 @@ class MarketSnapshot:
       - ``STALE``          : network fetch failed, cached data returned
                              (``stale_age_seconds`` > 0, originally fetched
                              at ``fetched_at_utc``)
-      - ``EMPTY_FALLBACK`` : network fetch failed AND no cache was
-                             available (events == [])
-      - ``NEVER_FETCHED``  : initial state before any fetch attempted
+      - ``FETCH_FAILED_NO_CACHE`` : network fetch failed AND no cache was
+                                    available (events == [])
+      - ``KEYWORD_DISCOVERY_UNVERIFIED`` : keyword recovery path returned
+                                           non-authoritative discovery evidence
+      - ``NEVER_FETCHED``        : initial state before any fetch attempted
 
     Callers MAY treat the events as a plain ``list[dict]`` for backwards
     compatibility, but live-trading call paths SHOULD branch on
@@ -972,7 +1153,7 @@ def find_weather_markets(
     """
     events = _get_active_events(include_slug_pattern=include_slug_pattern)
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     return _parse_and_persist_weather_events(
@@ -1092,7 +1273,7 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     """
     events = _get_active_events()
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -1123,7 +1304,7 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
 
     events = _get_active_events()
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -1315,7 +1496,7 @@ def _get_active_events_snapshot(*, include_slug_pattern: bool = True) -> MarketS
     On successful fetch: authority="VERIFIED", stale_age_seconds=0.0.
     On network failure with cache: authority="STALE", stale_age_seconds
         = seconds since last successful fetch.
-    On network failure without cache: authority="EMPTY_FALLBACK",
+    On network failure without cache: authority="FETCH_FAILED_NO_CACHE",
         events=[].
     """
     global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
@@ -1359,10 +1540,10 @@ def _get_active_events_snapshot(*, include_slug_pattern: bool = True) -> MarketS
             logger.error(
                 "Active events fetch failed and no cache available: %s", e
             )
-            _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+            _ACTIVE_EVENTS_LAST_STATUS = "FETCH_FAILED_NO_CACHE"
             return MarketSnapshot(
                 events=[],
-                authority="EMPTY_FALLBACK",
+                authority="FETCH_FAILED_NO_CACHE",
                 fetched_at_utc=None,
                 stale_age_seconds=None,
             )
@@ -1389,16 +1570,16 @@ def get_last_scan_authority() -> ScanAuthority:
     return _ACTIVE_EVENTS_LAST_STATUS
 
 
-def _mark_keyword_fallback_authority() -> None:
-    """Mark keyword-search Gamma results as degraded provenance.
+def _mark_keyword_unverified_authority() -> None:
+    """Mark keyword-search Gamma results as unverified provenance.
 
     The tag path is the authoritative discovery surface. Keyword search is a
-    recovery fallback with weaker provenance, so live entry must not turn it
+    recovery path with weaker provenance, so live entry must not turn it
     into executable candidates without an explicit fail-closed gate.
     """
 
     global _ACTIVE_EVENTS_LAST_STATUS
-    _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+    _ACTIVE_EVENTS_LAST_STATUS = "KEYWORD_DISCOVERY_UNVERIFIED"
 
 
 def _clear_active_events_cache() -> None:
@@ -1482,13 +1663,18 @@ def _event_has_active_children(
     The `closed=false` API filter returns 0 results for these events.
 
     An event is admitted iff:
-      1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
-         unparseable (best-effort; missing endDate is deferred to _parse_event)
-      2. At least one child market has acceptingOrders=True AND (when
+      1. At least one child market has acceptingOrders=True AND (when
          ``clob_crosscheck=True``) passes CLOB archived cross-check (Gamma lies
          for archived markets post-V2 cutover 2026-05-11; CLOB /markets/{cid}
          is authoritative). If CLOB is unreachable, Gamma's acceptingOrders is
          trusted as fallback.
+
+    Parent ``endDate`` is intentionally not a tradeability veto here. Weather
+    events can keep accepting orders after the nominal 12:00Z market end while
+    waiting for same-day observation/settlement evidence. Using parent endDate
+    as a hard discovery veto drops exactly the Day0 markets this scanner must
+    keep visible; positive ``min_hours_to_resolution`` policy remains in
+    ``_parse_event`` for callers that require future-only markets.
 
     Args:
         clob_crosscheck: When True (default), each ``acceptingOrders=True``
@@ -1502,15 +1688,6 @@ def _event_has_active_children(
             one HTTP call per child per event, making a 50-city scan take ~10
             minutes instead of <90 seconds.
     """
-    end_str = event.get("endDate") or event.get("end_date")
-    if end_str:
-        try:
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            if end_dt < now_utc:
-                return False
-        except (ValueError, TypeError):
-            pass  # unparseable endDate: let _parse_event reject it downstream
-
     children = event.get("markets") or []
     for child in children:
         if child.get("acceptingOrders") is not True:
@@ -1572,8 +1749,8 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
             # Fetch events with this tag — no closed= filter; Polymarket negRisk
             # semantic means event.closed=True on actively-tradeable multi-outcome
             # events. Client-side gate via _event_has_active_children.
-            # Pages are ordered endDate desc; once all events on a page have
-            # past endDates, deeper pages are also past — break early.
+            # Pages are ordered endDate desc, but parent endDate is not a
+            # tradeability authority; keep paging until the hard cap/empty page.
             _MAX_TAG_PAGES = 10  # hard cap; each page = 50 events
             events = []
             offset = 0
@@ -1592,20 +1769,10 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
                 events.extend(batch)
                 if len(batch) < 50:
                     break
-                # Early-break: last event in page has the oldest endDate.
-                # If it's already past, remaining pages are all past events.
-                oldest_end = batch[-1].get("endDate") or batch[-1].get("end_date") or ""
-                if oldest_end:
-                    try:
-                        oldest_dt = datetime.fromisoformat(oldest_end.replace("Z", "+00:00"))
-                        if oldest_dt < now_utc:
-                            break
-                    except (ValueError, TypeError):
-                        pass
                 offset += 50
 
-            # Client-side tradeability gate: keep only events with future endDate
-            # and at least one child with acceptingOrders=True.  CLOB cross-check
+            # Client-side tradeability gate: keep events with at least one child
+            # acceptingOrders=True. Parent endDate is phase context only. CLOB cross-check
             # is skipped here (clob_crosscheck=False) — the per-child CLOB call
             # serialises hundreds of HTTP requests for a full 50-city tag scan,
             # inflating discovery from <90s to ~10min.
@@ -1715,7 +1882,11 @@ def _bool_env(name: str, default: bool) -> bool:
 def _slug_pattern_max_requests_from_env(max_requests: int | None = None) -> int:
     if max_requests is not None:
         return max(1, int(max_requests))
-    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", 28)
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", 512)
+
+
+def _slug_pattern_http_concurrency_from_env() -> int:
+    return max(1, min(64, _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_CONCURRENCY", 16)))
 
 
 def _slug_pattern_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
@@ -1795,44 +1966,108 @@ def _fetch_events_by_slug_pattern(
     budget_exhausted = False
     new_events: list[dict] = []
 
+    selected_jobs: list[tuple[str, str, str]] = []
     for step in range(len(jobs)):
-        if visited >= request_limit:
+        if len(selected_jobs) >= request_limit:
             break
-        if time.monotonic() >= deadline:
-            budget_exhausted = True
-            break
-        _date_str, _city, slug = jobs[(start + step) % len(jobs)]
-        visited += 1
+        selected_jobs.append(jobs[(start + step) % len(jobs)])
+
+    def _admit_slug_event(event: dict) -> None:
+        event_id = event.get("id") or event.get("slug")
+        if event_id in seen_ids:
+            return
+        if not _event_has_active_children(event, now_utc, clob_crosscheck=False):
+            return
+        seen_ids.add(event_id)
+        event["_discovery_path"] = "slug_pattern"
+        new_events.append(event)
+        logger.info(
+            "slug_pattern: discovered new event slug=%s id=%s",
+            event.get("slug"),
+            event.get("id"),
+        )
+
+    def _fetch_one_slug(slug: str) -> tuple[str, int | None, list[dict]]:
         try:
             resp = _gamma_get("/events", params={"slug": slug}, timeout=timeout, retries=retries)
         except httpx.HTTPError as exc:
             logger.debug("slug_pattern fetch failed for %s: %s", slug, exc)
-            continue
+            return slug, None, []
         if resp.status_code != 200:
             logger.debug("slug_pattern %s → HTTP %s", slug, resp.status_code)
-            continue
+            return slug, resp.status_code, []
         try:
             batch = resp.json()
         except Exception:
-            continue
+            return slug, resp.status_code, []
         if not isinstance(batch, list):
             batch = [batch] if isinstance(batch, dict) and batch else []
-        for event in batch:
-            if not isinstance(event, dict):
-                continue
-            event_id = event.get("id") or event.get("slug")
-            if event_id in seen_ids:
-                continue
-            if not _event_has_active_children(event, now_utc, clob_crosscheck=False):
-                continue
-            seen_ids.add(event_id)
-            event["_discovery_path"] = "slug_pattern"
-            new_events.append(event)
-            logger.info(
-                "slug_pattern: discovered new event slug=%s id=%s",
-                event.get("slug"),
-                event.get("id"),
-            )
+        return slug, resp.status_code, [event for event in batch if isinstance(event, dict)]
+
+    # Explicit small request limits are used by rotation tests and by any operator
+    # that intentionally wants serial probing. The production default scans the
+    # full configured opening horizon; run that path concurrently so 300+ direct
+    # slug lookups cannot take longer than the discovery interval.
+    concurrency = 1 if max_requests is not None else _slug_pattern_http_concurrency_from_env()
+    if concurrency <= 1 or len(selected_jobs) <= 1:
+        for _date_str, _city, slug in selected_jobs:
+            if time.monotonic() >= deadline:
+                budget_exhausted = True
+                break
+            visited += 1
+            _slug, _status, events = _fetch_one_slug(slug)
+            for event in events:
+                _admit_slug_event(event)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+
+        pending: dict = {}
+        next_job_index = 0
+
+        def _submit(executor: ThreadPoolExecutor) -> None:
+            nonlocal next_job_index, visited
+            while (
+                len(pending) < concurrency
+                and next_job_index < len(selected_jobs)
+                and time.monotonic() < deadline
+            ):
+                _date_str, _city, slug = selected_jobs[next_job_index]
+                next_job_index += 1
+                visited += 1
+                pending[executor.submit(_fetch_one_slug, slug)] = slug
+
+        with ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="zeus-slug-discovery",
+        ) as executor:
+            _submit(executor)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    budget_exhausted = True
+                    for future in pending:
+                        future.cancel()
+                    pending.clear()
+                    break
+                try:
+                    future = next(
+                        as_completed(
+                            tuple(pending),
+                            timeout=max(0.05, min(remaining, 0.5)),
+                        )
+                    )
+                except FuturesTimeoutError:
+                    continue
+                pending.pop(future, None)
+                try:
+                    _slug, _status, events = future.result()
+                except Exception as exc:  # noqa: BLE001 - one slug must not abort discovery
+                    logger.debug("slug_pattern worker failed: %s", exc)
+                    _submit(executor)
+                    continue
+                for event in events:
+                    _admit_slug_event(event)
+                _submit(executor)
 
     _SLUG_DISCOVERY_CURSOR = (start + visited) % len(jobs)
     if visited < len(jobs):
@@ -1915,7 +2150,10 @@ def _parse_event(
         try:
             end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
             hours_to_resolution = (end_dt - now).total_seconds() / 3600
-            if hours_to_resolution < min_hours:
+            if hours_to_resolution < min_hours and not (
+                min_hours <= 0.0
+                and _event_has_active_children(event, now, clob_crosscheck=False)
+            ):
                 return None
         except (ValueError, TypeError):
             logger.warning(
@@ -2730,6 +2968,8 @@ def capture_executable_market_snapshot(
     clob_market_info_cache: dict[str, dict] | None = None,
     fee_details_cache: dict[str, dict[str, Any]] | None = None,
     tolerate_missing_book: bool = False,
+    persist_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    commit_after_persist: bool = False,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
 
@@ -2814,20 +3054,13 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
-    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
-    # CLOB /markets authority.  Background substrate enumeration is different:
-    # it is an identity/family-proof producer and the submit path revalidates
-    # executable candidates before any order.  For that tolerate_missing_book
-    # path, use Gamma/topology identity plus the fresh CLOB orderbook instead of
-    # spending one serial /markets HTTP per condition.
-    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
-        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
-        True,
-    )
-
-    if not use_synthetic_clob_market and clob_market_info_cache is not None and condition_id in clob_market_info_cache:
+    # Every persisted executable-market snapshot, including background
+    # substrate identity rows, must be backed by real CLOB market metadata. A
+    # missing /markets fact defers the row; it must not be replaced with
+    # Gamma/topology-derived defaults that later look like live executable facts.
+    if clob_market_info_cache is not None and condition_id in clob_market_info_cache:
         raw_clob_market = clob_market_info_cache[condition_id]
-    elif not use_synthetic_clob_market:
+    else:
         raw_clob_market = _fetch_clob_market_info(clob, condition_id)
         if clob_market_info_cache is not None:
             clob_market_info_cache[condition_id] = raw_clob_market
@@ -2843,15 +3076,6 @@ def capture_executable_market_snapshot(
     else:
         raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
 
-    if use_synthetic_clob_market:
-        raw_clob_market = _synthetic_clob_market_info_for_substrate_identity(
-            condition_id=condition_id,
-            yes_token=yes_token,
-            no_token=no_token,
-            accepting_orders=accepting_orders,
-            enable_orderbook=enable_orderbook,
-            raw_orderbook=raw_orderbook,
-        )
     # Fill enable_orderbook from CLOB when Gamma omitted it (slug-discovered
     # markets) or for the persisted-reconstruction path.  CLOB is authoritative.
     clob_orderbook = _boolish_market_field(
@@ -2891,12 +3115,16 @@ def capture_executable_market_snapshot(
         accepting_orders=accepting_orders,
         child_active=active,
         child_closed=child_closed,
-        require_explicit_clob_tradeability=reconstructed_tradability,
+        require_explicit_clob_tradeability=True,
     )
     if not tradeability_status.executable_allowed:
-        raise ExecutableSnapshotCaptureError(
-            f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
-        )
+        if not tolerate_missing_book:
+            raise ExecutableSnapshotCaptureError(
+                f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
+            )
+        non_executable_identity_reason = tradeability_status.reason
+    else:
+        non_executable_identity_reason = None
 
     min_tick_size = _required_decimal_fact(
         (raw_orderbook, raw_clob_market),
@@ -2936,7 +3164,13 @@ def capture_executable_market_snapshot(
     # with the identity facts and an explicitly NON-executable tradeability status
     # so it is never selectable as a trade target and assert_snapshot_executable
     # rejects it at submission.
-    if tolerate_missing_book and selected_side_top is None:
+    if tolerate_missing_book and non_executable_identity_reason is not None:
+        fee_details = canonicalize_fee_details(
+            {"feesEnabled": False},
+            source=f"not_applicable_non_executable_identity:{non_executable_identity_reason}",
+            token_id=selected_token,
+        )
+    elif tolerate_missing_book and selected_side_top is None:
         tradeability_status = replace(
             tradeability_status,
             executable_allowed=False,
@@ -3012,33 +3246,54 @@ def capture_executable_market_snapshot(
         ),
         depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )
-    insert_snapshot(conn, snapshot)
-    # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
-    _current_hash = snapshot.raw_orderbook_hash
-    _now_ts = time.time()
-    _hash_delta_ms: Optional[int] = None
-    _prior = _prev_orderbook_hash_by_market.get(condition_id)
-    if _prior is not None:
-        _prior_hash, _prior_ts = _prior
-        if _current_hash != _prior_hash:
-            # Clamp to 0: NTP/manual clock adjustments can produce negative
-            # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
-            # a negative value causing snapshot capture to abort.
-            _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
-            # INV-37: conn is the trade substrate connection held by the caller (same conn
-            # as insert_snapshot above). No lock acquisition here; process-level
-            # serialization is the caller's responsibility (ingest_main subprocess
-            # lock chain). SAVEPOINT in write_transition provides within-connection
-            # atomicity for transition_seq assignment.
-            _write_book_hash_transition(
-                market_slug=snapshot.event_slug,
-                prev_hash=_prior_hash,
-                new_hash=_current_hash,
-                observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
-                delta_ms=_hash_delta_ms,
-                cycle_id=None,
-                conn=conn,
-            )
+    persist_context = (
+        persist_context_factory()
+        if persist_context_factory is not None
+        else contextlib.nullcontext()
+    )
+    before_changes = int(conn.total_changes)
+    with persist_context as write_lease:
+        try:
+            insert_snapshot(conn, snapshot)
+            # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
+            _current_hash = snapshot.raw_orderbook_hash
+            _now_ts = time.time()
+            _hash_delta_ms: Optional[int] = None
+            _prior = _prev_orderbook_hash_by_market.get(condition_id)
+            if _prior is not None:
+                _prior_hash, _prior_ts = _prior
+                if _current_hash != _prior_hash:
+                    # Clamp to 0: NTP/manual clock adjustments can produce negative
+                    # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
+                    # a negative value causing snapshot capture to abort.
+                    _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
+                    # INV-37: conn is the trade substrate connection held by the caller
+                    # (same conn as insert_snapshot above). SAVEPOINT in write_transition
+                    # provides within-connection atomicity for transition_seq assignment.
+                    _write_book_hash_transition(
+                        market_slug=snapshot.event_slug,
+                        prev_hash=_prior_hash,
+                        new_hash=_current_hash,
+                        observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
+                        delta_ms=_hash_delta_ms,
+                        cycle_id=None,
+                        conn=conn,
+                    )
+            if commit_after_persist:
+                commit_started = time.monotonic()
+                conn.commit()
+                commit_ms = (time.monotonic() - commit_started) * 1000.0
+                rows_changed = max(0, int(conn.total_changes) - before_changes)
+                record_commit = getattr(write_lease, "record_commit", None)
+                if callable(record_commit):
+                    record_commit(commit_ms=commit_ms, rows_changed=rows_changed)
+        except BaseException:
+            if commit_after_persist:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001 - preserve the original failure
+                    pass
+            raise
     _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
     return {
         "executable_snapshot_id": snapshot.snapshot_id,
@@ -3430,9 +3685,10 @@ def read_persisted_weather_markets(
                 len(event["outcomes"]),
             )
             continue
-        hours_to_resolution = event.get("hours_to_resolution")
-        if hours_to_resolution is None or hours_to_resolution <= 0:
-            continue
+        # Parent market_end_at / endDate is phase context, not live visibility
+        # authority. Day0/local-day and redecision families remain economically
+        # relevant after the nominal Gamma end while child snapshots still carry
+        # executable evidence.
         events.append(event)
 
     if not events:
@@ -3500,6 +3756,13 @@ def reconstruct_weather_market_from_static_topology(
     # freshness window — it only makes the warm lane fast enough to keep every pending
     # family's book inside it. The market-identity authority is stable by operator law
     # ("freshness 针对价格不针对市场; 市场捕捉了不会突然消失").
+    snapshot_select_columns = (
+        "snapshot_id, gamma_market_id, event_id, event_slug, condition_id, "
+        "question_id, yes_token_id, no_token_id, selected_outcome_token_id, "
+        "outcome_label, enable_orderbook, active, closed, accepting_orders, "
+        "market_start_at, market_end_at, market_close_at, sports_start_at, "
+        "token_map_json, raw_gamma_payload_hash, captured_at, freshness_deadline"
+    )
     seen_snapshot_ids: set[str] = set()
     snapshot_rows: list[Any] = []
     try:
@@ -3507,14 +3770,14 @@ def reconstruct_weather_market_from_static_topology(
             for label in ("YES", "NO", None):
                 if label is None:
                     seek_sql = (
-                        "SELECT * FROM executable_market_snapshots "
+                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
                         "WHERE condition_id = ? "
                         "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
                     )
                     seek_params: tuple[str, ...] = (condition_id_seek,)
                 else:
                     seek_sql = (
-                        "SELECT * FROM executable_market_snapshots "
+                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
                         "WHERE condition_id = ? AND outcome_label = ? "
                         "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
                     )
@@ -3640,9 +3903,8 @@ def reconstruct_weather_market_from_static_topology(
 
     if len(event["outcomes"]) != len(rows):
         return None
-    hours_to_resolution = event.get("hours_to_resolution")
-    if hours_to_resolution is None or hours_to_resolution <= 0:
-        return None
+    # Preserve local-Day0/redecision families after nominal Gamma endDate. The
+    # submit path still validates child-level executable snapshots and prices.
     event["condition_ids"] = _dedupe_condition_ids(event["condition_ids"])
     event["support_topology"]["executable_child_count"] = len(event["condition_ids"])
     event["fetched_at_utc"] = latest_seen.isoformat() if latest_seen is not None else None
@@ -3671,8 +3933,16 @@ def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> fl
     return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 130.0)
 
 
-def _snapshot_capture_reserve_seconds_from_env(total_budget_seconds: float) -> float:
-    reserve = _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
+def _snapshot_capture_reserve_seconds_from_env(
+    total_budget_seconds: float,
+    *,
+    reserve_seconds: float | None = None,
+) -> float:
+    reserve = (
+        float(reserve_seconds)
+        if reserve_seconds is not None
+        else _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
+    )
     return min(reserve, max(0.05, float(total_budget_seconds) - 0.05))
 
 
@@ -3685,6 +3955,73 @@ def _outcome_market_end_at(market: dict[str, Any], outcome: dict[str, Any]) -> d
         or market.get("market_close_at")
         or market.get("sports_start_at")
     )
+
+
+def _outcome_has_explicit_live_tradeability_after_end_anchor(
+    market: dict[str, Any],
+    outcome: dict[str, Any],
+) -> bool:
+    """Return True when child-market live facts outrank a stale end-time anchor.
+
+    Polymarket weather parent ``endDate`` values are phase/time anchors, not
+    final visibility authority for neg-risk child markets.  Day0/redecision must
+    be able to refresh a child that the venue still reports as active,
+    accepting orders, and orderbook-enabled.  This does not make the market
+    executable by itself: snapshot capture still fetches CLOB market/book facts,
+    and submit runs assert_snapshot_executable.
+    """
+
+    gamma_market_raw = outcome.get("gamma_market_raw")
+    if not isinstance(gamma_market_raw, dict):
+        gamma_market_raw = {}
+
+    active = _boolish_market_field(outcome, "active", "isActive")
+    if active is None:
+        active = _boolish_market_field(gamma_market_raw, "active", "isActive")
+    if active is not True:
+        return False
+
+    child_closed = _boolish_market_field(outcome, "closed", "isClosed")
+    if child_closed is None:
+        child_closed = _boolish_market_field(gamma_market_raw, "closed", "isClosed")
+    if child_closed is True:
+        return False
+
+    accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
+    if accepting_orders is None:
+        accepting_orders = _boolish_market_field(
+            gamma_market_raw,
+            "acceptingOrders",
+            "accepting_orders",
+        )
+    if accepting_orders is not True:
+        return False
+
+    enable_orderbook = _boolish_market_field(
+        outcome,
+        "enable_orderbook",
+        "enableOrderBook",
+        "orderbookEnabled",
+    )
+    if enable_orderbook is None:
+        enable_orderbook = _boolish_market_field(
+            gamma_market_raw,
+            "enable_orderbook",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+    if enable_orderbook is not True:
+        return False
+
+    parent_closed = _boolish_market_field(market, "closed", "isClosed")
+    parent_accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
+    # Parent closure labels on weather neg-risk families can lag/lead child
+    # tradability.  Only a parent-level explicit accepting=false is strong enough
+    # to suppress the child override; parent closed=true alone is not.
+    if parent_closed is True and parent_accepting is False:
+        return False
+
+    return True
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -3773,21 +4110,50 @@ def _snapshot_condition_refresh_state(
     yes_token = str(outcome.get("token_id") or "").strip()
     no_token = str(outcome.get("no_token_id") or "").strip()
     fresh_at = _utc_datetime(captured, field_name="captured")
+    expected_tokens = tuple(dict.fromkeys(token for token in (yes_token, no_token) if token))
     try:
-        rows = conn.execute(
-            """
-            SELECT selected_outcome_token_id, captured_at, freshness_deadline,
-                   yes_token_id, no_token_id, question_id
-            FROM executable_market_snapshots
-            WHERE condition_id = ?
-            ORDER BY captured_at DESC
-            """,
-            (cid,),
-        ).fetchall()
+        if expected_tokens:
+            placeholders = ",".join("?" for _ in expected_tokens)
+            rows = conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshot_latest
+                WHERE condition_id = ?
+                  AND selected_outcome_token_id IN ({placeholders})
+                ORDER BY captured_at DESC
+                """,
+                (cid, *expected_tokens),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshot_latest
+                WHERE condition_id = ?
+                ORDER BY captured_at DESC
+                """,
+                (cid,),
+            ).fetchall()
     except Exception:
-        return (2, float("inf")), set()
+        rows = []
     if not rows:
-        return (1, 0.0), set()
+        try:
+            rows = conn.execute(
+                """
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshots
+                WHERE condition_id = ?
+                ORDER BY captured_at DESC
+                """,
+                (cid,),
+            ).fetchall()
+        except Exception:
+            return (2, float("inf")), set()
+        if not rows:
+            return (1, 0.0), set()
 
     latest_ts = float("-inf")
     fresh_tokens: set[str] = set()
@@ -3858,10 +4224,13 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
 
 
 # Live CLOB probe 2026-06-06: POST /books accepts 500 token_id rows in one
-# request and returns the full set; 1000 rows returns 400.  Keep the chunk at
-# the proven upper envelope so a 500+ token weather substrate cycle does not
-# degrade back into hundreds of serial GET /book calls.
-_BATCH_ORDERBOOK_CHUNK = 500
+# request and returns the full set; 1000 rows returns 400.  Live 2026-06-25
+# later showed that envelope is not a latency-stable operating point: a 484-token
+# request repeatedly hit SSL handshake timeout and zeroed the entire price
+# surface.  Keep batching, but use smaller primary chunks and split failed
+# chunks before deferring to the next tick.
+_BATCH_ORDERBOOK_CHUNK = 100
+_BATCH_ORDERBOOK_RETRY_CHUNK = 5
 
 
 def _selected_token_for_direction(outcome: dict, direction: str) -> str:
@@ -3885,18 +4254,23 @@ def _prefetch_selected_orderbooks(
     selected_candidates: list[tuple],
     *,
     deadline: float | None = None,
+    max_retry_chunks: int | None = None,
+    primary_chunk_size: int | None = None,
+    failed_token_sink: set[str] | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
-    Returns a ``{token_id: orderbook_dict}`` map.  Best-effort: if the batch
-    wrapper is unavailable or the call fails, returns an empty map so capture
-    falls back to per-token GET /book (back-compat / never aborts the cycle).
-    Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request (the /books endpoint has
-    no documented per-call token cap; we chunk conservatively).
+    Returns a ``{token_id: orderbook_dict}`` map. Best-effort: if the batch
+    wrapper is unavailable or the call fails, returns an empty map. Batch-capable
+    warm callers should defer missing books to a later tick instead of degrading
+    into serial per-token GET /book.
+    Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request, with failed chunks split
+    to ``_BATCH_ORDERBOOK_RETRY_CHUNK`` so one large TLS/API failure cannot make
+    the whole substrate cycle price-blind.
     """
 
-    getter = getattr(clob, "get_orderbook_snapshots", None)
-    if not callable(getter):
+    getter = _configured_batch_orderbook_getter(clob)
+    if getter is None:
         return {}
 
     token_ids: list[str] = []
@@ -3925,42 +4299,286 @@ def _prefetch_selected_orderbooks(
     # same bound a single GET /book carries); the min-window/deadline gate applies
     # only to the SECOND-and-later chunks of a large multi-chunk warm cycle, where
     # deferring extra chunks to a later cycle is genuine budget protection. Per-bin
-    # fallback for tokens absent from the batch response is unchanged (capture's
-    # prefetched_orderbook=None branch, market_scanner.py:2822-2825).
+    # missing tokens from a batch-capable client are deferred by the caller; they
+    # do not fall back to per-token GET /book inside the warm lane.
     min_prefetch_window = _positive_float_env(
         "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS",
         0.75,
     )
 
+    if primary_chunk_size is None:
+        resolved_primary_chunk_size = min(
+            _BATCH_ORDERBOOK_CHUNK,
+            _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", _BATCH_ORDERBOOK_CHUNK),
+        )
+    else:
+        resolved_primary_chunk_size = max(1, int(primary_chunk_size))
+    primary_chunk_size = resolved_primary_chunk_size
+    retry_chunk_size = min(
+        primary_chunk_size,
+        _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
+    )
+    retry_chunk_cap = (
+        _positive_int_env(
+            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS",
+            2,
+        )
+        if max_retry_chunks is None
+        else max(0, int(max_retry_chunks))
+    )
+    def _fetch_chunk_with_split(chunk: list[str]) -> dict[str, dict]:
+        try:
+            chunk_books = getter(chunk)
+        except Exception as exc:
+            if len(chunk) <= retry_chunk_size:
+                logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
+                if failed_token_sink is not None:
+                    failed_token_sink.update(str(token) for token in chunk)
+                return {}
+            logger.warning(
+                "Batch orderbook prefetch chunk failed (%d tokens); retrying in %d-token chunks: %s",
+                len(chunk),
+                retry_chunk_size,
+                exc,
+            )
+            split_books: dict[str, dict] = {}
+            retry_chunks_attempted = 0
+            for sub_start in range(0, len(chunk), retry_chunk_size):
+                if retry_chunk_cap > 0 and retry_chunks_attempted >= retry_chunk_cap:
+                    logger.info(
+                        "Batch orderbook prefetch stopped retry split after %d chunks "
+                        "(cap %d); remaining token prices deferred",
+                        retry_chunks_attempted,
+                        retry_chunk_cap,
+                    )
+                    break
+                if deadline is not None and (deadline - time.monotonic()) < min_prefetch_window:
+                    logger.info(
+                        "Batch orderbook prefetch stopped retry split after %d chunks "
+                        "(window below %.3fs minimum); remaining token prices deferred",
+                        retry_chunks_attempted,
+                        min_prefetch_window,
+                    )
+                    break
+                sub_chunk = chunk[sub_start : sub_start + retry_chunk_size]
+                retry_chunks_attempted += 1
+                try:
+                    sub_books = getter(sub_chunk)
+                except Exception as sub_exc:
+                    logger.warning(
+                        "Batch orderbook prefetch retry chunk failed (%d tokens): %s",
+                        len(sub_chunk),
+                        sub_exc,
+                    )
+                    if failed_token_sink is not None:
+                        failed_token_sink.update(str(token) for token in sub_chunk)
+                    continue
+                if isinstance(sub_books, dict):
+                    split_books.update(sub_books)
+            return split_books
+        if isinstance(chunk_books, dict):
+            missing_tokens = [tok for tok in chunk if tok not in chunk_books]
+            if missing_tokens:
+                logger.info(
+                    "Batch orderbook prefetch missing %d token(s); deferred to next substrate tick",
+                    len(missing_tokens),
+                )
+            return chunk_books
+        return {}
+
     books: dict[str, dict] = {}
-    for chunk_index, start in enumerate(range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK)):
+    total_chunks = (len(token_ids) + primary_chunk_size - 1) // primary_chunk_size
+    for chunk_index, start in enumerate(range(0, len(token_ids), primary_chunk_size)):
         # Budget gate applies to chunk 2+ ONLY: the first chunk is the one POST that
         # replaces the per-token GET storm, so it always runs. Later chunks of a
-        # multi-chunk cycle are deferred to a later cycle when the window is spent —
-        # the unfetched tokens fall back per-token inside capture, never abort.
+        # multi-chunk cycle are deferred to a later cycle when the window is spent.
         if chunk_index > 0 and deadline is not None:
             remaining_window = deadline - time.monotonic()
             if remaining_window < min_prefetch_window:
                 logger.info(
                     "Batch orderbook prefetch stopped after chunk %d/%d "
-                    "(window %.3fs below %.3fs minimum); remaining tokens fall back per-token",
+                    "(window %.3fs below %.3fs minimum); remaining tokens deferred",
                     chunk_index,
-                    (len(token_ids) + _BATCH_ORDERBOOK_CHUNK - 1) // _BATCH_ORDERBOOK_CHUNK,
+                    total_chunks,
                     remaining_window,
                     min_prefetch_window,
                 )
                 break
-        chunk = token_ids[start : start + _BATCH_ORDERBOOK_CHUNK]
-        try:
-            chunk_books = getter(chunk)
-        except Exception as exc:
-            # One bad chunk must not abort the cycle; those tokens fall back to
-            # per-token GET /book inside capture.
-            logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
-            continue
-        if isinstance(chunk_books, dict):
-            books.update(chunk_books)
+        chunk = token_ids[start : start + primary_chunk_size]
+        books.update(_fetch_chunk_with_split(chunk))
     return books
+
+
+def _candidates_missing_prefetched_orderbooks(
+    selected_candidates: list[tuple],
+    prefetched_books: dict[str, dict],
+) -> list[tuple]:
+    """Return selected candidates whose direction token still needs a book."""
+
+    missing: list[tuple] = []
+    for candidate in selected_candidates:
+        _recency, _priority, _ordinal, _market, outcome, _condition_id, direction = candidate
+        token_id = _selected_token_for_direction(outcome, direction)
+        if token_id and token_id in prefetched_books:
+            continue
+        missing.append(candidate)
+    return missing
+
+
+def _empty_orderbook_identity_book(token_id: str) -> dict[str, Any]:
+    return {
+        "asset_id": str(token_id),
+        "market": str(token_id),
+        "bids": [],
+        "asks": [],
+        "synthetic_identity_reason": "batch_books_missing_priority_identity",
+    }
+
+
+def _remaining_attemptable_snapshot_candidates(
+    selected_candidates: list[tuple],
+    start_index: int,
+    *,
+    batch_orderbook_supported: bool,
+    prefetched_books: dict[str, dict],
+) -> int:
+    """Count remaining candidates that can actually reach a snapshot write."""
+
+    if not batch_orderbook_supported:
+        return max(1, len(selected_candidates) - start_index)
+    count = 0
+    for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates[
+        start_index:
+    ]:
+        token_id = _selected_token_for_direction(outcome, direction)
+        if not token_id or token_id in prefetched_books:
+            count += 1
+    return max(1, count)
+
+
+def _prefetch_selected_orderbooks_from_feasibility(
+    conn,
+    selected_candidates: list[tuple],
+    *,
+    captured: datetime,
+    already_prefetched: set[str] | None = None,
+    deadline: float | None = None,
+) -> dict[str, dict]:
+    """Use fresh live price-channel book evidence when direct CLOB batch misses.
+
+    ``execution_feasibility_evidence`` is the trade-class live quote witness table
+    written by the price-channel daemon. This path does not create a second price
+    authority; it reuses the same CLOB-derived book rows already required by the
+    submit witness, and the reconstructed book still passes snapshot identity and
+    top-of-book validation before any candidate can become executable.
+    """
+
+    if not _table_exists(conn, "execution_feasibility_evidence"):
+        return {}
+    already = set(already_prefetched or set())
+    max_age_seconds = _positive_float_env(
+        "ZEUS_MARKET_DISCOVERY_FEASIBILITY_BOOK_MAX_AGE_SECONDS",
+        120.0,
+    )
+    cutoff = captured.astimezone(timezone.utc) - timedelta(seconds=max_age_seconds)
+    books: dict[str, dict] = {}
+    prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
+    try:
+        _set_busy_timeout_ms(conn, _feasibility_prefetch_busy_timeout_ms())
+        for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            token_id = _selected_token_for_direction(outcome, direction)
+            if not token_id or token_id in already or token_id in books:
+                continue
+            try:
+                row = conn.execute(
+                    """
+                    SELECT token_id, direction, quote_seen_at, book_hash_before,
+                           best_bid_before, best_ask_before, depth_before_json
+                      FROM execution_feasibility_evidence
+                     WHERE token_id = ?
+                     ORDER BY CASE WHEN direction = ? THEN 0 ELSE 1 END,
+                              quote_seen_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    (token_id, str(direction)),
+                ).fetchone()
+            except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    logger.info(
+                        "Execution feasibility prefetch deferred on SQLite lock after %d books",
+                        len(books),
+                    )
+                    break
+                raise
+            if row is None:
+                continue
+            data = dict(row)
+            quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
+            if quote_seen_at is None or quote_seen_at < cutoff:
+                continue
+            book = _orderbook_from_feasibility_row(data, outcome=outcome)
+            if book is not None:
+                books[token_id] = book
+    finally:
+        _set_busy_timeout_ms(conn, prior_busy_timeout_ms)
+    return books
+
+
+def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, Any]) -> dict[str, Any] | None:
+    token_id = str(row.get("token_id") or "").strip()
+    if not token_id:
+        return None
+    try:
+        raw_depth = str(row.get("depth_before_json") or "").strip()
+        depth = json.loads(raw_depth) if raw_depth else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(depth, dict):
+        return None
+    bids = depth.get("bids")
+    asks = depth.get("asks")
+    if not isinstance(bids, list):
+        bids = []
+    if not isinstance(asks, list):
+        asks = []
+    if not asks:
+        return None
+    gamma_market_raw = outcome.get("gamma_market_raw")
+    if not isinstance(gamma_market_raw, dict):
+        gamma_market_raw = {}
+    book: dict[str, Any] = {
+        "asset_id": token_id,
+        "market": token_id,
+        "bids": bids,
+        "asks": asks,
+        "hash": str(row.get("book_hash_before") or ""),
+    }
+    tick_size = _first_field(outcome, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
+    if tick_size is None:
+        tick_size = _first_field(gamma_market_raw, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
+    min_order_size = _first_field(outcome, "min_order_size", "minimum_order_size", "minOrderSize")
+    if min_order_size is None:
+        min_order_size = _first_field(gamma_market_raw, "min_order_size", "minimum_order_size", "minOrderSize")
+    neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
+    if neg_risk is None:
+        neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
+    if tick_size is None or min_order_size is None or neg_risk is None:
+        return None
+    try:
+        tick_dec = Decimal(str(tick_size))
+        min_order_dec = Decimal(str(min_order_size))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
+        return None
+    if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
+        return None
+    book["tick_size"] = str(tick_dec)
+    book["min_order_size"] = str(min_order_dec)
+    book["neg_risk"] = bool(neg_risk)
+    return book
 
 
 def refresh_executable_market_substrate_snapshots(
@@ -3973,6 +4591,9 @@ def refresh_executable_market_substrate_snapshots(
     refresh_reason: str | None = None,
     max_outcomes: int | None = None,
     budget_seconds: float | None = None,
+    capture_reserve_seconds: float | None = None,
+    priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -3991,6 +4612,16 @@ def refresh_executable_market_substrate_snapshots(
 
     captured = captured_at or datetime.now(timezone.utc)
     per_city_limit = _snapshot_max_outcomes_from_env(max_outcomes)
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    priority_condition_rank: dict[str, int] = {}
+    for raw_condition_id in priority_condition_ids or ():
+        condition_id = str(raw_condition_id or "").strip()
+        if condition_id and condition_id not in priority_condition_rank:
+            priority_condition_rank[condition_id] = len(priority_condition_rank)
     attempted = inserted = skipped = failed = 0
     # cap_truncated counts outcomes dropped by per-city cap or budget (true
     # truncation).  skipped counts all filtered-out outcomes (missing cid,
@@ -4002,13 +4633,21 @@ def refresh_executable_market_substrate_snapshots(
     seen_snapshot_sides: set[tuple[str, str]] = set()
     candidate_cities: set[str] = set()
     candidate_count = 0
+    candidate_rejection_counts: dict[str, int] = {}
+    candidate_override_counts: dict[str, int] = {}
+
+    def _reject_candidate(reason: str) -> None:
+        candidate_rejection_counts[reason] = candidate_rejection_counts.get(reason, 0) + 1
+
+    def _override_candidate(reason: str) -> None:
+        candidate_override_counts[reason] = candidate_override_counts.get(reason, 0) + 1
 
     # Group candidates by city for breadth-first interleaving, except the
     # max_outcomes=0 pending-family path, where the group key is one market
-    # family.  The family-completion path is budget-driven, not count-capped:
-    # it spends the live tick completing as many full family proofs as possible
-    # instead of spraying one condition across every city and leaving all FDR
-    # proofs blocked.
+    # family. The family-completion path first breadth-covers urgent live-money
+    # families (Day0/redecision/open-rest/held exposure) with a YES/NO pair so
+    # their executable price evidence becomes fresh, then spends remaining budget
+    # completing full family proofs for FDR/admission.
     # candidate_groups:
     #   group_key -> sorted list of
     #   (recency_key, priority, ordinal, market, outcome, cid, dir)
@@ -4031,6 +4670,7 @@ def refresh_executable_market_substrate_snapshots(
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             if not condition_id:
+                _reject_candidate("missing_condition_id")
                 skipped += 1
                 continue
             # FAMILY-IDENTITY admission (2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root):
@@ -4052,12 +4692,16 @@ def refresh_executable_market_substrate_snapshots(
                 str(outcome.get("token_id") or "").strip()
                 and str(outcome.get("no_token_id") or "").strip()
             ):
+                _reject_candidate("missing_yes_no_token_identity")
                 skipped += 1
                 continue
             end_at = _outcome_market_end_at(market, outcome)
             if end_at is not None and end_at <= captured:
-                skipped += 1
-                continue
+                if not _outcome_has_explicit_live_tradeability_after_end_anchor(market, outcome):
+                    _reject_candidate("market_end_at_elapsed")
+                    skipped += 1
+                    continue
+                _override_candidate("market_end_at_elapsed_live_tradeability")
             refresh_key, fresh_selected_tokens = _snapshot_condition_refresh_state(
                 conn,
                 condition_id,
@@ -4067,13 +4711,16 @@ def refresh_executable_market_substrate_snapshots(
             for direction in ("buy_yes", "buy_no"):
                 snapshot_side = (condition_id, direction)
                 if snapshot_side in seen_snapshot_sides:
+                    _reject_candidate("duplicate_condition_side")
                     skipped += 1
                     continue
                 if direction == "buy_no" and not str(outcome.get("no_token_id") or "").strip():
+                    _reject_candidate("missing_no_token_identity")
                     skipped += 1
                     continue
                 selected_token = _selected_token_for_direction(outcome, direction)
                 if selected_token and selected_token in fresh_selected_tokens:
+                    _reject_candidate("selected_token_already_fresh")
                     skipped += 1
                     continue
                 seen_snapshot_sides.add(snapshot_side)
@@ -4095,7 +4742,16 @@ def refresh_executable_market_substrate_snapshots(
     # breadth-first: take slot 0 from each city, then slot 1, etc.
     per_group_sorted: list[list[tuple]] = []
     for group_key in sorted(candidate_groups):
-        group_list = sorted(candidate_groups[group_key], key=lambda item: (item[0], item[1], item[2]))
+        group_list = sorted(
+            candidate_groups[group_key],
+            key=lambda item: (
+                0 if str(item[5] or "").strip() in priority_conditions else 1,
+                priority_condition_rank.get(str(item[5] or "").strip(), len(priority_condition_rank)),
+                item[0],
+                item[1],
+                item[2],
+            ),
+        )
         # per_city_limit == 0 is the UNLIMITED sentinel: capture every family bin.
         if per_city_limit and len(group_list) > per_city_limit:
             cap_truncated += len(group_list) - per_city_limit
@@ -4104,6 +4760,10 @@ def refresh_executable_market_substrate_snapshots(
         per_group_sorted.append(group_list)
     per_group_sorted.sort(
         key=lambda group_list: (
+            0 if (
+                group_list
+                and str(group_list[0][5] or "").strip() in priority_conditions
+            ) else 1,
             group_list[0][0] if group_list else (2, float("inf")),
             _snapshot_refresh_city_key(group_list[0][3]) if group_list else "",
             str(group_list[0][3].get("slug") or "") if group_list else "",
@@ -4121,22 +4781,47 @@ def refresh_executable_market_substrate_snapshots(
         max_candidates = _snapshot_capture_max_candidates_per_tick(
             per_city_limit=per_city_limit,
         )
-        for group_index, group_list in enumerate(per_group_sorted):
+        selected_candidate_keys: set[tuple[int, str, str]] = set()
+
+        def _candidate_key(item: tuple) -> tuple[int, str, str]:
+            return (int(item[2]), str(item[5] or ""), str(item[6] or ""))
+
+        def _mark_truncated(groups: list[list[tuple]]) -> None:
+            nonlocal cap_truncated, skipped
+            remaining = 0
+            for group in groups:
+                for item in group:
+                    key = _candidate_key(item)
+                    if key in selected_candidate_keys:
+                        continue
+                    remaining += 1
+                    candidate_cap_truncated_cities.add(_snapshot_refresh_city_key(item[3]))
+            cap_truncated += remaining
+            skipped += remaining
+
+        urgent_groups = [
+            group for group in per_group_sorted if _snapshot_group_refresh_urgency(group) >= 3
+        ]
+        ordinary_groups = [
+            group for group in per_group_sorted if _snapshot_group_refresh_urgency(group) < 3
+        ]
+        ordered_groups = urgent_groups + ordinary_groups
+        for group_index, group_list in enumerate(ordered_groups):
+            remaining_group = [
+                item for item in group_list if _candidate_key(item) not in selected_candidate_keys
+            ]
+            if not remaining_group:
+                continue
             if (
                 max_candidates is not None
                 and selected_candidates
-                and len(selected_candidates) + len(group_list) > max_candidates
+                and len(selected_candidates) + len(remaining_group) > max_candidates
             ):
-                remaining = sum(len(group) for group in per_group_sorted[group_index:])
-                candidate_cap_truncated_cities.update(
-                    _snapshot_refresh_city_key(item[3])
-                    for group in per_group_sorted[group_index:]
-                    for item in group
-                )
-                cap_truncated += remaining
-                skipped += remaining
+                _mark_truncated(ordered_groups[group_index:])
                 break
-            selected_candidates.extend(group_list)
+            for item in remaining_group:
+                selected_candidates.append(item)
+                selected_candidate_keys.add(_candidate_key(item))
     else:
         max_slots = max((len(c) for c in per_group_sorted), default=0)
         for slot in range(0, max_slots, 2):
@@ -4150,13 +4835,24 @@ def refresh_executable_market_substrate_snapshots(
         _snapshot_refresh_city_key(market)
         for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
     }
+    urgent_refresh_family_count = sum(
+        1 for group in per_group_sorted if _snapshot_group_refresh_urgency(group) >= 3
+    )
+    selected_urgent_cities = {
+        _snapshot_refresh_city_key(market)
+        for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
+        if _snapshot_market_refresh_urgency(market) >= 3
+    }
     inserted_cities: set[str] = set()
     budget_truncated_cities: set[str] = set(candidate_cap_truncated_cities)
     # Start the wall-clock budget BEFORE the batch prefetch so the batch's own
     # latency is charged against the same envelope (advisor 2026-05-27: a
     # 50-token POST /books can take >1s; charging it keeps the deadline honest).
     snapshot_budget_seconds = _snapshot_budget_seconds_from_env(budget_seconds)
-    capture_reserve_seconds = _snapshot_capture_reserve_seconds_from_env(snapshot_budget_seconds)
+    capture_reserve_seconds = _snapshot_capture_reserve_seconds_from_env(
+        snapshot_budget_seconds,
+        reserve_seconds=capture_reserve_seconds,
+    )
     deadline = time.monotonic() + snapshot_budget_seconds
     prefetch_deadline = deadline - capture_reserve_seconds
     budget_exhausted = False
@@ -4165,17 +4861,130 @@ def refresh_executable_market_substrate_snapshots(
     # chunk (vs one GET /book per outcome).  This collapses the orderbook leg of
     # an 11-bin negRisk event from 11 sequential HTTP calls to 1, so the budget
     # gate captures every bin instead of starving 8 of 11 (root cause of
-    # EDGE_INSUFFICIENT).  Per-bin staleness must NOT abort the event: a token
-    # missing from the batch map simply falls back / skips that one outcome
-    # (operator directive: "market event constant, bin event should not block
-    # freshness").  market_info is synthetic for background substrate identity;
+    # EDGE_INSUFFICIENT). Per-bin staleness must NOT abort the event, but once a
+    # CLOB client supports batch /books, a missing batch entry is deferred to the
+    # next tick instead of falling back to serial /book reads. market_info is
+    # synthetic for background substrate identity;
     # fee_details are fetched once per family and reused only inside this
     # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
-    prefetched_books = _prefetch_selected_orderbooks(
-        clob,
-        selected_candidates,
-        deadline=prefetch_deadline,
+    batch_orderbook_supported = _configured_batch_orderbook_getter(clob) is not None
+    full_family_capture = per_city_limit == 0
+    prefetched_books: dict[str, dict] = {}
+    full_family_direct_clob_prefetch_forced = _bool_env(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_ENABLED",
+        False,
     )
+    full_family_direct_clob_candidate_threshold = (
+        _full_family_direct_clob_prefetch_candidate_threshold()
+        if full_family_capture
+        else 0
+    )
+    ordered_selected_priority_conditions: list[str] = []
+    seen_selected_priority_conditions: set[str] = set()
+    for _recency, _priority, _ordinal, _market, _outcome, condition_id, _direction in selected_candidates:
+        cid = str(condition_id or "").strip()
+        if cid in priority_conditions and cid not in seen_selected_priority_conditions:
+            ordered_selected_priority_conditions.append(cid)
+            seen_selected_priority_conditions.add(cid)
+    selected_priority_conditions = set(ordered_selected_priority_conditions)
+    priority_direct_clob_condition_limit = (
+        _priority_direct_clob_prefetch_condition_limit()
+        if full_family_capture and priority_conditions
+        else 0
+    )
+    priority_direct_clob_service_conditions = set(
+        ordered_selected_priority_conditions[:priority_direct_clob_condition_limit]
+        if priority_direct_clob_condition_limit > 0
+        else []
+    )
+    priority_direct_clob_scope_allowed = bool(priority_direct_clob_service_conditions)
+    priority_direct_clob_deferred_condition_count = max(
+        0,
+        len(ordered_selected_priority_conditions) - len(priority_direct_clob_service_conditions),
+    )
+    if batch_orderbook_supported:
+        # Money-path redecision confirm refresh already has a live price-channel
+        # witness surface. Hydrate from it first, then spend network time only on
+        # missing books. Doing the CLOB batch first lets a single slow /books call
+        # consume the entire reserve before the cheap local witness can be used.
+        prefetched_books.update(
+            {
+                token_id: book
+                for token_id, book in _prefetch_selected_orderbooks_from_feasibility(
+                    conn,
+                    selected_candidates,
+                    captured=captured,
+                    already_prefetched=set(prefetched_books),
+                    deadline=prefetch_deadline,
+                ).items()
+                if token_id not in prefetched_books
+            }
+        )
+    candidates_needing_network_books = _candidates_missing_prefetched_orderbooks(
+        selected_candidates,
+        prefetched_books,
+    )
+    priority_full_family_direct_clob_prefetch = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and priority_conditions
+        and priority_direct_clob_service_conditions
+        and full_family_direct_clob_candidate_threshold > 0
+    )
+    small_full_family_direct_clob_prefetch = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and full_family_direct_clob_candidate_threshold > 0
+        and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
+    )
+    full_family_direct_clob_prefetch_enabled = bool(
+        full_family_direct_clob_prefetch_forced
+        or small_full_family_direct_clob_prefetch
+        or priority_full_family_direct_clob_prefetch
+    )
+    direct_clob_prefetch_skipped = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and not full_family_direct_clob_prefetch_enabled
+    )
+    network_book_candidates = candidates_needing_network_books
+    failed_prefetch_tokens: set[str] = set()
+    if (
+        priority_full_family_direct_clob_prefetch
+        and not full_family_direct_clob_prefetch_forced
+        and not small_full_family_direct_clob_prefetch
+    ):
+        network_book_candidates = [
+            candidate
+            for candidate in candidates_needing_network_books
+            if str(candidate[5] or "").strip() in priority_direct_clob_service_conditions
+        ]
+        if not network_book_candidates:
+            direct_clob_prefetch_skipped = True
+    if not direct_clob_prefetch_skipped:
+        full_family_primary_chunk_size = (
+            min(
+                _BATCH_ORDERBOOK_CHUNK,
+                _positive_int_env(
+                    "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK",
+                    20,
+                ),
+            )
+            if full_family_capture
+            else None
+        )
+        prefetched_books.update(
+            _prefetch_selected_orderbooks(
+                clob,
+                network_book_candidates,
+                deadline=prefetch_deadline,
+                max_retry_chunks=(0 if full_family_capture else None),
+                primary_chunk_size=full_family_primary_chunk_size,
+                failed_token_sink=failed_prefetch_tokens,
+            )
+        )
+    prefetch_missing_skipped = 0
+    prefetch_missing_identity_captured = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
     for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
@@ -4190,7 +4999,6 @@ def refresh_executable_market_substrate_snapshots(
                 for _recency, _priority, _ordinal, remaining_market, _outcome, _condition_id, _direction in selected_candidates[index:]
             }
             break
-        attempted += 1
         decision = SimpleNamespace(
             edge=SimpleNamespace(direction=direction),
             tokens={
@@ -4200,18 +5008,54 @@ def refresh_executable_market_substrate_snapshots(
             },
         )
         # Resolve the token capture will actually read (direction -> yes/no) so
-        # we hand it the matching prefetched book.  When the batch did not return
-        # this token (partial response / offline bin) we pass None and capture
-        # falls back to a fresh per-token GET /book — never aborting the event.
+        # we hand it the matching prefetched book. In the background substrate
+        # lane, once the CLOB supports batch /books, a missing batch entry is
+        # deferred to the next tick. Falling back to per-token /book here is the
+        # live starvation mode: one slow or partial batch can become N blocking
+        # HTTP reads and overrun the warm cadence.
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
+        priority_candidate = str(condition_id or "").strip() in priority_conditions
+        priority_candidate_serviced = (
+            str(condition_id or "").strip() in priority_direct_clob_service_conditions
+        )
+        if full_family_capture and batch_orderbook_supported and selected_token and prefetched_book is None:
+            if (
+                priority_candidate
+                and priority_candidate_serviced
+                and selected_token not in failed_prefetch_tokens
+            ):
+                prefetched_book = _empty_orderbook_identity_book(selected_token)
+                prefetch_missing_identity_captured += 1
+            else:
+                skipped += 1
+                prefetch_missing_skipped += 1
+                continue
+        attempted += 1
         prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
         lock_retry_count = _snapshot_capture_sqlite_lock_retries()
         capture_attempt = 0
         try:
             while True:
                 remaining_seconds = max(0.001, deadline - time.monotonic())
-                _set_busy_timeout_ms(conn, _snapshot_capture_busy_timeout_ms(remaining_seconds))
+                remaining_candidates = _remaining_attemptable_snapshot_candidates(
+                    selected_candidates,
+                    index,
+                    batch_orderbook_supported=batch_orderbook_supported,
+                    prefetched_books=prefetched_books,
+                )
+                effective_lock_retry_count = _snapshot_capture_effective_lock_retries(
+                    configured_retries=lock_retry_count,
+                    remaining_candidates=remaining_candidates,
+                )
+                _set_busy_timeout_ms(
+                    conn,
+                    _snapshot_capture_busy_timeout_ms(
+                        remaining_seconds,
+                        remaining_candidates=remaining_candidates,
+                        priority_candidate=priority_candidate,
+                    ),
+                )
                 try:
                     capture_executable_market_snapshot(
                         conn,
@@ -4228,6 +5072,8 @@ def refresh_executable_market_substrate_snapshots(
                         # bin including illiquid (no-ask) tail bins so the FDR full-family
                         # proof can be assembled.  Illiquid bins are persisted non-tradeable.
                         tolerate_missing_book=True,
+                        persist_context_factory=snapshot_write_context_factory,
+                        commit_after_persist=snapshot_write_context_factory is not None,
                     )
                     # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
                     # capture_executable_market_snapshot does per-outcome venue HTTP
@@ -4247,7 +5093,8 @@ def refresh_executable_market_substrate_snapshots(
                     # per row releases the trade-DB WAL write lock and preserves the
                     # caller-managed single-connection transaction contract (no new connection,
                     # no cross-DB independent write).
-                    conn.commit()
+                    if snapshot_write_context_factory is None:
+                        conn.commit()
                     inserted += 1
                     inserted_cities.add(_snapshot_refresh_city_key(market))
                     break
@@ -4261,7 +5108,7 @@ def refresh_executable_market_substrate_snapshots(
                         pass
                     if (
                         _is_sqlite_locked_error(exc)
-                        and capture_attempt < lock_retry_count
+                        and capture_attempt < effective_lock_retry_count
                         and time.monotonic() < deadline
                     ):
                         capture_attempt += 1
@@ -4286,9 +5133,13 @@ def refresh_executable_market_substrate_snapshots(
     summary = {
         "discovered_event_count": len(markets or []),
         "executable_snapshot_candidate_count": candidate_count,
+        "executable_snapshot_candidate_rejection_counts": candidate_rejection_counts,
+        "executable_snapshot_candidate_override_counts": candidate_override_counts,
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),
+        "urgent_refresh_family_count": urgent_refresh_family_count,
+        "selected_urgent_refresh_city_count": len(selected_urgent_cities),
         "fresh_executable_city_count": len(inserted_cities),
         "budget_truncated_city_count": len(budget_truncated_cities),
         "uncaptured_candidate_city_count": max(0, len(candidate_cities) - len(inserted_cities)),
@@ -4302,6 +5153,21 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_budget_seconds": snapshot_budget_seconds,
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
+        "prefetch_missing_skipped": prefetch_missing_skipped,
+        "prefetch_missing_identity_captured": prefetch_missing_identity_captured,
+        "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
+        "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
+        "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,
+        "direct_clob_prefetch_selected_priority_condition_count": len(selected_priority_conditions),
+        "direct_clob_prefetch_priority_serviced_condition_count": len(
+            priority_direct_clob_service_conditions
+        ),
+        "direct_clob_prefetch_priority_deferred_condition_count": (
+            priority_direct_clob_deferred_condition_count
+        ),
+        "direct_clob_prefetch_priority_scope_allowed": int(priority_direct_clob_scope_allowed),
+        "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
+        "direct_clob_prefetch_priority_enabled": int(priority_full_family_direct_clob_prefetch),
     }
     if failures:
         summary["failure_samples"] = failures
@@ -4349,37 +5215,6 @@ def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")
     return dict(raw)
-
-
-def _synthetic_clob_market_info_for_substrate_identity(
-    *,
-    condition_id: str,
-    yes_token: str,
-    no_token: str,
-    accepting_orders: bool | None,
-    enable_orderbook: bool | None,
-    raw_orderbook: dict,
-) -> dict[str, Any]:
-    """Build substrate-only CLOB identity facts without /markets HTTP.
-
-    This is only used by ``tolerate_missing_book=True`` background substrate
-    refresh.  It does not change order/submit capture, which still fetches CLOB
-    market authority and revalidates before any real venue command.
-    """
-
-    return {
-        "condition_id": condition_id,
-        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
-        "archived": False,
-        "enable_order_book": bool(enable_orderbook is not False),
-        "accepting_orders": bool(accepting_orders is not False),
-        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
-        or "0.01",
-        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
-        or "1",
-        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
-        "authority": "synthetic_substrate_identity",
-    }
 
 
 def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:

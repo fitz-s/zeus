@@ -471,12 +471,18 @@ def build_forecast_snapshot_ready_event(
     source: str | None = None,
     event_type: str = "FORECAST_SNAPSHOT_READY",
 ) -> OpportunityEvent:
+    effective_min_members_floor = _effective_min_members_floor(
+        source_run=source_run,
+        coverage=coverage,
+        snapshot=snapshot,
+        configured_floor=min_members_floor,
+    )
     classification = classify_forecast_snapshot(
         source_run=source_run,
         coverage=coverage,
         snapshot=snapshot,
         decision_time=decision_time,
-        min_members_floor=min_members_floor,
+        min_members_floor=effective_min_members_floor,
         live_eligibility_reader=live_eligibility_reader,
     )
     expected_steps = _required_expected_steps(source_run=source_run, coverage=coverage)
@@ -517,7 +523,7 @@ def build_forecast_snapshot_ready_event(
         required_fields_present=classification.required_fields_present,
         required_steps_present=classification.required_steps_present,
         member_count=observed_members,
-        min_members_floor=min_members_floor,
+        min_members_floor=effective_min_members_floor,
         completeness_status=classification.completeness_status,  # type: ignore[arg-type]
         required_steps=[int(step) for step in expected_steps],
         observed_steps=[int(step) for step in observed_steps],
@@ -551,6 +557,57 @@ def build_forecast_snapshot_ready_event(
         # `ORDER BY priority DESC, available_at ASC` fetch. Without this, newest-available_at
         # families are perpetually starved at the tail behind the existing backlog.
         priority=50 if classification.completeness_status == "COMPLETE" else 0,
+    )
+
+
+def _effective_min_members_floor(
+    *,
+    source_run: dict[str, Any],
+    coverage: dict[str, Any],
+    snapshot: dict[str, Any],
+    configured_floor: int,
+) -> int:
+    """Return the member floor in the same unit the event's member_count uses."""
+
+    expected_members = _int_value(
+        coverage.get("expected_members")
+        or source_run.get("expected_members")
+        or snapshot.get("member_count")
+        or 0
+    )
+    if (
+        expected_members > 0
+        and expected_members < configured_floor
+        and _is_posterior_model_count_product(
+            source_run=source_run,
+            coverage=coverage,
+            snapshot=snapshot,
+        )
+    ):
+        return expected_members
+    return configured_floor
+
+
+def _is_posterior_model_count_product(
+    *,
+    source_run: dict[str, Any],
+    coverage: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> bool:
+    values = (
+        source_run.get("track"),
+        coverage.get("track"),
+        source_run.get("source_id"),
+        coverage.get("source_id"),
+        coverage.get("source_transport"),
+        coverage.get("data_version"),
+        snapshot.get("data_version"),
+    )
+    text = " ".join(str(value or "").lower() for value in values)
+    return (
+        "replacement_0_1" in text
+        or "bayes_fusion" in text
+        or "raw_model_forecasts" in text
     )
 
 

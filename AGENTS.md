@@ -1,6 +1,34 @@
 # Zeus AGENTS
 
-Root operating contract for `/Users/leofitz/zeus`. Keep durable Zeus law, money-path mental models, evidence gates, and routing rules here. Do not store branch names, current SHAs, live PIDs, bankrolls, one-off receipts, generated tool dumps, model catalogs, or active packet diary content. Nested `AGENTS.md` files govern their subtrees; system/developer/user instructions override all AGENTS files.
+Root operating contract for `/Users/leofitz/zeus`: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
+
+## Boot Digest (SessionStart injection slice — NOT a reading surface)
+
+SessionStart injects only a prefix of this file; this digest keeps the whole law in outline under truncation. **Reading contract: the digest licenses orientation only.** Before touching any surface a digest line names, Read that section (§N) plus the scoped `AGENTS.md` of the subtree — the digest omits the tables and gates that make the law executable. Citing "Boot Digest" as authority is itself a misread. Reading this file directly? Skip the digest; read §0–§6.
+
+**Mission [full law: §0].** Zeus trades Polymarket weather derivatives: `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`. Every non-trivial change states where it sits on that chain and how it behaves on re-decision. The chain is CYCLIC; no decision final until settlement; §0 carries the re-decision lanes this omits.
+
+**Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
+
+**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record: walk-forward de-bias -> T2 Bayesian precision fusion -> mu*, sigma_pred (floor 1.0C) -> sigma-shape floor -> bin integration -> q_lcb -> Edge -> Fractional Kelly. Never reintroduce market-anchor caps, shadow gates, or bankroll snapshots into root law. Legacy ENS/Platt is diagnostics-only.
+
+**Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
+
+**DBs [§2].** `zeus-world.db` (world/markets), `zeus-forecasts.db` (observations/settlements/calibration), `zeus_trades.db` (positions/orders/execution). Ownership machine-checked; no write transaction spans DBs on independent connections — only the two sanctioned helpers (INV-37).
+
+**Settlement [§2 — read before ANY settlement/bin/source work].** Integer temps from Weather Underground; every settlement write passes `SettlementSemantics.assert_settlement_value()`. Bin types point / finite_range / open_shoulder — never infer semantics from label punctuation. HIGH and LOW tracks share calendar geometry, nothing else.
+
+**Risk & lifecycle [§2].** GREEN/YELLOW/ORANGE/RED = max(individual); advisory-only risk forbidden (INV-05); only RED sweeps. Lifecycle enum-governed `pending_entry -> ... -> settled`; exit intent ≠ closure; settlement ≠ exit. Reconciliation: Chain > Chronicler > Portfolio.
+
+**Routing [§3 — has the per-task supplemental-read table this omits].** Root AGENTS -> scoped AGENTS for touched subtrees -> CodeGraph for structure (don't grep-first for symbols) -> targeted reference per §3 table. STOP AND PLAN before `architecture/**`, `docs/authority/**`, workflows, `src/state/**` truth paths, `src/control/**`, `src/supervisor_api/**`, cross-zone, >4 files, or anything canonical/lifecycle/schema/live-execution/settlement.
+
+**Docs & registries [§4 — registry-route table].** Unregistered files are invisible; every added/renamed/deleted file updates its owning registry. Current-fact docs are summary-only, evidence-backed, expiry-bound. No root coordination/scratch files unless asked.
+
+**Change control [§5].** Commits `type(scope): subject`; no destructive git; preserve unrelated dirty work; PRs only at milestone level (paid review once — batch).
+
+**Review [§6 + REVIEW.md first].** Runtime-risk order (Tier 0 live-money before all); empty findings + partial coverage ≠ clean pass.
+
+**END OF DIGEST.** Law starts at §0. Context ends here = boot slice truncated: Read this file in full before acting on any named surface.
 
 ## 0. Mission And Money Path
 
@@ -10,7 +38,23 @@ Primary causal chain:
 
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-Every non-trivial change must say where it sits on that chain and what upstream truth it consumes. A downstream optimization that guesses contract/source/settlement truth is a money-path bug.
+Every non-trivial change must say where it sits on that chain, what upstream truth it consumes, and how it behaves on re-decision. A downstream optimization that guesses contract/source/settlement truth is a money-path bug.
+
+### Cyclic, Not One-Shot
+
+The chain above is one pass of a continuously repeating cycle, not a single decision. Zeus runs as a mesh of recurring scheduled jobs whose cadences range from seconds to daily — entry reactor, continuous-redecision screen, maker-rest escalation, held-position monitor/exit, command recovery, settlement skill-attribution, and freshness/heartbeat backstops (specific cadences are config, not root law). Every node on the chain is revisited as wall-clock time advances and as new information arrives: a fresher forecast issue, a moved book, a new observation, an elapsed deadline. No decision is final until settlement.
+
+Re-decision is a first-class lane, not an exception path:
+
+- New-entry candidates are re-emitted every reactor cycle; fair round-robin covers the full city×metric family universe over a few cycles, so a market passed over is reconsidered against fresh evidence rather than abandoned.
+- A confirmed resting maker entry stays under continuous re-decision — screened against current same-side best bid (never ask cost), pulled and re-decided when the book drifts past tolerance or belief decays, escalated rest→cross when its deadline elapses.
+- A held position is re-evaluated every monitor cycle on a fresh `ExitContext` (refreshed probability and CLOB quote) through `Position.evaluate_exit`: continuous re-evaluation before fill, during holding, through exit, and after settlement.
+
+Time-ordering is law:
+
+- Every fact carries source-issued, fetched, and written timestamps. Freshness gates drop stale forecasts, observations, and quotes and fail closed (DATA_DEGRADED, read-only); they never bridge a gap with stale-as-fresh. Selection-time executable truth is not submit-time truth (FC-03): re-fetch a fresh snapshot at submit or fail closed.
+- Learning is strictly walk-forward. De-bias and calibration consume only outcomes settled before the decision; the decision probability is frozen at decision time as an immutable certificate; settlement skill-attribution grades against that frozen certificate. No look-ahead crosses the time boundary.
+- Lifecycle is a monotonic time progression (`pending_entry -> ... -> settled`); each strategy's edge decays on its own clock (§2 alpha decay).
 
 ### Probability Authority
 
@@ -137,7 +181,7 @@ Durable trading rules:
 - Price, probability, sizing, fill, lifecycle, and settlement evidence are separate facts.
 - Current config affects present behavior but does not belong in root AGENTS unless it becomes durable law.
 
-For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route.
+For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route. Term definitions live in `docs/reference/glossary.md`; math and physics index in `docs/reference/theory_map.md`.
 
 ## 3. Routing And Gates
 
@@ -223,7 +267,7 @@ Commits use `type(scope): subject`. Add body only when why/tested scope/residual
 
 Open PRs only for milestone-level changes: complete feature, new invariant plus antibody tests, security gate, schema migration with coverage, or equivalent. Single-function fixes, partial implementations, incremental docs, and local packet iterations stay in the worktree branch. Every PR consumes paid automated review once; batch related work before opening. Template: `.github/pull_request_template.md`.
 
-Never run destructive git commands or overwrite unrelated dirty work without explicit human approval. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
+Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, force-push to main) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
 
 ## 6. Review Tasks
 

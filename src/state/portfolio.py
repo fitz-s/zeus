@@ -2,7 +2,7 @@
 
 Atomic JSON + SQL mirror. Positions are projection-cache adapters; canonical
 truth is `position_events` + `position_current` (see PR #352, F1 in
-docs/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
+docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
 combines submitted-intent economics, verified fill economics, and chain-
 observed economics into a single object — but each economics object has its
 own authority field on `position_current` and event payloads. The legacy
@@ -45,11 +45,16 @@ from src.contracts.position_truth import (
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
     ChainOnlyFact,
     ChainOnlyReviewState,
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+    has_current_money_risk_chain_state,
 )
 from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
+from src.strategy.live_inference.live_admission import LIVE_DIRECTION_WIN_RATE_FLOOR
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
@@ -65,16 +70,29 @@ from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_STRATEGY_KEYS = {
-    "settlement_capture",
-    "shoulder_sell",
-    "center_buy",
-    "opening_inertia",
-}
+def _canonical_strategy_keys() -> frozenset[str]:
+    from src.strategy.strategy_profile import live_safe_keys
+
+    return live_safe_keys()
+
+
+CANONICAL_STRATEGY_KEYS = _canonical_strategy_keys()
 
 POSITION_ENV_UNKNOWN = "unknown_env"
 
 POSITIONS_PATH = state_path("positions.json")
+
+_CANONICAL_PHASE_TO_RUNTIME_STATE: dict[str, str] = {
+    "pending_entry": LifecycleState.PENDING_TRACKED.value,
+    "active": LifecycleState.ENTERED.value,
+}
+
+
+def _normalize_runtime_lifecycle_state(value: str | LifecycleState) -> str | LifecycleState:
+    if isinstance(value, LifecycleState):
+        return value
+    state_value = str(value or "")
+    return _CANONICAL_PHASE_TO_RUNTIME_STATE.get(state_value, state_value)
 
 # Portfolio authority labels are a separate grammar from observation authority.
 # ObservationAtom uses Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
@@ -130,6 +148,28 @@ def _ci_intervals_separated(
     return (hi_a < lo_b - _CI_SEP_EPS) or (hi_b < lo_a - _CI_SEP_EPS)
 
 
+def _held_side_lcb_or_point(
+    ci: Optional[tuple],
+    point: Optional[float],
+) -> Optional[float]:
+    if ci is not None:
+        try:
+            lower = float(min(ci))
+        except (TypeError, ValueError):
+            lower = float("nan")
+        if math.isfinite(lower):
+            return lower
+    if point is None:
+        return None
+    try:
+        point_float = float(point)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(point_float):
+        return point_float
+    return None
+
+
 @dataclass(frozen=True)
 class ExitContext:
     """Unified runtime authority surface for exit evaluation + execution.
@@ -152,6 +192,7 @@ class ExitContext:
     hours_to_settlement: Optional[float] = None
     position_state: str = ""
     day0_active: bool = False
+    day0_zero_probability_exit_authority: bool = False
     whale_toxicity: Optional[bool] = None
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
@@ -262,10 +303,10 @@ def _compute_exit_correlation_crowding(
 
 # Administrative exit reasons — excluded from P&L calculations
 ADMIN_EXITS = frozenset({
-    "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
+    "PHANTOM_NOT_ON_CHAIN",
     "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
     "SETTLED_UNKNOWN_DIRECTION", "EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
-})
+})  # GHOST_DUPLICATE removed 2026-06-29: 0 live rows, no writer (dead value)
 
 # K1/#49: Sentinel for quarantine placeholder fields — downstream code must
 # check `pos.is_quarantine_placeholder` instead of comparing city == "UNKNOWN".
@@ -414,7 +455,17 @@ def _finite_float_or_zero(value: object) -> float:
     return result if math.isfinite(result) else 0.0
 
 
-# F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
+def _finite_float_or_none(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+# F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
 # view consumed by exit_triggers / monitor_refresh / risk gates. Routes by
 # fill_authority so balance-only (venue_position_observed) positions expose
 # chain economics, and trade-verified positions expose fill economics — both
@@ -525,7 +576,7 @@ class Position:
     corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
-    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): provenance tag for
+    # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): provenance tag for
     # entered_at. "verified_entry_fill" when the timestamp came from a real
     # venue fill fact; "reconstructed_from_chain" when it was fabricated from
     # the reconcile-time clock (no fill fact available); "" for legacy rows
@@ -570,7 +621,7 @@ class Position:
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = VenueVisibilityStatus.UNKNOWN.value
     chain_shares: float = 0.0
-    # F1 (docs/findings_2026_05_28.md, 2026-05-28): chain-observed economics
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md, 2026-05-28): chain-observed economics
     # carry their own typed slots so balance-only rescue does not overwrite
     # decision/fill economics on `entry_price` / `cost_basis_usd` / `size_usd`.
     # Set by chain_reconciliation balance-only rescue branch; consumed by
@@ -583,7 +634,7 @@ class Position:
     # not see this position — that case uses `last_chain_absence_observed_at`.
     # Finding 1 (PR C0, 2026-05-27): conflating positive and absence
     # observations into one timestamp inverted CHAIN_EMPTY vs CHAIN_UNKNOWN
-    # semantics downstream. See docs/plans/2026-05-27-chain-local-position-model-refactor.md.
+    # semantics downstream. See docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md.
     chain_verified_at: str = ""
     last_chain_absence_observed_at: str = ""
 
@@ -669,6 +720,7 @@ class Position:
         )
         if not isinstance(self.direction, Direction):
             self.direction = Direction(self.direction)
+        self.state = _normalize_runtime_lifecycle_state(self.state)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
         if not isinstance(self.chain_state, VenueVisibilityStatus):
@@ -676,6 +728,7 @@ class Position:
         if not isinstance(self.exit_state, ExitState):
             self.exit_state = ExitState(self.exit_state)
         if self.pre_exit_state:
+            self.pre_exit_state = _normalize_runtime_lifecycle_state(self.pre_exit_state)
             self.pre_exit_state = LifecycleState(self.pre_exit_state).value
         if not isinstance(self.lifecycle_state, SettlementOutcome):
             self.lifecycle_state = SettlementOutcome(int(self.lifecycle_state))
@@ -1022,8 +1075,53 @@ class Position:
         )
         applied.append("forward_edge_compute")
 
+        def _live_floor_revoked_decision() -> ExitDecision | None:
+            entry_held_prob = (
+                float(exit_context.entry_posterior)
+                if ExitContext._is_finite(exit_context.entry_posterior)
+                else float(self.p_posterior or 0.0)
+            )
+            current_held_prob = float(exit_context.fresh_prob)
+            entry_held_lcb = _held_side_lcb_or_point(exit_context.entry_ci, entry_held_prob)
+            current_held_lcb = _held_side_lcb_or_point(exit_context.current_ci, current_held_prob)
+            if not (
+                entry_held_lcb is not None
+                and current_held_lcb is not None
+                and current_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
+                and entry_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
+                and not (exit_context.day0_active and current_held_prob <= 1e-9)
+            ):
+                return None
+            applied.append("live_win_rate_floor_revoked")
+            if not ExitContext._is_finite(exit_context.best_bid):
+                applied.append("best_bid_unavailable")
+                applied.append("exit_context_incomplete")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="LIVE_WIN_RATE_FLOOR_REVOKED_CONTEXT_INCOMPLETE",
+                )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                (
+                    "LIVE_WIN_RATE_FLOOR_REVOKED "
+                    f"(entry_lcb={entry_held_lcb:.4f}, current_lcb={current_held_lcb:.4f}, "
+                    f"entry_point={entry_held_prob:.4f}, current_point={current_held_prob:.4f}, "
+                    f"floor={LIVE_DIRECTION_WIN_RATE_FLOOR:.4f})"
+                ),
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="LIVE_WIN_RATE_FLOOR_REVOKED",
+            )
+
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
+            applied.append("day0_standard_exit_optimizer")
             if not ExitContext._is_finite(exit_context.best_bid):
                 applied.append("best_bid_unavailable")
                 applied.append("exit_context_incomplete")
@@ -1034,38 +1132,50 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
-            if self.direction == "buy_no":
-                day0_decision = self._buy_no_exit(
-                    forward_edge,
-                    current_p_posterior=float(exit_context.fresh_prob),
-                    current_market_price=float(exit_context.current_market_price),
-                    best_bid=exit_context.best_bid,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    day0_active=True,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-            else:
-                day0_decision = self._buy_yes_exit(
-                    forward_edge,
-                    current_p_posterior=float(exit_context.fresh_prob),
-                    best_bid=exit_context.best_bid,
-                    day0_active=True,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-            if day0_decision.should_exit:
-                return day0_decision
-            if day0_decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
-                return day0_decision
-            # Don't return False here — fall through to SETTLEMENT_IMMINENT
-            # and other force-exit checks (whale toxicity, edge reversal).
-            # Without this fallthrough, positions with expired target_dates
-            # loop forever in day0_window.
-            applied = list(day0_decision.applied_validations or applied)
+            if float(exit_context.fresh_prob) <= 1e-9:
+                applied.append("day0_zero_probability_exit_authority_gate")
+                if not exit_context.day0_zero_probability_exit_authority:
+                    applied.append("day0_zero_probability_exit_authority_blocked")
+                else:
+                    sell_value_dominates = self._sell_value_exceeds_hold_value(
+                        current_p_posterior=float(exit_context.fresh_prob),
+                        best_bid=exit_context.best_bid,
+                        hours_to_settlement=exit_context.hours_to_settlement,
+                        applied=applied,
+                        portfolio_positions=exit_context.portfolio_positions,
+                        bankroll=exit_context.bankroll,
+                    )
+                    if sell_value_dominates is True:
+                        self.neg_edge_count = 0
+                        entry_prob_for_reason = (
+                            float(exit_context.entry_posterior)
+                            if ExitContext._is_finite(exit_context.entry_posterior)
+                            else float(self.p_posterior or 0.0)
+                        )
+                        applied.append("day0_zero_probability_sell_value_dominates")
+                        self.applied_validations = _dedupe_validations(applied)
+                        return ExitDecision(
+                            True,
+                            (
+                                "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES "
+                                f"(entry={entry_prob_for_reason:.4f}, "
+                                "current=0.0000)"
+                            ),
+                            selected_method=self.selected_method or self.entry_method,
+                            applied_validations=list(self.applied_validations),
+                            trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+                        )
+                    if sell_value_dominates is None:
+                        applied.append("day0_zero_probability_exit_context_incomplete_hold")
+                        self.applied_validations = _dedupe_validations(applied)
+                        return ExitDecision(
+                            False,
+                            "DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                            selected_method=self.selected_method or self.entry_method,
+                            applied_validations=list(self.applied_validations),
+                            trigger="DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                        )
+                    applied.append("day0_zero_probability_hold_value_dominates")
 
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
@@ -1173,15 +1283,12 @@ class Position:
                 trigger="FLASH_CRASH_PANIC",
             )
 
-        # Micro-position hold (Layer 8: < $1 never sold)
+        # Micro-position marker: small fills still need the same live redecision
+        # math as every other held position. Returning here hid incident-created
+        # negative-edge dust from CI/hold-value exits; keep the breadcrumb but let
+        # the downstream economic gates decide hold vs exit.
         if self.effective_cost_basis_usd < 1.0:
             applied.append("micro_position_hold")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
 
         # Vig extreme
         if (
@@ -1222,6 +1329,33 @@ class Position:
                     else buy_yes_edge_threshold(self.entry_ci_width)
                 )
                 applied.append("ci_threshold")
+                if exit_context.day0_active and current_held <= 1e-9:
+                    if not exit_context.day0_zero_probability_exit_authority:
+                        applied.append("day0_zero_probability_exit_authority_blocked")
+                    else:
+                        sell_value_dominates = self._sell_value_exceeds_hold_value(
+                            current_p_posterior=current_held,
+                            best_bid=exit_context.best_bid,
+                            hours_to_settlement=exit_context.hours_to_settlement,
+                            applied=applied,
+                            portfolio_positions=exit_context.portfolio_positions,
+                            bankroll=exit_context.bankroll,
+                        )
+                        if sell_value_dominates is True:
+                            self.neg_edge_count = 0
+                            applied.append("day0_zero_probability_sell_value_dominates")
+                            self.applied_validations = _dedupe_validations(applied)
+                            return ExitDecision(
+                                True,
+                                (
+                                    "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES "
+                                    f"(entry={float(exit_context.entry_posterior):.4f}, "
+                                    f"current={current_held:.4f})"
+                                ),
+                                selected_method=self.selected_method or self.entry_method,
+                                applied_validations=list(self.applied_validations),
+                                trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+                            )
                 if evidence_edge >= edge_threshold:
                     self.neg_edge_count = 0
                     if forward_edge > 0.0:
@@ -1279,20 +1413,32 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="CI_SEPARATED_REVERSAL",
                 )
-            # CI present but NOT a separated-below reversal: the belief CI still overlaps entry
-            # (a noisy snapshot / large point move) → HOLD. Suppress the flat 2-confirm exit; a
-            # bare price move must NOT close the position. Reset the flat counter so a transient
-            # overlapping dip cannot accumulate toward a later flat exit.
-            self.neg_edge_count = 0
-            applied.append("ci_overlap_hold")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "CI_OVERLAP_HOLD",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="CI_OVERLAP_HOLD",
-            )
+            # CI present but NOT a separated-below reversal: for ordinary positions,
+            # a noisy overlapping interval suppresses flat exits. For Day0 the
+            # observed-boundary remaining-window CI is often deliberately wide; a
+            # terminal hold here prevents the standard EV/consecutive optimizer from
+            # ever reacting to the same fresh belief. Keep the overlap as evidence,
+            # but let Day0 continue into the normal exit optimizer.
+            floor_revoked_decision = _live_floor_revoked_decision()
+            if floor_revoked_decision is not None:
+                return floor_revoked_decision
+            if exit_context.day0_active:
+                applied.append("ci_overlap_nonterminal_day0")
+            else:
+                self.neg_edge_count = 0
+                applied.append("ci_overlap_hold")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "CI_OVERLAP_HOLD",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="CI_OVERLAP_HOLD",
+                )
+
+        floor_revoked_decision = _live_floor_revoked_decision()
+        if floor_revoked_decision is not None:
+            return floor_revoked_decision
 
         # Direction-specific exit logic
         if self.direction == "buy_no":
@@ -1302,7 +1448,7 @@ class Position:
                 current_market_price=float(exit_context.current_market_price),
                 best_bid=exit_context.best_bid,
                 hours_to_settlement=exit_context.hours_to_settlement,
-                day0_active=bool(exit_context.day0_active),
+                day0_active=exit_context.day0_active,
                 applied=applied,
                 portfolio_positions=exit_context.portfolio_positions,
                 bankroll=exit_context.bankroll,
@@ -1313,7 +1459,7 @@ class Position:
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=best_bid,
-                day0_active=bool(exit_context.day0_active),
+                day0_active=exit_context.day0_active,
                 hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
                 portfolio_positions=exit_context.portfolio_positions,
@@ -1363,64 +1509,7 @@ class Position:
         applied.append("ci_threshold")
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            applied.append("ev_gate")
-            shares = self.effective_shares
-            if hold_value_exit_costs_enabled():
-                applied.append("hold_value_exit_costs_enabled")
-                if hours_to_settlement is None or hours_to_settlement < 0.0:
-                    # T6.4-hardening (con-nyx finding c): authority gap —
-                    # time_cost collapses to 0.0, silently degrading D6
-                    # protection at this call site. Surface via breadcrumb
-                    # so monitor summaries can count these occurrences.
-                    applied.append("hold_value_hours_unknown_time_cost_zero")
-                _crowding = _compute_exit_correlation_crowding(
-                    this_cluster=self.cluster,
-                    portfolio_positions=portfolio_positions,
-                    bankroll=bankroll,
-                    shares=shares,
-                    best_bid=best_bid,
-                    crowding_rate=exit_correlation_crowding_rate(),
-                )
-                if _crowding > 0.0:
-                    applied.append("hold_value_correlation_crowding_applied")
-                hold_value = HoldValue.compute_with_exit_costs(
-                    shares=shares,
-                    current_p_posterior=current_p_posterior,
-                    best_bid=best_bid,
-                    hours_to_settlement=hours_to_settlement,
-                    fee_rate=exit_fee_rate(),
-                    daily_hurdle_rate=exit_daily_hurdle_rate(),
-                    correlation_crowding=_crowding,
-                )
-            else:
-                hold_value = HoldValue.compute(
-                    gross_value=shares * current_p_posterior,
-                    fee_cost=0.0,
-                    time_cost=0.0,
-                )
-            if shares * best_bid <= hold_value.net_value:
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            # Day0 observation posterior can move abruptly right after the
-            # local day opens, before enough of the settlement day has elapsed
-            # to prove a real reversal. The CI-separation gate above owns
-            # evidence-backed belief reversals; settlement-imminent remains a
-            # separate force-exit below. Do not turn a point-estimate day0
-            # swing plus a tiny cash-out improvement into an immediate sell.
-            self.neg_edge_count = 0
-            applied.append("day0_observation_reversal_requires_ci_separation")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
-            )
+            applied.append("day0_observation_reversal_nonterminal")
         applied.append("consecutive_cycle_check")
         if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0
@@ -1522,71 +1611,16 @@ class Position:
 
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            if not ExitContext._is_finite(best_bid):
-                applied.append("best_bid_unavailable")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            shares = self.effective_shares
-            if shares > 0:
-                applied.append("ev_gate")
-                if hold_value_exit_costs_enabled():
-                    applied.append("hold_value_exit_costs_enabled")
-                    if hours_to_settlement is None or hours_to_settlement < 0.0:
-                        applied.append("hold_value_hours_unknown_time_cost_zero")
-                    _crowding = _compute_exit_correlation_crowding(
-                        this_cluster=self.cluster,
-                        portfolio_positions=portfolio_positions,
-                        bankroll=bankroll,
-                        shares=shares,
-                        best_bid=best_bid,
-                        crowding_rate=exit_correlation_crowding_rate(),
-                    )
-                    if _crowding > 0.0:
-                        applied.append("hold_value_correlation_crowding_applied")
-                    hold_value = HoldValue.compute_with_exit_costs(
-                        shares=shares,
-                        current_p_posterior=current_p_posterior,
-                        best_bid=best_bid,
-                        hours_to_settlement=hours_to_settlement,
-                        fee_rate=exit_fee_rate(),
-                        daily_hurdle_rate=exit_daily_hurdle_rate(),
-                        correlation_crowding=_crowding,
-                    )
-                else:
-                    hold_value = HoldValue.compute(
-                        gross_value=shares * current_p_posterior,
-                        fee_cost=0.0,
-                        time_cost=0.0,
-                    )
-                sell_value = shares * best_bid
-                if sell_value <= hold_value.net_value:
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                    )
-            # Same evidence rule as buy-YES: a day0 point-estimate reversal is
-            # not enough to liquidate. CI-separated reversal and
-            # settlement-imminent exits are handled outside this flat EV gate.
-            self.neg_edge_count = 0
-            applied.append("day0_observation_reversal_requires_ci_separation")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
-            )
+            applied.append("day0_observation_reversal_nonterminal")
 
-        # Near-settlement hold (unless deeply negative)
-        if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():
+        # Near-settlement hold (unless deeply negative). Day0 already passed
+        # through the shared settlement-imminent gate in evaluate_exit; do not
+        # let this wider buy-NO shortcut bypass the standard Day0 optimizer.
+        if (
+            not day0_active
+            and hours_to_settlement is not None
+            and hours_to_settlement < near_settlement_hours()
+        ):
             applied.append("near_settlement_gate")
             if forward_edge < near_threshold:
                 self.applied_validations = _dedupe_validations(applied)
@@ -1872,7 +1906,7 @@ def _runtime_strategy_key_from_projection_row(row: dict) -> str:
 
     from src.strategy.strategy_profile import try_get
 
-    profile = try_get("opening_inertia")
+    profile = try_get("forecast_qkernel_entry")
     if (
         profile is not None
         and profile.is_runtime_live()
@@ -1881,11 +1915,11 @@ def _runtime_strategy_key_from_projection_row(row: dict) -> str:
     ):
         logger.warning(
             "runtime repaired legacy EDLI forecast strategy label: position_id=%s "
-            "settlement_capture -> opening_inertia metric=%s",
+            "settlement_capture -> forecast_qkernel_entry metric=%s",
             row.get("position_id") or row.get("trade_id") or "",
             metric,
         )
-        return "opening_inertia"
+        return "forecast_qkernel_entry"
     return strategy_key
 
 
@@ -2068,14 +2102,21 @@ def _calibration_entry_authority_rejection(payload_json: str | None) -> str | No
     except (TypeError, json.JSONDecodeError):
         return "EDLI_ENTRY_CALIBRATION_CERT_JSON_INVALID"
     authority = str(payload.get("authority") or "").strip().upper()
+    coverage_status = str(payload.get("coverage_status") or "").strip()
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         return "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
+    if authority == "DAY0_LIVE_OBSERVATION_HARD_FACT":
+        return None
     n_samples_raw = payload.get("n_samples")
     try:
         n_samples = int(n_samples_raw) if n_samples_raw is not None else None
     except (TypeError, ValueError):
         n_samples = None
-    if n_samples is not None and n_samples <= 0:
+    if (
+        n_samples is not None
+        and n_samples <= 0
+        and coverage_status != "INSUFFICIENT_DATA"
+    ):
         return "EDLI_ENTRY_CALIBRATION_EMPTY_SAMPLE"
     return None
 
@@ -2318,6 +2359,13 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     if (
         not runtime_exit_state
         and state == "pending_exit"
+        and str(row.get("order_status") or "")
+        in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+    ):
+        runtime_exit_state = str(row.get("order_status") or "")
+    if (
+        not runtime_exit_state
+        and state == "pending_exit"
         and exit_retry_count > 0
         and next_exit_retry_at
     ):
@@ -2370,6 +2418,9 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         last_monitor_market_price_is_fresh=bool(
             row.get("last_monitor_market_price_is_fresh") or False
         ),
+        last_monitor_best_bid=_finite_float_or_none(row.get("last_monitor_best_bid")),
+        last_monitor_best_ask=_finite_float_or_none(row.get("last_monitor_best_ask")),
+        last_monitor_market_vig=_finite_float_or_none(row.get("last_monitor_market_vig")),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
         # PR #352 (Part-5 audit Finding 1): the durable projection stores chain
@@ -2385,7 +2436,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
             row.get("last_chain_absence_observed_at") or row.get("chain_absence_at") or ""
         ),
         chain_shares=float(row.get("chain_shares") or 0.0),
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics round-trip via position_current so a balance-only
         # rescued position survives daemon restart with the correct
         # exposure on `effective_exposure()`.
@@ -2465,6 +2516,7 @@ def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
         first_seen_at=first_seen,
         last_seen_at=last_seen,
         review_state=review_state,
+        entry_block_scope=str(row.get("entry_block_scope") or "global"),
     )
 
 
@@ -2486,8 +2538,9 @@ def _derive_chain_only_review_state(
 
     The 48h review window is a SOFT escalation marker — it does NOT clear
     the fact, it flips UNRESOLVED → EXPIRED so ops dashboards can surface
-    chain-only inventory that has lingered past triage SLA. Only operator
-    action (suppression_reason flip) actually resolves the fact.
+    chain-only inventory that has lingered past triage SLA. Expired review
+    debt does not freeze unrelated new entries; only operator action
+    (suppression_reason flip) actually resolves the fact.
     """
     if suppression_reason in ("operator_quarantine_clear", "settled_position"):
         return ChainOnlyReviewState.RESOLVED
@@ -2905,9 +2958,21 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
     return ordered
 
 
-INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed", "quarantined", "admin_closed"})
-LEGACY_NONVOCABULARY_INACTIVE_STATES = frozenset({"quarantine_fill_failed", "quarantine_void_failed"})
-QUARANTINED_CHAIN_STATES = frozenset({"quarantined", "quarantine_expired"})
+INACTIVE_RUNTIME_STATES = frozenset(
+    set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
+)
+NO_EXPOSURE_CHAIN_STATES = NO_CURRENT_MONEY_RISK_CHAIN_STATES
+_POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+
+
+def _positive_chain_exposure_shares(pos: "Position") -> float:
+    try:
+        value = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value <= _POSITIVE_CHAIN_EXPOSURE_EPS:
+        return 0.0
+    return value
 
 
 def _semantic_value(value: object) -> str:
@@ -2919,10 +2984,27 @@ def _semantic_value(value: object) -> str:
 def _is_runtime_open_position(pos: Position) -> bool:
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+    chain_shares = _positive_chain_exposure_shares(pos)
+    if (
+        chain_shares > 0.0
+        and (
+            state == "quarantined"
+            and has_current_money_risk_chain_state(chain_state)
+            or (not state and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
+        )
+    ):
+        return True
+    no_exposure_chain_state = chain_state in NO_EXPOSURE_CHAIN_STATES
+    if state == "pending_exit" and chain_shares > 0.0:
+        no_exposure_chain_state = False
+    local_projection_without_chain_exposure = (
+        chain_state == VenueVisibilityStatus.LOCAL_ONLY.value
+        and chain_shares <= 0.0
+    )
     return (
         state not in INACTIVE_RUNTIME_STATES
-        and state not in LEGACY_NONVOCABULARY_INACTIVE_STATES
-        and chain_state not in QUARANTINED_CHAIN_STATES
+        and not no_exposure_chain_state
+        and not local_projection_without_chain_exposure
     )
 
 
@@ -2956,6 +3038,10 @@ def compute_economic_close(
         pos.pre_exit_state = ""
         pos.exit_price = exit_price
         pos.exit_reason = exit_reason
+        pos.exit_state = "sell_filled"
+        pos.next_exit_retry_at = ""
+        pos.exit_retry_count = 0
+        pos.last_exit_error = ""
         pos.last_exit_at = now
         pos.pnl = _compute_realized_pnl(pos, exit_price)
         _track_exit(state, pos)
@@ -3085,7 +3171,7 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
 def _track_exit(state: PortfolioState, pos: Position) -> None:
     """Track exit for reentry/cooldown checks AND replay auditability.
 
-    CRITICAL: All fields required by profit_validation_replay.py must be
+    CRITICAL: All fields required by equity/report replay consumers must be
     persisted here. If a field is on Position but not in this dict, the
     replay engine will classify the exit as 'fully_skipped'.
 
@@ -3445,32 +3531,60 @@ def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
     )
 
 
-# Derived from canonical INACTIVE_RUNTIME_STATES — single source of truth (Fitz #1).
+# Non-open runtime phases used by the direct DB dedup query. This is intentionally
+# broader than terminal lifecycle states because economically_closed has no live exposure.
 # tuple(sorted(...)) for stable SQL placeholder order.
-_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
+_NON_OPEN_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
 
 
 def has_same_token_open_db(conn, token_id: str) -> bool:
     """Decision-time dedup gate: queries position_current directly at call time.
     Non-terminal phases: active, day0_window, pending_exit, pending_entry,
-      phantom_not_on_chain, and any future non-terminal state.
-    Terminal (excluded): voided, economically_closed, settled, quarantined,
+      phantom_not_on_chain, and any future open state.
+    Non-open (excluded): voided, economically_closed, settled, quarantined,
       admin_closed.
 
     Checks BOTH token_id (YES side) and no_token_id (NO side) columns so buy_no
     positions are not invisible to the dedup gate.
 
     Uses a parameterized NOT IN — placeholders built from the fixed-length
-    _TERMINAL_PHASES tuple (internal constant, not user input). This f-string
+    _NON_OPEN_PHASES tuple (internal constant, not user input). This f-string
     SQL site is registered in scripts/check_dynamic_sql.py baseline.
     """
-    placeholders = ",".join("?" * len(_TERMINAL_PHASES))
+    placeholders = ",".join("?" * len(_NON_OPEN_PHASES))
+    columns = {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    if "chain_shares" in columns:
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        if "phase" in columns and "chain_state" in columns:
+            chain_truth_sql = "phase = 'quarantined' AND chain_state IN ({})".format(
+                ",".join("?" for _ in chain_state_values)
+            )
+        elif "chain_state" in columns:
+            chain_truth_sql = "chain_state IN ({})".format(
+                ",".join("?" for _ in chain_state_values)
+            )
+        else:
+            chain_truth_sql = "phase IN ('voided', 'quarantined')"
+            chain_state_values = ()
+        positive_chain_clause = (
+            " OR (COALESCE(chain_shares, 0) > ? "
+            f"AND ({chain_truth_sql}))"
+        )
+    else:
+        positive_chain_clause = ""
+        chain_state_values = ()
+    params: list[object] = [token_id, token_id, *_NON_OPEN_PHASES]
+    if positive_chain_clause:
+        params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS, *chain_state_values])
     row = conn.execute(
         f"""SELECT 1 FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN ({placeholders})
+            AND (phase NOT IN ({placeholders}){positive_chain_clause})
             LIMIT 1""",
-        (token_id, token_id, *_TERMINAL_PHASES),
+        tuple(params),
     ).fetchone()
     return row is not None
 

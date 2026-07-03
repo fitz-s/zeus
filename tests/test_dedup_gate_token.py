@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-06-29
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -26,6 +26,7 @@ from src.state.portfolio import (
 from src.engine.evaluator import _layer7_dedup_fires
 from src.execution.executor import (
     _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+    _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS,
     _entry_duplicate_same_token_component,
     _entry_same_token_cooldown_component,
 )
@@ -51,6 +52,7 @@ def mem_db():
             bin_label TEXT,
             direction TEXT NOT NULL DEFAULT 'buy_yes',
             shares REAL DEFAULT 0,
+            chain_shares REAL DEFAULT 0,
             cost_basis_usd REAL DEFAULT 0,
             token_id TEXT,
             no_token_id TEXT,
@@ -77,6 +79,8 @@ def mem_db():
             token_id TEXT NOT NULL,
             intent_kind TEXT NOT NULL DEFAULT 'EXIT',
             side TEXT NOT NULL DEFAULT 'BUY',
+            size REAL DEFAULT 0,
+            price REAL DEFAULT 0,
             venue_order_id TEXT,
             state TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT '2026-05-17T22:13:38',
@@ -100,15 +104,25 @@ def mem_db():
     return conn
 
 
-def _insert_position(conn, position_id, phase, token_id, direction="buy_yes", no_token_id=None):
+def _insert_position(
+    conn,
+    position_id,
+    phase,
+    token_id,
+    direction="buy_yes",
+    no_token_id=None,
+    *,
+    shares=0.0,
+    chain_shares=0.0,
+):
     conn.execute(
         """INSERT INTO position_current
            (position_id, phase, trade_id, market_id, city, bin_label,
-            direction, shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            direction, shares, chain_shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, 0.0, 0.0, token_id,
+            "London", "18°C", direction, shares, chain_shares, 0.0, token_id,
             no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
@@ -168,6 +182,44 @@ def test_voided_position_allows_reentry(mem_db):
     """Voided positions are terminal — must not block."""
     _insert_position(mem_db, "cee5fc85-3dd", "voided", TOKEN_X)
     assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+def test_terminal_local_phase_with_positive_chain_shares_blocks_reentry(mem_db):
+    """Chain-backed exposure remains live even if local lifecycle projection is terminal.
+
+    This protects the Munich/Istanbul class: a local void/quarantine label cannot
+    make a chain-held token available to the fresh-entry selector.
+    """
+    _insert_position(
+        mem_db,
+        "voided-but-chain-held",
+        "voided",
+        TOKEN_X,
+        chain_shares=12.5,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+
+
+def test_economically_closed_positive_chain_projection_does_not_block_reentry(mem_db):
+    _insert_position(
+        mem_db,
+        "closed-stale-chain-projection",
+        "economically_closed",
+        TOKEN_X,
+        chain_shares=12.5,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+def test_quarantined_positive_chain_shares_blocks_reentry(mem_db):
+    _insert_position(
+        mem_db,
+        "quarantine-chain-held",
+        "quarantined",
+        TOKEN_X,
+        chain_shares=3.0,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
 
 
 # ── buy_no token coverage (PR #143 bot review fix) ───────────────────────────────
@@ -420,7 +472,7 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
     assert result["allowed"] is True
 
 
-def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_order_fact(mem_db):
+def test_executor_duplicate_gate_blocks_cancelled_pending_entry_with_live_order_fact(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -453,7 +505,8 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_
         candidate_position_id="fresh-candidate",
     )
 
-    assert result["allowed"] is True
+    assert result["allowed"] is False
+    assert result["reason"] == "open_position_same_token"
 
 
 def test_executor_duplicate_gate_blocks_cancelled_pending_entry_with_fill(mem_db):
@@ -545,7 +598,7 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
     assert result["existing_position_id"] == "active-position"
 
 
-def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
+def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -556,10 +609,10 @@ def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
     )
     mem_db.execute(
         """INSERT INTO venue_commands
-           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+           (command_id, position_id, token_id, intent_kind, side, size, price, venue_order_id,
             state, created_at, updated_at)
            VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
-                   'order-stale-pending', 'CANCELLED',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
                    '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
         (TOKEN_X,),
     )
@@ -576,11 +629,131 @@ def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
         mem_db,
         token_id=TOKEN_X,
         candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
         now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
     )
 
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert (
+        result["remaining_seconds"]
+        == _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS - 60
+    )
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["candidate_price"] == "0.73"
+    assert result["candidate_shares"] == "12.7"
+
+
+def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.74,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
+    )
+
     assert result["allowed"] is True
-    assert result["reason"] == "allowed_terminal_no_fill_prior_entries"
+    assert result["reason"] == "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
+    assert result["cooldown_seconds"] == _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS
+    assert result["existing_command_id"] == "cmd-cancelled"
+
+
+def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["existing_price"] == "0.73"
+    assert result["candidate_price"] == "0.73"
+
+
+def test_cancelled_entry_without_zero_fill_fact_still_blocks_redecision(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:30+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_entry_cooling_down"
+    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 30
 
 
 def test_executor_cooldown_still_blocks_when_active_command_exists(mem_db):

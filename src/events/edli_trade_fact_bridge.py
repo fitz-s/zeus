@@ -308,13 +308,23 @@ def _ensure_trades_attached_if_needed(
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "trades" in attached and _table_exists(conn, "venue_trade_facts", schema="trades"):
         return
+    explicit_trade_db_path = trade_db_path is not None
+    main_has_trade_facts = _table_exists(conn, "venue_trade_facts")
+    main_db_path = _database_path(conn, "main")
     if trade_db_path is None:
         try:
             from src.state.db import _zeus_trade_db_path
 
             trade_db_path = _zeus_trade_db_path()
         except Exception:  # noqa: BLE001
+            if main_has_trade_facts:
+                return
             return
+    if main_has_trade_facts and (
+        (_database_path_is_memory(main_db_path) and not explicit_trade_db_path)
+        or _same_database_path(main_db_path, trade_db_path)
+    ):
+        return
     if "trades" not in attached:
         conn.execute("ATTACH DATABASE ? AS trades", (str(trade_db_path),))
 
@@ -343,6 +353,30 @@ def _table_exists(conn: sqlite3.Connection, table: str, *, schema: str = "main")
             (table,),
         ).fetchone()
     return row is not None
+
+
+def _database_path(conn: sqlite3.Connection, schema: str) -> str:
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            name = str(row[1])
+            if name == schema:
+                return str(row[2] or "")
+    except sqlite3.Error:
+        return ""
+    return ""
+
+
+def _database_path_is_memory(path: str) -> bool:
+    return path in {"", ":memory:"}
+
+
+def _same_database_path(path: str, other: str | Path) -> bool:
+    if not path:
+        return False
+    try:
+        return Path(path).resolve() == Path(other).resolve()
+    except Exception:  # noqa: BLE001
+        return str(path) == str(other)
 
 
 def _q(schema: str, table: str) -> str:

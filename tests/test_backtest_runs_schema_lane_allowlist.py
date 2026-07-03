@@ -147,7 +147,7 @@ def test_insert_declared_lane_accepted(lane: str):
         INSERT INTO backtest_runs
             (run_id, lane, started_at, status, authority_scope, config_json, summary_json)
         VALUES (?, ?, '2026-05-07T00:00:00Z', 'completed',
-                'diagnostic_non_promotion', '{}', '{}')
+                'offline_no_promotion', '{}', '{}')
         """,
         (f"test-run-{lane}", lane),
     )
@@ -166,7 +166,7 @@ def test_unknown_lane_rejected():
             INSERT INTO backtest_runs
                 (run_id, lane, started_at, status, authority_scope, config_json, summary_json)
             VALUES ('bad-run', '__unknown_lane__', '2026-05-07T00:00:00Z', 'completed',
-                    'diagnostic_non_promotion', '{}', '{}')
+                    'offline_no_promotion', '{}', '{}')
             """
         )
 
@@ -191,7 +191,7 @@ def test_insert_selection_coverage_divergence_status_accepted(div_status: str):
         INSERT INTO backtest_runs
             (run_id, lane, started_at, status, authority_scope, config_json, summary_json)
         VALUES ('test-run-div', 'selection_coverage', '2026-05-07T00:00:00Z', 'completed',
-                'diagnostic_non_promotion', '{}', '{}')
+                'offline_no_promotion', '{}', '{}')
         """
     )
     conn.execute(
@@ -219,7 +219,7 @@ def test_unknown_divergence_status_rejected():
         INSERT INTO backtest_runs
             (run_id, lane, started_at, status, authority_scope, config_json, summary_json)
         VALUES ('bad-div-run', 'selection_coverage', '2026-05-07T00:00:00Z', 'completed',
-                'diagnostic_non_promotion', '{}', '{}')
+                'offline_no_promotion', '{}', '{}')
         """
     )
     with pytest.raises(sqlite3.IntegrityError):

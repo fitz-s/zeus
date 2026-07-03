@@ -91,7 +91,7 @@ def test_all_priced_rejected_yields_all_candidates_rejected_with_class_counts():
     # per-class counts present and correct
     assert "n=4" in reason
     assert "capital_efficiency_lcb_ev=3" in reason
-    assert "direction_law=1" in reason
+    assert "legacy_rounded_mu_direction=1" in reason
     # best_rejected leg = highest conservative EV/$ priced loser, still labelled as rejected.
     assert "best_rejected=" in reason
     assert "reason_class=capital_efficiency_lcb_ev" in reason
@@ -124,7 +124,7 @@ def test_positive_ev_vetoed_leg_is_labelled_best_rejected_with_gate_reason():
 
     assert reason is not None
     assert "best_rejected=27C buy_yes" in reason
-    assert "reason_class=direction_law" in reason
+    assert "reason_class=legacy_rounded_mu_direction" in reason
     assert "missing_reason=DIRECTION_LAW_BIN_FORECAST_MISMATCH:direction=buy_yes" in reason
     assert "rejected_ev_per_dollar=1.0619" in reason
 
@@ -186,7 +186,7 @@ def test_classifier_buckets_every_known_gate_and_falls_to_other():
         "COVERAGE_UNLICENSED_TAIL:x": "coverage_unlicensed_tail",
         "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:x": "buy_no_evidence",
         "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING": "buy_no_evidence",
-        "DIRECTION_LAW_BIN_FORECAST_MISMATCH:x": "direction_law",
+        "DIRECTION_LAW_BIN_FORECAST_MISMATCH:x": "legacy_rounded_mu_direction",
         "clob_no_ask_illiquid": "native_ask_missing",
         "missing executable snapshot row": "native_ask_missing",
         "missing token id": "native_ask_missing",
@@ -280,16 +280,65 @@ def _priced_no_proof(condition_id: str, no_ask: str, bin_c: float, q_lcb: float,
     )
 
 
+def _priced_yes_proof(
+    condition_id: str,
+    yes_ask: str,
+    bin_c: float,
+    *,
+    q_live: float,
+    q_lcb: float,
+):
+    from src.events.candidate_binding import MarketTopologyCandidate
+    from src.types.market import Bin
+
+    row = _native_row(condition_id, no_ask="0.99", snapshot_id="snap-" + condition_id)
+    depth = json.loads(row["orderbook_depth_json"])
+    depth["YES"]["asks"] = [{"price": yes_ask, "size": "100000"}]
+    row["orderbook_depth_json"] = json.dumps(depth)
+    ep, _pf, _c = era._execution_price_from_snapshot(
+        row,
+        selected_token_id=row["yes_token_id"],
+        direction="buy_yes",
+    )
+    return era._CandidateProof(
+        candidate=MarketTopologyCandidate(
+            city="buenos_aires",
+            target_date="2026-07-02",
+            metric="high",
+            condition_id=condition_id,
+            yes_token_id=row["yes_token_id"],
+            no_token_id=row["no_token_id"],
+            bin=Bin(low=bin_c, high=bin_c, unit="C", label=f"{int(bin_c)}C"),
+        ),
+        token_id=row["yes_token_id"],
+        direction="buy_yes",
+        row=row,
+        executable_snapshot_id=str(row["snapshot_id"]),
+        execution_price=ep,
+        q_posterior=q_live,
+        q_lcb_5pct=q_lcb,
+        c_cost_95pct=None,
+        p_fill_lcb=1.0,
+        trade_score=max(0.0, q_lcb - float(yes_ask)),
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="ch",
+        p_live_vector_hash="lh",
+        missing_reason=None,
+    )
+
+
 def test_beijing_lie_real_path_selects_none_and_relabels_to_all_rejected():
     """A (the measured lie, real path): a family of bins with LIVE two-sided NO books
     whose every priced NO is capital-efficiency-rejected (q_lcb < price) drives the
     REAL selector to None — the trigger for the bare SELECTED_CANDIDATE_MISSING —
     and the honest aggregator over the REAL book emits ALL_CANDIDATES_REJECTED."""
     proofs = (
-        _priced_no_proof("cond-30", "0.66", 30.0, 0.30,
-                         "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.55:q_lcb=0.30:price=0.66"),
-        _priced_no_proof("cond-31", "0.76", 31.0, 0.40,
-                         "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.47:q_lcb=0.40:price=0.76"),
+        _priced_no_proof("cond-30", "0.66", 30.0, 0.55,
+                         "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.17:q_lcb=0.55:price=0.66"),
+        _priced_no_proof("cond-31", "0.76", 31.0, 0.60,
+                         "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.21:q_lcb=0.60:price=0.76"),
     )
     # Every proof is PRICED (live book) but missing_reason set -> scoped out ->
     # nothing executable AND nothing bookless -> the real selector returns None.
@@ -308,6 +357,39 @@ def test_beijing_lie_real_path_selects_none_and_relabels_to_all_rejected():
     assert projection is not None and len(projection) == 2
     assert all(e["is_selected_fallback"] is False for e in projection)
     assert all("CAPITAL_EFFICIENCY" in (e["missing_reason"] or "") for e in projection)
+
+
+def test_low_win_rate_cheap_yes_relabels_to_win_rate_floor_not_unknown():
+    """A priced positive-EV lottery YES excluded by live selection must say why.
+
+    The live selector rejects q_lcb below the win-rate floor before ranking.  The
+    opportunity book must project the same reason; otherwise durable no-trade rows
+    show ``missing_reason=UNKNOWN`` for exactly the cheap YES shape operators need
+    to audit.
+    """
+
+    proof = _priced_yes_proof(
+        "cond-low-yes",
+        "0.01",
+        38.0,
+        q_live=0.08,
+        q_lcb=0.02,
+    )
+    assert era._selection_scoped_proofs(proofs=(proof,)) == ()
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt-low-yes",
+        family_id="fam-low-yes",
+        proofs=(proof,),
+        selected_proof=None,
+    )
+    reason = era._family_all_candidates_rejected_reason(book)
+
+    assert reason is not None
+    assert "win_rate_floor=1" in reason
+    assert "reason_class=win_rate_floor" in reason
+    assert "missing_reason=ADMISSION_WIN_RATE_FLOOR:q_lcb=0.0200:min=0.5100" in reason
+    assert "missing_reason=UNKNOWN" not in reason
 
 
 # --- hash-stability pin (D): the candidate_book lives in envelope_json, never the hash ----------

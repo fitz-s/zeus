@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from src.config import PROJECT_ROOT
 from src.contracts.replacement_pipeline_files import (
@@ -505,6 +505,14 @@ _REQUEST_REQUIRED_KEYS: tuple[str, ...] = (
     "target_date",
     "source_cycle_time",
 )
+_REQUEST_DEDUP_KEY_FIELDS: tuple[str, ...] = (
+    "city",
+    "target_date",
+    "temperature_metric",
+    "source_cycle_time",
+    "baseline_source_run_id",
+    "openmeteo_source_run_id",
+)
 
 
 def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
@@ -548,6 +556,100 @@ def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
             exc.detail,
         )
     return True, "", ""
+
+
+def _load_request_payload_for_coalescing(path: Path) -> Mapping[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | None:
+    values: list[str] = []
+    for field in _REQUEST_DEDUP_KEY_FIELDS:
+        value = str(payload.get(field) or "").strip()
+        if not value:
+            return None
+        if field == "source_cycle_time":
+            parsed = _parse_utc_iso(value)
+            if parsed is None:
+                return None
+            value = parsed.isoformat()
+        values.append(value)
+    return tuple(values)
+
+
+def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[datetime, int, str]:
+    computed_at = _parse_utc_iso(payload.get("computed_at"))
+    if computed_at is None:
+        computed_at = datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return computed_at, mtime_ns, path.name
+
+
+def _coalesce_superseded_materialization_requests(
+    requests: Sequence[Path],
+    *,
+    processed_path: Path,
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """Keep only the newest request per semantic forecast scope.
+
+    Seed discovery can enqueue the same city/date/metric/source-cycle request on
+    every scheduler tick while a previous copy is still waiting. Running every
+    duplicate subprocess burns the materializer budget without producing a newer
+    posterior, which lets raw live-input cycles outrun live posteriors. Invalid
+    or incomplete payloads are deliberately left untouched here so the normal
+    pre-spawn validation gate can fail them with its precise reason code.
+    """
+
+    keys: dict[Path, tuple[str, ...]] = {}
+    newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
+    for path in requests:
+        payload = _load_request_payload_for_coalescing(path)
+        if payload is None:
+            continue
+        key = _request_semantic_key(payload)
+        if key is None:
+            continue
+        keys[path] = key
+        freshness = _request_freshness_key(path, payload)
+        current = newest_by_key.get(key)
+        if current is None or freshness > current[0]:
+            newest_by_key[key] = (freshness, path)
+
+    keepers = {path for _freshness, path in newest_by_key.values()}
+    remaining: list[Path] = []
+    superseded: list[str] = []
+    for path in requests:
+        key = keys.get(path)
+        if key is None or path in keepers:
+            remaining.append(path)
+            continue
+        newest_path = newest_by_key[key][1]
+        moved = _move_request(path, processed_path)
+        _write_sidecar(
+            moved,
+            {
+                "status": "SKIPPED_SUPERSEDED_REQUEST",
+                "reason_codes": [
+                    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
+                ],
+                "request_written": False,
+                "request_validated": False,
+                "subprocess_spawned": False,
+                "superseded_by": newest_path.name,
+                "semantic_key": {
+                    field: key[idx] for idx, field in enumerate(_REQUEST_DEDUP_KEY_FIELDS)
+                },
+            },
+        )
+        superseded.append(str(moved))
+    return tuple(remaining), tuple(superseded)
 
 
 def _prepare_seed_requests(
@@ -825,7 +927,12 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY"]),
         )
 
-    processed: list[str] = []
+    requests, superseded = _coalesce_superseded_materialization_requests(
+        requests,
+        processed_path=processed_path,
+    )
+
+    processed: list[str] = list(superseded)
     failed: list[str] = []
     for input_json in requests[:limit]:
         # POISON-PILL GATE: validate the request schema before spawning the materializer
@@ -919,6 +1026,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
 
     status = "FAILED" if failed else "PROCESSED"
     reasons = [*seed_reasons, "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED"]
+    if superseded:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     skipped = max(len(requests) - limit, 0)

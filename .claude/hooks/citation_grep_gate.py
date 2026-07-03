@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.2 + hook matcher contract for Edit/Write/MultiEdit/NotebookEdit
+# Authority basis: docs/archive/2026-Q2/operations_historical/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.2 + hook matcher contract for Edit/Write/MultiEdit/NotebookEdit
 
 """
 citation_grep_gate.py -- PreToolUse advisory for Edit/Write/MultiEdit/NotebookEdit.

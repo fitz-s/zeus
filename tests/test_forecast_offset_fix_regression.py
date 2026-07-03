@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Purpose: Regression antibody for PR-A snapshot ORDER BY fix — contributing 00Z must beat latest 12Z.
 # Reuse: Run when _snapshot_query_sql ORDER BY CASE, contributes_to_target_extrema semantics, or attribution logic changes.

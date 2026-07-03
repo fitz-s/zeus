@@ -68,6 +68,7 @@ def test_one_fetch_per_model_cycle_and_under_budget(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl, "_default_live_fetch_batched", fake_single)
     monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", fake_prev)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
 
     from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
     import sqlite3

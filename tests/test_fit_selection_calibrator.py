@@ -120,6 +120,7 @@ def test_adverse_selection_recovery_blocks_toxic_no_and_keeps_genuine_yes():
     for i in range(200):
         rows.append(_row("2026-06-10T00:00:00+00:00", "YES", 1.0, "modal", 0.45, i < 92))
     artifact = fsc.fit_cells(rows, min_n=30, posterior_version=fsc.POSTERIOR_VERSION)
+    assert set(artifact["_meta"]["armed_sides"]) == {"NO", "YES"}
     sc.reset_artifact_cache()
 
     v_no = sc.apply_selection_calibrator(
@@ -174,7 +175,28 @@ def test_fit_eb_cells_fail_closed_when_selected_support_thin():
     )
     key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
     assert artifact["cells"][key]["n_selected"] == 5
+    assert "NO" not in artifact["_meta"]["armed_sides"]
     sc.reset_artifact_cache()
+    v = sc.apply_selection_calibrator(
+        raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
+    )
+    assert v.trade is False and v.q_safe == 0.0 and v.basis == "SIDE_NOT_ARMED"
+
+
+def test_fit_eb_cells_thin_cell_fails_closed_when_side_has_other_deep_support():
+    corpus = (
+        [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 170) for i in range(200)]
+        + [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "modal", 0.55, i < 70) for i in range(100)]
+    )
+    selected = (
+        [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 4) for i in range(5)]
+        + [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "modal", 0.55, i < 36) for i in range(40)]
+    )
+    artifact = fsc.fit_eb_cells(
+        corpus_rows=corpus, selected_rows=selected, min_n=30,
+        posterior_version=fsc.POSTERIOR_VERSION, tau=10.0,
+    )
+    assert "NO" in artifact["_meta"]["armed_sides"]
     v = sc.apply_selection_calibrator(
         raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
     )

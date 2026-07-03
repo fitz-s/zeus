@@ -38,7 +38,6 @@ from src.state.paths import (
     oracle_artifact_heartbeat_path,
     oracle_data_dir,
     oracle_error_rates_path,
-    oracle_snapshot_dir,
     storage_root,
     write_heartbeat,
     write_json_atomic,
@@ -76,7 +75,6 @@ def test_storage_root_override_redirects_all_artifacts(
         oracle_artifact_heartbeat_path()
         == tmp_path.resolve() / "data" / "oracle_error_rates.heartbeat.json"
     )
-    assert oracle_snapshot_dir() == tmp_path.resolve() / "raw" / "oracle_shadow_snapshots"
 
 
 def test_oracle_penalty_picks_up_storage_root_override(

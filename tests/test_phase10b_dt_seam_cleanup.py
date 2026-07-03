@@ -1734,7 +1734,7 @@ class TestRCPV2RowCountSensor:
         assert status["portfolio"]["bankroll"] == pytest.approx(211.37)
         assert status["portfolio"]["bankroll_object_identity"] == "wallet_equity"
         assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
-        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
+        assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider"
 
     def test_bankroll_semantics_rejects_unproven_riskguard_bankroll(self, tmp_path, monkeypatch):
         """Relationship: legacy risk rows cannot promote wallet+PnL into status bankroll."""
@@ -1891,7 +1891,7 @@ class TestRCPV2RowCountSensor:
         assert status["portfolio"]["bankroll"] is None
         assert status["portfolio"]["bankroll_truth_status"] == "missing"
         assert status["portfolio"]["effective_bankroll_derivation"] == "missing_wallet_truth"
-        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider_unavailable"
+        assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider_unavailable"
         assert "bankroll_truth_missing" in status["risk"]["infrastructure_issues"]
 
 
@@ -1979,10 +1979,10 @@ class TestPhase2DExecutionCapabilityStatus:
             ("exit", "global_allow_submit"),
             ("redeem", "global_allow_redeem"),
         ):
-            assert matrix[action]["status"] == "blocked"
+            assert matrix[action]["status"] == "unavailable"
             assert matrix[action][allow_key] is False
             assert matrix[action]["live_action_authorized"] is False
-            assert "cutover_guard" in matrix[action]["blocked_components"]
+            assert "cutover_guard" in matrix[action]["unavailable_components"]
         assert matrix["cancel"]["status"] == "requires_intent"
         assert matrix["cancel"]["global_allow_cancel"] is True
         assert matrix["cancel"]["live_action_authorized"] is False

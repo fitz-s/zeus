@@ -61,11 +61,6 @@ HEARTBEAT_SCHEMA_REGISTRY: dict[str, dict] = {
             "match writer behavior."
         ),
     },
-    "oracle_error_rates.heartbeat.json": {
-        "writer": "scripts/bridge_oracle_to_calibration.py",
-        "declared_fields": ["sha256", "written_at"],
-        "note": "Artifact-derived sidecar; keys are artifact metadata + sha256.",
-    },
 }
 
 

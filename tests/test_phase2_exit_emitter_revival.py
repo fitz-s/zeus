@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -555,6 +556,116 @@ class TestDay0StaticClosedBehavioral:
         assert summary.get("monitor_closed_market_pending_settlement_after_eval", 0) == 1, (
             "a static-closed market with NO executable bid must still receive the "
             "terminal MARKET_CLOSED stamp (post-eval)"
+        )
+
+    def test_venue_closed_still_records_day0_hard_fact(self, monkeypatch):
+        """Venue closed blocks sell submission, not settlement-observation truth."""
+
+        import logging as _logging
+        from datetime import datetime, timezone
+
+        from src.engine import cycle_runtime
+
+        conn = _db()
+        pos = _make_position(
+            trade_id="day0-venue-closed-hard-fact",
+            state="day0_window",
+            chain_state="synced",
+            direction="buy_no",
+            condition_id=_CONDITION_ID,
+            market_id=_CONDITION_ID,
+            no_token_id=_ASSET_ID,
+            token_id="yes-token",
+            p_posterior=0.8,
+            entry_price=0.77,
+        )
+        _seed_position_current(conn, pos)
+        portfolio = _portfolio(pos)
+
+        class ClosedClob:
+            def get_clob_market_info(self, condition_id):
+                return {"closed": True, "accepting_orders": False}
+
+            def get_best_bid_ask(self, token_id):  # pragma: no cover - must not be reached
+                raise AssertionError("closed hard-fact monitor should not need a quote")
+
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None, world_conn=None, **kwargs: SimpleNamespace(
+                action="EXIT_DEAD_BIN",
+                reason="observed high entered held NO bin",
+                source="durable_observation_instants",
+            ),
+        )
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn_, pos_, *, deps, **kwargs: True,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+            def add_exit(self, *a, **k):
+                pass
+
+        deps = type(
+            "Deps",
+            (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult",
+                    (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_venue_closed_hard_fact"),
+                "cities_by_name": {
+                    "London": type("City", (), {"timezone": "Europe/London"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 20, 6, 0, tzinfo=timezone.utc)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            ClosedClob(),
+            portfolio,
+            Artifact(),
+            type("Tracker", (), {"record_exit": lambda self, position: None})(),
+            summary,
+            deps=deps,
+            exit_order_submit_enabled=False,
+        )
+
+        assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
+        assert summary.get("day0_hard_fact_closed_market_monitors", 0) == 1
+        assert summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) == 1
+        assert results and results[0].fresh_prob == pytest.approx(0.0)
+        assert "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED" in results[0].exit_reason
+        assert pos.last_monitor_prob == pytest.approx(0.0)
+        assert pos.last_monitor_prob_is_fresh is True
+        assert pos.last_monitor_market_price is None
+        assert pos.last_monitor_market_price_is_fresh is False
+        hold_event = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND caused_by = 'market_closed_hold_to_settlement'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (pos.trade_id,),
+        ).fetchone()
+        assert hold_event is not None
+        assert json.loads(hold_event["payload_json"])["semantic_event"] == (
+            "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
         )
 
 

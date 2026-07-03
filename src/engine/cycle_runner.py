@@ -15,10 +15,9 @@ from datetime import datetime, timezone
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
-# 2026-05-04 (live-block antibody — structural fix #4): single source of truth
-# for "why are entries blocked right now?" across all 13 stacked gates.
-# Phase 1 is observational — registry snapshot is logged + emitted into the
-# cycle JSON before the existing L752 short-circuit.  Existing logic unchanged.
+# 2026-05-04 (live-block antibody — structural fix #4): operator snapshot for
+# "why are entries blocked right now?" across current runtime blocker probes.
+# Runtime entry authority remains _discovery_gates_allow_entries() below.
 # See docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
 from src.control.entries_block_registry import (
     BlockStage,
@@ -29,7 +28,7 @@ from src.control.block_adapters._base import RegistryDeps
 # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01): module-level import
 # so test monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", ...) takes effect.
 # Per-cycle freshness consumer wired into run_cycle() top to short-circuit DAY0_CAPTURE
-# and tag OPENING_HUNT degraded_data when source_health.json shows stale upstreams.
+# and block OPENING_HUNT entries when source_health.json shows stale upstreams.
 from src.control.freshness_gate import evaluate_freshness_mid_run
 from src.data.market_scanner import (
     capture_executable_market_snapshot,
@@ -105,7 +104,7 @@ from src.strategy.risk_limits import RiskLimits
 logger = logging.getLogger(__name__)
 
 # Post-A4: KNOWN_STRATEGIES is derived from the StrategyProfile registry's
-# boot-allowed set (live_status in {"live", "shadow"}). The pre-A4 hardcoded
+# boot-allowed set (live_status == "live"). The pre-A4 hardcoded
 # set was a 4-entry literal that drifted independently of LIVE_SAFE_STRATEGIES
 # in control_plane (both nominally "boot allowlist", separate sources).
 # Resolved here by routing through the single registry source — see PLAN.md
@@ -132,17 +131,28 @@ def _has_quarantined_positions(portfolio: PortfolioState) -> bool:
     # for mid-cycle chain-only-quarantine detection. Chain reconcile now
     # emits typed ChainOnlyFact entries instead of synthetic Position rows.
     # PR D1 (Finding D1, Part-2 audit, 2026-05-27): gate fires only on facts
-    # whose review_state still blocks entry (UNRESOLVED / EXPIRED /
-    # ACKNOWLEDGED). RESOLVED facts (operator-cleared or settled) do NOT
-    # block — see ChainOnlyFact.blocks_entry.
+    # whose review_state still blocks entry (fresh UNRESOLVED or operator
+    # ACKNOWLEDGED). EXPIRED/RESOLVED facts are review debt, not current
+    # entry blockers — see ChainOnlyFact.blocks_entry.
     chain_only_facts = getattr(portfolio, "chain_only_facts", None) or []
     if any(getattr(fact, "blocks_entry", True) for fact in chain_only_facts):
         return True
-    return any(
-        _semantic_value(getattr(pos, "state", "")) == "quarantined"
-        or _semantic_value(getattr(pos, "chain_state", "")) in {"quarantined", "quarantine_expired"}
-        for pos in portfolio.positions
-    )
+    for pos in portfolio.positions:
+        chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+        if chain_state in {"quarantined", "quarantine_expired"}:
+            return True
+        if _semantic_value(getattr(pos, "state", "")) != "quarantined":
+            continue
+        if _runtime._quarantined_position_can_redecision(pos):
+            continue
+        if chain_state in {
+            "chain_absent_confirmed_position_unattributed",
+            "chain_confirmed_zero",
+            "entry_authority_quarantined",
+        }:
+            continue
+        return True
+    return False
 
 
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED
@@ -359,10 +369,10 @@ def _discovery_gates_allow_entries(
     chain_ready: bool,
     has_quarantine: bool,
     force_exit: bool,
+    freshness_allows_entries: bool,
     entry_bankroll,
     exposure_gate_hit: bool,
     entries_paused: bool,
-    block_registry,
 ) -> bool:
     """Return True only when ALL entry-blocking conditions are clear.
 
@@ -374,18 +384,15 @@ def _discovery_gates_allow_entries(
 
     Fail-closed rules:
     - Any non-GREEN risk_level → blocked (fails closed on unknown future levels).
-    - block_registry is None (construction failed) → blocked. Registry-unavailable
-      is treated as is_clear=False to preserve the fail-closed contract. This is
-      intentional: a broken safety registry is itself a blocking condition.
-    - block_registry.is_clear(BlockStage.DISCOVERY) is False → blocked.
     - Status dicts missing the "entry" key default to not allowing submit.
+    - Degraded/unknown forecast freshness blocks entries while monitor/exit
+      lanes continue; it is not an observability-only tag.
     """
-    if block_registry is None or not block_registry.is_clear(BlockStage.DISCOVERY):
-        return False
     return (
         chain_ready
         and not has_quarantine
         and not force_exit
+        and freshness_allows_entries
         and not entries_paused
         and current_posture == "NORMAL"
         and entry_bankroll is not None
@@ -399,22 +406,20 @@ def _discovery_gates_allow_entries(
     )
 
 
-# P0.3 (INV-27): observability-only surfacing of positions in execution-unsafe
-# states. Operator decision 2026-04-26: surface warnings, do NOT block entries.
-# K4 (P1+) will replace these heuristics with command-truth integration.
+# P0.3 (INV-27): surface pending execution-truth holes that are not already
+# represented by a canonical entry gate. Quarantine is intentionally excluded:
+# _has_quarantined_positions() is the live entry blocker for that state.
 _PENDING_STATE_PREFIX = "pending_"
-_QUARANTINED_STATE_VALUES = frozenset({"quarantined", "quarantine_expired"})
 
 
 def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
-    """Scan portfolio for positions in execution-unsafe states.
+    """Scan portfolio for pending positions with unknown command authority.
 
     Returns a list of warning dicts. Each warning carries enough identity
-    (trade_id, state) for an operator to investigate; we do not block entries.
+    (trade_id, state) for an operator to investigate. It is not a duplicate
+    quarantine surface; quarantine already blocks via _has_quarantined_positions.
 
-    Detection rules (P0 conservative — pre-K4):
-    - Position in any quarantined state with empty `order_id`
-      → "quarantine_without_order_authority"
+    Detection rule:
     - Position in any pending_* state with empty `order_id`
       → "pending_state_missing_order_id"
 
@@ -427,14 +432,7 @@ def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
         state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
         order_id = str(getattr(pos, "order_id", "") or "").strip()
         trade_id = getattr(pos, "trade_id", "") or ""
-        if state_val in _QUARANTINED_STATE_VALUES and not order_id:
-            warnings.append({
-                "type": "quarantine_without_order_authority",
-                "trade_id": trade_id,
-                "state": state_val,
-                "reason": "Position is quarantined without order_id; no venue command authority to verify state.",
-            })
-        elif state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
+        if state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
             warnings.append({
                 "type": "pending_state_missing_order_id",
                 "trade_id": trade_id,
@@ -458,11 +456,6 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
         return "opening_inertia"
     if mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE:
         return "imminent_open_capture"
-    from src.strategy.strategy_profile import _classify_via_registry
-    from types import SimpleNamespace as _SimpleNamespace
-    _ctx = _SimpleNamespace(edge=edge, candidate=None, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
-        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return "unclassified"
@@ -619,12 +612,13 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # tests can monkeypatch it. Four branches per design §3.1 + imminent extension:
     #   FRESH    → fall through (normal cycle)
     #   STALE w/ day0_capture_disabled + DAY0_CAPTURE or IMMINENT_OPEN_CAPTURE → short-circuit
-    #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → tag degraded_data, continue
+    #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → block entries, continue monitor/exits
     # The DAY0 short-circuit returns the summary BEFORE any IO so the trading stack
-    # never touches stale upstream data. OPENING_HUNT continues with the flag set
-    # so downstream entry decisions can be tagged in decision_log.
+    # never touches stale upstream data. OPENING_HUNT continues only for
+    # monitor/exit/reconciliation; discovery is blocked by the central gate.
     # IMMINENT_OPEN_CAPTURE is fail-closed like DAY0_CAPTURE: markets close within
     # 24h so there is no time to recover from a bad trade on stale signals.
+    freshness_allows_entries = True
     try:
         _freshness_verdict = evaluate_freshness_mid_run(STATE_DIR)
     except Exception as exc:
@@ -649,7 +643,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
             summary["freshness_gate_error"] = repr(exc)
             return summary
         summary["degraded_data"] = True
+        summary["freshness_entry_blocked"] = True
         summary["freshness_gate_error"] = repr(exc)
+        freshness_allows_entries = False
         _freshness_verdict = None
     if _freshness_verdict is not None:
         # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly
@@ -668,7 +664,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
             return summary
         if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
             summary["degraded_data"] = True
+            summary["freshness_entry_blocked"] = True
             summary["stale_sources"] = list(_freshness_verdict.stale_sources)
+            freshness_allows_entries = False
 
     artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)
 
@@ -984,6 +982,8 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
+    elif not freshness_allows_entries:
+        entries_blocked_reason = "freshness_degraded"
     elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED, RiskLevel.DATA_DEGRADED):
         # Phase 9A R-BT: DATA_DEGRADED from DT#6 (portfolio_loader_degraded) must
         # populate entries_blocked_reason so operators see a reason code in
@@ -1020,31 +1020,20 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # posture surfaces only when it is the *sole* block.
     if entries_blocked_reason is None and _current_posture != "NORMAL":
         entries_blocked_reason = f"posture={_current_posture}"
-    # ── BLOCK-REGISTRY BUILD (codereview-may19.md P0-1) ─────────────────────
-    # Build registry first; _block_registry=None means construction failed and
-    # the gate FAIL-CLOSES (registry-unavailable is itself a blocking condition).
-    # Snapshot is written to summary JSON for diagnostics regardless of gate outcome.
-    # CI gate `tests/test_no_unregistered_block_predicate.py` enforces all block
-    # predicates are registered adapters.
-    _block_registry = None  # fail-closed default; set below on success
+    # ── BLOCK-REGISTRY SNAPSHOT ───────────────────────────────────────────────
+    # The registry is observability only. Entry authority is the explicit
+    # _discovery_gates_allow_entries() inputs below; a broken snapshot must not
+    # become an extra runtime blocker.
     try:
-        import os as _os
-        from pathlib import Path as _Path
         from src.state.db import get_world_connection as _get_world_conn, get_connection as _get_db_conn, RISK_DB_PATH as _RISK_DB_PATH
-        from src.riskguard import riskguard as _riskguard_mod
         from src.control import heartbeat_supervisor as _heartbeat_mod
         from src.control import ws_gap_guard as _ws_gap_mod
-        from src.control import entry_forecast_rollout as _rollout_gate_mod
         _block_registry = EntriesBlockRegistry.from_runtime(
             RegistryDeps(
-                state_dir=_Path(STATE_DIR),
                 db_connection_factory=_get_world_conn,
                 risk_state_db_connection_factory=lambda: _get_db_conn(_RISK_DB_PATH),
-                riskguard_module=_riskguard_mod,
                 heartbeat_module=_heartbeat_mod,
                 ws_gap_guard_module=_ws_gap_mod,
-                rollout_gate_module=_rollout_gate_mod,
-                env=dict(_os.environ),
             )
         )
         _block_snapshot = _block_registry.enumerate_blocks(stage="all")
@@ -1060,8 +1049,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         )
         summary["block_registry"] = [b.to_dict() for b in _block_snapshot]
     except Exception as _registry_exc:  # noqa: BLE001
-        # Registry construction failed — _block_registry stays None.
-        # The gate will fail-closed: _block_registry=None → gate returns False.
         logger.warning(
             "ENTRIES_BLOCK_REGISTRY_SNAPSHOT_FAILED cycle=%s exc=%s: %s",
             summary.get("cycle_id", "?"),
@@ -1074,7 +1061,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # _discovery_gates_allow_entries() is the SINGLE authority for entry dispatch.
     # It consumes all known blockers as explicit kwargs. Status dicts missing the
     # "entry" key default to not allowing submit (fail-closed per PR #54 fix-up).
-    # _block_registry=None (construction failed above) → gate fails closed.
     if _discovery_gates_allow_entries(
         risk_level=risk_level,
         heartbeat_status=_heartbeat_status,
@@ -1085,10 +1071,10 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         chain_ready=chain_ready,
         has_quarantine=has_quarantine,
         force_exit=force_exit,
+        freshness_allows_entries=freshness_allows_entries,
         entry_bankroll=entry_bankroll,
         exposure_gate_hit=exposure_gate_hit,
         entries_paused=entries_paused,
-        block_registry=_block_registry,
     ):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(

@@ -1,5 +1,7 @@
 # Agent PR discipline — four first-principles of workflow quality
 
+Status: ACTIVE
+
 Created: 2026-05-09
 Last extended: 2026-05-09
 Authority basis: operator directive 2026-05-09 (post PR #105/#106 — "first-principles, not blockers; teach not enforce")

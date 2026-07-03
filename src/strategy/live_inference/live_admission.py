@@ -6,25 +6,34 @@ than per-family ranking. They do not change q, price, FDR, Kelly, or venue state
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import math
 
-# SINGLE VOCABULARY (pr408 review C1+C2 #1 CRITICAL, 2026-06-14): the settlement-backward
-# coverage admission predicates live in ONE home (the K3 module) and are imported here so
-# the live-admission gate reads the SAME contract as the ARM gate and the cert credential —
-# never a re-derived status-name allowlist. The prior {LICENSED, UNLICENSED} allowlist
-# EXCLUDED INSUFFICIENT_DATA and rejected thin-settlement cold cells at submit; these
-# predicates make INSUFFICIENT_DATA license-by-default exactly as the K3 design requires.
+# BUY-NO MATERIAL-BIN VOCABULARY: this is stricter than the replacement certificate
+# coverage predicate. A typed INSUFFICIENT_DATA verdict proves the coverage authority ran
+# and is enough for the certificate bridge to continue into ordinary live gates, but it
+# is not enough to waive the special material-bin buy-NO evidence requirement.
 from src.calibration.settlement_backward_coverage import (
-    settlement_coverage_allows_arm,
     settlement_coverage_refutes_claim,
 )
 
 
-# Operator objective: real participating trades must settle with stable win-rate
-# greater than 51% after costs. Positive-EV low-probability lottery legs remain
-# valid research/shadow evidence, but they are not live-money entries.
+# Operator objective for ordinary binary replacement/NO-side candidates: real
+# participating trades must settle with stable win-rate greater than 51% after
+# costs. Q-kernel center-buy YES is a different Arrow-Debreu point-bin contract:
+# a single exact-bin YES can be profitable with side probability below 51% when
+# it is the family-efficient claim. It uses the q-kernel quality floor below
+# instead of this binary replacement floor.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
+LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.15
+LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS = frozenset({
+    "center_buy",
+    "forecast_qkernel_entry",
+})
+LIVE_NEAR_DAY0_FORECAST_ENTRY_LEAD_HOURS = 12.0
+LIVE_NEAR_DAY0_FORECAST_ENTRY_POST_START_HOURS = 24.0
+LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE = 1.0
 
 # A buy-NO on a single settlement bin is not a generic "not this exact value"
 # lottery when the model itself assigns material YES mass to that bin. The
@@ -37,24 +46,19 @@ LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
 LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
 
-# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11; pr408 #1 CRITICAL,
-# 2026-06-14): the settlement-backward coverage verdict statuses under which the buy-NO
-# material-bin conservative-evidence gate admits a fused-bootstrap q_lcb. ANY REAL VERDICT
-# is settled-record evidence the gate honors:
+# Settlement-backward coverage verdict statuses under which the buy-NO material-bin
+# conservative-evidence gate admits a fused-bootstrap q_lcb. This is intentionally
+# narrower than the certificate bridge's "typed verdict exists" rule:
 #   LICENSED          = realized settled win-rate backs the claimed q_lcb within tolerance.
-#   INSUFFICIENT_DATA = thin/absent per-day claim history — license-by-default (RULE 1:
-#                       lack of data is NOT proof of overconfidence; the EMOS/MC q_lcb
-#                       already carries its own conservative LCB floor). pr408 #1: the prior
-#                       allowlist OMITTED this, rejecting every thin-settlement cold cell.
 #   UNLICENSED        = the record refuted the raw claim and the K3 shrink to realized-1pp
 #                       was the verdict's output — the (shrunk) q_lcb is settled-backed.
-# Built from the K3 admission predicates (allows_arm ∪ refutes_claim = all real verdicts)
-# so this set can never drift from the ARM gate / cert credential vocabulary. None /
-# UNEVALUATED carry NO verdict at all → not in this set → not admitted by this gate.
+#   INSUFFICIENT_DATA = thin/absent claim history; not overconfidence proof, but
+#                       also not a material-bin buy-NO waiver.
+# None / UNEVALUATED carry no executable verdict and are not admitted by this gate.
 # Category inversion this kills: a record-BACKED bootstrap q_lcb must not be rejected while
 # a record-REFUTED (re-branded) one is accepted. The verdict, not the brand, is the evidence.
 SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset(
-    {"LICENSED", "INSUFFICIENT_DATA", "UNLICENSED"}
+    {"LICENSED", "UNLICENSED"}
 )
 
 
@@ -77,6 +81,155 @@ def live_win_rate_floor_rejection_reason(
     if q_value < floor_value:
         return f"ADMISSION_WIN_RATE_FLOOR:q_lcb={q_value:.4f}:min={floor_value:.4f}"
     return None
+
+
+def qkernel_center_yes_quality_floor() -> float:
+    """Minimum conservative exact-bin YES probability for live q-kernel center buys."""
+
+    return float(LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB)
+
+
+def is_qkernel_exact_yes_strategy(strategy_key: object) -> bool:
+    return str(strategy_key or "").strip() in LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS
+
+
+def live_entry_probability_quality_rejection_reason(
+    *,
+    q_lcb: float | int | None,
+    direction: object = None,
+    strategy_key: object = None,
+    selection_authority_applied: object = None,
+    qkernel_execution_economics: object = None,
+    floor: float = LIVE_DIRECTION_WIN_RATE_FLOOR,
+) -> str | None:
+    """Return the probability-quality blocker for a live entry candidate.
+
+    Ordinary buy-side entries keep the binary selected-side win-rate floor. The
+    q-kernel center-buy YES lane is exempt from the 51% binary floor because it
+    buys one exact outcome in a multi-bin family; using the binary floor there
+    mechanically starves legitimate center YES trades and pushes the optimizer
+    toward NO. It still needs a real conservative probability floor so cheap
+    longshot tails cannot pass on ROI optics alone.
+    """
+
+    direction_value = getattr(direction, "value", direction)
+    direction_text = str(direction_value or "").strip().lower()
+    direction_is_buy_yes = direction_text in {"buy_yes", "yes", "direction.yes"}
+    strategy_text = str(strategy_key or "").strip()
+    authority_text = str(selection_authority_applied or "").strip()
+    is_qkernel_center_yes = (
+        direction_is_buy_yes
+        and is_qkernel_exact_yes_strategy(strategy_text)
+        and authority_text == "qkernel_spine"
+        and isinstance(qkernel_execution_economics, Mapping)
+        and str(qkernel_execution_economics.get("source") or "").strip() == "qkernel_spine"
+    )
+    if is_qkernel_center_yes:
+        reason = live_win_rate_floor_rejection_reason(
+            q_lcb=q_lcb,
+            floor=qkernel_center_yes_quality_floor(),
+        )
+        if reason is None:
+            return None
+        return reason.replace(
+            "ADMISSION_WIN_RATE_FLOOR",
+            "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
+            1,
+        )
+    return live_win_rate_floor_rejection_reason(q_lcb=q_lcb, floor=floor)
+
+
+def near_day0_raw_extrema_consistency_rejection_reason(
+    *,
+    event_type: object,
+    direction: object,
+    target_bin_low: float | int | None,
+    target_bin_high: float | int | None,
+    raw_member_min: float | int | None,
+    raw_member_max: float | int | None,
+    raw_member_count: int | None,
+    lead_hours_to_target_start: float | int | None,
+    source_cycle_time: object = None,
+    margin_native: float = LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE,
+    pre_start_window_hours: float = LIVE_NEAR_DAY0_FORECAST_ENTRY_LEAD_HOURS,
+    post_start_window_hours: float = LIVE_NEAR_DAY0_FORECAST_ENTRY_POST_START_HOURS,
+) -> str | None:
+    """Reject forecast-lane exact-bin YES entries that contradict near-Day0 raw extrema.
+
+    The q-kernel may buy a YES point/range with conservative probability below a
+    binary 51% floor, but close to the local target day the same raw-model extrema
+    that feed the spine must still support the selected bin. A daily posterior tail
+    widened by sigma cannot overrule a fresh short-horizon member envelope.
+
+    This predicate is intentionally one-way: it only guards forecast-lane buy-YES
+    entries. Day0 observation events have their own authority, and buy-NO receives
+    support from the selected-side NO bound rather than from overlap with the YES bin.
+    """
+
+    event_text = str(event_type or "").strip()
+    if event_text not in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
+        return None
+    direction_value = getattr(direction, "value", direction)
+    if str(direction_value or "").strip().lower() not in {"buy_yes", "yes", "direction.yes"}:
+        return None
+    try:
+        lead_hours = float(lead_hours_to_target_start)
+        pre_window = float(pre_start_window_hours)
+        post_window = float(post_start_window_hours)
+        margin = float(margin_native)
+    except (TypeError, ValueError):
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:lead_hours=missing"
+    if not all(math.isfinite(v) for v in (lead_hours, pre_window, post_window, margin)):
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:lead_hours=nonfinite"
+    if pre_window <= 0.0 or post_window <= 0.0 or margin < 0.0:
+        raise ValueError("near-Day0 raw-extrema windows and margin must be positive")
+    if lead_hours > pre_window or lead_hours < -post_window:
+        return None
+    if lead_hours <= 0.0:
+        return (
+            "ADMISSION_DAY0_FORECAST_ENTRY_REQUIRES_OBSERVATION_LANE:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    try:
+        count = int(raw_member_count or 0)
+        raw_min = float(raw_member_min)
+        raw_max = float(raw_member_max)
+    except (TypeError, ValueError):
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    if count <= 0 or not all(math.isfinite(v) for v in (raw_min, raw_max)):
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_MISSING:"
+            f"lead_hours={lead_hours:.3f}"
+        )
+    if raw_min > raw_max:
+        return (
+            "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_INVALID:"
+            f"raw_min={raw_min:.3f}:raw_max={raw_max:.3f}:count={count}"
+        )
+    bin_low = None if target_bin_low is None else float(target_bin_low)
+    bin_high = None if target_bin_high is None else float(target_bin_high)
+    if bin_low is not None and not math.isfinite(bin_low):
+        bin_low = None
+    if bin_high is not None and not math.isfinite(bin_high):
+        bin_high = None
+    if bin_low is None and bin_high is None:
+        return "ADMISSION_NEAR_DAY0_RAW_EXTREMA_EVIDENCE_INVALID:bin_bounds=missing"
+
+    below_selected_bin = bin_low is not None and raw_max < (bin_low - margin)
+    above_selected_bin = bin_high is not None and raw_min > (bin_high + margin)
+    if not (below_selected_bin or above_selected_bin):
+        return None
+    cycle_text = str(source_cycle_time or "").strip() or "missing"
+    return (
+        "ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION:"
+        f"lead_hours={lead_hours:.3f}:raw_min={raw_min:.3f}:raw_max={raw_max:.3f}:"
+        f"bin_low={'open' if bin_low is None else f'{bin_low:.3f}'}:"
+        f"bin_high={'open' if bin_high is None else f'{bin_high:.3f}'}:"
+        f"margin={margin:.3f}:count={count}:cycle={cycle_text}"
+    )
 
 
 def live_lcb_consistency_rejection_reason(
@@ -252,22 +405,10 @@ def live_buy_no_conservative_evidence_rejection_reason(
     guard is deliberately one-way: it never creates a trade and it does not touch
     buy-YES.
 
-    ``settlement_coverage_status`` (twin-authority reconciliation #7, 2026-06-11) is
-    the family's settlement-backward coverage VERDICT status — the SAME flag-
-    independent verdict the cert credential licenses on (computed once per family on
-    the replacement path; the caller threads the status string, keeping this module
-    pure). When the q_lcb source is not in the allow-list, ANY real settled-record
-    verdict admits — read through the K3 admission predicates so this gate can never
-    drift from the ARM gate / cert vocabulary:
-      * LICENSED / INSUFFICIENT_DATA  → ``settlement_coverage_allows_arm`` (the record
-        did not refute; INSUFFICIENT_DATA is license-by-default — pr408 #1 CRITICAL fix:
-        the prior allow-list OMITTED it, blocking every thin-settlement cold cell).
-      * UNLICENSED                    → ``settlement_coverage_refutes_claim`` (the record
-        evaluated the scope and the K3 shrink to realized-1pp is the verdict's output —
-        the resulting q_lcb is settled-record-backed).
-    None / UNEVALUATED (no verdict at all) reject, with the status appended to the reason
-    for provenance. This is reconciliation, not gate-weakening: the evidence bar (a real
-    settled-record verdict) is unchanged — only the vocabulary is unified with the K3 layer.
+    ``settlement_coverage_status`` is the family's settlement-backward coverage
+    verdict. When the q_lcb source is not in the allow-list, this special buy-NO
+    gate admits only LICENSED or UNLICENSED-after-shrink semantics. INSUFFICIENT_DATA
+    is allowed at the certificate layer but is not a material-bin buy-NO waiver.
     """
 
     if direction != "buy_no":
@@ -298,17 +439,8 @@ def live_buy_no_conservative_evidence_rejection_reason(
     if yes_posterior >= material_floor:
         source = str(q_lcb_calibration_source or "").strip()
         if source not in allowed_lcb_sources:
-            # Twin-authority reconciliation #7 (2026-06-11) + pr408 #1 CRITICAL
-            # (2026-06-14): a settlement-backward coverage verdict the settled record
-            # produced is settled-record backing — read through the K3 predicates so this
-            # gate honors the SAME contract as the ARM gate and cert credential. A
-            # non-refuting verdict (LICENSED or INSUFFICIENT_DATA — license-by-default on
-            # thin data) admits; UNLICENSED (refuted → shrunk) is also settled-backed and
-            # admits. Only None / UNEVALUATED (no verdict) falls through to reject. Kills
-            # BOTH the category inversion (record-BACKED bootstrap rejected while a
-            # re-branded record-REFUTED one accepted) AND the thin-data block.
             status = str(settlement_coverage_status or "").strip()
-            if settlement_coverage_allows_arm(status) or settlement_coverage_refutes_claim(status):
+            if status == "LICENSED" or settlement_coverage_refutes_claim(status):
                 return None
             # FIX-4 (§2): the conservative_edge>confidence_gap waiver is DELETED.
             # It admitted a material-YES buy_no on a self-referential test of the
@@ -439,23 +571,3 @@ def city_skill_block_rejection_reason(
         return None
     except Exception:  # noqa: BLE001 — never break admission for the skill gate.
         return None
-
-
-def shadow_log_admission(*, path: str | None = None, **fields) -> bool:
-    """Record a would-admit candidate to the shadow log (accrual of the missing population).
-
-    DEFAULT OFF (``ZEUS_SHADOW_ADMIT_LOG`` unset) -> no-op (returns False). When ON: appends the
-    would-admit record. FAIL-SOFT: any error is swallowed (observability never breaks trading).
-    ``side`` is derived from ``direction`` for the underlying logger."""
-    try:
-        from src.decision.shadow_admit_logger import maybe_log_candidate
-        if "side" not in fields and "direction" in fields:
-            fields["side"] = "NO" if str(fields.pop("direction") or "").lower() == "buy_no" else "YES"
-        elif "direction" in fields:
-            fields.pop("direction")
-        # The underlying record uses ``q_lcb_side``; the live seam is called with ``q_lcb``.
-        if "q_lcb_side" not in fields and "q_lcb" in fields:
-            fields["q_lcb_side"] = fields.pop("q_lcb")
-        return bool(maybe_log_candidate(path=path, **fields))
-    except Exception:  # noqa: BLE001 — never break trading for a log write.
-        return False

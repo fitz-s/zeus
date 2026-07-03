@@ -19,6 +19,7 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "live_health_probe.py"
 FORECAST_READY_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_forecast_live_ready.py"
+OPS_HEALTH_PROBE_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ops" / "health_probe.py"
 
 
 def _load_module():
@@ -39,6 +40,22 @@ def _load_forecast_ready_module():
     return module
 
 
+def _load_ops_health_probe_module():
+    module_name = "ops_health_probe_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, OPS_HEALTH_PROBE_SCRIPT_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reset_ops_health_probe_state(module) -> None:
+    module.reds.clear()
+    module.warns.clear()
+    module.rows.clear()
+
+
 def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     module = _load_module()
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
@@ -51,6 +68,75 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     assert "src/execution/command_recovery.py" in daemon_paths
     assert "src/execution/exchange_reconcile.py" in daemon_paths
     assert "src/data/polymarket_client.py" in daemon_paths
+
+
+def test_ops_health_probe_ignores_stuck_job_before_latest_daemon_start(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-ingest.err").write_text(
+        "\n".join(
+            [
+                "2026-06-28 01:27:40,000 WARNING Execution of job skipped: maximum number of running instances reached",
+                "2026-06-28 01:36:35,000 INFO Zeus ingest daemon starting (pid=55049)",
+                "2026-06-28 01:36:41,000 INFO Job executed successfully",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 38, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert not module.reds
+    assert ("stuck-jobs", "GREEN", "none in tail") in module.rows
+
+
+def test_ops_health_probe_flags_stuck_job_after_latest_daemon_start(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-ingest.err").write_text(
+        "\n".join(
+            [
+                "2026-06-28 01:36:35,000 INFO Zeus ingest daemon starting (pid=55049)",
+                "2026-06-28 01:37:40,000 WARNING Execution of job skipped: maximum number of running instances reached",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 38, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert any("APScheduler job STALLED" in red for red in module.reds)
+    assert any(row[:2] == ("stuck-jobs", "RED") for row in module.rows)
+
+
+def test_ops_health_probe_ignores_stuck_job_after_later_success(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-substrate-observer.err").write_text(
+        "2026-06-28 01:44:46,865 WARNING Execution of job \"_edli_market_substrate_warm_cycle (trigger: interval[0:00:20], next run at: 2026-06-28 01:44:46 CDT)\" skipped: maximum number of running instances reached (1)",
+        encoding="utf-8",
+    )
+    (log_dir / "zeus-substrate-observer.log").write_text(
+        "2026-06-28 01:52:39,817 INFO Job \"_edli_market_substrate_warm_cycle (trigger: interval[0:00:20], next run at: 2026-06-28 01:52:46 CDT)\" executed successfully",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 53, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert not module.reds
+    assert ("stuck-jobs", "GREEN", "none in tail") in module.rows
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -674,7 +760,7 @@ def test_legacy_ingest_without_opendata_ownership_is_observed_not_actionable(
     assert "legacy_ingest_opendata_owner_present" not in out
 
 
-def test_entry_blocked_is_actionable_even_when_daemons_are_alive(tmp_path, monkeypatch, capsys):
+def test_entry_unavailable_is_actionable_even_when_daemons_are_alive(tmp_path, monkeypatch, capsys):
     module = _load_module()
     root = tmp_path / "zeus"
     _healthy_state(root)
@@ -705,7 +791,7 @@ def test_entry_blocked_is_actionable_even_when_daemons_are_alive(tmp_path, monke
     assert out.startswith("ALERT")
     assert "entry=blocked" in out
     assert "blocking_gates=1" in out
-    assert "entry_blocked" in out
+    assert "entry_unavailable" in out
 
 
 def test_process_loaded_code_stale_is_actionable(tmp_path, monkeypatch, capsys):
@@ -853,6 +939,38 @@ def test_git_runtime_identity_uses_expected_commit_env(tmp_path, monkeypatch):
     assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls
 
 
+def test_git_runtime_identity_defaults_expected_to_current_head(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "hotfix/live\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = ""
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.delenv("ZEUS_LIVE_EXPECTED_COMMIT", raising=False)
+    monkeypatch.delenv("ZEUS_LIVE_EXPECTED_REF", raising=False)
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["status"] == "ok"
+    assert identity["head"] == "abc123"
+    assert identity["expected_ref"] == "HEAD"
+    assert identity["expected_commit"] == "abc123"
+    assert identity["matches_expected"] is True
+    assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls
+
+
 def test_git_runtime_identity_ignores_station_migration_timestamp_artifact(tmp_path, monkeypatch):
     module = _load_module()
     root = tmp_path / "zeus"
@@ -903,6 +1021,42 @@ def test_git_runtime_identity_ignores_state_station_migration_timestamp_artifact
     assert identity["dirty"] is False
     assert identity["dirty_paths"] == []
     assert identity["ignored_dirty_paths"] == ["state/station_migration_alerts.json"]
+
+
+def test_git_runtime_identity_ignores_non_runtime_dirty_paths(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+
+    def fake_run(args, **kwargs):
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = (
+                " M .claude/hooks/registry.yaml\n"
+                " M docs/operations/current/plans/live_redecision_repair/PLAN.md\n"
+                "?? .ai-bridge/\n"
+                "?? docs/evidence/settlement_guard/2026-06-29_settlement_guard.md\n"
+            )
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["dirty"] is False
+    assert identity["dirty_paths"] == []
+    assert identity["ignored_dirty_paths"] == [
+        ".claude/hooks/registry.yaml",
+        "docs/operations/current/plans/live_redecision_repair/PLAN.md",
+        ".ai-bridge/",
+        "docs/evidence/settlement_guard/2026-06-29_settlement_guard.md",
+    ]
 
 
 def test_git_runtime_identity_still_flags_material_dirty_path(tmp_path, monkeypatch):

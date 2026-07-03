@@ -53,6 +53,48 @@
     "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1",
     "require_active_market_future_coverage": true
   },
+  "edli": {
+    "enabled": true,
+    "live_execution_mode": "edli_live",
+    "edli_live_scope": "forecast_plus_day0",
+    "reactor_mode": "live",
+    "event_writer_enabled": true,
+    "_reactor_scan_interval_seconds_note": "W4.3: edli_event_reactor poll cadence (process_pending's ONLY caller). Default=60 is the current A2 latency-SLA detection floor; do not raise without re-measuring the SLA (see main.py's job registration comment).",
+    "reactor_scan_interval_seconds": 60,
+    "forecast_snapshot_trigger_enabled": true,
+    "day0_extreme_trigger_enabled": true,
+    "day0_authority_catchup_scanner_enabled": true,
+    "day0_hard_fact_live_enabled": true,
+    "market_channel_ingestor_enabled": true,
+    "market_channel_quote_cache_enabled": true,
+    "edli_user_channel_reconcile_enabled": true,
+    "edli_user_channel_message_queue_path": "",
+    "edli_venue_reconcile_facts_path": "",
+    "edli_user_channel_reconcile_max_messages": 50,
+    "edli_user_channel_reconcile_pending_limit": 50,
+    "forecast_snapshot_emit_limit": false,
+    "day0_catchup_emit_limit": 20,
+    "market_channel_refresh_max_actions_per_window": 5,
+    "market_channel_refresh_window_seconds": 60,
+    "pre_submit_max_quote_age_ms": 1000,
+    "pre_submit_balance_allowance_check_enabled": true,
+    "real_order_submit_enabled": true,
+    "durable_submit_outbox_enabled": true,
+    "edli_live_operator_authorized": true,
+    "edli_stage_loaded_sha_file": "state/loaded_sha.json",
+    "edli_stage_source_health_json": "state/source_health.json",
+    "edli_stage_status_json": "state/status_summary.json",
+    "edli_stage_readiness_max_age_seconds": 900,
+    "edli_source_run_dual_chain_enabled": true,
+    "edli_live_promotion_artifact_path": "state/edli_live_promotion_artifact.json",
+    "edli_live_max_unresolved_unknowns": 0,
+    "edli_live_min_realized_edge_bps": 0,
+    "mainstream_warm_max_families_per_cycle": 8,
+    "replacement_0_1_bayes_precision_fusion_capture_enabled": true,
+    "replacement_0_1_bayes_precision_fusion_enabled": true,
+    "replacement_0_1_fused_q_shape_enabled": true,
+    "no_submit_visible_depth_fill_lcb": 0.05
+  },
   "calibration": {
     "method": "platt",
     "refit_every_n": 50,
@@ -155,13 +197,9 @@
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true
   },
-  "baseline_bias_correction_enabled": false,
   "feature_flags": {
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,
-    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
-    "NATIVE_MULTIBIN_BUY_NO_SHADOW": false,
-    "NATIVE_MULTIBIN_BUY_NO_LIVE": false,
-    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization; live gates entry submission."
+    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF."
   }
 }

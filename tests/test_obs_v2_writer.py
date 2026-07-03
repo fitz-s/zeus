@@ -27,8 +27,9 @@ from src.data.observation_instants_writer import (
     insert_rows,
 )
 from src.data.tier_resolver import (
-    SOURCE_ROLE_FALLBACK_EVIDENCE,
+    SOURCE_ROLE_COVERAGE_FILL_EVIDENCE,
     SOURCE_ROLE_HISTORICAL_HOURLY,
+    SOURCE_ROLE_RUNTIME_MONITORING,
     Tier,
     tier_for_city,
 )
@@ -606,30 +607,30 @@ def test_insert_rows_round_trip_primary_ogimet_city_persists_source_role_trainin
 
 
 @pytest.mark.parametrize(
-    "fallback_source",
+    "coverage_fill_source",
     ["ogimet_metar_kord", "meteostat_bulk_kord"],
 )
-def test_insert_rows_round_trip_wu_fallback_persists_runtime_only_source_role(
+def test_insert_rows_round_trip_wu_coverage_fill_persists_non_training_source_role(
     mem_db,
-    fallback_source,
+    coverage_fill_source,
 ):
     row = _make_row(
-        source=fallback_source,
+        source=coverage_fill_source,
         provenance_json=_valid_provenance(
-            fallback=fallback_source,
-            source_url=f"https://example.invalid/{fallback_source}",
+            coverage_fill=coverage_fill_source,
+            source_url=f"https://example.invalid/{coverage_fill_source}",
         ),
     )
     insert_rows(mem_db, [row])
 
     assert _source_semantics(mem_db, city=row.city, source=row.source) == (
-        SOURCE_ROLE_FALLBACK_EVIDENCE,
+        SOURCE_ROLE_COVERAGE_FILL_EVIDENCE,
         0,
-        "RUNTIME_ONLY_FALLBACK",
+        "OK",
     )
 
 
-def test_insert_rows_round_trip_hko_persists_source_reaudit_status(mem_db):
+def test_insert_rows_round_trip_hko_persists_runtime_monitoring_status(mem_db):
     row = ObsV2Row(
         **_minimal_valid_kwargs(
             city="Hong Kong",
@@ -656,9 +657,9 @@ def test_insert_rows_round_trip_hko_persists_source_reaudit_status(mem_db):
     insert_rows(mem_db, [row])
 
     assert _source_semantics(mem_db, city=row.city, source=row.source) == (
-        SOURCE_ROLE_FALLBACK_EVIDENCE,
+        SOURCE_ROLE_RUNTIME_MONITORING,
         0,
-        "REQUIRES_SOURCE_REAUDIT",
+        "OK",
     )
 
 

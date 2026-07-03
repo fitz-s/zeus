@@ -88,6 +88,20 @@ def _fsr_event(city: str, target_date: str, snapshot_id: str, *, available_at: s
     )
 
 
+def _redecision_event(city: str, target_date: str, snapshot_id: str, *, available_at: str):
+    return make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",  # type: ignore[arg-type]
+        entity_key=f"redecision|{city}|{target_date}|high|{snapshot_id}",
+        source="continuous-redecision",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        causal_snapshot_id=snapshot_id,
+        payload={"city": city, "target_date": target_date, "metric": "high"},
+        priority=50,
+    )
+
+
 def _world_conn(*, factory=sqlite3.Connection) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:", factory=factory)
     conn.row_factory = sqlite3.Row
@@ -158,6 +172,82 @@ def test_expired_in_tz_candidate_archived_and_not_rescanned():
     assert expired.event_id not in [e.event_id for e in returned]
     # And it is no longer pending in the working set.
     assert _pending_count(conn) == 0
+
+
+def test_expired_redecision_candidate_archived_and_not_rescanned():
+    """A stale continuous-redecision row is the same forecast decision family.
+
+    It must be pruned from the mutable working set; otherwise old held-position
+    redecision rows keep warming closed/non-active families and starve current
+    entry/redecision work even though fetch_pending already read-filters them.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    expired = _redecision_event(
+        "Chicago", "2026-06-04", "snap-redecision-exp", available_at="2026-06-04T13:00:00+00:00"
+    )
+    store.insert_or_ignore(expired)
+    assert _status_of(conn, expired.event_id) == "pending"
+
+    n = store.archive_expired_candidates(decision_time=_DECISION_TIME)
+    assert n == 1
+
+    assert _status_of(conn, expired.event_id) == "expired"
+    assert _event_row_still_present(conn, expired.event_id)
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert expired.event_id not in [e.event_id for e in returned]
+    assert _pending_count(conn) == 0
+
+
+def test_stale_snapshot_selection_deadline_remains_refreshable_when_local_day_open():
+    """A stale selected executable window is refreshable price evidence, not closure.
+
+    The target local day may still be open, so a requeued event whose selected snapshot
+    deadline is already past must remain active. The substrate refresh/redecision loop
+    owns the cure; archive must not make the event disappear.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    stale = _redecision_event(
+        "Chicago",
+        "2026-06-07",
+        "snap-stale-selection",
+        available_at="2026-06-05T10:00:00+00:00",
+    )
+    fresh = _redecision_event(
+        "Chicago",
+        "2026-06-07",
+        "snap-fresh-selection",
+        available_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+    store.insert_or_ignore(fresh)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET last_error = ?
+         WHERE event_id = ?
+        """,
+        (
+            "EXECUTABLE_SNAPSHOT_STALE:"
+            "selection_deadline=2026-06-05T11:00:00+00:00:"
+            "decision_time=2026-06-05T12:00:00+00:00",
+            stale.event_id,
+        ),
+    )
+
+    returned_before_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert stale.event_id in [event.event_id for event in returned_before_prune]
+    assert fresh.event_id in [event.event_id for event in returned_before_prune]
+
+    archived = store.archive_expired_candidates(decision_time=_DECISION_TIME)
+
+    assert archived == 0
+    assert _status_of(conn, stale.event_id) == "pending"
+    assert _status_of(conn, fresh.event_id) == "pending"
+    returned_after_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert stale.event_id in [event.event_id for event in returned_after_prune]
+    assert fresh.event_id in [event.event_id for event in returned_after_prune]
 
 
 def test_active_oceania_candidate_not_archived_despite_utc_lookback():
@@ -270,6 +360,50 @@ def test_expired_sweep_prefilters_target_band_before_batch_limit():
     assert archived == 1
     assert _status_of(conn, expired.event_id) == "expired"
     assert _status_of(conn, active.event_id) == "pending"
+
+
+def test_frontier_equal_target_gets_exact_city_tz_check():
+    """Rows exactly on the Oceania frontier floor must be examined, not skipped.
+
+    Live regression, 2026-06-29: Auckland's local date made the archive frontier
+    floor 2026-06-28. Old 2026-06-28 FSR rows were not ``< frontier_floor`` so
+    they never reached the exact per-city predicate and stayed pending. The SQL
+    candidate band must include equality, while the city-tz predicate still
+    prevents over-archiving a western city whose target local day is not done.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    decision = "2026-06-29T06:00:00+00:00"
+    # At 06:00Z, Auckland local date is 2026-06-29, so frontier_floor is
+    # 2026-06-28. Chicago's 2026-06-28 local day ended at 05:00Z.
+    expired_fsr = _fsr_event(
+        "Chicago",
+        "2026-06-28",
+        "snap-frontier-exp-fsr",
+        available_at="2026-06-28T02:00:00+00:00",
+    )
+    expired_redecision = _redecision_event(
+        "Chicago",
+        "2026-06-28",
+        "snap-frontier-exp-red",
+        available_at="2026-06-28T02:01:00+00:00",
+    )
+    # Los Angeles's 2026-06-28 local day ends at 07:00Z, so it must survive.
+    active_west = _fsr_event(
+        "Los Angeles",
+        "2026-06-28",
+        "snap-frontier-active",
+        available_at="2026-06-28T02:02:00+00:00",
+    )
+    for event in (expired_fsr, expired_redecision, active_west):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_expired_candidates(decision_time=decision)
+
+    assert archived == 2
+    assert _status_of(conn, expired_fsr.event_id) == "expired"
+    assert _status_of(conn, expired_redecision.event_id) == "expired"
+    assert _status_of(conn, active_west.event_id) == "pending"
 
 
 def test_sweep_is_idempotent():
@@ -389,19 +523,16 @@ def test_expired_sweep_candidate_query_uses_processing_status_index():
 
 
 # ---------------------------------------------------------------------------
-# Venue-close (POST_TRADING) sweep tests — #126, 2026-06-15
+# Static endDate is not venue-close sweep authority — corrected 2026-06-26
 #
-# Bug: archive_expired_candidates used ONLY the local-day predicate.  In the
-# [venue_close, local_day_end) window a family is POST_TRADING (venue closed at
-# F1 12:00-UTC) but the local day has not yet ended, so _strictly_past_in_tz
-# returned False and the family stayed 'pending' forever.  132 families were
-# confirmed stuck live on 2026-06-15 (Miami|2026-06-15|low, etc.).
+# Gamma endDate/F1 12:00Z is resolution timing, not proof that the CLOB is no
+# longer accepting orders. archive_expired_candidates expires only rows whose
+# target local day is strictly past.
 #
 # All four tests use a UTC-negative city (Miami, America/New_York UTC-4 in June)
-# whose local day ends at 2026-06-15T04:00:00Z but whose F1 venue close fired at
-# 2026-06-15T12:00:00Z — i.e. 12:00Z < 04:00Z next day.
+# whose local day ends at 2026-06-16T04:00:00Z.
 #
-# decision_time = 2026-06-15T14:00:00Z: venue closed (>=12:00Z), local NOT yet
+# decision_time = 2026-06-15T14:00:00Z: after Gamma endDate, local NOT yet
 # ended (14:00Z < 04:00Z next day on 2026-06-16).
 # ---------------------------------------------------------------------------
 
@@ -415,19 +546,15 @@ _VENUE_CLOSE_CITY = "Miami"
 _VENUE_CLOSE_TARGET = "2026-06-15"
 
 
-def test_venue_closed_local_open_swept_to_expired():
-    """(a) Bug case: FSR family whose F1 12:00-UTC venue close HAS fired but whose
-    local day has NOT yet ended is swept to 'expired'.  This is the [venue_close,
-    local_day_end) window that previously kept 132 families stuck 'pending' forever
-    (Miami|2026-06-15|low, Wellington|2026-06-15|high, etc., confirmed live 2026-06-16).
+def test_gamma_enddate_local_open_not_swept_to_expired():
+    """A family after Gamma endDate but before local day end is kept active.
 
-    Decision 2026-06-15T14:00Z: Miami/2026-06-15 is POST_TRADING (venue closed
-    at 12:00Z) but the local day ends at 2026-06-16T04:00Z — _strictly_past_in_tz
-    alone returns False, so without the venue-close path the row stays pending forever.
+    Decision 2026-06-15T14:00Z: Miami/2026-06-15 is after 12:00Z but the
+    local day ends at 2026-06-16T04:00Z. Static timing is not venue-closed proof.
     """
     conn = _world_conn()
     store = EventStore(conn)
-    # Miami 2026-06-15: venue closed at 12:00Z; decision at 14:00Z; local day ends 04:00Z next day.
+    # Miami 2026-06-15: after 12:00Z; decision at 14:00Z; local day ends 04:00Z next day.
     stuck = _fsr_event(
         _VENUE_CLOSE_CITY, _VENUE_CLOSE_TARGET, "snap-venue-close",
         available_at="2026-06-15T11:00:00+00:00",
@@ -437,22 +564,17 @@ def test_venue_closed_local_open_swept_to_expired():
 
     n = store.archive_expired_candidates(decision_time=_VENUE_CLOSE_DECISION)
 
-    assert n >= 1, (
-        "a POST_TRADING family in the [venue_close, local_day_end) window must be swept"
-    )
-    assert _status_of(conn, stuck.event_id) == "expired", (
-        "processing status must be 'expired', not left 'pending'"
-    )
+    assert n == 0
+    assert _status_of(conn, stuck.event_id) == "pending"
     # Provenance: immutable event row must NOT be deleted.
     assert _event_row_still_present(conn, stuck.event_id)
-    # Must not reappear in the active scan.
+    # Must remain visible in the active scan.
     returned = store.fetch_pending(decision_time=_VENUE_CLOSE_DECISION, limit=100)
-    assert stuck.event_id not in [e.event_id for e in returned]
+    assert stuck.event_id in [e.event_id for e in returned]
 
 
 def test_genuinely_live_venue_open_not_swept():
-    """(b) Fail-closed: a family whose venue is still OPEN (target_date tomorrow,
-    before its 12:00-UTC close) must NOT be archived.
+    """(b) Fail-closed: a future target_date must NOT be archived.
 
     Decision 2026-06-15T14:00Z; target_date 2026-06-16: F1 close fires at
     2026-06-16T12:00Z which is in the future → phase is PRE_SETTLEMENT_DAY or

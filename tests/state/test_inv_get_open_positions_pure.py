@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 4, PR A scaffold; flipped by PR D)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 4, PR A scaffold; flipped by PR D)
 """Antibody invariants: `get_open_positions(chain_view=...)` is PURE.
 
 Finding 4 (P1 confirmed bug): src/state/portfolio.py:get_open_positions
@@ -95,3 +95,19 @@ def test_get_open_positions_with_chain_view_does_not_mutate_position() -> None:
         f"chain_state mutated from {pre_chain_state!r} to {pos.chain_state!r} — "
         "chain_view must not alter Position without a canonical event."
     )
+
+
+def test_get_open_positions_excludes_local_only_zero_chain_exposure() -> None:
+    pos = _make_pos()
+    pos.chain_state = "local_only"
+    pos.chain_shares = 0.0
+
+    assert get_open_positions(PortfolioState(positions=[pos])) == []
+
+
+def test_get_open_positions_excludes_terminal_no_exposure_chain_state() -> None:
+    pos = _make_pos()
+    pos.chain_state = "chain_confirmed_zero"
+    pos.chain_shares = 0.0
+
+    assert get_open_positions(PortfolioState(positions=[pos])) == []

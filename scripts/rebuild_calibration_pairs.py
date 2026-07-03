@@ -867,7 +867,7 @@ def _low_contract_evidence_rejection(
 
     Old LOW rows have no persisted contract/window evidence; those stay on the
     legacy path until a new recovery data version is introduced.  If a row does
-    carry the new shadow evidence, it must prove the same contract-bin outcome
+    carry the new audit evidence, it must prove the same contract-bin outcome
     before pair generation.  This blocks accidental adjacent-day LOW training
     even if a row was mistakenly marked ``training_allowed=1`` upstream.
     """

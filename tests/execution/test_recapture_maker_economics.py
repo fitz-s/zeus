@@ -29,6 +29,7 @@ class _LegacyIntent:
     executable_snapshot_min_tick_size: float = 0.01
     executable_snapshot_min_order_size: float = 5.0
     executable_snapshot_neg_risk: bool = False
+    limit_price: float = 0.14
 
 
 def _final_intent(*, post_only: bool, limit: float = 0.14):
@@ -58,6 +59,24 @@ def _fresh_snapshot(*, top_ask):
         no_token_id="tok-no",
         condition_id="cond-1",
     )
+
+
+def _fresh_snapshot_with_min_order_size(*, top_ask, min_order_size):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.min_order_size = min_order_size
+    return snap
+
+
+def _fresh_snapshot_with_neg_risk(*, top_ask, neg_risk):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.neg_risk = neg_risk
+    return snap
+
+
+def _fresh_snapshot_with_tick(*, top_ask, min_tick_size):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.min_tick_size = min_tick_size
+    return snap
 
 
 def _stale_snapshot():
@@ -148,6 +167,91 @@ def test_maker_rest_empty_fresh_ask_is_bid_establishing(_patched_recapture):
         submitted_shares=219.77,
     )
     assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_same_selected_token_min_order_size_drift_updates_envelope(_patched_recapture):
+    """Venue min-order metadata can drift between elected snapshot and submit.
+    For the same selected token, recapture should only require the submitted
+    shares to satisfy the fresh venue minimum, then carry fresh metadata forward."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_min_order_size(
+        top_ask=Decimal("0.20"),
+        min_order_size=Decimal("1"),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=True, limit=0.14),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_min_order_size == Decimal("1")
+
+
+def test_same_selected_token_neg_risk_drift_updates_envelope(_patched_recapture):
+    """Fresh recapture may correct stale/missing negRisk metadata for the same token."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_neg_risk(
+        top_ask=Decimal("0.20"),
+        neg_risk=True,
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(executable_snapshot_neg_risk=False),
+        _final_intent(post_only=True, limit=0.14),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_neg_risk is True
+
+
+def test_same_selected_token_tick_drift_updates_envelope(_patched_recapture):
+    """Venue tick metadata can drift between elected snapshot and submit.
+    For the same selected token, recapture should carry the fresh tick forward
+    and keep the order if its fresh-tick limit remains non-crossing."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_tick(
+        top_ask=Decimal("0.20"),
+        min_tick_size=Decimal("0.01"),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(executable_snapshot_min_tick_size=Decimal("0.001")),
+        _final_intent(post_only=True, limit=0.141),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_min_tick_size == Decimal("0.01")
+    assert out.limit_price == 0.14
+
+
+def test_recapture_rejects_when_submitted_shares_below_fresh_min_order_size(_patched_recapture):
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_min_order_size(
+        top_ask=Decimal("0.20"),
+        min_order_size=Decimal("10"),
+    )
+
+    with pytest.raises(ValueError, match="below fresh min_order_size"):
+        _recapture_fresh_entry_snapshot_if_needed(
+            _LegacyIntent(),
+            _final_intent(post_only=True, limit=0.14),
+            conn=object(),
+            submitted_shares=5.0,
+        )
 
 
 def test_taker_still_validates_with_depth_sweep(_patched_recapture, monkeypatch):

@@ -61,8 +61,34 @@ CREATE INDEX IF NOT EXISTS idx_execution_feasibility_evidence_token_created
     ON execution_feasibility_evidence(token_id, created_at DESC)
 """
 
+CREATE_LATEST_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS execution_feasibility_latest (
+    token_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('buy_yes', 'buy_no', 'sell_yes', 'sell_no')),
+    evidence_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    outcome_label TEXT NOT NULL CHECK (outcome_label IN ('YES', 'NO')),
+    quote_seen_at TEXT NOT NULL,
+    book_hash_before TEXT,
+    best_bid_before REAL,
+    best_ask_before REAL,
+    depth_before_json TEXT,
+    created_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    PRIMARY KEY (token_id, direction)
+)
+"""
+
+CREATE_LATEST_TOKEN_CREATED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_execution_feasibility_latest_token_created
+    ON execution_feasibility_latest(token_id, created_at DESC)
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_TOKEN_TIME_INDEX_SQL)
     conn.execute(CREATE_TOKEN_CREATED_INDEX_SQL)
+    conn.execute(CREATE_LATEST_TABLE_SQL)
+    conn.execute(CREATE_LATEST_TOKEN_CREATED_INDEX_SQL)

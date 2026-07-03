@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement soft-anchor fine-tune from single-day/post-selection leakage.
 # Reuse: Run before using Open-Meteo ECMWF IFS 9km + AIFS sampled-2t parameters as promotion evidence.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked integration.
 """Replacement soft-anchor nested fine-tune tests."""
 
 from __future__ import annotations
@@ -115,13 +115,13 @@ def test_leave_day_out_selection_uses_training_days_not_holdout_day() -> None:
     assert result.mean_holdout_log_loss is not None
 
 
-def test_single_day_and_small_sample_finetune_stays_shadow_only() -> None:
+def test_single_day_and_small_sample_finetune_is_blocked() -> None:
     result = evaluate_openmeteo_ecmwf_ifs9_aifs_nested_finetune(
         [_row(date(2026, 6, 4), win_param=PARAM_A)],
         candidate_grid=GRID,
     )
 
-    assert result.status == "SHADOW_EVIDENCE_ONLY"
+    assert result.status == "BLOCKED"
     assert "REPLACEMENT_FINETUNE_INSUFFICIENT_OFFICIAL_DAYS" in result.reason_codes
     assert "REPLACEMENT_FINETUNE_INSUFFICIENT_OFFICIAL_ROWS" in result.reason_codes
     assert "REPLACEMENT_FINETUNE_INCOMPLETE_FOLDS" in result.reason_codes
@@ -168,11 +168,11 @@ def test_finetune_requires_guardrail_bucket_row_coverage_before_promotion_ready(
         min_rows_per_guardrail_bucket=20,
     )
 
-    assert result.status == "SHADOW_EVIDENCE_ONLY"
+    assert result.status == "BLOCKED"
     assert "REPLACEMENT_FINETUNE_GUARDRAIL_BUCKET_COVERAGE_INSUFFICIENT" in result.reason_codes
     coverage = {bucket.guardrail_bucket: bucket for bucket in result.guardrail_bucket_coverage}
     assert coverage["coastal"].row_count == 5
-    assert coverage["coastal"].status == "SHADOW_ONLY"
+    assert coverage["coastal"].status == "BLOCKED"
     assert coverage["standard"].status == "PASS"
     assert result.promotion_ready is False
 

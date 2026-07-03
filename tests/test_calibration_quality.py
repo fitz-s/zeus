@@ -47,8 +47,8 @@ def get_db_path() -> Path:
 def load_calibration_data() -> list[CalibrationRecord]:
     """Load ensemble snapshots joined with settlements for calibration analysis.
     
-    Uses ensemble_snapshots instead of shadow_signals because shadow_signals
-    only contains future predictions not yet settled.
+    Uses ensemble_snapshots instead of the retired signal capture table because
+    live prediction capture is not settlement-labeled calibration truth.
     """
     db_path = get_db_path()
     conn = sqlite3.connect(str(db_path))

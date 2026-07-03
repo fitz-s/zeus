@@ -13,20 +13,17 @@
 #     * MAJOR (drift ledger :32) — exit_family_optimizer is RESURRECTED-AS-INPUT, not
 #       rewritten: ``optimize_exit_family(legs=...)`` is the per-leg direct-sell leg
 #       computer for the DIRECT_SELL route; its ``_per_leg_sell_value`` is the exact
-#       held-side bid cash-out. Conversion is layered on top (shadow), hold-to-redeem
-#       is layered on top from joint_q.
+#       held-side bid cash-out. Hold-to-redeem is layered on top from joint_q.
 #     * MAJOR (drift ledger :33) — the family position-vector does NOT exist at the
 #       exit site today; it is CREATED here by grouping portfolio positions by
 #       ``family_key`` via the ``family_exclusive_dedup`` primitive
 #       (``WeatherFamilyKey`` / ``_family_key``).
 #     * BLOCKER (drift ledger VENUE-PRIMITIVE VERDICT) — convert/merge/split venue
-#       primitives are ABSENT. ``CONVERT_TO_BASKET_SELL`` is therefore built with
-#       ``executable=False`` and CANNOT be chosen. ``DIRECT_SELL`` (native bid sell via
-#       the leaf ``executable_cost`` walker) and ``HOLD_TO_REDEEM`` (redeem wired at
-#       polymarket_v2_adapter.py:872/1496 — accounting-only per operator law 2026-06-10,
-#       but the held-to-resolution payout is real) ARE executable.
-#     * MINOR (drift ledger :41) — the RED test for the conversion route uses the
-#       canonical name ``..._when_more_valuable`` (spec :1216), not the :64 variant.
+#       primitives are ABSENT, so conversion is omitted until a real primitive exists.
+#       ``DIRECT_SELL`` (native bid sell via the leaf ``executable_cost`` walker) and
+#       ``HOLD_TO_REDEEM`` (redeem wired at polymarket_v2_adapter.py:872/1496 —
+#       accounting-only per operator law 2026-06-10, but the held-to-resolution payout
+#       is real) ARE executable.
 #
 #   Live dependencies (ALL already built; imported, never re-implemented):
 #     - src/strategy/exit_family_optimizer.py::{optimize_exit_family, ExitLegInput,
@@ -54,15 +51,13 @@
 This is Stage 10 of the q-kernel rebuild (consult_build_spec.md lines 906-941). The
 exit decision is NOT "should I reverse this one token's edge?" — it is "what is the
 maximum value I can realize from this whole family position right now, and by which
-route?". The engine prices THREE routes over the family position vector and chooses the
-max over the EXECUTABLE ones:
+route?". The engine prices executable routes over the family position vector and chooses
+the max:
 
     direct  = DIRECT_SELL        — sell each held token into its native bid ladder.
-    convert = CONVERT_TO_BASKET_SELL — convert/merge/split into a basket and sell.
     hold    = HOLD_TO_REDEEM     — hold every leg to resolution and redeem the winners.
 
-    chosen = max([direct, convert, hold], key=lambda r: r.value_usd if r.executable
-                                                          else -inf)
+    chosen = max([direct, hold], key=lambda r: r.value_usd)
 
 THE CORRECTED TRANSFORMATION (operator law — make the bad output mathematically
 impossible, NOT a gate that catches it):
@@ -70,20 +65,16 @@ impossible, NOT a gate that catches it):
   The defect this replaces (spec line 940) is that the live exit path builds an
   ``ExitIntent`` for the CURRENT token and calls ``place_sell_order`` — i.e. it treats
   the direct sell of the one position as THE exit authority. The corrected transform
-  makes ``DIRECT_SELL`` ONE route among three and selects by ``max(... value_usd ...)``.
+  makes ``DIRECT_SELL`` ONE route among executable routes and selects by
+  ``max(... value_usd ...)``.
 
   The "direct sell is the exit authority" output is made unconstructable, not detected:
   the engine has NO code path that returns the direct route without first comparing it
-  to ``hold`` (and ``convert`` when it becomes executable). ``LiquidationDecision.chosen``
+  to ``hold``. ``LiquidationDecision.chosen``
   is the literal argmax; there is no branch that short-circuits to direct. So whenever
   hold-to-redeem is worth more than the direct bid sell (the deep-discount-bid case the
   old per-token sell would have realized at a loss), the chosen route is HOLD_TO_REDEEM
   by construction — the engine cannot emit direct as authority while hold dominates.
-
-  Symmetrically, a NON-executable route can NEVER be chosen: the argmax key scores a
-  non-executable route as ``-inf``, so ``CONVERT_TO_BASKET_SELL`` (no venue primitive)
-  is structurally excluded from selection — it is recorded as an alternative for the
-  receipt, not gated out after a wrong pick.
 
 WHAT STAYS LEAF (operator law; drift ledger GREENFIELD):
 
@@ -99,7 +90,7 @@ direct-sell computer, not a rewrite. The engine shapes the family position vecto
 under an ADVISORY_ONLY constraint so it emits per-leg ``sell_value`` without re-deciding
 hold, and sums those sell values into the DIRECT_SELL route. The hold-to-redeem leg is
 computed from ``joint_q`` (spec line 936 — hold value is over the joint q, not the
-observation posterior), and conversion is layered on top as a shadow route.
+observation posterior).
 
 THE POSITION VECTOR IS CREATED HERE (drift ledger MAJOR :33): there is no family
 position-vector at the exit site today (live exit is strictly per-position single-token).
@@ -132,14 +123,7 @@ from src.strategy.live_inference.executable_cost import (
 )
 
 
-RouteType = Literal["DIRECT_SELL", "CONVERT_TO_BASKET_SELL", "HOLD_TO_REDEEM"]
-
-# The reason a route is NON-executable (the venue-primitive blocker for conversion).
-CONVERSION_PRIMITIVE_ABSENT = (
-    "CONVERSION_VENUE_PRIMITIVE_ABSENT: on-chain neg-risk convert/merge/split is not "
-    "wired in PolymarketV2Adapter (drift ledger VENUE-PRIMITIVE VERDICT); the basket "
-    "conversion route cannot be executed and is excluded from selection."
-)
+RouteType = Literal["DIRECT_SELL", "HOLD_TO_REDEEM"]
 
 
 class LiquidationValueError(ValueError):
@@ -229,14 +213,11 @@ class LiquidationRoute:
 
     Field names are verbatim from consult_build_spec.md.
 
-    * ``route_type`` — ``"DIRECT_SELL"`` | ``"CONVERT_TO_BASKET_SELL"`` |
-      ``"HOLD_TO_REDEEM"``.
+    * ``route_type`` — ``"DIRECT_SELL"`` | ``"HOLD_TO_REDEEM"``.
     * ``value_usd`` — the total realized USD value of liquidating the whole family
       vector via this route.
     * ``executable`` — whether this route can actually be executed against wired venue
-      primitives. ``CONVERT_TO_BASKET_SELL`` is ``False`` (no convert/merge/split
-      primitive); a non-executable route is scored ``-inf`` in selection and can never
-      be chosen.
+      primitives.
     * ``legs`` — the per-instrument priced legs that compose the route value.
     * ``reason`` — why the route is non-executable (or any diagnostic), else ``None``.
     """
@@ -262,8 +243,7 @@ class LiquidationDecision:
       scored ``-inf``). This is the literal ``max(...)`` of the route list; there is no
       branch that returns ``direct`` without comparing it to ``hold``, so "direct sell is
       the exit authority" is unconstructable.
-    * ``alternatives`` — every other route (including the shadow conversion route) for
-      the receipt; recorded, not gated.
+    * ``alternatives`` — every other executable route considered for the receipt.
     * ``position_vector_hash`` — a deterministic digest over the family position vector
       (family id, per-instrument quantity, direction, and payoff row) so a route receipt
       can prove which exact family vector it was priced against.
@@ -411,51 +391,7 @@ def direct_sell_value(
 
 
 # ---------------------------------------------------------------------------
-# Route 2 — CONVERT_TO_BASKET_SELL: shadow. No venue primitive (drift BLOCKER).
-# ---------------------------------------------------------------------------
-
-def conversion_basket_sell_value(
-    position: PositionVector,
-    family_book: FamilyBook,
-    venue_primitives: Any = None,
-) -> LiquidationRoute:
-    """Value of converting the family vector into a basket and selling it (SHADOW).
-
-    The on-chain neg-risk convert/merge/split venue primitive is ABSENT (drift ledger
-    VENUE-PRIMITIVE VERDICT) — there is NOTHING to execute. This route is built with
-    ``executable=False`` so it is scored ``-inf`` in selection and can NEVER be chosen,
-    no matter how high a notional basket value would be. This is NOT a cap that catches a
-    bad value: it is honoring the venue BLOCKER — the route has no executable transform,
-    so it carries no realized value and is structurally excluded from the argmax.
-
-    When a convert/merge/split primitive lands in ``PolymarketV2Adapter`` +
-    ``NegRiskAdapter`` (passed here as ``venue_primitives``), this becomes executable and
-    the basket value can be priced against the leaf bid ladders of the complementary
-    siblings. Until then it is a receipt-only alternative.
-    """
-    has_primitive = _venue_has_conversion_primitive(venue_primitives)
-    if not has_primitive:
-        # No primitive → no realized value, executable=False. The basket value is left
-        # at zero (not a guessed notional) so a receipt reader sees "shadow, unpriced".
-        return LiquidationRoute(
-            route_type="CONVERT_TO_BASKET_SELL",
-            value_usd=Decimal(0),
-            executable=False,
-            legs=(),
-            reason=CONVERSION_PRIMITIVE_ABSENT,
-        )
-    # Defensive: a future primitive would price the basket against the leaf bid ladders.
-    # Unreachable today (no primitive exists); kept un-priced so we never fabricate a
-    # value for a route we cannot actually walk yet.
-    raise LiquidationValueError(  # pragma: no cover - no venue primitive exists yet
-        "CONVERSION_PRIMITIVE_PRESENT_BUT_PRICING_UNIMPLEMENTED: a convert/merge/split "
-        "primitive was supplied but basket pricing is not implemented; refuse rather "
-        "than fabricate a value."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Route 3 — HOLD_TO_REDEEM: hold every leg to resolution, redeem winners (joint_q).
+# Route 2 — HOLD_TO_REDEEM: hold every leg to resolution, redeem winners (joint_q).
 # ---------------------------------------------------------------------------
 
 def hold_to_redeem_value(
@@ -550,18 +486,16 @@ class LiquidationValueEngine:
         time_to_resolution: Any = None,
         risk_policy: Any = None,
     ) -> LiquidationDecision:
-        """Price the three routes and select the max over the executable ones."""
+        """Price executable routes and select the max."""
         direct = direct_sell_value(position, family_book)
-        convert = conversion_basket_sell_value(position, family_book, venue_primitives)
         hold = hold_to_redeem_value(
             position, joint_q, time_to_resolution, risk_policy
         )
 
-        routes = (direct, convert, hold)
+        routes = (direct, hold)
 
-        # The argmax over EXECUTABLE routes: a non-executable route scores -inf so it can
-        # never be chosen (the shadow conversion route is structurally excluded). This is
-        # the literal spec line-938 transform; there is no branch that returns direct
+        # The argmax over executable routes. This is the literal spec line-938 transform;
+        # there is no branch that returns direct
         # without this comparison, so "direct sell is the exit authority" is
         # unconstructable.
         chosen = max(routes, key=_route_selection_key)
@@ -714,22 +648,6 @@ def _require_market(family_book: FamilyBook, instrument_id: str) -> MarketBook:
             "the direct sell leg against a missing native ladder."
         )
     return market
-
-
-def _venue_has_conversion_primitive(venue_primitives: Any) -> bool:
-    """True only when a real convert/merge/split venue primitive is supplied.
-
-    The on-chain neg-risk convert/merge/split is ABSENT today (drift ledger VENUE
-    VERDICT), so this returns False for the default ``None`` and for any object that does
-    not expose a convert/merge/split callable. There is no env/flag that flips this — the
-    primitive's PRESENCE is the only thing that makes conversion executable.
-    """
-    if venue_primitives is None:
-        return False
-    for name in ("convert_positions", "merge_positions", "split_position", "convert"):
-        if callable(getattr(venue_primitives, name, None)):
-            return True
-    return False
 
 
 def _attr(obj: Any, name: str, default: Any = None) -> Any:

@@ -1,5 +1,7 @@
 # Plan — Kill the "blocking I/O under the world write mutex" anti-pattern (K≪N)
 
+Status: ACTIVE
+
 Created: 2026-06-04
 Authority basis: live incident 2026-06-04 (zeus-world.db WAL 488MB→1GB+ lock-starvation), feedback_liveness_first_health_antibody, Rule 3 (single mechanism) + Rule 4 (kill error category).
 

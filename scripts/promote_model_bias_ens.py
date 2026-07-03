@@ -7,12 +7,12 @@
 #   model_bias_ens (world.db). INV-37 compliant: single-DB write via
 #   get_world_connection(write_class="bulk") + SAVEPOINT. No ATTACH needed
 #   (model_bias_ens is world-class only; no cross-DB writes in this path).
-#   Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F3.
+#   Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F3.
 """Promote model_bias_ens STAGING rows to VERIFIED in production zeus-world.db.
 
 STAGING rows are written by fit_full_transport_error_models.py with
 ``authority='STAGING'``.  This script promotes them to ``authority='VERIFIED'``
-after the operator confirms shadow-validation results are acceptable.
+after the operator confirms validation results are acceptable.
 
 Subcommands
 -----------

@@ -135,6 +135,43 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeInvalidSafeSignatureTwoStepClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+        )
+
+
+class FakeInvalidSafeSignatureOneStepClient(FakeOneStepClient):
+    def __init__(self):
+        super().__init__(response={"orderID": "ord-recovered", "status": "LIVE"})
+        self._refreshed = False
+        self.derived_creds = FakeApiCreds(
+            "derived-submit-key",
+            "derived-submit-secret",
+            "derived-submit-passphrase",
+        )
+
+    def derive_api_key(self):
+        self.calls.append(("derive_api_key",))
+        return self.derived_creds
+
+    def set_api_creds(self, creds):
+        self.calls.append(("set_api_creds", creds))
+        self._refreshed = True
+
+    def create_and_post_order(self, order_args, options=None, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("create_and_post_order", order_args, options, order_type, post_only, defer_exec))
+        if not self._refreshed:
+            raise RuntimeError(
+                "PolyApiException[status_code=400, "
+                "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+            )
+        return self.response
+
+
 class FakeBalanceAllowanceClient:
     def __init__(self, response=None):
         self.response = response or {"balance": "100000000", "allowance": "50000000"}
@@ -588,6 +625,98 @@ def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     ]
 
 
+def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class FakeClientWithTargetCtf(FakeBalanceAllowanceClient):
+        def get_positions(self):
+            raise AssertionError("target exit CTF proof must not enumerate every position")
+
+        def get_balance_allowance(self, params):
+            self.calls.append(("get_balance_allowance", params))
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                assert getattr(params, "token_id") == "exit-token"
+                return {"balance": "21427700"}
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    fake = FakeClientWithTargetCtf()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=["exit-token"])
+
+    assert payload["ctf_token_scope"] == "targeted"
+    assert payload["ctf_token_balances_units"] == {"exit-token": 21427700}
+    assert payload["ctf_token_allowances_units"] == {"exit-token": 21427700}
+    call_asset_types = [
+        str(getattr(call[1], "asset_type", "")).upper()
+        for call in fake.calls
+        if call[0] == "get_balance_allowance"
+    ]
+    assert any("COLLATERAL" in asset for asset in call_asset_types)
+    assert any("CONDITIONAL" in asset for asset in call_asset_types)
+
+
+def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(refresh_allowance=False)
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == "50000000"
+    assert [call[0] for call in fake.calls] == ["get_balance_allowance"]
+
+
+def test_pusd_collateral_payload_skips_chain_allowance_fallback_for_heartbeat(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        raise AssertionError("pUSD heartbeat must not call chain allowance fallback")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(refresh_allowance=False)
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 0
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "missing"
+    assert rpc_calls == []
+
+
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
@@ -864,11 +993,27 @@ def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(mo
         lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
     )
     monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
+    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: False)
 
     adapter = pm.PolymarketClient()._ensure_v2_adapter()
 
     assert adapter.signature_type == 2
     assert adapter.polygon_rpc_url
+
+
+def test_polymarket_client_requires_explicit_signature_type_when_submit_armed(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
+    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: True)
+
+    with pytest.raises(RuntimeError, match="POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required"):
+        pm.PolymarketClient()._ensure_v2_adapter()
 
 
 def test_default_q1_egress_evidence_uses_current_live_control_surface():
@@ -1187,6 +1332,44 @@ def test_post_order_exception_still_bubbles_as_possible_unknown_side_effect(tmp_
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
+def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(tmp_path):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    fake = FakeInvalidSafeSignatureOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_and_post_order"]
+    assert adapter_mod._cached_derived_api_creds(
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        signer_key="test-key",
+        signature_type=2,
+        funder_address="0xfunder",
+    ) is None
+
+
+def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path):
+    signed = b"signed-safe-order"
+    fake = FakeInvalidSafeSignatureTwoStepClient(signed_order=signed)
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert result.envelope.signed_order == signed
+    assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+
+
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
@@ -1377,6 +1560,34 @@ def test_neg_risk_passthrough_v2_preserves_snapshot_value(tmp_path):
     assert envelope.neg_risk is True
     assert getattr(options, "neg_risk") is True
     assert result.envelope.neg_risk is True
+
+
+def test_submit_rejects_unbound_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    pre_submit_placeholder = envelope.with_updates(funder_address="UNRESOLVED_PRE_SUBMIT_FUNDER")
+
+    result = adapter.submit(pre_submit_placeholder)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "missing pre-bound funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
+
+
+def test_submit_rejects_mismatched_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    mismatched = envelope.with_updates(funder_address="0xotherfunder")
+
+    result = adapter.submit(mismatched)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "does not match adapter funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
 
 
 def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):
@@ -1764,3 +1975,255 @@ def test_old_v1_sdk_import_is_removed_from_live_client_paths():
     ]
     offenders = [path.as_posix() for path in live_paths if "py_clob_client" in path.read_text()]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# W2.1: PolymarketV2Adapter.submit_batch / cancel_batch
+# ---------------------------------------------------------------------------
+
+
+class FakeBatchTwoStepClient:
+    """Two-step SDK client fake supporting post_orders/cancel_orders.
+
+    create_order returns a signed payload that VARIES per call (keyed on
+    token_id+price) so distinct envelopes hash to distinct signed_order
+    hashes -- required to exercise echo-id mapping meaningfully.
+    """
+
+    def __init__(self, post_orders_response=None, cancel_orders_response=None):
+        self.post_orders_response = post_orders_response
+        self.cancel_orders_response = cancel_orders_response
+        self.calls = []
+
+    def get_ok(self):
+        self.calls.append(("get_ok",))
+        return {"ok": True}
+
+    def create_order(self, order_args, options=None):
+        self.calls.append(("create_order", order_args, options))
+        return f"signed:{order_args.token_id}:{order_args.price}".encode()
+
+    def post_orders(self, args, post_only=False, defer_exec=False):
+        self.calls.append(("post_orders", args, post_only, defer_exec))
+        return self.post_orders_response
+
+    def cancel_orders(self, order_ids):
+        self.calls.append(("cancel_orders", order_ids))
+        return self.cancel_orders_response
+
+
+class FakeSigningFailsOnSecondClient(FakeBatchTwoStepClient):
+    def create_order(self, order_args, options=None):
+        self.calls.append(("create_order", order_args, options))
+        if len([c for c in self.calls if c[0] == "create_order"]) == 2:
+            raise RuntimeError("local signing failed on second order")
+        return f"signed:{order_args.token_id}:{order_args.price}".encode()
+
+
+class FakePostOrdersExceptionClient(FakeBatchTwoStepClient):
+    def post_orders(self, args, post_only=False, defer_exec=False):
+        self.calls.append(("post_orders", args, post_only, defer_exec))
+        raise TimeoutError("post_orders timed out")
+
+
+class FakeCancelOrdersExceptionClient(FakeBatchTwoStepClient):
+    def cancel_orders(self, order_ids):
+        self.calls.append(("cancel_orders", order_ids))
+        raise TimeoutError("cancel_orders timed out")
+
+
+def _priced_intent(price: float) -> ExecutionIntent:
+    from dataclasses import replace
+
+    return replace(_intent(), limit_price=price)
+
+
+def _batch_envelopes(adapter, n: int, *, post_only: bool = False):
+    # FakeSnapshot's yes_token_id is fixed ("yes-token"); vary limit_price
+    # per order instead of token_id so create_submission_envelope's
+    # assert_live_submit_bound (selected_outcome_token_id must equal the
+    # snapshot's yes/no token) stays satisfied while still producing
+    # distinct signed_order_hash values per order (FakeBatchTwoStepClient
+    # keys signing on token_id+price).
+    return [
+        adapter.create_submission_envelope(
+            _priced_intent(0.50 + i * 0.01), FakeSnapshot(), order_type="GTC", post_only=post_only
+        )
+        for i in range(n)
+    ]
+
+
+def _signed_hash_for(price: str) -> str:
+    return hashlib.sha256(f"signed:yes-token:{price}".encode()).hexdigest()
+
+
+class TestSubmitBatch:
+    def test_empty_envelopes_returns_empty_list(self, tmp_path):
+        adapter, _ = _adapter(tmp_path, FakeBatchTwoStepClient())
+        assert adapter.submit_batch([]) == []
+
+    def test_oversized_batch_raises_value_error(self, tmp_path):
+        from src.venue.batch_submit import MAX_ORDERS_PER_BATCH
+
+        adapter, _ = _adapter(tmp_path, FakeBatchTwoStepClient())
+        envelopes = _batch_envelopes(adapter, MAX_ORDERS_PER_BATCH + 1)
+        with pytest.raises(ValueError, match="exceeds MAX_ORDERS_PER_BATCH"):
+            adapter.submit_batch(envelopes)
+
+    def test_index_fallback_maps_results_in_order(self, tmp_path):
+        fake = FakeBatchTwoStepClient(
+            post_orders_response=[
+                {"orderID": "ord-0", "status": "LIVE"},
+                {"orderID": "ord-1", "status": "LIVE"},
+                {"orderID": "ord-2", "status": "LIVE"},
+            ]
+        )
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 3)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [r.status for r in results] == ["accepted", "accepted", "accepted"]
+        assert [r.envelope.order_id for r in results] == ["ord-0", "ord-1", "ord-2"]
+        post_orders_call = next(c for c in fake.calls if c[0] == "post_orders")
+        assert len(post_orders_call[1]) == 3
+
+    def test_echo_id_mapping_survives_out_of_order_response(self, tmp_path):
+        prices = [str(0.50 + i * 0.01) for i in range(3)]
+        hashes = [_signed_hash_for(p) for p in prices]
+        # Response deliberately reversed and echoes signed_order_hash --
+        # index mapping would silently mismatch here; echo-id must not.
+        response = [
+            {"orderHash": hashes[2], "orderID": "ord-for-2", "status": "LIVE"},
+            {"orderHash": hashes[1], "orderID": "ord-for-1", "status": "LIVE"},
+            {"orderHash": hashes[0], "orderID": "ord-for-0", "status": "LIVE"},
+        ]
+        fake = FakeBatchTwoStepClient(post_orders_response=response)
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 3)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [r.envelope.order_id for r in results] == ["ord-for-0", "ord-for-1", "ord-for-2"]
+
+    def test_non_array_response_marks_all_unmapped(self, tmp_path):
+        fake = FakeBatchTwoStepClient(post_orders_response={"error": "malformed"})
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [r.status for r in results] == ["unmapped", "unmapped"]
+        assert all(r.error_code == "BATCH_RESPONSE_UNMAPPED" for r in results)
+
+    def test_length_mismatch_marks_all_unmapped(self, tmp_path):
+        fake = FakeBatchTwoStepClient(post_orders_response=[{"orderID": "only-one"}])
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 3)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert len(results) == 3
+        assert all(r.status == "unmapped" for r in results)
+
+    def test_mixed_post_only_rejects_whole_batch_before_signing(self, tmp_path):
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        mixed = [
+            adapter.create_submission_envelope(_priced_intent(0.50), FakeSnapshot(), order_type="GTC", post_only=False),
+            adapter.create_submission_envelope(_priced_intent(0.51), FakeSnapshot(), order_type="GTC", post_only=True),
+        ]
+
+        results = adapter.submit_batch(mixed)
+
+        assert all(r.status == "rejected" and r.error_code == "BATCH_POST_ONLY_MISMATCH" for r in results)
+        assert not any(c[0] == "create_order" for c in fake.calls)
+
+    def test_signing_failure_for_any_envelope_rejects_whole_batch_before_network(self, tmp_path):
+        fake = FakeSigningFailsOnSecondClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 3)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert all(r.status == "rejected" and r.error_code == "V2_PRE_SUBMIT_EXCEPTION" for r in results)
+        assert not any(c[0] == "post_orders" for c in fake.calls)
+
+    def test_post_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
+        fake = FakePostOrdersExceptionClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+
+        with pytest.raises(TimeoutError, match="post_orders timed out"):
+            adapter.submit_batch(envelopes)
+
+        assert any(c[0] == "post_orders" for c in fake.calls)
+
+
+class TestCancelBatch:
+    def test_empty_order_ids_returns_empty_list(self, tmp_path):
+        adapter, _ = _adapter(tmp_path, FakeBatchTwoStepClient())
+        assert adapter.cancel_batch([]) == []
+
+    def test_oversized_batch_raises_value_error(self, tmp_path):
+        from src.venue.batch_submit import MAX_ORDERS_PER_BATCH
+
+        adapter, _ = _adapter(tmp_path, FakeBatchTwoStepClient())
+        with pytest.raises(ValueError, match="exceeds MAX_ORDERS_PER_BATCH"):
+            adapter.cancel_batch([f"ord-{i}" for i in range(MAX_ORDERS_PER_BATCH + 1)])
+
+    def test_index_fallback_maps_canceled_results_in_order(self, tmp_path):
+        fake = FakeBatchTwoStepClient(
+            cancel_orders_response=[
+                {"canceled": True, "orderID": "ord-0"},
+                {"canceled": True, "orderID": "ord-1"},
+            ]
+        )
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch(["ord-0", "ord-1"])
+
+        assert [r.status for r in results] == ["CANCELED", "CANCELED"]
+        cancel_call = next(c for c in fake.calls if c[0] == "cancel_orders")
+        assert cancel_call[1] == ["ord-0", "ord-1"]
+
+    def test_echo_id_mapping_survives_out_of_order_response(self, tmp_path):
+        response = [
+            {"orderID": "ord-1", "canceled": True},
+            {"orderID": "ord-0", "not_canceled": "already open elsewhere"},
+        ]
+        fake = FakeBatchTwoStepClient(cancel_orders_response=response)
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch(["ord-0", "ord-1"])
+
+        assert results[0].order_id == "ord-0"
+        assert results[0].status == "NOT_CANCELED"
+        assert results[1].order_id == "ord-1"
+        assert results[1].status == "CANCELED"
+
+    def test_non_array_response_marks_all_unmapped(self, tmp_path):
+        fake = FakeBatchTwoStepClient(cancel_orders_response={"error": "malformed"})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch(["ord-0", "ord-1"])
+
+        assert all(r.status == "UNKNOWN" for r in results)
+
+    def test_unsupported_client_returns_unmapped_unknown(self, tmp_path):
+        class NoCancelOrdersClient(FakeBatchTwoStepClient):
+            cancel_orders = None  # type: ignore[assignment]
+
+        adapter, _ = _adapter(tmp_path, NoCancelOrdersClient())
+
+        results = adapter.cancel_batch(["ord-0"])
+
+        assert results[0].status == "UNKNOWN"
+        assert results[0].error_code == "CANCEL_BATCH_UNSUPPORTED"
+
+    def test_cancel_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
+        fake = FakeCancelOrdersExceptionClient()
+        adapter, _ = _adapter(tmp_path, fake)
+
+        with pytest.raises(TimeoutError, match="cancel_orders timed out"):
+            adapter.cancel_batch(["ord-0"])

@@ -88,6 +88,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install PyYAML
+      - name: Prepare CI settings
+        run: test -f config/settings.json || cp config/settings.example.json config/settings.json
       - name: Schema smoke
         run: python scripts/check_schema_fingerprint.py
       - name: Money-path test quality metadata
@@ -108,6 +110,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pytest-timeout pytest-rerunfailures PyYAML
+      - name: Prepare CI settings
+        run: test -f config/settings.json || cp config/settings.example.json config/settings.json
       - name: Assert invariant coverage
         run: |
           python scripts/ci/assert_invariant_coverage.py \
@@ -153,6 +157,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pytest-timeout hypothesis PyYAML
+      - name: Prepare CI settings
+        run: test -f config/settings.json || cp config/settings.example.json config/settings.json
       - name: Run deterministic money path
         run: |
           pytest -q tests/money_path \

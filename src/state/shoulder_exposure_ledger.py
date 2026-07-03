@@ -11,7 +11,7 @@ Design:
   - Append-only log of shoulder exposure entries keyed by decision_event_id + side.
   - Used by shoulder_cluster_cap.check_shoulder_cluster_cap to detect cross-city
     same-direction shoulder sell under the same weather-system cluster (plan §2 T3 G3).
-  - Used by shadow_readiness_report to aggregate total exposure.
+  - Used by risk/readiness reports to aggregate total exposure.
 
 INV-37 contract:
   All write/read functions require caller-provided conn (INV-37).
@@ -168,7 +168,7 @@ def read_distinct_cities_in_cluster(
 def read_total_exposure_usd(*, conn: sqlite3.Connection) -> float:
     """Return total notional_usd across all shoulder exposure entries.
 
-    Used by shadow_readiness_report for aggregate portfolio shoulder exposure.
+    Used by risk/readiness reports for aggregate portfolio shoulder exposure.
 
     Parameters
     ----------

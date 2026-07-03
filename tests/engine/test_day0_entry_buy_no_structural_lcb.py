@@ -70,6 +70,58 @@ def test_low_day0_current_record_bin_stays_unresolved_for_buy_no() -> None:
     assert _qlcb_float(lcb[("low20", "buy_no")]) == 0.0
 
 
+def test_low_day0_nonabsorbing_bin_carries_remaining_day_buy_no_lcb() -> None:
+    family = _family(
+        _candidate("low20", 20.0, 20.0),
+        _candidate("low19", 19.0, 19.0),
+    )
+
+    q, lcb = _apply_day0_mask_to_generated_probabilities(
+        payload={
+            "metric": "low",
+            "rounded_value": 20.0,
+            "_edli_q_source": "day0_remaining_day",
+        },
+        family=family,
+        q_by_condition={"low20": 0.20, "low19": 0.80},
+        lcb_by_condition={
+            ("low20", "buy_yes"): 0.10,
+            ("low20", "buy_no"): 0.75,
+            ("low19", "buy_yes"): 0.70,
+            ("low19", "buy_no"): 0.15,
+        },
+    )
+
+    assert q["low20"] == pytest.approx(0.20)
+    assert _qlcb_float(lcb[("low20", "buy_no")]) == pytest.approx(0.75)
+
+
+def test_high_day0_nonabsorbing_bin_carries_remaining_day_buy_no_lcb() -> None:
+    family = _family(
+        _candidate("high31", 31.0, 31.0),
+        _candidate("high32", 32.0, 32.0),
+    )
+
+    q, lcb = _apply_day0_mask_to_generated_probabilities(
+        payload={
+            "metric": "high",
+            "rounded_value": 29.0,
+            "_edli_q_source": "day0_remaining_day",
+        },
+        family=family,
+        q_by_condition={"high31": 0.20, "high32": 0.80},
+        lcb_by_condition={
+            ("high31", "buy_yes"): 0.10,
+            ("high31", "buy_no"): 0.75,
+            ("high32", "buy_yes"): 0.70,
+            ("high32", "buy_no"): 0.15,
+        },
+    )
+
+    assert q["high31"] == pytest.approx(0.20)
+    assert _qlcb_float(lcb[("high31", "buy_no")]) == pytest.approx(0.75)
+
+
 def test_high_day0_dead_yes_bin_licenses_structural_buy_no() -> None:
     family = _family(
         _candidate("high29", 29.0, 29.0),
@@ -91,4 +143,3 @@ def test_high_day0_dead_yes_bin_licenses_structural_buy_no() -> None:
     assert q["high29"] == 0.0
     assert _qlcb_float(lcb[("high29", "buy_yes")]) == 0.0
     assert _qlcb_float(lcb[("high29", "buy_no")]) == pytest.approx(1.0)
-

@@ -46,7 +46,7 @@ call-sites without tracing into the consuming code. Hand-verified as non-issues:
 - `ensemble_snapshots` cannot seed a spine **ENTRY** decision under `qkernel_spine_enabled=true` (entry fixed to `raw_model_forecasts`, commit `9ee1936148`).
 - Market-anchor / one-sided q_lcb cap (`event_reactor_adapter.py:7943-7974`) is **gated off** behind the replacement-authority flag — not applied to any live q_lcb.
 - Binary per-candidate Kelly runs on the **current** strategy-of-record economics, not legacy q.
-- The legacy ENS/Platt/`baseline_q_lcb_reference` baseline is **diagnostics-only provenance**, never joined onto the live q/edge/size.
+- The ENS/Platt comparison reference is never joined onto the live q/edge/size.
 - `executable_cost._levels_for_direction` is **leaf-only** (confirmed by codegraph).
 - `shoulder_strategy_vnext` classifier is not on the live decision path.
 - Stale EMOS center artifacts contribute **zero** to the spine entry center (`build_center` runs on the raw multi-model envelope).

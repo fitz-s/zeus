@@ -92,6 +92,7 @@ class TestPollFetchDecision:
         import scripts.download_replacement_forecast_current_targets as dl
         import src.data.replacement_cycle_availability as rca
         import src.data.replacement_forecast_production as prod
+        import src.data.source_clock_update_probe as source_clock_probe
 
         fetched: list[tuple[str, str]] = []
 
@@ -107,6 +108,23 @@ class TestPollFetchDecision:
             rca, "probe_anchor_available_any", lambda c, **k: c <= anchor_pub
         )
         monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda db, sid: anchor_have)
+
+        class _NoSourceClockChange:
+            updated_sources = ()
+
+            def as_dict(self):
+                return {
+                    "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                    "updated_sources": [],
+                    "affected_cities": [],
+                    "error": None,
+                }
+
+        monkeypatch.setattr(
+            source_clock_probe,
+            "probe_openmeteo_source_clock_updates",
+            lambda **_kwargs: _NoSourceClockChange(),
+        )
 
         class _FrozenDatetime(datetime):
             @classmethod
@@ -160,6 +178,70 @@ class TestPollFetchDecision:
             )
             is None
         )
+
+    def test_source_clock_change_does_not_bypass_extras_coverage_gate(self, monkeypatch, tmp_path):
+        import src.data.replacement_forecast_production as prod
+        import src.data.source_clock_update_probe as source_clock_probe
+
+        cycle = _dt("2026-06-10T12:00:00")
+        calls: list[str] = []
+
+        class _SourceClockChanged:
+            updated_sources = ("met_nordic",)
+
+            def as_dict(self):
+                return {
+                    "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                    "updated_sources": ["met_nordic"],
+                    "affected_cities": ["Helsinki"],
+                    "error": None,
+                }
+
+        monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda db, sid: cycle)
+        monkeypatch.setattr(
+            source_clock_probe,
+            "probe_openmeteo_source_clock_updates",
+            lambda **_kwargs: _SourceClockChanged(),
+        )
+        monkeypatch.setattr(prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: cycle)
+        monkeypatch.setattr(prod, "_extras_cycle_incomplete", lambda cfg, resolved_cycle: False)
+        monkeypatch.setattr(
+            prod,
+            "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+            lambda cfg: calls.append("extras") or {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+                "written_row_count": 0,
+            },
+        )
+        monkeypatch.setattr(
+            prod,
+            "_enqueue_fusion_upgrade_reseeds_if_needed",
+            lambda cfg: {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+        )
+        monkeypatch.setattr(
+            prod,
+            "_enqueue_cycle_advance_reseeds_if_needed",
+            lambda cfg: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+        )
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: D102
+                return datetime(2026, 6, 10, 22, 30, tzinfo=UTC)
+
+        monkeypatch.setattr(prod, "datetime", _FrozenDatetime)
+        report = prod._replacement_cycle_availability_poll_if_needed(
+            {
+                "download_current_targets_enabled": True,
+                "forecast_db": tmp_path / "f.db",
+                "download_output_dir": tmp_path,
+            }
+        )
+
+        assert report["source_clock_status"] == "SOURCE_CLOCK_UPDATES_CHANGED"
+        assert report["source_clock_updated_sources"] == ["met_nordic"]
+        assert report["bayes_precision_fusion_extras_status"] == "EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED"
+        assert calls == []
 
 
 class TestNoGuessAntibody:

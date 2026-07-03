@@ -118,6 +118,175 @@ def test_all_jobs_single_instance_coalesce_preserved() -> None:
         assert s.coalesce is True, f"{s.job_id} must coalesce"
 
 
+def test_replacement_availability_poll_uses_fast_source_clock_cadence(monkeypatch) -> None:
+    """The source-clock download poll must not sit behind the old 5-minute interval."""
+    import src.ingest_main as ingest_main
+
+    def _poll_kwargs() -> dict:
+        for _fn, trigger, kwargs in ingest_main._ingest_main_job_specs():
+            if kwargs.get("id") == "ingest_replacement_availability_poll":
+                assert trigger == "interval"
+                return kwargs
+        raise AssertionError("ingest_replacement_availability_poll spec missing")
+
+    monkeypatch.delenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, raising=False)
+    kwargs = _poll_kwargs()
+    assert kwargs["seconds"] == 60
+    assert "minutes" not in kwargs
+    assert kwargs["misfire_grace_time"] == 120
+    assert kwargs["next_run_time"] is not None
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "20")
+    assert _poll_kwargs()["seconds"] == 20
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "5")
+    assert _poll_kwargs()["seconds"] == 15
+
+
+def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_current(monkeypatch) -> None:
+    """The 60s source-clock poll must stay lightweight when no public run changed."""
+    import src.ingest_main as ingest_main
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+
+    class _NoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": None,
+            }
+
+    def _scoped_path(*_args, **_kwargs):
+        raise AssertionError("scoped source-clock download path should not run without a source-clock change")
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    probe_kwargs: list[dict[str, object]] = []
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return _NoChange()
+
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
+    assert result["source_clock_status"] == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+    assert result["source_clock_updated_sources"] == []
+    assert probe_kwargs == [{"advance_cursor": False}]
+
+
+def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
+    """Default materialization capacity must not under-drain the default seed burst."""
+    import src.data.replacement_forecast_production as prod
+
+    source = prod.settings._data if hasattr(prod.settings, "_data") else prod.settings
+    monkeypatch.setitem(source, "replacement_forecast_live", {})
+
+    cfg = prod._replacement_forecast_live_materialization_queue_config()
+
+    assert cfg["seed_discovery_limit"] == 80
+    assert cfg["seed_limit"] == 80
+    assert cfg["limit"] == 80
+    assert cfg["limit"] >= cfg["seed_limit"]
+
+
+def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
+    """A detected public run change must drive the heavy path with the same probe report."""
+    import src.ingest_main as ingest_main
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["icon_global"],
+                "affected_cities": ["Munich"],
+                "error": None,
+            }
+
+    changed_report = _Changed()
+
+    def _scoped_path(cfg, *, source_clock_report=None, max_wall_clock_seconds=None):
+        assert cfg["download_current_targets_enabled"] is True
+        assert source_clock_report is changed_report
+        assert max_wall_clock_seconds == 45.0
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "source_clock_status": "SOURCE_CLOCK_UPDATES_CHANGED",
+            "source_clock_updated_sources": ["icon_global"],
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    probe_kwargs: list[dict[str, object]] = []
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return changed_report
+
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda cfg: {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda cfg: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 2,
+            "advances_detected": 2,
+            "held_advances_detected": 1,
+            "freshest_materializable_cycle": "2026-07-02T12:00:00+00:00",
+        },
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert result["source_clock_updated_sources"] == ["icon_global"]
+    assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["cycle_advance_seeds_enqueued"] == 2
+    assert result["cycle_advance_detail"]["held_advances_detected"] == 1
+    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert probe_kwargs == [{"advance_cursor": False}]
+
+
+def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:
+    """The heavy source-clock capture must be timeboxed below the next poll tick."""
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "20")
+    monkeypatch.delenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, raising=False)
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 15.0
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "999")
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 19.0
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "0")
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 1.0
+
+
 def test_build_job_specs_owner_filter() -> None:
     """F9: build_job_specs(owner) must return ONLY that daemon's jobs — otherwise activation
     would cross-schedule both daemons and bypass the OpenData singleton."""
@@ -249,10 +418,6 @@ def test_forecast_live_legacy_and_registry_triggers_are_equivalent(monkeypatch) 
     from datetime import datetime, timezone
     from src.config import settings
 
-    cfg = dict(settings._data.get("replacement_forecast_shadow", {}))
-    cfg["disable_legacy_opendata_forecast_live_jobs"] = False
-    monkeypatch.setitem(settings._data, "replacement_forecast_shadow", cfg)
-
     specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
 
     # legacy view: id -> (trigger, sorted trigger-only kwargs)
@@ -280,10 +445,6 @@ def test_forecast_live_boot_assert_holds_in_both_owner_envs(monkeypatch) -> None
         build_registry_scheduler, expected_registry_job_ids, job_defs_from_specs,
     )
     from src.config import settings
-
-    cfg = dict(settings._data.get("replacement_forecast_shadow", {}))
-    cfg["disable_legacy_opendata_forecast_live_jobs"] = False
-    monkeypatch.setitem(settings._data, "replacement_forecast_shadow", cfg)
 
     specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
     job_defs = job_defs_from_specs(specs)

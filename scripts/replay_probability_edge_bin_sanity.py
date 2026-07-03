@@ -12,7 +12,7 @@ Per §D.4 acceptance criteria:
   - Amsterdam-like rows REJECTED (edge_bin p_mkt < 0.05, ratio >= 3.0, member_support < 0.05)
   - Historical-filled rows NOT REJECTED (member_support >= 0.05 → BIMODAL PROTECTION pass)
   - Priced>=5¢ credible rows NOT REJECTED (same pass condition)
-  - FP = 0 before hard mode; else shadow.
+  - FP = 0 before hard mode; else blocked.
   - FP definition: fair-confident bin (p_mkt >= 0.05 AND p_cal >= 0.30) exists elsewhere.
 
 BIMODAL PROTECTION: p_raw[edge_bin] >= min_edge_bin_member_support → unconditional PASS.
@@ -184,7 +184,7 @@ def main():
             else:
                 amsterdam_status = f"PASSED (edge_bin={edge_bin_idx}, p_mkt={edge_p_mkt:.4f}, member_support={edge_member_support:.3f})"
 
-    verdict = "HARD_READY" if fp_count == 0 else "SHADOW_ONLY"
+    verdict = "HARD_READY" if fp_count == 0 else "BLOCKED"
 
     lines = [
         "# live_prob_p0_edge_bin_sanity_20260523.md",

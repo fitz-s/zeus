@@ -118,10 +118,12 @@ class TestF1Day0NowcastStrategyAuthority:
         key = _strategy_key_for_hypothesis(candidate, hypothesis)
         assert key == "day0_nowcast_entry", f"Expected 'day0_nowcast_entry', got {key!r}"
 
-    def test_registry_day0_nowcast_entry_live_status_is_shadow(self) -> None:
+    def test_registry_day0_nowcast_entry_live_status_is_live(self) -> None:
         from src.strategy.strategy_profile import get
         profile = get("day0_nowcast_entry")
-        assert profile.live_status == "shadow"
+        assert profile.live_status == "live"
+        assert profile.metric_is_live("high") is True
+        assert profile.metric_is_live("low") is True
 
     def test_registry_day0_nowcast_entry_cycle_axis_dispatch_mode_is_null(self) -> None:
         """Must be null to avoid dispatch collision with settlement_capture (day0_capture)."""
@@ -152,16 +154,10 @@ _DE_INSERT = """
         ?, '2026-05-22T00:00:00Z', 'unknown_legacy', 27, ?)
 """
 
-_SE_INSERT = """
-    INSERT INTO shadow_experiments
-        (experiment_id, strategy_id, config_hash, cohort_tag, started_at, immutable)
-    VALUES (?, ?, 'hash-test', ?, '2026-05-22T00:00:00Z', 0)
-"""
-
 _RD_INSERT = """
     INSERT INTO regret_decompositions
-        (decision_event_id, experiment_id, total_regret_usd, computed_at)
-    VALUES (?, ?, ?, '2026-05-22T01:00:00Z')
+        (decision_event_id, experiment_id, strategy_id, cohort_tag, total_regret_usd, computed_at)
+    VALUES (?, ?, ?, ?, ?, '2026-05-22T01:00:00Z')
 """
 
 _DC_INSERT = """
@@ -171,7 +167,7 @@ _DC_INSERT = """
         authority_id, authority_version, algorithm_id, algorithm_version,
         payload_json, payload_hash, certificate_hash, verifier_status, created_at
     ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-              ?, 'FINAL_INTENT', 'SHADOW', '2026-05-22T00:00:00Z',
+              ?, 'FINAL_INTENT', 'NO_SUBMIT', '2026-05-22T00:00:00Z',
               'test_authority', '1.0', 'test_algorithm', '1.0',
               ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', '2026-05-22T00:00:00Z')
 """
@@ -192,19 +188,18 @@ def _seed_evidence(
     conn: sqlite3.Connection,
     *,
     strategy_key: str = "settlement_capture",
-    source: str = "shadow_decision",
+    source: str = "offline_decision",
     experiment_id: str = "exp-1",
     strategy_id_in_experiment: str | None = None,
     total_regret: float = 0.10,
 ) -> str:
-    """Insert a complete decision_event → shadow_experiment → regret_decomposition chain."""
+    """Insert a complete decision_event -> experiment -> regret_decomposition chain."""
     if strategy_id_in_experiment is None:
         strategy_id_in_experiment = strategy_key
 
     de_id = f"de-{experiment_id}-{strategy_key}"
     conn.execute(_DE_INSERT, (de_id, 0, strategy_key, source))
-    conn.execute(_SE_INSERT, (experiment_id, strategy_id_in_experiment, "cohort-A"))
-    conn.execute(_RD_INSERT, (de_id, experiment_id, total_regret))
+    conn.execute(_RD_INSERT, (de_id, experiment_id, strategy_id_in_experiment, "cohort-A", total_regret))
     # C2 fix: n_decisions now reads decision_certificates, not decision_events.
     _insert_certificate(conn, cert_id=f"cert-{de_id}", strategy_key=strategy_key)
     conn.commit()
@@ -218,21 +213,21 @@ class TestF2EvidenceReportDenominatorScoping:
         from src.analysis.evidence_report import build_evidence_report
 
         conn = _make_evidence_db()
-        # Insert shadow_decision + live_decision for same strategy (decision_events legacy)
-        conn.execute(_DE_INSERT, ("de-shadow", 0, "settlement_capture", "shadow_decision"))
+        # Insert offline_decision + live_decision for same strategy.
+        conn.execute(_DE_INSERT, ("de-offline", 0, "settlement_capture", "offline_decision"))
         conn.execute(_DE_INSERT, ("de-live", 1, "settlement_capture", "live_decision"))
-        # C2 fix: n_decisions reads decision_certificates. Only the shadow entity reached
+        # C2 fix: n_decisions reads decision_certificates. Only the offline entity reached
         # the certificate path; the live_decision entity has no corresponding certificate.
         # source filter is not applied to decision_certificates (unmappable), so the
-        # certificate count (1) is the correct denominator for the shadow experiment.
-        _insert_certificate(conn, "cert-de-shadow", "settlement_capture")
+        # certificate count (1) is the correct denominator for the offline experiment.
+        _insert_certificate(conn, "cert-de-offline", "settlement_capture")
         conn.commit()
 
         report = build_evidence_report(
             "settlement_capture",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
-            source="shadow_decision",
+            source="offline_decision",
             breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 1, f"Expected 1, got {report.n_decisions}"
@@ -241,15 +236,15 @@ class TestF2EvidenceReportDenominatorScoping:
         from src.analysis.evidence_report import build_evidence_report
 
         conn = _make_evidence_db()
-        for seq, src in enumerate(("shadow_decision", "live_decision", "phase0_backfill")):
+        for seq, src in enumerate(("offline_decision", "live_decision", "phase0_backfill")):
             conn.execute(_DE_INSERT, (f"de-{src}", seq, "settlement_capture", src))
         # C2 fix: each decision entity has a corresponding certificate in the active lane.
-        for src in ("shadow_decision", "live_decision", "phase0_backfill"):
+        for src in ("offline_decision", "live_decision", "phase0_backfill"):
             _insert_certificate(conn, f"cert-de-{src}", "settlement_capture")
         conn.commit()
 
         report = build_evidence_report(
-            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn,
+            "settlement_capture", EvidenceTier.REPLAY_PASS, conn=conn,
             breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 3
@@ -264,15 +259,13 @@ class TestF3RegretJoinCorrectness:
 
         conn = _make_evidence_db()
         # decision_event belongs to settlement_capture
-        conn.execute(_DE_INSERT, ("de-sc", 0, "settlement_capture", "shadow_decision"))
-        # shadow_experiment belongs to center_buy (different strategy)
-        conn.execute(_SE_INSERT, ("exp-contaminated", "center_buy", "cohort-X"))
-        # regret row links de-sc (settlement_capture) to exp-contaminated (center_buy)
-        conn.execute(_RD_INSERT, ("de-sc", "exp-contaminated", 0.10))
+        conn.execute(_DE_INSERT, ("de-sc", 0, "settlement_capture", "offline_decision"))
+        # regret row carries center_buy even though the decision_event belongs to settlement_capture
+        conn.execute(_RD_INSERT, ("de-sc", "exp-contaminated", "center_buy", "cohort-X", 0.10))
         conn.commit()
 
         report = build_evidence_report(
-            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn, breakeven_win_rate=0.5,
+            "center_buy", EvidenceTier.REPLAY_PASS, conn=conn, breakeven_win_rate=0.5,
         )
         # The regret row must NOT count because de-sc.strategy_key = settlement_capture ≠ center_buy
         assert report.n_settled == 0, f"Cross-strategy contamination: n_settled={report.n_settled}"
@@ -285,7 +278,7 @@ class TestF3RegretJoinCorrectness:
         _seed_evidence(conn, strategy_key="settlement_capture", total_regret=0.05)
 
         report = build_evidence_report(
-            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn,
+            "settlement_capture", EvidenceTier.REPLAY_PASS, conn=conn,
             breakeven_win_rate=0.5,
         )
         assert report.n_settled == 1
@@ -329,7 +322,7 @@ class TestF4EvidenceTierLifecycle:
             """,
             (
                 "settlement_capture",
-                int(EvidenceTier.SHADOW_PASS),
+                int(EvidenceTier.REPLAY_PASS),
                 "2026-05-22T00:00:00Z",
                 "legacy",
                 None,
@@ -370,7 +363,7 @@ class TestF4EvidenceTierLifecycle:
         assignment = record_evidence_tier_assignment(
             conn,
             strategy_id="settlement_capture",
-            tier=EvidenceTier.SHADOW_PASS,
+            tier=EvidenceTier.REPLAY_PASS,
             rationale="test",
             operator_ref=None,
             verdict_reason=None,
@@ -393,7 +386,7 @@ class TestF4EvidenceTierLifecycle:
         record_evidence_tier_assignment(
             conn,
             strategy_id="settlement_capture",
-            tier=EvidenceTier.SHADOW_PASS,
+            tier=EvidenceTier.REPLAY_PASS,
             rationale="test",
             operator_ref=None,
             verdict_reason=None,
@@ -410,7 +403,7 @@ class TestF4EvidenceTierLifecycle:
         record_evidence_tier_assignment(
             conn,
             strategy_id="settlement_capture",
-            tier=EvidenceTier.SHADOW_PASS,
+            tier=EvidenceTier.REPLAY_PASS,
             rationale="test",
             operator_ref=None,
             verdict_reason=None,
@@ -426,7 +419,7 @@ class TestF4EvidenceTierLifecycle:
         record_evidence_tier_assignment(
             conn,
             strategy_id="settlement_capture",
-            tier=EvidenceTier.SHADOW_PASS,
+            tier=EvidenceTier.REPLAY_PASS,
             rationale="test",
             operator_ref=None,
             verdict_reason=None,
@@ -435,14 +428,14 @@ class TestF4EvidenceTierLifecycle:
         )
         result = current_evidence_tier_assignment(conn, "settlement_capture")
         assert result is not None
-        assert result.tier == EvidenceTier.SHADOW_PASS
+        assert result.tier == EvidenceTier.REPLAY_PASS
 
     def test_supersedes_id_roundtrips(self) -> None:
         conn = _make_tier_db()
         a1 = record_evidence_tier_assignment(
             conn,
             strategy_id="settlement_capture",
-            tier=EvidenceTier.SHADOW_PASS,
+            tier=EvidenceTier.REPLAY_PASS,
             rationale="v1",
             operator_ref=None,
             verdict_reason=None,

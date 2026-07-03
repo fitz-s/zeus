@@ -332,3 +332,23 @@ def test_day0_nowcast_context_parses_epoch_timestamps():
     assert context["age_hours"] == pytest.approx(0.5)
     assert context["fresh_observation"] is True
     assert context["blend_weight"] > 0.0
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["wu_icao_history", "hko_hourly_accumulator", "ogimet_metar_ltfm"],
+)
+def test_day0_nowcast_context_trusts_canonical_observation_sources(source):
+    observed_at = datetime(2026, 7, 1, 15, tzinfo=timezone.utc)
+    current_at = datetime(2026, 7, 1, 15, 30, tzinfo=timezone.utc)
+
+    context = day0_nowcast_context(
+        hours_remaining=2.0,
+        observation_source=source,
+        observation_time=observed_at.isoformat(),
+        current_utc_timestamp=current_at.isoformat(),
+    )
+
+    assert context["trusted_source"] is True
+    assert context["fresh_observation"] is True
+    assert context["blend_weight"] > 0.0

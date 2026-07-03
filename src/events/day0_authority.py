@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Mapping
 
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -10,6 +11,25 @@ from src.contracts.settlement_semantics import SettlementSemantics
 
 class Day0AuthorityError(ValueError):
     """Raised when a Day0 observation cannot authorize live hard facts."""
+
+
+DAY0_LIVE_AUTHORITY_MATCHES = {
+    "source_match_status": "MATCH",
+    "local_date_status": "MATCH",
+    "station_match_status": "MATCH",
+    "dst_status": "UNAMBIGUOUS",
+    "metric_match_status": "MATCH",
+    "rounding_status": "MATCH",
+    "source_authorized_status": "AUTHORIZED",
+    "live_authority_status": "live",
+}
+
+DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
+DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
+DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
+DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
+DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
+DAY0_REMAINING_DAY_LCB_TOLERANCE = 1e-6
 
 
 def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNOWN") -> str:
@@ -25,6 +45,232 @@ def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNO
     if raw == "NON_LIVE_AUTHORITY":
         return "blocked"
     return raw
+
+
+def day0_live_payload_authority_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Return mismatched live Day0 authority fields for an already-built payload."""
+
+    errors: list[str] = []
+    for field_name, expected in DAY0_LIVE_AUTHORITY_MATCHES.items():
+        observed = payload.get(field_name)
+        if observed in (None, ""):
+            observed_value = ""
+        elif field_name == "live_authority_status":
+            observed_value = normalize_day0_live_authority_status(observed)
+        else:
+            observed_value = str(observed or "").strip()
+        if observed_value != expected:
+            errors.append(f"{field_name}={observed_value or 'missing'}")
+    return tuple(errors)
+
+
+def assert_live_day0_payload_authority(payload: Mapping[str, object]) -> None:
+    """Fail closed unless a payload carries the live Day0 observation authority contract."""
+
+    errors = day0_live_payload_authority_errors(payload)
+    if errors:
+        raise Day0AuthorityError(",".join(errors))
+
+
+def _day0_probability_block(payload: Mapping[str, object]) -> Mapping[str, object]:
+    block = payload.get("day0_probability_authority")
+    return block if isinstance(block, Mapping) else {}
+
+
+def _first_text(payload: Mapping[str, object], block: Mapping[str, object], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            value = block.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _first_float(payload: Mapping[str, object], block: Mapping[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            value = block.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise Day0AuthorityError(f"{key} is not numeric") from None
+        if not math.isfinite(number):
+            raise Day0AuthorityError(f"{key} is not finite")
+        return number
+    return None
+
+
+def _first_int(payload: Mapping[str, object], block: Mapping[str, object], *keys: str) -> int | None:
+    number = _first_float(payload, block, *keys)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _day0_lcb_transform(payload: Mapping[str, object], block: Mapping[str, object]) -> Mapping[str, object]:
+    transform = payload.get("_edli_day0_lcb_transform")
+    if not isinstance(transform, Mapping):
+        transform = payload.get("day0_lcb_transform")
+    if not isinstance(transform, Mapping):
+        transform = block.get("lcb_transform")
+    if not isinstance(transform, Mapping):
+        raise Day0AuthorityError("remaining_day_lcb_transform missing")
+    return transform
+
+
+def _assert_remaining_day_lcb_is_supported_by_transform(*, q_live: float, q_lcb: float) -> None:
+    """Validate the selected-side Day0 qLCB shape.
+
+    ``remaining_models`` is evidence that the remaining-window probability was
+    built from live model vectors. It is not a binomial success count, so it must
+    not be reused as a Wilson denominator. The load-bearing proof is the
+    transform identity checked below: selected qLCB must equal the persisted
+    remaining-window transform for the selected condition/direction and must not
+    degenerate to the point q.
+    """
+
+    if q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE:
+        raise Day0AuthorityError("remaining_day q_lcb is degenerate with q_live")
+
+
+def assert_live_day0_probability_authority(
+    payload: Mapping[str, object],
+    *,
+    direction: object | None = None,
+    condition_id: object | None = None,
+    q_live: float | None = None,
+    q_lcb: float | None = None,
+) -> None:
+    """Fail closed unless Day0 entry probability is remaining-window qkernel evidence.
+
+    A live Day0 observation can authoritatively mask already-impossible bins, but it is
+    not itself an exact-bin probability model. Live entry submit therefore needs proof
+    that q/q_lcb came from the remaining-day probability surface and that the selected
+    side's q_lcb equals the Day0 LCB transform for the selected condition.
+    """
+
+    block = _day0_probability_block(payload)
+    authority = _first_text(payload, block, "authority", "calibration_authority")
+    calibration_method = _first_text(payload, block, "calibration_method")
+    input_space = _first_text(payload, block, "input_space")
+    hard_fact_markers = {authority.upper(), calibration_method.lower(), input_space.lower()}
+    if DAY0_OBSERVATION_HARD_FACT_AUTHORITY in hard_fact_markers or "day0_live_observation_hard_fact" in hard_fact_markers:
+        raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
+
+    q_source = _first_text(payload, block, "_edli_q_source", "day0_q_source", "q_source")
+    if q_source != DAY0_REMAINING_DAY_Q_SOURCE:
+        raise Day0AuthorityError(f"remaining_day_q_source required:{q_source or 'missing'}")
+    q_mode = _first_text(payload, block, "_edli_day0_q_mode", "day0_q_mode", "q_mode")
+    if q_mode != DAY0_REMAINING_DAY_Q_MODE:
+        raise Day0AuthorityError(f"remaining_day_q_mode required:{q_mode or 'missing'}")
+    remaining_models = _first_int(
+        payload,
+        block,
+        "_edli_day0_remaining_models",
+        "day0_remaining_models",
+        "remaining_models",
+    )
+    if remaining_models is None or remaining_models <= 0:
+        raise Day0AuthorityError("remaining_day_models missing")
+    rounded_value = _first_float(payload, block, "rounded_value", "rounded_extreme")
+    if rounded_value is None:
+        raise Day0AuthorityError("remaining_day_observed_extreme missing")
+    observation_time = _first_text(payload, block, "observation_time", "observation_available_at")
+    if not observation_time:
+        raise Day0AuthorityError("remaining_day_observation_time missing")
+
+    transform = _day0_lcb_transform(payload, block)
+    if q_lcb is None:
+        return
+    if q_live is not None:
+        try:
+            q_live_value = float(q_live)
+            q_lcb_value = float(q_lcb)
+        except (TypeError, ValueError):
+            raise Day0AuthorityError("remaining_day q_live/q_lcb nonnumeric") from None
+        if not (math.isfinite(q_live_value) and math.isfinite(q_lcb_value)):
+            raise Day0AuthorityError("remaining_day q_live/q_lcb nonfinite")
+        if q_live_value < 0.0 or q_live_value > 1.0 or q_lcb_value < 0.0 or q_lcb_value > 1.0:
+            raise Day0AuthorityError("remaining_day q_live/q_lcb out of range")
+        _assert_remaining_day_lcb_is_supported_by_transform(
+            q_live=q_live_value,
+            q_lcb=q_lcb_value,
+        )
+    selected_condition = str(condition_id or payload.get("condition_id") or "").strip()
+    if not selected_condition:
+        raise Day0AuthorityError("selected_condition_id missing")
+    direction_text = str(direction or payload.get("direction") or "").strip().lower()
+    if direction_text.endswith("_yes"):
+        transform_key = "yes_lcb_by_condition"
+    elif direction_text.endswith("_no"):
+        transform_key = "no_lcb_by_condition"
+    else:
+        raise Day0AuthorityError(f"selected_direction unsupported:{direction_text or 'missing'}")
+    by_condition = transform.get(transform_key)
+    if not isinstance(by_condition, Mapping):
+        raise Day0AuthorityError(f"{transform_key} missing")
+    if selected_condition not in by_condition:
+        raise Day0AuthorityError(f"selected_condition_lcb missing:{selected_condition}")
+    try:
+        transform_lcb = float(by_condition[selected_condition])
+    except (TypeError, ValueError):
+        raise Day0AuthorityError(f"selected_condition_lcb nonnumeric:{selected_condition}") from None
+    if not math.isfinite(transform_lcb):
+        raise Day0AuthorityError(f"selected_condition_lcb nonfinite:{selected_condition}")
+    if not math.isclose(float(q_lcb), transform_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise Day0AuthorityError(
+            "selected q_lcb does not match remaining-day transform:"
+            f"condition_id={selected_condition}:q_lcb={float(q_lcb):.12g}:"
+            f"transform_lcb={transform_lcb:.12g}"
+        )
+
+
+def assert_live_day0_qkernel_guard_authority(
+    economics: Mapping[str, object],
+    *,
+    probability_payload: Mapping[str, object] | None = None,
+) -> None:
+    """Fail closed unless Day0 entry qkernel evidence uses remaining-day guard law.
+
+    ``DAY0_OBSERVED_BOUNDARY`` is a hard-fact observation boundary. It can rule out
+    already-impossible outcomes, but it cannot by itself license an entry on a
+    finite bin that merely contains the current running extreme.
+    """
+
+    for field_name in ("q_lcb_guard_basis", "selection_guard_basis"):
+        basis = str(economics.get(field_name) or "").strip()
+        if not basis:
+            raise Day0AuthorityError(f"{field_name} missing")
+        if basis == DAY0_OBSERVED_BOUNDARY_GUARD_BASIS:
+            raise Day0AuthorityError(f"{field_name} cannot be DAY0_OBSERVED_BOUNDARY")
+        if basis != DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS:
+            raise Day0AuthorityError(
+                f"{field_name} must be {DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS}"
+            )
+    for field_name in ("q_lcb_guard_abstained", "selection_guard_abstained"):
+        if economics.get(field_name) is not False:
+            raise Day0AuthorityError(f"{field_name} must be false")
+    try:
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        raise Day0AuthorityError("selection_guard_q_safe must be positive") from None
+    if not math.isfinite(selection_guard_q_safe) or selection_guard_q_safe <= 0.0:
+        raise Day0AuthorityError("selection_guard_q_safe must be positive")
+    if probability_payload is not None:
+        block = _day0_probability_block(probability_payload)
+        remaining_models = _first_int(
+            probability_payload,
+            block,
+            "_edli_day0_remaining_models",
+            "day0_remaining_models",
+            "remaining_models",
+        )
+        if remaining_models is None or remaining_models <= 0:
+            raise Day0AuthorityError("remaining_day_models missing")
 
 
 @dataclass(frozen=True)

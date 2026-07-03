@@ -77,6 +77,38 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
     return snapshot_id
 
 
+def _valid_execution_capability_payload() -> dict:
+    """Minimal payload satisfying venue_command_repo._validate_entry_submit_payload
+    for ENTRY SUBMIT_REQUESTED (shape mirrors tests/test_venue_command_repo.py's
+    helper of the same name). Fresh dict per call so callers can safely mutate."""
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.7,
+                        "q_lcb_5pct": 0.6,
+                        "expected_edge": 0.1,
+                        "min_entry_price": 0.01,
+                        "limit_price": 0.5,
+                        "submit_edge": 0.1,
+                        "expected_profit_usd": 1.0,
+                        "min_expected_profit_usd": 0.01,
+                        "submit_edge_density": 0.1,
+                        "min_submit_edge_density": 0.01,
+                        "shares": 10.0,
+                        "qkernel_side": "buy_yes",
+                    },
+                },
+                {"component": "entry_actionable_certificate", "allowed": True},
+            ],
+        },
+    }
+
+
 def _ensure_envelope(
     conn,
     *,
@@ -779,7 +811,8 @@ class TestCancelPendingInRecoveryFilter:
         )
         # INTENT_CREATED → SUBMITTING → CANCEL_PENDING via valid grammar path
         append_event(conn, command_id="cmd-cp", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:00:01Z")
+                     occurred_at="2026-04-26T00:00:01Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-cp", event_type="CANCEL_REQUESTED",
                      occurred_at="2026-04-26T00:00:02Z")
 

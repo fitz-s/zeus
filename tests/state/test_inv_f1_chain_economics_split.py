@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §F1 (Program A — Economics-Authority Split)
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1 (Program A — Economics-Authority Split)
 """F1 antibody invariants: balance-only chain rescue stops mutating entry/fill economics.
 
 The pre-F1 chain reconciliation rescue branch (src/state/chain_reconciliation.py)
@@ -16,7 +16,7 @@ F1 splits these on the Position dataclass + on `position_current`, and routes
 exit/risk consumers through a single typed `effective_exposure()` derived view
 whose authority field is `venue_trade_fill` or `venue_position_observed`.
 
-Acceptance tests (per docs/findings_2026_05_28.md §F1):
+Acceptance tests (per docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1):
 1. Balance-only rescue preserves submitted entry/fill economics (limit, notional,
    shares); chain values land in chain_* fields with fill_authority=venue_position_observed.
 2. Projection (position_current) carries chain_avg_price + chain_cost_basis_usd;

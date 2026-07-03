@@ -17,13 +17,12 @@ Seven relationship tests covering:
   1. test_per_strategy_latency_aggregation_correctness — synthetic ticks
      with known latencies; verify p50/p95 math + grouping
   2. test_sample_quality_boundaries — exactly 10/30/100 tick boundaries
-  3. test_empty_db_safety — no ticks → all 4 strategies return None
+  3. test_empty_db_safety — no ticks → governed strategies return None
   4. test_invalid_timestamps_excluded — NULL source_timestamp + unparsable
      formats excluded from the aggregation
   5. test_window_filter — ticks outside [end - window_days, end] excluded
   6. test_unknown_strategy_quarantined — strategy_key not in STRATEGY_KEYS
-     skipped (mirrors AD pattern; schema CHECK prevents direct insert but
-     test confirms the runtime guard)
+     skipped by the computation layer
   7. test_negative_latency_clipped_to_zero — clock-skew defense:
      zeus_timestamp BEFORE source_timestamp → latency 0 ms, not negative
   8. test_n_with_action_counts_position_events_within_window — companion
@@ -34,8 +33,6 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from src.state.db import init_schema
 from src.state.ws_poll_reaction import (
@@ -215,7 +212,7 @@ def test_sample_quality_boundaries():
 
 
 def test_empty_db_safety():
-    """RELATIONSHIP: empty DB → all 4 strategies present with latency=None
+    """RELATIONSHIP: empty DB → governed strategy buckets present with latency=None
     + n_signals=0 + sample_quality=insufficient + window bounds set."""
     conn = _make_conn()
     result = compute_reaction_latency_per_strategy(conn, window_days=7, end_date="2026-04-28")
@@ -278,16 +275,23 @@ def test_window_filter():
 
 
 def test_unknown_strategy_quarantined():
-    """RELATIONSHIP: position_current.strategy_key has CHECK constraint at
-    architecture/2026_04_02_architecture_kernel.sql:53-58 enforcing 4
-    governed values. Insert with unknown strategy_key → IntegrityError
-    (schema antibody). Function still returns 4 keys."""
+    """RELATIONSHIP: unknown strategy_key rows are skipped by read-side attribution.
+
+    Schema is intentionally wide enough to preserve historical/imported rows;
+    report consumers must quarantine unknown strategy keys rather than treating
+    them as live-governed buckets.
+    """
     conn = _make_conn()
-    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
-        _insert_position_current(conn, position_id="bad1", token_id="tok-bad",
-                                 strategy_key="not_a_real_strategy")
+    _insert_position_current(conn, position_id="bad1", token_id="tok-bad",
+                             strategy_key="not_a_real_strategy")
+    _insert_tick(conn, token_id="tok-bad",
+                 source_ts="2026-04-23T12:00:00+00:00",
+                 zeus_ts="2026-04-23T12:00:00.100000+00:00")
+    conn.commit()
     result = compute_reaction_latency_per_strategy(conn, window_days=7, end_date="2026-04-28")
     assert set(result.keys()) == set(STRATEGY_KEYS)
+    assert "not_a_real_strategy" not in result
+    assert all(rec["n_signals"] == 0 for rec in result.values())
 
 
 def test_negative_latency_clipped_to_zero():

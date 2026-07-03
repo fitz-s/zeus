@@ -1,7 +1,6 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Gate 2 routing: routes to LiveExecutor (via venue_adapter) when ZEUS_MODE=live,
-else routes to ShadowExecutor for paper/replay/backtest paths.
+Live entry execution uses FinalExecutionIntent through the venue adapter.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -22,7 +21,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
@@ -44,11 +43,19 @@ from src.contracts.execution_price import (
 )
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
+from src.decision.family_decision_engine import (
+    entry_price_floor_decision,
+    roi_frontier_useful_values,
+)
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
+from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
+
+_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
+_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -162,8 +169,8 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
-_ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
-    {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
+_ENTRY_DUPLICATE_NON_OPEN_PHASES = frozenset(
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
 )
 _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
     {
@@ -188,6 +195,8 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
+_ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
+_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -206,6 +215,14 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        quoted = _quote_sql_identifier(table)
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({quoted})")}
+    except sqlite3.Error:
+        return set()
 
 
 def _entry_has_positive_trade_fact(
@@ -311,10 +328,13 @@ def _entry_terminal_command_has_no_fill_exposure(
     command_id: str,
     state: str,
 ) -> bool:
-    if str(state or "").upper() not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+    state_text = str(state or "").upper()
+    if state_text not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
         return False
     if _entry_has_positive_trade_fact(conn, command_id=command_id):
         return False
+    if state_text in {"CANCELLED", "EXPIRED"}:
+        return _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
     return True
 
 
@@ -380,67 +400,82 @@ def _table_exists_in_schema(conn: sqlite3.Connection, schema: str, table: str) -
     return row is not None
 
 
-def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
-    """Read the durable entries-paused override at the submit boundary."""
-
-    now = datetime.now(timezone.utc).isoformat()
-    checked_schemas: list[str] = []
-    authority_schemas: list[str] = []
-    for schema in _attached_schema_names(conn):
-        if schema == "temp":
-            continue
-        checked_schemas.append(schema)
+def _main_database_filename(conn: sqlite3.Connection) -> str:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
         try:
-            if not _table_exists_in_schema(conn, schema, "control_overrides"):
-                continue
-            authority_schemas.append(schema)
-            schema_sql = _quote_sql_identifier(schema)
-            row = conn.execute(
-                f"""
-                SELECT value, issued_by, reason, issued_at, effective_until
-                FROM {schema_sql}.control_overrides
-                WHERE target_type = 'global'
-                  AND target_key = 'entries'
-                  AND action_type = 'gate'
-                  AND issued_at <= ?
-                  AND (effective_until IS NULL OR effective_until > ?)
-                ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
-        except sqlite3.Error:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+        except (IndexError, KeyError, TypeError):
             continue
-        if row is None:
-            continue
-        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
-        if value in {"true", "1", "yes", "on"}:
-            issued_by = row["issued_by"] if isinstance(row, sqlite3.Row) else row[1]
-            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
-            issued_at = row["issued_at"] if isinstance(row, sqlite3.Row) else row[3]
-            effective_until = row["effective_until"] if isinstance(row, sqlite3.Row) else row[4]
-            return {
-                "component": "entries_pause_control_override",
-                "allowed": False,
-                "reason": str(reason or "entries_paused"),
-                "issued_by": str(issued_by or ""),
-                "issued_at": str(issued_at or ""),
-                "effective_until": "" if effective_until is None else str(effective_until),
-                "authority_schema": schema,
-            }
+        if str(name or "").strip() == "main":
+            return os.path.basename(str(path or "").strip())
+    return ""
 
-    if authority_schemas:
+
+def _attach_world_for_trade_certificate_read(conn: sqlite3.Connection) -> str | None:
+    """Expose the canonical world certificate ledger to trade-main connections."""
+
+    if "world" in _attached_schema_names(conn):
+        return None
+    if _main_database_filename(conn) != "zeus_trades.db":
+        return None
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH
+
+        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+    except sqlite3.Error as exc:
+        return str(exc)
+    return None
+
+
+def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
+    """Read the single durable entries-paused authority at the submit boundary.
+
+    ``control_overrides`` tables in trade DB are legacy archived ghosts; they
+    must not be consumed as live submit authority.  The control plane writes and
+    resumes through world DB, so the executor opens that authority directly.
+    """
+
+    try:
+        from src.state.db import get_world_connection, query_control_override_state
+
+        world_conn = get_world_connection()
+        try:
+            state = query_control_override_state(world_conn)
+        finally:
+            world_conn.close()
+    except Exception as exc:  # noqa: BLE001
         return {
             "component": "entries_pause_control_override",
-            "allowed": True,
-            "reason": "allowed",
-            "authority_schema": ",".join(authority_schemas),
+            "allowed": False,
+            "reason": f"entries_pause_control_unreadable:{type(exc).__name__}",
+            "authority_schema": "world",
+        }
+
+    if state.get("status") != "ok":
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": False,
+            "reason": f"entries_pause_control_unreadable:{state.get('status', 'unknown')}",
+            "authority_schema": "world",
+        }
+    if bool(state.get("entries_paused", False)):
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": False,
+            "reason": str(state.get("entries_pause_reason") or "entries_paused"),
+            "issued_by": str(state.get("entries_pause_source") or ""),
+            "authority_schema": "world",
         }
     return {
         "component": "entries_pause_control_override",
         "allowed": True,
-        "reason": "missing_control_override_table",
-        "checked_schemas": checked_schemas,
+        "reason": "allowed",
+        "authority_schema": "world",
     }
 
 
@@ -595,6 +630,696 @@ def _entry_taker_quality_component(
     }
 
 
+def _float_field(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _bool_field(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def _entry_economics_component(
+    intent: ExecutionIntent,
+    *,
+    shares: float,
+    actionable_payload: Mapping[str, Any] | None = None,
+) -> dict:
+    """Executor-side live ENTRY submit proof.
+
+    Upstream qkernel/family selection owns probability math. The executor's job
+    is fail-closed consumption: an ENTRY cannot reach the venue unless the final
+    intent carries the selected-side q/q_lcb and proves the submit price still
+    has positive conservative edge after the exact submitted share count.
+    """
+
+    q_live = _float_field(getattr(intent, "q_live", None))
+    q_lcb = _float_field(getattr(intent, "q_lcb_5pct", None))
+    expected_edge = _float_field(getattr(intent, "expected_edge", None))
+    min_entry_price = _float_field(getattr(intent, "min_entry_price", None))
+    min_expected_profit = _float_field(getattr(intent, "min_expected_profit_usd", None))
+    min_edge_density = _float_field(getattr(intent, "min_submit_edge_density", None))
+    limit_price = _float_field(getattr(intent, "limit_price", None))
+    submitted_shares = _float_field(shares)
+    missing = [
+        name
+        for name, value in (
+            ("q_live", q_live),
+            ("q_lcb_5pct", q_lcb),
+            ("expected_edge", expected_edge),
+            ("min_entry_price", min_entry_price),
+            ("min_expected_profit_usd", min_expected_profit),
+            ("min_submit_edge_density", min_edge_density),
+            ("limit_price", limit_price),
+            ("shares", submitted_shares),
+        )
+        if value is None
+    ]
+    economics = getattr(intent, "qkernel_execution_economics", None)
+    day0_authority_errors: tuple[str, ...] | None = None
+    is_day0_actionable = False
+    if isinstance(actionable_payload, Mapping) and str(
+        actionable_payload.get("event_type") or ""
+    ).strip() == "DAY0_EXTREME_UPDATED":
+        from src.events.day0_authority import day0_live_payload_authority_errors
+
+        is_day0_actionable = True
+        day0_authority_errors = day0_live_payload_authority_errors(actionable_payload)
+    if not isinstance(economics, Mapping):
+        missing.append("qkernel_execution_economics")
+    if missing:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="missing_entry_economics",
+            missing=",".join(missing),
+        )
+    assert q_live is not None
+    assert q_lcb is not None
+    assert expected_edge is not None
+    assert min_entry_price is not None
+    assert min_expected_profit is not None
+    assert min_edge_density is not None
+    assert limit_price is not None
+    assert submitted_shares is not None
+    if not (0.0 <= q_lcb <= q_live <= 1.0):
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="invalid_probability_order",
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+        )
+    if not (0.0 < limit_price < 1.0 and submitted_shares > 0.0):
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="invalid_price_or_size",
+            limit_price=limit_price,
+            shares=submitted_shares,
+        )
+    submit_edge = q_lcb - limit_price
+    expected_profit = submit_edge * submitted_shares
+    edge_density = submit_edge / limit_price
+    effective_min_expected_profit = max(
+        min_expected_profit,
+        _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+    )
+    effective_min_edge_density = max(
+        min_edge_density,
+        _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+    )
+    strategy_key = ""
+    direction_for_floor = ""
+    if isinstance(actionable_payload, Mapping):
+        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+        direction_for_floor = str(actionable_payload.get("direction") or "").strip().lower()
+    if not strategy_key:
+        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
+    if not direction_for_floor:
+        direction_for_floor = str(getattr(intent, "direction", "") or "").strip().lower()
+    floor_decision = entry_price_floor_decision(
+        strategy_key=strategy_key,
+        direction=direction_for_floor,
+        declared_min_entry_price=min_entry_price,
+        selection_authority_applied=getattr(intent, "selection_authority_applied", ""),
+        economics=economics if isinstance(economics, Mapping) else None,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=limit_price,
+    )
+    live_min_entry_price = floor_decision.live_min_entry_price
+    effective_min_entry_price = floor_decision.effective_min_entry_price
+    qkernel_low_price_floor_authorized = (
+        floor_decision.qkernel_low_price_floor_authorized
+    )
+    if min_entry_price < 0.0:
+        reason = "min_entry_price_negative"
+    elif (
+        min_entry_price + 1e-12 < live_min_entry_price
+        and not qkernel_low_price_floor_authorized
+    ):
+        reason = "min_entry_price_below_live_floor"
+    elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
+        reason = "min_expected_profit_below_live_floor"
+    elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:
+        reason = "min_submit_edge_density_below_live_floor"
+    elif expected_edge <= 0.0:
+        reason = "expected_edge_non_positive"
+    elif submit_edge <= 0.0:
+        reason = "submit_q_lcb_minus_limit_non_positive"
+    elif expected_edge > submit_edge + 1e-6:
+        reason = "expected_edge_exceeds_submit_edge"
+    elif limit_price + 1e-12 < effective_min_entry_price:
+        reason = "limit_price_below_strategy_entry_floor"
+    elif expected_profit + 1e-9 < effective_min_expected_profit:
+        reason = "expected_profit_below_floor"
+    elif edge_density + 1e-9 < effective_min_edge_density:
+        reason = "submit_edge_density_below_floor"
+    else:
+        reason = ""
+    if reason:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            limit_price=limit_price,
+            submit_edge=submit_edge,
+            expected_profit_usd=expected_profit,
+            min_entry_price=min_entry_price,
+            live_min_entry_price=live_min_entry_price,
+            effective_min_entry_price=effective_min_entry_price,
+            qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
+            min_expected_profit_usd=min_expected_profit,
+            live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+            submit_edge_density=edge_density,
+            min_submit_edge_density=min_edge_density,
+            live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+            shares=submitted_shares,
+        )
+    if day0_authority_errors is not None:
+        if day0_authority_errors:
+            return _capability_component(
+                "entry_economics",
+                allowed=False,
+                reason="day0_observation_authority_missing",
+                missing=",".join(day0_authority_errors),
+            )
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_probability_authority,
+        )
+
+        try:
+            assert_live_day0_probability_authority(
+                actionable_payload or {},
+                direction=(actionable_payload or {}).get(
+                    "direction",
+                    getattr(intent, "direction", ""),
+                ),
+                condition_id=(actionable_payload or {}).get(
+                    "condition_id",
+                    getattr(intent, "condition_id", ""),
+                ),
+                q_live=q_live,
+                q_lcb=q_lcb,
+            )
+        except Day0AuthorityError as exc:
+            return _capability_component(
+                "entry_economics",
+                allowed=False,
+                reason="day0_probability_authority_missing",
+                error=str(exc),
+            )
+    direction = str(getattr(intent, "direction", "") or "")
+    expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
+    econ_side = str(economics.get("side") or "").upper()
+    econ_source = str(economics.get("source") or "").strip()
+    selection_authority = str(
+        getattr(intent, "selection_authority_applied", "") or ""
+    ).strip()
+    econ_cost = _float_field(economics.get("cost"))
+    econ_edge_lcb = _float_field(economics.get("edge_lcb"))
+    econ_delta_u_at_min = _float_field(economics.get("delta_u_at_min"))
+    econ_optimal_stake_usd = _float_field(economics.get("optimal_stake_usd"))
+    econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
+    econ_false_edge_rate = _float_field(economics.get("false_edge_rate"))
+    payoff_q_point = _float_field(economics.get("payoff_q_point"))
+    payoff_q_lcb = _float_field(economics.get("payoff_q_lcb"))
+    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
+    selection_guard_abstained = _bool_field(economics.get("selection_guard_abstained"))
+    selection_guard_q_safe = _float_field(economics.get("selection_guard_q_safe"))
+    day0_qkernel_guard_error = ""
+    if is_day0_actionable:
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_qkernel_guard_authority,
+        )
+
+        try:
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=actionable_payload or {},
+            )
+        except Day0AuthorityError as exc:
+            day0_qkernel_guard_error = str(exc)
+    from src.strategy.live_inference.live_admission import (
+        live_entry_probability_quality_rejection_reason,
+    )
+
+    live_probability_quality_reason = live_entry_probability_quality_rejection_reason(
+        q_lcb=q_lcb,
+        direction=intent.direction,
+        strategy_key=(
+            (actionable_payload or {}).get("strategy_key")
+            if actionable_payload
+            else None
+        ),
+        selection_authority_applied=intent.selection_authority_applied,
+        qkernel_execution_economics=economics,
+    )
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if econ_source != "qkernel_spine":
+        reason = "qkernel_source_missing"
+    elif selection_authority != "qkernel_spine":
+        reason = "qkernel_selection_authority_missing"
+    elif not selection_guard_basis:
+        reason = "qkernel_selection_guard_missing"
+    elif selection_guard_abstained is not False:
+        reason = "qkernel_selection_guard_abstained"
+    elif selection_guard_basis == "SIDE_NOT_ARMED":
+        reason = "qkernel_selection_side_not_armed"
+    elif day0_qkernel_guard_error:
+        reason = "day0_qkernel_guard_authority_missing"
+    elif selection_guard_q_safe is None or selection_guard_q_safe <= 0.0:
+        reason = "qkernel_selection_q_safe_non_positive"
+    elif expected_side and econ_side != expected_side:
+        reason = "qkernel_side_mismatch"
+    elif econ_cost is None:
+        reason = "qkernel_cost_missing"
+    elif limit_price > econ_cost + 1e-6:
+        reason = "submit_price_worse_than_qkernel_cost"
+    elif econ_edge_lcb is None or econ_edge_lcb <= 0.0:
+        reason = "qkernel_edge_lcb_non_positive"
+    elif econ_edge_lcb > submit_edge + 1e-6:
+        reason = "qkernel_edge_lcb_exceeds_submit_edge"
+    elif expected_edge > econ_edge_lcb + 1e-6:
+        reason = "expected_edge_exceeds_qkernel_edge_lcb"
+    elif econ_delta_u_at_min is None or econ_delta_u_at_min <= 0.0:
+        reason = "qkernel_delta_u_at_min_non_positive"
+    elif econ_optimal_stake_usd is None or econ_optimal_stake_usd <= 0.0:
+        reason = "qkernel_optimal_stake_non_positive"
+    elif econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0:
+        reason = "qkernel_optimal_delta_u_non_positive"
+    elif econ_false_edge_rate is None or not (0.0 < econ_false_edge_rate <= max_false_edge_rate):
+        reason = "qkernel_false_edge_rate_blocks"
+    elif payoff_q_point is None or payoff_q_lcb is None:
+        reason = "qkernel_payoff_probability_missing"
+    elif abs((payoff_q_lcb - econ_cost) - econ_edge_lcb) > 1e-6:
+        reason = "qkernel_payoff_edge_inconsistent"
+    elif not math.isclose(payoff_q_point, q_live, rel_tol=0.0, abs_tol=1e-6):
+        reason = "qkernel_payoff_q_point_mismatch_q_live"
+    elif not math.isclose(payoff_q_lcb, q_lcb, rel_tol=0.0, abs_tol=1e-6):
+        reason = "qkernel_payoff_q_lcb_mismatch_q_lcb"
+    elif economics.get("direction_law_ok") is not True:
+        reason = "qkernel_direction_law_not_ok"
+    elif economics.get("coherence_allows") is not True:
+        reason = "qkernel_coherence_blocks"
+    elif live_probability_quality_reason is not None:
+        reason = live_probability_quality_reason
+    elif not roi_frontier_useful_values(
+        side=econ_side,
+        cost=econ_cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=econ_edge_lcb,
+        stake=econ_optimal_stake_usd,
+        delta_u_at_min=econ_delta_u_at_min,
+    ):
+        reason = "qkernel_roi_frontier_not_useful"
+    else:
+        reason = ""
+    if reason:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            submit_edge=submit_edge,
+            qkernel_side=econ_side,
+            expected_side=expected_side,
+            qkernel_source=econ_source,
+            limit_price=limit_price,
+            qkernel_cost=econ_cost if econ_cost is not None else "",
+            qkernel_edge_lcb=econ_edge_lcb if econ_edge_lcb is not None else "",
+            qkernel_delta_u_at_min=(
+                econ_delta_u_at_min if econ_delta_u_at_min is not None else ""
+            ),
+            qkernel_optimal_stake_usd=(
+                econ_optimal_stake_usd if econ_optimal_stake_usd is not None else ""
+            ),
+            qkernel_optimal_delta_u=(
+                econ_optimal_delta_u if econ_optimal_delta_u is not None else ""
+            ),
+            qkernel_false_edge_rate=(
+                econ_false_edge_rate if econ_false_edge_rate is not None else ""
+            ),
+            max_false_edge_rate=max_false_edge_rate,
+            qkernel_payoff_q_point=payoff_q_point if payoff_q_point is not None else "",
+            qkernel_payoff_q_lcb=payoff_q_lcb if payoff_q_lcb is not None else "",
+            qkernel_selection_guard_basis=selection_guard_basis,
+            qkernel_selection_guard_abstained=(
+                selection_guard_abstained if selection_guard_abstained is not None else ""
+            ),
+            qkernel_selection_guard_q_safe=(
+                selection_guard_q_safe if selection_guard_q_safe is not None else ""
+            ),
+            day0_qkernel_guard_error=day0_qkernel_guard_error,
+        )
+    live_win_rate_floor_reason = live_probability_quality_reason
+    if live_win_rate_floor_reason is not None:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=live_win_rate_floor_reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            limit_price=limit_price,
+            submit_edge=submit_edge,
+            expected_profit_usd=expected_profit,
+            shares=submitted_shares,
+            qkernel_source=econ_source,
+            qkernel_side=econ_side,
+            qkernel_cost=econ_cost,
+            qkernel_edge_lcb=econ_edge_lcb,
+            qkernel_payoff_q_lcb=payoff_q_lcb,
+        )
+    return _capability_component(
+        "entry_economics",
+        q_live=q_live,
+        q_lcb_5pct=q_lcb,
+        expected_edge=expected_edge,
+        limit_price=limit_price,
+        submit_edge=submit_edge,
+        expected_profit_usd=expected_profit,
+        min_entry_price=min_entry_price,
+        live_min_entry_price=live_min_entry_price,
+        effective_min_entry_price=effective_min_entry_price,
+        qkernel_low_price_floor_authorized=qkernel_low_price_floor_authorized,
+        min_expected_profit_usd=min_expected_profit,
+        live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+        submit_edge_density=edge_density,
+        min_submit_edge_density=min_edge_density,
+        live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+        shares=submitted_shares,
+        qkernel_source=econ_source,
+        qkernel_side=econ_side,
+        qkernel_cost=econ_cost,
+        qkernel_edge_lcb=econ_edge_lcb,
+        qkernel_false_edge_rate=econ_false_edge_rate,
+        day0_observation_authority=(day0_authority_errors == ()),
+    )
+def _entry_actionable_certificate_payload_and_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
+) -> tuple[dict, Mapping[str, Any] | None]:
+    """Require the live actionable certificate to be persisted and currently valid."""
+
+    certificate_hash = str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
+    if not certificate_hash:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="missing_actionable_certificate_hash",
+        ), None
+    if _decision_certificate_is_quarantined(conn, certificate_hash):
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_quarantined",
+            certificate_hash=certificate_hash,
+        ), None
+    attach_error = _attach_world_for_trade_certificate_read(conn)
+    matching_schema = ""
+    payload_json: str | None = None
+    table_seen = False
+    for schema in _attached_schema_names(conn):
+        try:
+            if not _table_exists_in_schema(conn, schema, "decision_certificates"):
+                continue
+            table_seen = True
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT certificate_type, mode, verifier_status, payload_json
+                  FROM {schema_sql}.decision_certificates
+                 WHERE certificate_hash = ?
+                   AND certificate_type = 'ActionableTradeCertificate'
+                   AND mode = 'LIVE'
+                   AND verifier_status = 'VERIFIED'
+                 LIMIT 1
+                """,
+                (certificate_hash,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_read_failed",
+                certificate_hash=certificate_hash,
+                error=str(exc),
+            ), None
+        if row is not None:
+            matching_schema = schema
+            try:
+                payload_json = str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[3])
+            except (IndexError, KeyError, TypeError):
+                payload_json = None
+            break
+    if not table_seen:
+        if attach_error:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_world_attach_failed",
+                certificate_hash=certificate_hash,
+                error=attach_error,
+            ), None
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="decision_certificates_table_unavailable",
+            certificate_hash=certificate_hash,
+        ), None
+    if not matching_schema:
+        if attach_error:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_world_attach_failed",
+                certificate_hash=certificate_hash,
+                error=attach_error,
+            ), None
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_not_persisted_live_verified",
+            certificate_hash=certificate_hash,
+        ), None
+    if not payload_json:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_payload_missing",
+            certificate_hash=certificate_hash,
+            certificate_schema=matching_schema,
+        ), None
+    try:
+        from src.decision_kernel.verifier import _verify_actionable_payload
+
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("payload_json is not an object")
+        _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        mismatch_reason = _actionable_certificate_intent_mismatch_reason(
+            payload,
+            intent,
+            decision_id=decision_id,
+        )
+        if mismatch_reason:
+            raise ValueError(mismatch_reason)
+    except Exception as exc:  # noqa: BLE001
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_fails_current_verifier",
+            certificate_hash=certificate_hash,
+            certificate_schema=matching_schema,
+            verification_error=str(exc),
+        ), None
+    return _capability_component(
+        "entry_actionable_certificate",
+        certificate_hash=certificate_hash,
+        certificate_schema=matching_schema,
+    ), payload
+
+
+def _entry_actionable_certificate_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
+) -> dict:
+    component, _payload = _entry_actionable_certificate_payload_and_component(
+        conn,
+        intent,
+        decision_id=decision_id,
+    )
+    return component
+
+
+def _direction_value(value: object) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip()
+
+
+def _float_values_match(left: object, right: object, *, tolerance: float = 1e-9) -> bool:
+    parsed_left = _float_field(left)
+    parsed_right = _float_field(right)
+    if parsed_left is None or parsed_right is None:
+        return False
+    return abs(parsed_left - parsed_right) <= tolerance
+
+
+def _actionable_certificate_intent_mismatch_reason(
+    payload: Mapping[str, Any],
+    intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
+) -> str:
+    """Ensure the durable actionable certificate authorizes this exact submit."""
+
+    token_id = str(getattr(intent, "token_id", "") or "").strip()
+    if token_id and str(payload.get("token_id") or "").strip() != token_id:
+        return "actionable_certificate_token_mismatch"
+
+    direction = _direction_value(getattr(intent, "direction", ""))
+    if direction and str(payload.get("direction") or "").strip() != direction:
+        return "actionable_certificate_direction_mismatch"
+
+    snapshot_id = str(
+        getattr(
+            intent,
+            "actionable_executable_snapshot_id",
+            getattr(intent, "executable_snapshot_id", ""),
+        )
+        or ""
+    ).strip()
+    payload_snapshot_id = str(payload.get("executable_snapshot_id") or "").strip()
+    if snapshot_id and payload_snapshot_id and payload_snapshot_id != snapshot_id:
+        return "actionable_certificate_snapshot_mismatch"
+
+    for field_name in ("q_live", "q_lcb_5pct"):
+        intent_value = getattr(intent, field_name, None)
+        if intent_value is not None and not _float_values_match(payload.get(field_name), intent_value):
+            return f"actionable_certificate_{field_name}_mismatch"
+
+    intent_economics = getattr(intent, "qkernel_execution_economics", None)
+    payload_economics = payload.get("qkernel_execution_economics")
+    if isinstance(intent_economics, Mapping):
+        if not isinstance(payload_economics, Mapping):
+            return "actionable_certificate_qkernel_economics_missing"
+        for key in (
+            "source",
+            "side",
+            "direction_law_ok",
+            "coherence_allows",
+        ):
+            if payload_economics.get(key) != intent_economics.get(key):
+                return f"actionable_certificate_qkernel_{key}_mismatch"
+        for key in (
+            "cost",
+            "edge_lcb",
+            "delta_u_at_min",
+            "optimal_stake_usd",
+            "optimal_delta_u",
+            "false_edge_rate",
+            "payoff_q_point",
+            "payoff_q_lcb",
+        ):
+            if key in intent_economics and not _float_values_match(
+                payload_economics.get(key),
+                intent_economics.get(key),
+            ):
+                return f"actionable_certificate_qkernel_{key}_mismatch"
+
+    decision_text = str(decision_id or "").strip()
+    if decision_text.startswith("edli_exec_cmd:"):
+        parts = decision_text.split(":")
+        if len(parts) < 5:
+            return "actionable_certificate_edli_decision_id_malformed"
+        event_id = parts[1]
+        command_direction = parts[-1]
+        command_token = parts[-2]
+        final_intent_id = ":".join(parts[2:-2])
+        if str(payload.get("event_id") or "").strip() != event_id:
+            return "actionable_certificate_edli_event_mismatch"
+        if str(payload.get("final_intent_id") or "").strip() != final_intent_id:
+            return "actionable_certificate_edli_final_intent_mismatch"
+        if token_id and command_token != token_id:
+            return "actionable_certificate_edli_token_mismatch"
+        if direction and command_direction != direction:
+            return "actionable_certificate_edli_direction_mismatch"
+    return ""
+
+
+def _decision_certificate_is_quarantined(
+    conn: sqlite3.Connection,
+    certificate_hash: str,
+) -> bool:
+    if not certificate_hash:
+        return False
+    try:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+            REASON_INVALID_LIVE_PARENT_MODE,
+        )
+    except Exception:
+        DECISION_CERTIFICATES_TABLE = "decision_certificates"
+        REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+        REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
+    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
+    for schema in _attached_schema_names(conn):
+        try:
+            if not _table_exists_in_schema(conn, schema, "decision_integrity_quarantine"):
+                continue
+            schema_sql = _quote_sql_identifier(schema)
+            placeholders = ",".join("?" for _ in reason_codes)
+            row = conn.execute(
+                f"""
+                SELECT 1
+                  FROM {schema_sql}.decision_integrity_quarantine
+                 WHERE table_name = ?
+                   AND row_id = ?
+                   AND reason_code IN ({placeholders})
+                 LIMIT 1
+                """,
+                (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row is not None:
+            return True
+    return False
+
+
 def _parse_sqlite_timestamp(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -615,6 +1340,8 @@ def _entry_same_token_cooldown_component(
     *,
     token_id: str,
     candidate_position_id: str,
+    limit_price: float | None = None,
+    shares: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Throttle repeated ENTRY attempts for a top-ranked token."""
@@ -632,9 +1359,12 @@ def _entry_same_token_cooldown_component(
             "allowed": True,
             "reason": "missing_venue_commands_table",
         }
+    command_columns = _table_column_names(conn, "venue_commands")
+    has_price_size = "price" in command_columns and "size" in command_columns
+    select_price_size = ", price, size" if has_price_size else ""
     rows = conn.execute(
-        """
-        SELECT command_id, position_id, state, created_at, updated_at
+        f"""
+        SELECT command_id, position_id, state, created_at, updated_at{select_price_size}
         FROM venue_commands
         WHERE intent_kind = 'ENTRY'
           AND side = 'BUY'
@@ -656,6 +1386,11 @@ def _entry_same_token_cooldown_component(
     state = ""
     created_at = ""
     updated_at = ""
+    prior_price: object | None = None
+    prior_size: object | None = None
+    terminal_no_fill_row: tuple[
+        str, str, str, object, object, object | None, object | None
+    ] | None = None
     for row in rows:
         if isinstance(row, sqlite3.Row):
             command_id = str(row["command_id"])
@@ -663,26 +1398,52 @@ def _entry_same_token_cooldown_component(
             state = str(row["state"])
             created_at = row["created_at"]
             updated_at = row["updated_at"]
+            row_price = row["price"] if has_price_size else None
+            row_size = row["size"] if has_price_size else None
         else:
             command_id = str(row[0])
             position_id = str(row[1])
             state = str(row[2])
             created_at = row[3]
             updated_at = row[4]
+            row_price = row[5] if has_price_size else None
+            row_size = row[6] if has_price_size else None
         if _entry_terminal_command_has_no_fill_exposure(
             conn,
             command_id=command_id,
             state=state,
         ):
+            if terminal_no_fill_row is None:
+                terminal_no_fill_row = (
+                    command_id,
+                    position_id,
+                    state,
+                    created_at,
+                    updated_at,
+                    row_price,
+                    row_size,
+                )
             continue
+        prior_price = row_price
+        prior_size = row_size
         break
     else:
-        return {
-            "component": "entry_same_token_cooldown",
-            "allowed": True,
-            "reason": "allowed_terminal_no_fill_prior_entries",
-            "token_id": token,
-        }
+        if terminal_no_fill_row is None:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": True,
+                "reason": "allowed_no_blocking_prior_entries",
+                "token_id": token,
+            }
+        (
+            command_id,
+            position_id,
+            state,
+            created_at,
+            updated_at,
+            prior_price,
+            prior_size,
+        ) = terminal_no_fill_row
     last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
     if last_seen is None:
         return {
@@ -697,28 +1458,98 @@ def _entry_same_token_cooldown_component(
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
     age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
-    remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
+    terminal_no_fill = _entry_terminal_command_has_no_fill_exposure(
+        conn,
+        command_id=command_id,
+        state=state,
+    )
+    cooldown_seconds = (
+        _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS
+        if terminal_no_fill
+        else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
+    )
+    remaining_seconds = cooldown_seconds - age_seconds
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
             "allowed": False,
-            "reason": "same_token_entry_cooling_down",
-            "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+            "reason": (
+                "same_token_terminal_no_fill_cooling_down"
+                if terminal_no_fill
+                else "same_token_entry_cooling_down"
+            ),
+            "cooldown_seconds": cooldown_seconds,
             "remaining_seconds": int(remaining_seconds),
             "existing_command_id": command_id,
             "existing_position_id": position_id,
             "existing_command_state": state,
             "existing_updated_at": str(updated_at or ""),
             "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
         }
+    if terminal_no_fill:
+        existing_price = _decimal_or_none(prior_price)
+        candidate_price = _decimal_or_none(limit_price)
+        if existing_price is None or candidate_price is None:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_reprice_evidence_missing",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+            }
+        reprice_delta = abs(candidate_price - existing_price)
+        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_requires_reprice",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "reprice_delta": str(reprice_delta),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+            }
     return {
         "component": "entry_same_token_cooldown",
         "allowed": True,
-        "reason": "allowed_cooldown_elapsed",
-        "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+        "reason": (
+            "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
+            if terminal_no_fill
+            else "allowed_cooldown_elapsed"
+        ),
+        "cooldown_seconds": cooldown_seconds,
         "age_seconds": int(age_seconds),
         "existing_command_id": command_id,
+        "existing_position_id": position_id,
         "existing_command_state": state,
+        "existing_updated_at": str(updated_at or ""),
+        "existing_created_at": str(created_at or ""),
+        "existing_price": str(prior_price or ""),
+        "existing_size": str(prior_size or ""),
+        "candidate_price": str(limit_price or ""),
+        "candidate_shares": str(shares or ""),
     }
 
 
@@ -745,7 +1576,7 @@ def _entry_duplicate_same_token_component(
         }
 
     if _table_exists(conn, "position_current"):
-        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         rows = conn.execute(
             f"""
             SELECT position_id, phase, order_id, shares, cost_basis_usd
@@ -758,7 +1589,7 @@ def _entry_duplicate_same_token_component(
                 token,
                 token,
                 candidate_position_id,
-                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
             ),
         ).fetchall()
         for row in rows:
@@ -773,7 +1604,7 @@ def _entry_duplicate_same_token_component(
             }
 
     if _table_exists(conn, "venue_commands"):
-        terminal_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        non_open_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         open_state_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_OPEN_COMMAND_STATES)
         terminal_no_exposure_placeholders = ",".join(
             "?" for _ in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
@@ -793,7 +1624,7 @@ def _entry_duplicate_same_token_component(
                         vc.state = 'FILLED'
                     AND (
                             pc.phase IS NULL
-                         OR pc.phase NOT IN ({terminal_phase_placeholders})
+                         OR pc.phase NOT IN ({non_open_phase_placeholders})
                     )
                  )
                  OR (
@@ -808,7 +1639,7 @@ def _entry_duplicate_same_token_component(
                 token,
                 candidate_position_id,
                 *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
-                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
                 *sorted(_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES),
                 *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
             ),
@@ -916,6 +1747,15 @@ def _is_polymarket_invalid_amount_400_message(message: str) -> bool:
     return precision_rejection or marketable_buy_min_rejection
 
 
+def _is_polymarket_invalid_signature_400(exc: Exception) -> bool:
+    if type(exc).__name__ != "PolyApiException":
+        return False
+    message = str(exc)
+    if "status_code=400" not in message:
+        return False
+    return "invalid POLY_GNOSIS_SAFE signature" in message
+
+
 def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
     return {
         "reason": "venue_rejected_geoblock_403",
@@ -934,6 +1774,17 @@ def _invalid_amount_rejection_payload(exc: Exception, *, idempotency_key: str) -
         "exception_message": str(exc),
         "idempotency_key": idempotency_key,
         "proof_class": "deterministic_venue_invalid_amount_400",
+        "venue_order_created": False,
+    }
+
+
+def _invalid_signature_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_auth_invalid_signature_400",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_auth_signature_400",
         "venue_order_created": False,
     }
 
@@ -975,6 +1826,8 @@ def _deterministic_submit_rejection_payload(
         return _geoblock_rejection_payload(exc, idempotency_key=idempotency_key)
     if _is_polymarket_invalid_amount_400(exc):
         return _invalid_amount_rejection_payload(exc, idempotency_key=idempotency_key)
+    if _is_polymarket_invalid_signature_400(exc):
+        return _invalid_signature_rejection_payload(exc, idempotency_key=idempotency_key)
     # GENERAL 400 fallback (kept LAST so the specific invalid_amount reason_code wins
     # for its downstream no-verbatim-retry handling): every other 400 is still a
     # deterministic venue rejection, never an unknown side effect / governor latch.
@@ -1129,7 +1982,6 @@ def _venue_submit_order_fact_state(result: dict) -> str:
 def _venue_submit_matched_size(
     result: dict,
     *,
-    fallback_size: float | Decimal | None = None,
     side: str | None = None,
 ) -> str:
     for key in (
@@ -1150,9 +2002,6 @@ def _venue_submit_matched_size(
     value = _first_submit_value(result, *amount_keys)
     if value not in (None, ""):
         return str(value)
-    status = _venue_submit_status(result)
-    if status in {"MATCHED", "FILLED"} and fallback_size is not None:
-        return str(fallback_size)
     return "0"
 
 
@@ -1190,9 +2039,8 @@ def _venue_submit_remaining_size(
 def _venue_submit_fill_price(
     result: dict,
     *,
-    fallback_price: float | Decimal,
     side: str | None = None,
-) -> str:
+) -> str | None:
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
@@ -1203,7 +2051,7 @@ def _venue_submit_fill_price(
         value = _first_submit_value(result, key)
         if _positive_decimal_or_none(value) is not None:
             return str(value)
-    return str(fallback_price)
+    return None
 
 
 def _venue_fill_covers_submit(matched_size: str, submitted_size: float | Decimal) -> bool:
@@ -1271,14 +2119,21 @@ def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> d
     )
 
 
-def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
+def _refresh_exit_collateral_snapshot_for_submit(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str | None = None,
+    shares: float | None = None,
+) -> dict:
     """Refresh CTF inventory truth before exit sell preflight."""
     from src.execution.collateral import refresh_collateral_snapshot_for_submit
 
+    _ = shares
     return refresh_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
-        reuse_fresh_snapshot=True,
+        reuse_fresh_snapshot=False,
+        token_id=token_id,
     )
 
 
@@ -1349,15 +2204,23 @@ def _pre_submit_decision_source_errors(
     """Split source blockers from audit fields unavailable before venue submit."""
 
     errors = context.integrity_errors()
+    audit_only_errors = set(_PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS)
+    if context.is_day0_observation_context():
+        audit_only_errors.difference_update(
+            {
+                "missing_observation_time",
+                "missing_observation_available_at",
+            }
+        )
     blockers = tuple(
         error
         for error in errors
-        if error not in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+        if error not in audit_only_errors
     )
     deferred = tuple(
         error
         for error in errors
-        if error in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+        if error in audit_only_errors
     )
     return blockers, deferred
 
@@ -1597,6 +2460,19 @@ def _exit_snapshot_identity_details(intent) -> dict[str, str] | None:
         "snapshot_id": _json_safe_string(getattr(intent, "executable_snapshot_id", ""), ""),
         "snapshot_hash": snapshot_hash,
     }
+
+
+def _exit_idempotency_decision_component(effective_decision_id: str, intent) -> str:
+    """Scope exit idempotency to the executable snapshot while keeping decision_id stable."""
+
+    details = _exit_snapshot_identity_details(intent)
+    if details is None:
+        return effective_decision_id
+    snapshot_id = details.get("snapshot_id", "")
+    snapshot_hash = details.get("snapshot_hash", "")
+    if not snapshot_id or not snapshot_hash:
+        return effective_decision_id
+    return f"{effective_decision_id}:exit_snapshot:{snapshot_id}:{snapshot_hash}"
 
 
 def _exit_snapshot_identity_component(
@@ -1862,15 +2738,17 @@ def _build_pre_submit_envelope(
     """Build the U2 venue-submission envelope before SDK contact.
 
     This deliberately uses only the already-captured ExecutableMarketSnapshot
-    plus the command's intended order shape.  It does not resolve keychain
-    credentials or instantiate the SDK client, preserving INV-30's
-    persist-before-submit ordering.  If the snapshot is missing or the token is
-    not in that snapshot, return None and let insert_command's executable
-    snapshot gate raise the more precise fail-closed error.
+    plus the command's intended order shape and the canonical public funder
+    identity. It does not touch the private key or instantiate the SDK client,
+    preserving INV-30's persist-before-submit ordering. If the snapshot is
+    missing or the token is not in that snapshot, return None and let
+    insert_command's executable snapshot gate raise the more precise
+    fail-closed error.
     """
 
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.contracts.executable_market_snapshot import canonicalize_fee_details
+    from src.data.polymarket_client import resolve_funder_address
     from src.state.snapshot_repo import get_snapshot
     from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
 
@@ -1906,16 +2784,18 @@ def _build_pre_submit_envelope(
         separators=(",", ":"),
     )
     payload_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    try:
+        funder_address = str(resolve_funder_address() or "").strip()
+    except Exception as exc:
+        raise PreSubmitIdentityBindingError(str(exc)) from exc
+    if not funder_address:
+        raise PreSubmitIdentityBindingError("canonical funder_address is empty")
     envelope = VenueSubmissionEnvelope(
         sdk_package="py-clob-client-v2",
         sdk_version="pre-submit",
         host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
         chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-        funder_address=(
-            os.environ.get("POLYMARKET_FUNDER_ADDRESS")
-            or os.environ.get("POLYMARKET_PROXY_ADDRESS")
-            or "UNRESOLVED_PRE_SUBMIT_FUNDER"
-        ),
+        funder_address=funder_address,
         condition_id=snapshot.condition_id,
         question_id=snapshot.question_id,
         yes_token_id=snapshot.yes_token_id,
@@ -1965,6 +2845,10 @@ def _persist_prebuilt_submit_envelope(
 
 class FinalSubmissionEnvelopePersistenceError(RuntimeError):
     """Raised when post-submit SDK provenance cannot be persisted."""
+
+
+class PreSubmitIdentityBindingError(RuntimeError):
+    """Raised when a pre-submit envelope cannot bind canonical live identity."""
 
 
 def _persist_final_submission_envelope_payload(
@@ -2058,6 +2942,17 @@ def _current_command_state_value(conn: sqlite3.Connection, command_id: str) -> s
         return str(row["state"])
     except Exception:
         return str(row[0])
+
+
+def _venue_command_exists(conn: sqlite3.Connection, command_id: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
 
 
 def _submit_ack_already_persisted(
@@ -2775,7 +3670,12 @@ def _final_intent_snapshot_metadata(
         raise ValueError("FinalExecutionIntent tick_size does not match executable snapshot")
     if intent.min_order_size != snapshot.min_order_size:
         raise ValueError("FinalExecutionIntent min_order_size does not match executable snapshot")
-    if intent.neg_risk != snapshot.neg_risk:
+    # Some executable snapshots carry a stale/omitted false while the live
+    # certificate path has already proven neg-risk true. True is monotonic here;
+    # a false intent against a true snapshot remains a hard provenance mismatch.
+    if intent.neg_risk != snapshot.neg_risk and not (
+        intent.neg_risk is True and snapshot.neg_risk is False
+    ):
         raise ValueError("FinalExecutionIntent neg_risk does not match executable snapshot")
     sweep = simulate_clob_sweep(
         snapshot=snapshot,
@@ -2861,6 +3761,7 @@ def _legacy_entry_intent_from_final(
         timeout_seconds=_final_intent_timeout_seconds(intent),
         decision_edge=0.0,
         executable_snapshot_id=intent.snapshot_id,
+        actionable_executable_snapshot_id=intent.snapshot_id,
         executable_snapshot_hash=intent.snapshot_hash,
         executable_cost_basis_id=intent.cost_basis_id,
         executable_cost_basis_hash=intent.cost_basis_hash,
@@ -2875,6 +3776,15 @@ def _legacy_entry_intent_from_final(
         submit_order_type=intent.order_type,
         post_only=intent.post_only,
         taker_quality_proof=intent.taker_quality_proof,
+        q_live=intent.q_live,
+        q_lcb_5pct=intent.q_lcb_5pct,
+        expected_edge=intent.expected_edge,
+        min_entry_price=intent.min_entry_price,
+        min_expected_profit_usd=intent.min_expected_profit_usd,
+        min_submit_edge_density=intent.min_submit_edge_density,
+        selection_authority_applied=intent.selection_authority_applied,
+        qkernel_execution_economics=intent.qkernel_execution_economics,
+        actionable_certificate_hash=intent.actionable_certificate_hash,
     )
 
 
@@ -2927,12 +3837,21 @@ def _recapture_fresh_entry_snapshot_if_needed(
         return legacy_intent
     if fresh.selected_outcome_token_id != final_intent.selected_token_id:
         raise ValueError("recaptured executable snapshot selected token mismatch")
-    if fresh.min_tick_size != final_intent.tick_size:
-        raise ValueError("recaptured executable snapshot tick_size mismatch")
-    if fresh.min_order_size != final_intent.min_order_size:
-        raise ValueError("recaptured executable snapshot min_order_size mismatch")
-    if fresh.neg_risk != final_intent.neg_risk:
-        raise ValueError("recaptured executable snapshot neg_risk mismatch")
+    fresh_limit_price = _align_buy_limit_price_to_tick(
+        final_intent.final_limit_price,
+        fresh.min_tick_size,
+    )
+    if Decimal(str(submitted_shares)) < Decimal(str(fresh.min_order_size)):
+        raise ValueError(
+            "recaptured executable snapshot submitted_shares below fresh min_order_size: "
+            f"submitted_shares={submitted_shares} fresh_min_order_size={fresh.min_order_size}"
+        )
+    # neg_risk is venue metadata attached to the same condition/token identity.
+    # Older elected/JIT snapshots can be missing the CLOB negRisk fact and carry
+    # the default False; the fresh recapture below is the authority that gets
+    # threaded into the submit envelope. Do not reject solely because this
+    # metadata was corrected, provided selected token, tick/min-order, and
+    # economics still validate against the fresh book.
     # MODE-CORRECT ECONOMICS VALIDATION (live 2026-06-12 02:16:49Z, Helsinki
     # POST_ONLY 219.77@0.14): the crossable-depth sweep is TAKER economics — a
     # post_only maker rest ADDS liquidity and by construction has no crossable
@@ -2947,10 +3866,10 @@ def _recapture_fresh_entry_snapshot_if_needed(
     _is_maker_rest = bool(getattr(final_intent, "post_only", False))
     if _is_maker_rest:
         fresh_ask = fresh.orderbook_top_ask
-        if fresh_ask is not None and Decimal(str(final_intent.final_limit_price)) >= Decimal(str(fresh_ask)):
+        if fresh_ask is not None and Decimal(str(fresh_limit_price)) >= Decimal(str(fresh_ask)):
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
-                f"post_only limit {final_intent.final_limit_price} would cross fresh ask {fresh_ask}"
+                f"post_only limit {fresh_limit_price} would cross fresh ask {fresh_ask}"
             )
     else:
         sweep = simulate_clob_sweep(
@@ -2958,15 +3877,21 @@ def _recapture_fresh_entry_snapshot_if_needed(
             direction=final_intent.direction,
             requested_size_kind="shares",
             requested_size_value=Decimal(str(submitted_shares)),
-            limit_price=final_intent.final_limit_price,
+            limit_price=fresh_limit_price,
         )
-        if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
+        expected_price = Decimal(str(final_intent.expected_fill_price_before_fee))
+        if (
+            sweep.depth_status != "PASS"
+            or sweep.average_price is None
+            or Decimal(str(sweep.average_price)) > expected_price
+        ):
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
                 f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
             )
     return replace(
         legacy_intent,
+        limit_price=fresh_limit_price,
         executable_snapshot_id=fresh.snapshot_id,
         executable_snapshot_hash=fresh.executable_snapshot_hash,
         executable_snapshot_min_tick_size=fresh.min_tick_size,
@@ -3077,33 +4002,9 @@ def execute_intent(
             "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: live entry must use "
             "FinalExecutionIntent via execute_final_intent"
         )
-    if not (
-        os.environ.get("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT") == "1"
-        and os.environ.get("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "").strip().lower()
-        == "paper"
-    ):
-        raise RuntimeError(
-            "LEGACY_EXECUTION_INTENT_NON_LIVE_BLOCKED: legacy ExecutionIntent "
-            "requires ZEUS_ALLOW_LEGACY_EXECUTION_INTENT=1 and "
-            "ZEUS_LEGACY_EXECUTION_INTENT_SCOPE=paper"
-        )
-    trade_id = str(uuid.uuid4())[:12]
-    shadow_result = submit_order(intent, mode="paper")
-    if not isinstance(shadow_result, dict):
-        return OrderResult(
-            trade_id=trade_id,
-            status="rejected",
-            reason=f"legacy_paper_executor_result_invalid:{type(shadow_result).__name__}",
-        )
-    return OrderResult(
-        trade_id=trade_id,
-        status=str(shadow_result.get("status") or "shadow_filled"),
-        order_id=str(shadow_result.get("order_id") or ""),
-        submitted_price=float(intent.limit_price),
-        shares=_entry_buy_submit_shares(intent.target_size_usd, intent.limit_price),
-        order_role="entry",
-        reason=None,
-        command_state=None,
+    raise RuntimeError(
+        "LEGACY_EXECUTION_INTENT_BLOCKED: legacy ExecutionIntent has no "
+        "production execution route; use FinalExecutionIntent via execute_final_intent"
     )
 
 
@@ -3136,29 +4037,6 @@ def create_exit_order_intent(
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
     )
-
-
-
-
-def submit_order(order: Any, *, mode: Optional[str] = None) -> Any:
-    """Gate 2 top-level router: live path uses VenueAdapterExecutor, shadow uses ShadowExecutorImpl.
-
-    C-4 shim: routes based on ZEUS_MODE env var (or explicit mode kwarg).
-    Live callers should prefer execute_final_intent / execute_intent directly;
-    this shim exists for backwards-compat call sites that cannot yet pass a token.
-
-    @untyped_for_compat is NOT applied here because this shim is new code, not
-    a legacy site.  Deprecated callers should migrate to the typed ABC paths.
-    """
-    from src.config import get_mode as _get_mode
-
-    resolved_mode = mode or _get_mode()
-    if resolved_mode == "live":
-        from src.execution.venue_adapter import VenueAdapterExecutor
-        return VenueAdapterExecutor().submit(order)
-    else:
-        from src.execution.shadow_executor import ShadowExecutorImpl
-        return ShadowExecutorImpl().submit(order)
 
 
 def place_sell_order(
@@ -3205,10 +4083,16 @@ def execute_exit_order(
       5. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
     from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand
-    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        append_trade_fact,
+        insert_command,
+    )
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -3294,8 +4178,12 @@ def execute_exit_order(
     # supplied a real one. P1.S5 wires real decision_id from upstream;
     # exit path still uses synthetic when called without decision_id.
     effective_decision_id = decision_id or f"exit:{intent.trade_id}"
+    idempotency_decision_id = _exit_idempotency_decision_component(
+        effective_decision_id,
+        intent,
+    )
     idem = IdempotencyKey.from_inputs(
-        decision_id=effective_decision_id,
+        decision_id=idempotency_decision_id,
         token_id=intent.token_id,
         side="SELL",
         price=limit_price,
@@ -3357,8 +4245,6 @@ def execute_exit_order(
         order_type = _exit_order_type(selected_order_type)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
-        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -3480,6 +4366,13 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
 
+        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
+            conn,
+            token_id=intent.token_id,
+            shares=shares,
+        )
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
+
         try:
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
@@ -3592,32 +4485,61 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        except PreSubmitIdentityBindingError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_identity_binding_failed: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=rej_time,
-                    payload={
-                        "reason": "pre_submit_collateral_reservation_failed",
-                        "detail": str(exc),
-                        "exception_type": type(exc).__name__,
-                        "side_effect_boundary_crossed": False,
-                        "sdk_submit_attempted": False,
-                    },
-                )
-                if _own_conn:
-                    conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "execute_exit_order: SUBMIT_REJECTED append_event failed after "
-                    "pre-submit collateral reservation failure (command_id=%s "
-                    "trade_id=%s): inner=%s original=%s",
+            if _venue_command_exists(conn, command_id):
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=rej_time,
+                        payload={
+                            "reason": "pre_submit_collateral_reservation_failed",
+                            "detail": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "side_effect_boundary_crossed": False,
+                            "sdk_submit_attempted": False,
+                        },
+                    )
+                    if _own_conn:
+                        conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "execute_exit_order: SUBMIT_REJECTED append_event failed after "
+                        "pre-submit collateral reservation failure (command_id=%s "
+                        "trade_id=%s): inner=%s original=%s",
+                        command_id,
+                        intent.trade_id,
+                        inner,
+                        exc,
+                    )
+            else:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.warning(
+                    "execute_exit_order: pre-command collateral rejection "
+                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
+                    "no order placed: %s",
                     command_id,
                     intent.trade_id,
-                    inner,
                     exc,
                 )
             return OrderResult(
@@ -3680,7 +4602,7 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
             )
         except sqlite3.OperationalError as exc:
             # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. A transient
@@ -3971,7 +4893,7 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
@@ -4022,9 +4944,33 @@ def execute_exit_order(
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+            )
+
+        order_fact_state = _venue_submit_order_fact_state(result)
+        matched_size = _venue_submit_matched_size(result, side="SELL")
+        remaining_size = _venue_submit_remaining_size(
+            result,
+            shares,
+            matched_size=matched_size,
+            side="SELL",
+        )
+        fill_price = _venue_submit_fill_price(result, side="SELL")
+        fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
+        fill_trade_id = next(iter(_venue_submit_trade_ids(result)), None) or fill_tx_hash
+        fill_event_type: str | None = None
+        if (
+            order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"}
+            and _positive_decimal_or_none(matched_size)
+            and fill_price is not None
+            and fill_trade_id
+        ):
+            fill_event_type = (
+                "FILL_CONFIRMED"
+                if _venue_fill_covers_submit(matched_size, shares)
+                else "PARTIAL_FILL_OBSERVED"
             )
 
         # SUBMIT_ACKED — order placed successfully
@@ -4048,13 +4994,9 @@ def execute_exit_order(
                 conn,
                 venue_order_id=order_id,
                 command_id=command_id,
-                state=_venue_submit_order_fact_state(result),
-                remaining_size=_venue_submit_remaining_size(
-                    result,
-                    shares,
-                    side="SELL",
-                ),
-                matched_size=_venue_submit_matched_size(result, side="SELL"),
+                state=order_fact_state,
+                remaining_size=remaining_size,
+                matched_size=matched_size,
                 source="REST",
                 observed_at=ack_time,
                 # C4 telemetry-truth: REST ACK response carries no server matchTime;
@@ -4074,6 +5016,61 @@ def execute_exit_order(
                     "source": "place_limit_order_ack",
                 },
             )
+            if fill_event_type and fill_trade_id:
+                if not _trade_fact_already_persisted(
+                    conn,
+                    command_id=command_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_trade_fact(
+                        conn,
+                        trade_id=fill_trade_id,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        state="MATCHED",
+                        filled_size=matched_size,
+                        fill_price=fill_price,
+                        source="REST",
+                        observed_at=ack_time,
+                        venue_timestamp=None,
+                        tx_hash=fill_tx_hash,
+                        raw_payload_hash=_canonical_payload_hash(
+                            {
+                                "command_id": command_id,
+                                "venue_order_id": order_id,
+                                "trade_id": fill_trade_id,
+                                "submit_result": result,
+                            }
+                        ),
+                        raw_payload_json={
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "submit_result": _jsonable_payload(result),
+                            "source": "place_exit_order_matched_submit",
+                        },
+                    )
+                if not _command_event_already_persisted(
+                    conn,
+                    command_id=command_id,
+                    event_type=fill_event_type,
+                    order_id=order_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=fill_event_type,
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "place_exit_order_matched_submit",
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "filled_size": matched_size,
+                            "fill_price": fill_price,
+                            "tx_hash": fill_tx_hash,
+                            **final_envelope_payload,
+                        },
+                    )
             # PR 6 (2026-05-19): persist submit intent + venue ack timing to settlement_commands.
             # Best-effort: do not fail the order on UPDATE error (column may not exist on older DBs).
             try:
@@ -4122,10 +5119,23 @@ def execute_exit_order(
                 command_state=durable_state,
             )
 
+        durable_state = _current_command_state_value(conn, command_id) or "ACKED"
         result_obj = OrderResult(
             trade_id=intent.trade_id,
-            status="pending",
-            reason="sell order posted",
+            status=(
+                "filled"
+                if fill_event_type == "FILL_CONFIRMED"
+                else ("partial" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "pending")
+            ),
+            reason=(
+                "sell order filled"
+                if fill_event_type == "FILL_CONFIRMED"
+                else (
+                    "sell order partially filled"
+                    if fill_event_type == "PARTIAL_FILL_OBSERVED"
+                    else "sell order posted"
+                )
+            ),
             order_id=order_id,
             submitted_price=limit_price,
             shares=shares,
@@ -4135,7 +5145,7 @@ def execute_exit_order(
             command_id=command_id,  # F7: FK to venue_commands row
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
-            command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
+            command_state=durable_state,
         )
         try:
             alert_trade(
@@ -4276,6 +5286,17 @@ def _live_order(
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
+        if not decision_id or effective_decision_id.startswith("entry:"):
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="entry_decision_identity:missing_durable_live_entry_decision_id",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         corrected_identity_component = _corrected_entry_identity_component(conn, intent)
         if not corrected_identity_component.get("allowed"):
             reason = str(
@@ -4314,6 +5335,7 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
             )
         effective_order_type = submit_order_type or order_type
         submit_post_only = bool(getattr(intent, "post_only", False))
@@ -4347,6 +5369,62 @@ def _live_order(
                 trade_id=trade_id,
                 status="rejected",
                 reason=f"entry_taker_quality:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+        (
+            actionable_certificate_component,
+            actionable_payload,
+        ) = _entry_actionable_certificate_payload_and_component(
+            conn,
+            intent,
+            decision_id=effective_decision_id,
+        )
+        if not actionable_certificate_component.get("allowed"):
+            reason = str(
+                actionable_certificate_component.get("reason")
+                or "entry_actionable_certificate"
+            )
+            logger.warning(
+                "_live_order: actionable certificate guard blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                actionable_certificate_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_actionable_certificate:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+        entry_economics_component = _entry_economics_component(
+            intent,
+            shares=shares,
+            actionable_payload=actionable_payload,
+        )
+        if not entry_economics_component.get("allowed"):
+            reason = str(entry_economics_component.get("reason") or "entry_economics")
+            logger.warning(
+                "_live_order: entry economics blocked before command persistence "
+                "for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                entry_economics_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_economics:{reason}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
@@ -4520,6 +5598,8 @@ def _live_order(
             conn,
             token_id=intent.token_id,
             candidate_position_id=trade_id,
+            limit_price=intent.limit_price,
+            shares=shares,
         )
         if not cooldown_component.get("allowed"):
             reason = str(
@@ -4604,6 +5684,22 @@ def _live_order(
                 pre_submit_envelope,
                 command_id=command_id,
             )
+            # SCH-W1.2-ORDER-STATE: stamp the decision-basis q_version from the
+            # already-verified actionable certificate's forecast section. NULL
+            # when the certificate's forecast authority is not posterior-provenance
+            # (ensemble-sourced entries carry no posterior_identity_hash) — a
+            # defined semantic ("no posterior identity for this decision"), not
+            # missing data.
+            entry_forecast_section = (
+                actionable_payload.get("forecast")
+                if isinstance(actionable_payload, dict)
+                else None
+            )
+            entry_q_version = (
+                entry_forecast_section.get("posterior_identity_hash")
+                if isinstance(entry_forecast_section, dict)
+                else None
+            )
             insert_command(
                 conn,
                 command_id=command_id,
@@ -4619,6 +5715,7 @@ def _live_order(
                 size=shares,
                 price=intent.limit_price,
                 created_at=now_str,
+                q_version=entry_q_version,
                 snapshot_checked_at=now_str,
                 expected_min_tick_size=intent.executable_snapshot_min_tick_size,
                 expected_min_order_size=intent.executable_snapshot_min_order_size,
@@ -4655,6 +5752,8 @@ def _live_order(
                                 post_only=submit_post_only,
                             ),
                             taker_quality_component,
+                            entry_economics_component,
+                            actionable_certificate_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,
@@ -4684,33 +5783,63 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
+            )
+        except PreSubmitIdentityBindingError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_identity_binding_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
             )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=rej_time,
-                    payload={
-                        "reason": "pre_submit_collateral_reservation_failed",
-                        "detail": str(exc),
-                        "exception_type": type(exc).__name__,
-                        "side_effect_boundary_crossed": False,
-                        "sdk_submit_attempted": False,
-                    },
-                )
-                if _own_conn:
-                    conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "_live_order: SUBMIT_REJECTED append_event failed after "
-                    "pre-submit collateral reservation failure (command_id=%s "
-                    "trade_id=%s): inner=%s original=%s",
+            if _venue_command_exists(conn, command_id):
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=rej_time,
+                        payload={
+                            "reason": "pre_submit_collateral_reservation_failed",
+                            "detail": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "side_effect_boundary_crossed": False,
+                            "sdk_submit_attempted": False,
+                        },
+                    )
+                    if _own_conn:
+                        conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: SUBMIT_REJECTED append_event failed after "
+                        "pre-submit collateral reservation failure (command_id=%s "
+                        "trade_id=%s): inner=%s original=%s",
+                        command_id,
+                        trade_id,
+                        inner,
+                        exc,
+                    )
+            else:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.warning(
+                    "_live_order: pre-command collateral rejection "
+                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
+                    "no order placed: %s",
                     command_id,
                     trade_id,
-                    inner,
                     exc,
                 )
             return OrderResult(
@@ -4770,6 +5899,7 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
             )
         except sqlite3.OperationalError as exc:
             # C-DBLOCK-UNKNOWN (2026-06-16): a transient 'database is locked' in this
@@ -4882,6 +6012,9 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
             )
         except Exception as exc:
             logger.error(
@@ -4953,35 +6086,52 @@ def _live_order(
                 idempotency_key=idem.value,
             )
             try:
-                if deterministic_rejection_payload is not None:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_REJECTED",
-                        occurred_at=unk_time,
-                        payload=deterministic_rejection_payload,
-                    )
-                else:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                        occurred_at=unk_time,
-                        payload={
-                            "reason": "post_submit_exception_possible_side_effect",
-                            "exception_type": type(exc).__name__,
-                            "exception_message": str(exc),
-                            "idempotency_key": idem.value,
-                        },
-                    )
-                # Commit UNCONDITIONALLY (same rule as the post-ACK path and the
-                # exit-order twin): the request crossed the venue boundary, so the
-                # venue may hold a live order. Under a caller-owned connection the
-                # old `if _own_conn` guard let a crash/rollback before the outer
-                # commit ERASE the unknown-side-effect fence — the next cycle then
-                # re-submits the same economic intent (duplicate live order).
-                # External review 2026-06-12 CRITICAL-2.
-                conn.commit()
+                terminal_event_type = (
+                    "SUBMIT_REJECTED"
+                    if deterministic_rejection_payload is not None
+                    else "SUBMIT_TIMEOUT_UNKNOWN"
+                )
+                terminal_payload = (
+                    deterministic_rejection_payload
+                    if deterministic_rejection_payload is not None
+                    else {
+                        "reason": "post_submit_exception_possible_side_effect",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "idempotency_key": idem.value,
+                    }
+                )
+                last_inner: Exception | None = None
+                for attempt_idx, delay_s in enumerate((0.0, 0.05, 0.15, 0.35), start=1):
+                    if delay_s:
+                        time.sleep(delay_s)
+                    try:
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type=terminal_event_type,
+                            occurred_at=unk_time,
+                            payload={
+                                **terminal_payload,
+                                "terminal_write_attempt": attempt_idx,
+                            },
+                        )
+                        # Commit UNCONDITIONALLY (same rule as the post-ACK path and the
+                        # exit-order twin): the request crossed the venue boundary, so the
+                        # venue may hold a live order. Under a caller-owned connection the
+                        # old `if _own_conn` guard let a crash/rollback before the outer
+                        # commit ERASE the unknown-side-effect fence — the next cycle then
+                        # re-submits the same economic intent (duplicate live order).
+                        # External review 2026-06-12 CRITICAL-2.
+                        conn.commit()
+                        last_inner = None
+                        break
+                    except sqlite3.OperationalError as inner:
+                        if "locked" not in str(inner).lower() and "busy" not in str(inner).lower():
+                            raise
+                        last_inner = inner
+                if last_inner is not None:
+                    raise last_inner
             except Exception as inner:
                 logger.error(
                     "_live_order: terminal SDK-exception event append/commit failed — "
@@ -5214,7 +6364,7 @@ def _live_order(
                 venue_ack_time=ack_time,
             )
         order_fact_state = _venue_submit_order_fact_state(result)
-        matched_size = _venue_submit_matched_size(result, fallback_size=shares, side="BUY")
+        matched_size = _venue_submit_matched_size(result, side="BUY")
         remaining_size = _venue_submit_remaining_size(
             result,
             shares,
@@ -5222,14 +6372,18 @@ def _live_order(
             side="BUY",
         )
         fill_event_type: str | None = None
-        fill_price = _venue_submit_fill_price(result, fallback_price=intent.limit_price, side="BUY")
+        fill_price = _venue_submit_fill_price(result, side="BUY")
         fill_trade_id: str | None = None
         fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
 
         fill_evidence = result
-        if order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"} and _positive_decimal_or_none(matched_size):
+        if order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"}:
             trade_ids = _venue_submit_trade_ids(result)
-            if not trade_ids:
+            if (
+                not trade_ids
+                or not _positive_decimal_or_none(matched_size)
+                or fill_price is None
+            ):
                 get_order = getattr(client, "get_order", None)
                 if callable(get_order):
                     try:
@@ -5248,7 +6402,6 @@ def _live_order(
                         trade_ids = _venue_submit_trade_ids(fill_evidence)
                         point_matched = _venue_submit_matched_size(
                             fill_evidence,
-                            fallback_size=matched_size,
                             side="BUY",
                         )
                         if _positive_decimal_or_none(point_matched):
@@ -5261,7 +6414,6 @@ def _live_order(
                             )
                         fill_price = _venue_submit_fill_price(
                             fill_evidence,
-                            fallback_price=intent.limit_price,
                             side="BUY",
                         )
                         fill_tx_hash = next(
@@ -5274,6 +6426,75 @@ def _live_order(
                     "FILL_CONFIRMED"
                     if _venue_fill_covers_submit(matched_size, shares)
                     else "PARTIAL_FILL_OBSERVED"
+                )
+            if fill_event_type and fill_price is None:
+                fill_event_type = None
+
+            if fill_event_type is None:
+                if not _positive_decimal_or_none(matched_size):
+                    review_reason = "matched_submit_missing_fill_size"
+                    review_detail = "venue matched status lacked positive matched size in submit response and point-order proof"
+                elif not fill_trade_id:
+                    review_reason = "matched_submit_missing_trade_id"
+                    review_detail = "venue matched status lacked trade id in submit response and point-order proof"
+                else:
+                    review_reason = "matched_submit_missing_fill_price"
+                    review_detail = "venue matched status lacked fill price in submit response and point-order proof"
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": review_reason,
+                            "detail": review_detail,
+                            "venue_order_id": order_id,
+                            "venue_status": str(result.get("status") or ""),
+                            "idempotency_key": idem.value,
+                            "side_effect_boundary_crossed": True,
+                            "sdk_submit_returned_order_id": True,
+                            "requires_recovery": True,
+                            "submit_result": _jsonable_payload(result),
+                            "fill_evidence": _jsonable_payload(fill_evidence),
+                            **final_envelope_payload,
+                        },
+                    )
+                    conn.commit()
+                    durable_state = _current_command_state_value(conn, command_id)
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: REVIEW_REQUIRED append_event failed after "
+                        "matched submit missing fill evidence (command_id=%s order_id=%s): %s",
+                        command_id,
+                        order_id,
+                        inner,
+                    )
+                    durable_state = _mark_post_submit_persistence_failure(
+                        conn,
+                        command_id=command_id,
+                        order_id=order_id,
+                        occurred_at=ack_time,
+                        reason="matched_submit_fill_evidence_review_persistence_failed",
+                        detail=str(inner),
+                        idempotency_key=idem.value,
+                        order_role="entry_order",
+                    )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason=review_reason,
+                    order_id=order_id,
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    external_order_id=order_id,
+                    venue_status=str(result.get("status") or ""),
+                    idempotency_key=idem.value,
+                    command_state=durable_state or "REVIEW_REQUIRED",
+                    command_id=command_id,
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
                 )
 
         # SUBMIT_ACKED
@@ -5390,6 +6611,23 @@ def _live_order(
                             "tx_hash": fill_tx_hash,
                             **final_envelope_payload,
                         },
+                    )
+                from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+                try:
+                    ensure_live_entry_projection_for_command(
+                        conn,
+                        command_id=command_id,
+                        client=client,
+                    )
+                except Exception as projection_exc:
+                    logger.error(
+                        "_live_order: immediate matched entry projection skipped "
+                        "(command_id=%s order_id=%s fill_event_type=%s): %s",
+                        command_id,
+                        order_id,
+                        fill_event_type,
+                        projection_exc,
                     )
             if not fill_event_type:
                 from src.execution.command_recovery import ensure_live_entry_projection_for_command

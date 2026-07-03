@@ -1555,85 +1555,6 @@ def _run_advisory_check_pr_monitor_arm_ack(
         return None
 
 
-def _run_advisory_check_pre_branch_create_in_primary(
-    payload: dict[str, Any],
-) -> str | None:
-    """PreToolUse (Bash): warn when `git checkout -b` / `git switch -c` /
-    `git worktree add` runs in the PRIMARY worktree (shared workspace).
-
-    Root cause this hook prevents (2026-05-17 incident): an agent that exits
-    its dedicated worktree and creates a new branch IN PRIMARY exposes its
-    session to concurrent processes (gh CLI, post-merge cleanup, other
-    agents) that operate on the shared primary. HEAD can be silently
-    switched mid-work.
-
-    Discipline: every agent must EnterWorktree (or `git worktree add` into
-    .claude/worktrees/) before any new-branch work. PRIMARY is read-only +
-    sync surface only.
-
-    Advisory only — never blocks. Bypass: ZEUS_PRIMARY_BRANCH_OK=1.
-    """
-    hook_id = "pre_branch_create_in_primary"
-    event = payload.get("hook_event_name", "PreToolUse")
-    try:
-        import re  # local import matches sibling-handler convention (see L155,172,188,...)
-        if payload.get("tool_name", "") != "Bash":
-            return None
-        cmd = _command_from_payload(payload)
-        # Command-position anchor (see maintree_git_state_guard): bare `\bgit`
-        # matched `echo git checkout -b x` (2026-06-13 audit). Still catches
-        # `FOO=x git checkout -b`, `a && git switch -c`, `/usr/bin/git worktree add`.
-        if not re.search(
-            r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?git"
-            r"\s+(checkout\s+-b|switch\s+-c|worktree\s+add)\b",
-            cmd,
-        ):
-            return None
-        if os.environ.get("ZEUS_PRIMARY_BRANCH_OK"):
-            return (
-                "[pre_branch_create_in_primary] ADVISORY (bypass active):\n"
-                "  ZEUS_PRIMARY_BRANCH_OK set — proceeding with branch op in PRIMARY.\n"
-                "  Bypass should be documented operator-side."
-            )
-        # Determine if cwd is the primary worktree
-        try:
-            r1 = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=3,
-            )
-            r2 = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                capture_output=True, text=True, timeout=3,
-            )
-        except Exception:
-            return None  # fail-open if git not available
-        if r1.returncode != 0 or r2.returncode != 0:
-            return None
-        cwd_root = r1.stdout.strip()
-        # The primary worktree is the FIRST entry in `git worktree list`.
-        primary = ""
-        for line in r2.stdout.splitlines():
-            if line.startswith("worktree "):
-                primary = line[len("worktree "):].strip()
-                break
-        if not primary or cwd_root != primary:
-            return None  # already in a worktree (or detection failed)
-        return (
-            "[pre_branch_create_in_primary] ADVISORY: branch op in PRIMARY worktree.\n"
-            f"  cwd: {cwd_root}\n"
-            f"  cmd: {cmd[:120]}\n"
-            "  RISK: PRIMARY is shared with gh CLI / post-merge cleanup / other\n"
-            "        agents. HEAD can be silently switched mid-work (2026-05-17\n"
-            "        incident: 3 cross-agent HEAD-switches in 6 min on PR #127).\n"
-            "  REMEDY: use EnterWorktree first (or `git worktree add .claude/\n"
-            "        worktrees/<task-slug>`), then cd there before branch ops.\n"
-            "  Bypass: ZEUS_PRIMARY_BRANCH_OK=1 (documents intent; not a skip)."
-        )
-    except Exception as exc:
-        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
-        return None
-
-
 # Main checkout that LIVE daemons run from. Hard-coded: the guard's whole job
 # is to detect "this git command would mutate the main tree's branch/state".
 _MAIN_TREE = Path("/Users/leofitz/zeus").resolve()
@@ -1893,7 +1814,9 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     # maintenance_worker_dry_run_floor DELETED 2026-06-13 — advisory-only (no deny
     # path = zero enforcement value), fired 38x/session, false-fired on read-only
     # commands and the global non-Zeus ~/.claude/settings.json. Top noise source.
-    "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
+    # pre_branch_create_in_primary DELETED 2026-06-29 — advisory-only worktree
+    # antibody; harness already isolates dispatched agents + rejects Enter/Exit
+    # from a cwd-overridden subagent, so the rule only restated harness behavior.
     "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
     "pr_monitor_arm_ack": _run_advisory_check_pr_monitor_arm_ack,
     "no_edge_rule1_guard": _run_advisory_check_no_edge_rule1_guard,

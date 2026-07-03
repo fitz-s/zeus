@@ -783,12 +783,11 @@ def test_inv27_execution_truth_warnings_law_registered():
 
 
 class TestRWExecutionTruthWarnings:
-    """R-W: cycle summary surfaces operator-visible warnings for portfolio
-    positions in execution-unsafe states. Observability-only — never blocks
-    entries (operator decision 2026-04-26). INV-27.
+    """R-W: cycle summary surfaces operator-visible warnings for pending
+    positions whose command truth is unknown. Quarantine is not duplicated here;
+    the canonical quarantine gate blocks entries. INV-27.
 
     Detection rules under K4-deferred heuristics:
-    - quarantined state + empty order_id → quarantine_without_order_authority
     - pending_* state + empty order_id → pending_state_missing_order_id
     """
 
@@ -811,21 +810,19 @@ class TestRWExecutionTruthWarnings:
             order_id=order_id,
         )
 
-    def test_quarantined_without_order_id_surfaces_warning(self):
-        from src.engine.cycle_runner import _collect_execution_truth_warnings
+    def test_quarantined_without_order_id_uses_canonical_entry_gate_not_warning(self):
+        from src.engine.cycle_runner import (
+            _collect_execution_truth_warnings,
+            _has_quarantined_positions,
+        )
         from src.state.portfolio import PortfolioState
 
         portfolio = PortfolioState(
             positions=[self._make_position(state="quarantined", order_id="", trade_id="q-1")],
             bankroll=211.37,
         )
-        warnings = _collect_execution_truth_warnings(portfolio)
-        assert len(warnings) == 1
-        w = warnings[0]
-        assert w["type"] == "quarantine_without_order_authority"
-        assert w["trade_id"] == "q-1"
-        assert w["state"] == "quarantined"
-        assert "no venue command authority" in w["reason"].lower() or "no order_id" in w["reason"].lower()
+        assert _collect_execution_truth_warnings(portfolio) == []
+        assert _has_quarantined_positions(portfolio) is True
 
     def test_pending_state_without_order_id_surfaces_warning(self):
         from src.engine.cycle_runner import _collect_execution_truth_warnings

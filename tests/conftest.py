@@ -660,33 +660,3 @@ def _ti1_redirect_live_db(tmp_path, monkeypatch):
     monkeypatch.setattr(_state_db, "ZEUS_FORECASTS_DB_PATH", tmp_forecasts)
     monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: tmp_trades)
     yield
-
-
-# ---------------------------------------------------------------------------
-# EMOS Ledger Isolation Antibody (2026-06-02)
-#
-# Category kill: test runs MUST NOT write to state/emos_shadow_ledger.jsonl.
-# Every test that invokes the live event reactor or any path that calls
-# append_ledger() would silently contaminate the live ledger with fixture
-# rows (the fixture contamination root-cause for the corrupt Chicago
-# 2026-05-25 cohort that needed the forecast-consistency gate).
-#
-# Mechanism: ZEUS_EMOS_LEDGER_PATH env var → _ledger_path() in emos_ledger.py
-# re-reads os.environ at call time (no import-time cache), so this fixture
-# takes effect for every call in the test's scope.
-#
-# Bypass (emergency-only): ZEUS_DISABLE_EMOS_LEDGER_ISOLATION=1
-# ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def _emos_ledger_test_isolation(tmp_path, monkeypatch):
-    """Redirect EMOS shadow ledger writes to a per-test tmp path.
-
-    Prevents test runs from contaminating state/emos_shadow_ledger.jsonl.
-    The live daemon (env var unset) is unaffected.
-    """
-    if os.environ.get("ZEUS_DISABLE_EMOS_LEDGER_ISOLATION") == "1":
-        yield
-        return
-    test_ledger = tmp_path / "emos_shadow_ledger_test.jsonl"
-    monkeypatch.setenv("ZEUS_EMOS_LEDGER_PATH", str(test_ledger))
-    yield

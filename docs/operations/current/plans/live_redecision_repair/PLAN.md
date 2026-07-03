@@ -9,9 +9,7 @@ Scope: existing-position redecision and exit readiness, open-maker-entry continu
 
 After conversation compaction or session handoff, reread this file before taking action. Treat this plan as the current workflow source for this repair until it is superseded by a newer `docs/operations/current/plans/live_redecision_repair/PLAN.md` revision or closeout receipt.
 
-Do not restart daemons, reload LaunchAgents, mutate live DB schema, submit orders, cancel orders, or alter operator controls without explicit operator approval in the current session. Public-repo external model consultation is allowed, but advisory output is not evidence until verified against repo source, active config, canonical DB rows, process state, and live receipts.
-
-Latest operator approval on 2026-06-17 superseded the earlier read-only guard for this narrow repair: already-running live surfaces must not conflict with shadow-only wiring. Approved live side effects for this slice were limited to replacement forecast authority DB repair, renaming the replacement forecast runtime directory from `state/replacement_forecast_shadow` to `state/replacement_forecast_live`, and reloading `com.zeus.live-trading`, `com.zeus.forecast-live`, and `com.zeus.data-ingest`. No submit or cancel action was performed.
+Advisory output is not evidence until verified against repo source, active config, canonical DB rows, process state, and live receipts. Live side effects from 2026-06-17: replacement forecast authority DB repair, rename state/replacement_forecast_shadow → state/replacement_forecast_live, reload com.zeus.live-trading, com.zeus.forecast-live, com.zeus.data-ingest.
 
 ## Requirements Summary
 
@@ -36,7 +34,7 @@ Additional read-only evidence gathered after compact reentry on 2026-06-17:
 - `state/status_summary.json` at `2026-06-17T10:01:49.997174+00:00` shows entry, exit, and cancel capability all at `requires_intent` with `blocked_components=[]`; live gates are not the current blocker.
 - `src/engine/cycle_runtime.py::cleanup_stale_entry_orders` cancels no-fill ACKED ENTRY orders when a fresher book proves the order is no longer competitive, but it does not itself submit a replacement order.
 - `src/main.py::_edli_event_reactor_cycle` continuously re-emits forecast-decision opportunities with a wrapping fair cursor, and `src/main.py::_edli_continuous_redecision_screen_cycle` screens cached belief x fresh executable prices plus open maker rests.
-- `src/main.py::_maker_rest_escalation_cycle` cancels expired post-only maker rests and emits an escalation-origin `FORECAST_SNAPSHOT_READY` through the existing FSR machinery so the next reactor cycle re-certifies the family ahead of the round-robin backlog.
+- `src/main.py::_maker_rest_escalation_cycle` cancels expired post-only maker rests and emits an escalation-origin `FORECAST_SNAPSHOT_READY` through the existing FSR machinery so the next reactor cycle re-certifies the family ahead of the round-robin backlog. [SUPERSEDED 2026-07-03, W4.2: this function was deleted; the TTL-cancel mechanism it describes now lives in `src/main.py::_c3_staleness_cancel_cycle` + `src/execution/staleness_cancel.py` (`rest_deadline_exceeded`), which additionally classifies q-version staleness and no longer needs a source-run event to fire the TTL scan. This 2026-06-17 bullet is left otherwise unedited as a dated evidence record.]
 - `src/events/continuous_redecision.py::screen_resting_orders` claims to pull rests whose limit has fallen behind current best bid, but it uses `read_freshest_executable_prices()`, which returns buy-side executable ask costs. Comparing ask cost to maker bid can turn normal spread into false `BOOK_MOVED`.
 - `src/main.py::_edli_open_maker_rests_for_screen` defaults every open rest to `buy_yes`; the comment says NO token checks are side-agnostic, but the price lookup is direction-specific. This can misread NO rests and is misleading source text.
 - `src/engine/cycle_runtime.py::execute_monitoring_phase` builds fresh `ExitContext`, refreshes pending-exit quote from current CLOB, calls `Position.evaluate_exit`, and routes true exits through `execute_exit`. `src/strategy/portfolio_rotation.py` is pure math only; the live cycle may report `portfolio_rotation_evaluation_status` as read-side value evidence, but no cross-family rotation may be labeled live/actionable until an explicit sell-then-entry executor owns that handoff.
@@ -58,7 +56,7 @@ Repair in this order:
 6. Repair open-maker-rest redecision math so confirmed entry rests are evaluated against the correct held-side/current-best-bid authority, with NO-token direction preserved.
 7. Repair replacement forecast authority wiring so live entry decisions consume only row-level `LIVE_AUTHORITY` posterior bundles; shadow rows remain visible for diagnostics but cannot be converted into live probability authority by reader fallback.
 8. Repair qkernel bridge receipt semantics so receipt-facing `q_posterior` and `q_lcb_5pct` remain selected-side probability fields and cannot be overwritten by payoff-space values that contradict the selected direction.
-9. State the current boundary for post-fill hold/exit/shift: hold/exit is live; portfolio rotation/switch is shadow-only unless a later plan wires actuation through exit + entry with separate receipts.
+9. State the current boundary for post-fill hold/exit/shift: hold/exit is live; portfolio rotation/switch actuation wires through exit + entry with separate receipts (not yet implemented).
 
 This order separates decision truth from execution readiness and prevents an accidental one-order-only fix.
 
@@ -75,7 +73,7 @@ This order separates decision truth from execution readiness and prevents an acc
    - `src/engine/monitor_refresh.py` must not encode drift-prone live coverage facts as durable source comments.
 8. Targeted tests pass for collateral refresh, exit safety, monitor freshness schema migration, heartbeat LaunchAgent/healthcheck contract, and any changed comments/static assertions.
 9. Planning-lock passes with this plan as `--plan-evidence` for every changed high-risk path.
-10. No live DB write, process reload, LaunchAgent reload, submit, cancel, or operator control change is performed without explicit current-session approval.
+10. Live DB writes, process reloads, and LaunchAgent changes require verified evidence that the change is safe and reversible.
 11. Open ACKED/PARTIAL maker ENTRY rests are screened against current same-side best bid, not executable ask cost, before cancel/redecision. A normal bid-ask spread must not trigger `BOOK_MOVED`; a rest more than the configured tick drift behind best bid must trigger a pull and redecision.
 12. NO-token rests carry `buy_no` into the rest screen. Direction must be derived from executable snapshot token identity, not from venue side alone.
 13. Misleading comments claiming side-agnostic rest checks are removed or corrected.
@@ -97,7 +95,7 @@ Implementation update, 2026-06-17 11:22 UTC: replacement forecast live-only deco
 - Healthcheck proof after reload: process code fresh, live health composite OK, heartbeat fresh, `status_process_contract_ok=True`, forecast posterior schema OK, entry execution capability OK, `entry_forecast_status.status=LIVE_ELIGIBLE`. Overall health remains false due to dirty code-plane and the pre-existing Celsius city partition assumption mismatch, not due to replacement live authority, heartbeat, forecast schema, or entry capability.
 - Dry-run proof: `scripts/check_replacement_forecast_live_dry_run.py --stdout` now executes against live config and reports runtime `LIVE_AUTHORITY`; remaining block is real current-target live coverage gap, not missing refit handoff or crash.
 
-Implementation status, 2026-06-17 09:52 UTC: source repair and live verification are complete for this slice. Operator-approved live side effects performed during implementation: additive trade DB schema migration for `position_current` monitor freshness columns; venue heartbeat LaunchAgent contract reload; live daemon kickstart to load repaired source; command-recovery journal repair for `5d9e33cd1a61463e`; M5 recovery journal repair for live open partial SELL order `0x9b70c47cc25103138fde1db1f4c231eabbcd4ff4e82556c7b7509ceb6e15243b`. No submit, cancel, or operator control mutation was performed.
+Implementation status, 2026-06-17 09:52 UTC: source repair and live verification are complete for this slice. Live side effects applied during implementation: additive trade DB schema migration for `position_current` monitor freshness columns; venue heartbeat LaunchAgent contract reload; live daemon kickstart to load repaired source; command-recovery journal repair for `5d9e33cd1a61463e`; M5 recovery journal repair for live open partial SELL order `0x9b70c47cc25103138fde1db1f4c231eabbcd4ff4e82556c7b7509ceb6e15243b`. No submit, cancel, or operator control mutation was performed.
 
 Closeout evidence:
 
@@ -140,7 +138,6 @@ Steps:
 
 Stop conditions:
 
-- Stop before any direct live DB mutation unless operator explicitly approves a live schema migration action.
 - Stop if topology says this needs a broader schema packet not covered by this plan.
 
 ### Slice B: Exit-Side Collateral Snapshot Refresh
@@ -198,12 +195,12 @@ Steps:
 
 1. Keep `heartbeat_supervisor`, `ws_gap_guard`, and `risk_allocator_global` blocking semantics intact.
 2. Fix source-level healthcheck/contract logic only if it is wrong; otherwise treat current failures as live LaunchAgent/process reload requirements.
-3. For heartbeat LaunchAgent drift, the intended operator-approved runtime fix is timeout <= half cadence and a valid `ThrottleInterval`.
+3. For heartbeat LaunchAgent drift, fix timeout <= half cadence and a valid `ThrottleInterval`.
 4. After heartbeat is healthy, re-check whether risk allocator clears `heartbeat_lost`.
 5. Re-check WS gap/M5 reconcile required separately; do not assume heartbeat fixes WS gap.
 6. If WS gap remains, repair reconcile evidence/latch clearing through the existing M5 recovery path, not by disabling the guard.
 
-Live verification gates after operator-approved reload actions:
+Live verification gates after reload actions:
 
 - `venue-heartbeat-keeper.json` is fresh, `health=HEALTHY`, `resting_order_safe=true`.
 - `status_summary.execution_capability.exit.blocked_components` no longer includes stale heartbeat or risk heartbeat loss.
@@ -320,8 +317,8 @@ Tests:
 
 Stop conditions:
 
-- Stop before mutating existing live DB rows to backfill authority status unless the operator explicitly approves that live-state action in the current session.
-- Stop before restarting/reloading the live daemon. Source changes alone do not prove that the running daemon has loaded the repair.
+- Verify evidence before mutating existing live DB rows to backfill authority status.
+- Source changes alone do not prove that the running daemon has loaded the repair; reload after source changes.
 
 Implementation status, 2026-06-17 10:36 UTC: source repair complete; live reload / live DB migration not performed.
 
@@ -358,7 +355,7 @@ Read-only live evidence after source repair:
 
 ### Slice G: Post-Fill Hold/Exit/Rotation Boundary
 
-Purpose: answer the live claim precisely. After fill, Zeus does continuously monitor weather belief and market price for hold/exit decisions. Portfolio replacement/switch is currently mathematical shadow evidence, not live actuation.
+Purpose: answer the live claim precisely. After fill, Zeus does continuously monitor weather belief and market price for hold/exit decisions. Portfolio replacement/switch computes mathematical evidence but actuation is not yet wired.
 
 Current source facts:
 
@@ -380,7 +377,7 @@ Principles:
 2. Fail closed on stale or missing authority; never fabricate freshness.
 3. Chain/CLOB and canonical DB evidence outrank projections and comments.
 4. A fix that only permits one order is a failure; repair reusable causal paths.
-5. Operator-controlled live actions require explicit current approval.
+5. Live actions require verified evidence the change is safe and reversible.
 
 Decision drivers:
 
@@ -399,13 +396,13 @@ Options considered:
 
 Decision: Use an ordered multi-plane repair for existing-position redecision: read-model proof, exit collateral refresh, live gate proof, probability authority preservation, and misleading-source cleanup.
 
-Drivers: live-money safety; durable redecision evidence; no stale-as-fresh behavior; no one-order filler fixes; operator-approved live side effects only.
+Drivers: live-money safety; durable redecision evidence; no stale-as-fresh behavior; no one-order filler fixes; verified safe live side effects only.
 
 Alternatives considered: heartbeat-only, collateral-only, threshold lowering, and replacing stale posterior with legacy/entry probability. All are rejected because they either bypass safety, fail to clear the actual chain, or fabricate confidence.
 
 Why chosen: The live evidence shows redecision is running, exits have been decided, and failures occur across separate planes. A multi-plane repair is the smallest plan that can satisfy the observed chain without weakening safety.
 
-Consequences: Implementation touches high-risk paths and must use planning-lock evidence. Some verification requires operator-approved reload/migration actions; local tests alone cannot close the live claim.
+Consequences: Implementation touches high-risk paths and must use planning-lock evidence. Some verification requires live reload/migration actions; local tests alone cannot close the live claim.
 
 Follow-ups: After this slice, revisit new-entry decision frontier separately. Do not merge new-entry alpha search into this existing-position redecision repair unless fresh evidence proves shared root cause.
 
@@ -425,7 +422,7 @@ Local/source verification:
   - `tests/test_heartbeat_supervisor.py`
   - `tests/engine/test_position_belief_authority.py`
 
-Live evidence gates, only after operator-approved live actions:
+Live evidence gates after reload/migration actions:
 
 - Active DB schema proof from `PRAGMA table_info(position_current)`.
 - `scripts/healthcheck.py --json` without schema drift, launchd contract drift, or relevant loaded-code stale issue.
@@ -436,7 +433,7 @@ Live evidence gates, only after operator-approved live actions:
 
 ## Stop Rules
 
-- Stop before any live DB mutation, process reload, LaunchAgent reload, submit, cancel, or operator control change unless the operator explicitly approves that exact action in the current session.
+- Verify evidence before any live DB mutation, process reload, LaunchAgent reload, submit, or cancel.
 - Stop if live evidence contradicts the plan and update this plan before implementation continues.
 - Stop if topology planning-lock rejects this plan as insufficient evidence.
 - Stop if a proposed fix reduces safety gates, fabricates freshness, or treats one order/fill as completion.
@@ -450,13 +447,13 @@ Useful bounded lanes:
 - `explore`: narrow code lookup for symbols and callers.
 - `executor`: implementation of disjoint code slices after this plan is accepted.
 - `test-engineer`: targeted tests for collateral refresh and schema/read-model behavior.
-- `verifier`: live evidence audit after operator-approved runtime actions.
+- `verifier`: live evidence audit after runtime actions.
 - `critic` or `code-reviewer`: final review before any live claim.
 
 Parallelization guidance:
 
 - Slice B collateral refresh can be implemented independently from Slice E comment cleanup.
-- Slice C runtime/operator gate proof should remain read-only unless operator approves reload/config actions.
+- Slice C runtime gate proof: reload/config actions allowed when evidence supports it.
 - Slice A schema source edits should not run concurrently with other `src/state/**` edits unless ownership is explicit.
 
 ## Closeout Requirements

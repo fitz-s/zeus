@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""Gate 3: control_overrides_history_entries_gate adapter.
+"""Blocker 3: control_overrides_history_entries_gate adapter.
 
 Probes: db:control_overrides_history (via control_overrides VIEW)
 Blocks when: a live entries gate row exists in the DB.
@@ -74,5 +74,5 @@ class DbControlOverridesAdapter:
                 owner_module="src.state.db",
                 owner_function="query_control_override_state",
                 raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                notes="probe raised — unknown in snapshot",
             )

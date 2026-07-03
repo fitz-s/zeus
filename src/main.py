@@ -14,7 +14,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-06-29
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
 #   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 # Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
@@ -55,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
     BlockingScheduler = None
 
 from src.config import cities_by_name, get_mode, settings
+from src.contracts.canonical_lifecycle import VenueOrderStatus
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.runtime import bankroll_provider
@@ -71,8 +72,6 @@ logger = logging.getLogger("zeus")
 
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
-_market_discovery_lock = threading.Lock()
-_market_substrate_refresh_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _edli_redecision_confirm_refresh_lock = threading.Lock()
@@ -87,7 +86,7 @@ OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
-# (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS, _refresh_pending_family_snapshots) MUST be
+# (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
 # strictly less than this so a cycle finishes before its next trigger; otherwise
 # max_instances=1 skips every overlapping run ("maximum number of running instances
 # reached"), the executable substrate is never refreshed, and the armed daemon is
@@ -95,22 +94,20 @@ HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 # freshness window. The invariant is asserted at job registration.
 _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 
-# FUNNEL-STARVATION FIX (2026-06-09): rotating cursor for the pending-family
-# substrate refresh. The warm cycle cannot reconstruct all live families in one
-# wall-clock budget (~150 families × ~225ms ≈ 34s > 17s budget), so each cycle
-# refreshes a SLICE; this offset advances by the slice size actually processed so
-# consecutive cycles cover disjoint families and the whole live set is swept
-# within a bounded number of cycles. See _refresh_pending_family_snapshots.
-_SUBSTRATE_REFRESH_CURSOR = 0
-# FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): family_key -> monotonic
-# deadline until which a NO-topology family whose Gamma slug lookup returned an
-# EMPTY event list (no Polymarket market listed yet for a future target_date) is
-# NOT re-probed. Stops not-yet-listed future families (measured 200/200 such were
-# next-day lows/highs probed the day before listing) from clogging the bounded
-# Gamma time-box every ~20s warm cycle and starving CLOB capture of families that
-# DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
-# (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
-_GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
+def _ensure_day0_identity_platt_fit_at_boot() -> None:
+    """Ensure Day0 nowcast has a live fit row before scheduler/reactor work starts."""
+
+    try:
+        from src.state.day0_nowcast_store import ensure_identity_platt_fit
+
+        fit = ensure_identity_platt_fit()
+        logger.info(
+            "day0_horizon_platt_fit_bootstrap: fit_run_id=%s fit_artifact_id=%s",
+            getattr(fit, "fit_run_id", None),
+            getattr(fit, "fit_artifact_id", None),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"DAY0_HORIZON_PLATT_FIT_BOOTSTRAP_FAILED:{exc}") from exc
 
 
 def _substrate_refresh_family_text_key(value: object) -> str:
@@ -135,7 +132,7 @@ def _substrate_refresh_city_alias_to_name() -> dict[str, str]:
 
 
 def _substrate_refresh_canonical_city_name(city: object) -> str:
-    raw = str(city or "").strip()
+    raw = str(getattr(city, "name", None) or city or "").strip()
     return _substrate_refresh_city_alias_to_name().get(
         _substrate_refresh_family_text_key(raw),
         raw,
@@ -144,9 +141,9 @@ def _substrate_refresh_canonical_city_name(city: object) -> str:
 
 def _substrate_refresh_canonical_metric(metric: object) -> str:
     text = _substrate_refresh_family_text_key(metric)
-    if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
+    if text in {"low", "lowest", "min", "minimum", "tmin"} or text.startswith("lowest "):
         return "low"
-    if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
+    if text in {"high", "highest", "max", "maximum", "tmax"} or text.startswith("highest "):
         return "high"
     return text
 
@@ -165,15 +162,128 @@ def _substrate_refresh_family_key(
     )
 
 
-# Wave-2 item 5 (2026-06-12): the canary live mode is COLLAPSED. Canary
-# semantics (min-fill-count + promotion-artifact qualifying lane) were deleted
-# in 5e1e7efd76; "edli_live" is now the ONLY event-driven live mode. The old
-# "edli_live_canary" string is no longer an admissible config value — it is
-# mapped to "edli_live" at the read boundary (_live_execution_mode) so any
-# persisted rows/receipts carrying the historical string remain readable.
-_LEGACY_LIVE_EXECUTION_MODE_ALIASES = {
-    "edli_live_canary": "edli_live",
-}
+@dataclass(frozen=True)
+class _Day0LiveFamilyAdmission:
+    admitted_families: frozenset[tuple[str, str, str]]
+    expiry_safe: bool
+
+    def __call__(self, observation: dict[str, Any]) -> bool:
+        family = _substrate_refresh_family_key(
+            observation.get("city"),
+            observation.get("target_date"),
+            observation.get("metric"),
+        )
+        return all(family) and family in self.admitted_families
+
+
+def _edli_day0_live_family_admission(
+    forecasts_conn,
+    trade_conn,
+    *,
+    decision_time: datetime | None = None,
+) -> _Day0LiveFamilyAdmission:
+    """Build the Day0 execution admission set from live market/exposure truth.
+
+    Day0 observations are valid observation facts, but live execution events must be
+    market-backed or tied to already-owned risk. Otherwise the reactor spends claim and
+    substrate budget on families where no order can ever be placed.
+    """
+
+    decision_time_utc = (
+        datetime.now(timezone.utc)
+        if decision_time is None
+        else decision_time.astimezone(timezone.utc)
+    )
+
+    def _market_family_is_current_local_day(city: object, target_date: object) -> bool:
+        city_name = _substrate_refresh_canonical_city_name(city)
+        city_cfg = cities_by_name.get(city_name)
+        city_tz = str(getattr(city_cfg, "timezone", "") or "")
+        if not city_tz:
+            return False
+        try:
+            target_local_date = date.fromisoformat(str(target_date or "").strip())
+            decision_local_date = decision_time_utc.astimezone(ZoneInfo(city_tz)).date()
+        except Exception:
+            return False
+        return target_local_date == decision_local_date
+
+    target_floor = (decision_time_utc.date() - timedelta(days=1)).isoformat()
+    target_ceiling = (decision_time_utc.date() + timedelta(days=1)).isoformat()
+    market_families: set[tuple[str, str, str]] = set()
+    market_surface_read_ok = False
+    try:
+        table_row = forecasts_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_events' LIMIT 1"
+        ).fetchone()
+        if table_row is not None:
+            rows = forecasts_conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE city IS NOT NULL
+                   AND target_date IS NOT NULL
+                   AND temperature_metric IN ('high', 'low')
+                   AND target_date BETWEEN ? AND ?
+                """,
+                (target_floor, target_ceiling),
+            ).fetchall()
+            market_surface_read_ok = True
+            for city, target_date, metric in rows:
+                if not _market_family_is_current_local_day(city, target_date):
+                    continue
+                family = _substrate_refresh_family_key(city, target_date, metric)
+                if all(family):
+                    market_families.add(family)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EDLI day0 live family admission: market_events read failed; "
+            "Day0 execution emission restricted to current exposure families: %r",
+            exc,
+        )
+
+    exposure_families: set[tuple[str, str, str]] = set()
+    exposure_surface_read_ok = False
+    try:
+        trade_tables = {
+            str(row[0])
+            for row in trade_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        exposure_surface_read_ok = {
+            "position_current",
+            "venue_commands",
+            "venue_order_facts",
+        }.issubset(trade_tables)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: trade exposure surface probe failed: %r", exc)
+
+    def _add_families(raw: Iterable[tuple[object, object, object]]) -> None:
+        for city, target_date, metric in raw or ():
+            family = _substrate_refresh_family_key(city, target_date, metric)
+            if all(family):
+                exposure_families.add(family)
+
+    try:
+        _add_families(_open_rest_family_rows_for_refresh(trade_conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: open-rest family read failed: %r", exc)
+    try:
+        from src.data.replacement_cycle_advance_trigger import _held_position_families
+
+        _add_families(_held_position_families(trade_conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
+
+    admitted = frozenset(market_families | exposure_families)
+    return _Day0LiveFamilyAdmission(
+        admitted_families=admitted,
+        expiry_safe=market_surface_read_ok and exposure_surface_read_ok,
+    )
+
+
+# Wave-2 item 5 (2026-06-12): "edli_live" is the only event-driven live mode.
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_live",
@@ -187,9 +297,8 @@ REACTOR_MODE_BY_LIVE_STAGE = {
     "disabled": "disabled",
     "edli_live": "live",
 }
-# Live production has one EDLI scope: forecast plus Day0. Forecast-only and
-# day0-shadow were staging scopes; keeping them in the live daemon makes the
-# execution layer understand non-live states.
+# Live production has one EDLI scope: forecast plus Day0. Historical staging
+# scopes stay out of the live daemon so the execution layer has one state.
 EDLI_LIVE_SCOPES = frozenset({"forecast_plus_day0"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
@@ -209,6 +318,7 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
+EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS = 5.0
 _EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
@@ -225,6 +335,11 @@ REQUIRED_STAGE_FILES_BY_MODE = {
 # PR-S6 deployment freshness gate — mutable container populated in main() at boot.
 # Tests monkeypatch this dict directly; scheduler job reads it each tick.
 _BOOT_STATE: dict = {"sha": None, "ts": None}
+
+
+def _is_full_git_sha(value: object) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in text)
 
 
 @dataclass(frozen=True)
@@ -283,10 +398,6 @@ def _mark_held_position_monitor_complete() -> None:
 
 def _live_execution_mode(edli_cfg: dict) -> str:
     mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
-    # Wave-2 item 5: map the historical canary mode string to its collapsed
-    # successor so persisted config/receipt data carrying the old value remains
-    # readable instead of failing closed on UNSUPPORTED_LIVE_EXECUTION_MODE.
-    mode = _LEGACY_LIVE_EXECUTION_MODE_ALIASES.get(mode, mode)
     if mode not in LIVE_EXECUTION_MODES:
         raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
     return mode
@@ -302,7 +413,7 @@ def _harvester_should_register(live_execution_mode: str) -> bool:
     consume, and capital stayed stuck on-chain (memory #56 "settled-target-still-
     active", reproducing on Shanghai cca68b44).
 
-    The resolver is shadow-safe: ``resolve_pnl_for_settled_markets`` READS VERIFIED
+    The resolver is settlement-read-only: ``resolve_pnl_for_settled_markets`` READS VERIFIED
     settlement_outcomes (read-only) and writes only trade-side close + a durable
     REDEEM_INTENT_CREATED row. The actual on-chain redeem POST lives in the
     SEPARATELY-gated _redeem_submitter_cycle (already scheduled in all modes), whose
@@ -373,7 +484,8 @@ def assert_frozen_as_of_not_stale(
     calling datetime.now() at import.
 
     WARN threshold: 10 days.
-    FATAL threshold: 21 days (unless ZEUS_FREEZE_GUARD_DISABLE=1).
+    FATAL threshold: 21 days (unless ZEUS_FREEZE_GUARD_DISABLE=1 or the
+    current live probability authority is the replacement qkernel path).
     """
     from datetime import datetime, timezone  # safe re-import: stdlib already loaded
     frozen_str: str | None = (
@@ -395,6 +507,14 @@ def assert_frozen_as_of_not_stale(
         return
     age_days = (now - frozen_dt).total_seconds() / 86400.0
     if age_days > 21:
+        if _replacement_qkernel_live_probability_authority_enabled(cfg):
+            logger.warning(
+                "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>21d threshold), "
+                "but current live probability authority is replacement_0_1/qkernel; "
+                "legacy Platt pin staleness is non-fatal for daemon boot",
+                age_days,
+            )
+            return
         if os.environ.get("ZEUS_FREEZE_GUARD_DISABLE", "0") == "1":
             logger.warning(
                 "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>21d threshold); "
@@ -412,6 +532,27 @@ def assert_frozen_as_of_not_stale(
             "Consider refreshing calibration.pin.frozen_as_of.",
             age_days,
         )
+
+
+def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
+    """Return True when live entry probability is served by replacement qkernel.
+
+    The calibration pin guards the legacy Platt/ENS calibration generation.  It
+    must remain fatal when that legacy path is the live probability authority.
+    When the live money path is explicitly the replacement_0_1 qkernel spine,
+    a stale Platt pin is stale calibration inventory, not a daemon-start
+    blocker; the replacement posterior freshness gates own live readiness.
+    """
+
+    edli = cfg.get("edli") if isinstance(cfg.get("edli"), dict) else {}
+    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
+    return (
+        bool(flags.get("qkernel_spine_enabled", False))
+        and str(edli.get("live_execution_mode") or "") == "edli_live"
+        and str(edli.get("reactor_mode") or "") == "live"
+        and bool(edli.get("replacement_0_1_bayes_precision_fusion_enabled", False))
+        and bool(edli.get("replacement_0_1_fused_q_shape_enabled", False))
+    )
 
 
 def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
@@ -506,7 +647,11 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     # Guard 2: frozen_as_of staleness
     try:
         assert_frozen_as_of_not_stale(raw_cfg, now=datetime.now(tz=timezone.utc))
-        results.append(("frozen_as_of_staleness", True, "frozen_as_of absent or within 21d — OK"))
+        results.append((
+            "frozen_as_of_staleness",
+            True,
+            "frozen_as_of absent, within 21d, or non-fatal under replacement qkernel authority — OK",
+        ))
     except RuntimeError as exc:
         results.append(("frozen_as_of_staleness", False, str(exc)))
     except Exception as exc:  # pragma: no cover
@@ -540,13 +685,14 @@ def _run_schema_guards() -> list:
       world_db_schema    — assert_schema_current + canonical table presence
       forecasts_db_schema — assert_schema_current_forecasts + live-required schema presence
       world_registry     — assert_db_matches_registry(WORLD)
-      forecasts_registry — assert_db_matches_registry(FORECASTS)
+      trade_registry     — assert_db_matches_registry(TRADE)
     """
     import sqlite3 as _sqlite3
 
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
         ZEUS_FORECASTS_DB_PATH,
+        _zeus_trade_db_path,
         assert_schema_current,
         assert_schema_current_forecasts,
     )
@@ -598,18 +744,20 @@ def _run_schema_guards() -> list:
     except Exception as exc:
         results.append(("world_registry", False, str(exc)))
 
-    # Forecasts registry
+    # Trade registry. Keep --validate-boot aligned with the real src.main boot
+    # path: world/trade registry are enforced there; forecasts registry is not.
     try:
-        if not ZEUS_FORECASTS_DB_PATH.exists():
-            raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
-        conn = _ro_conn(ZEUS_FORECASTS_DB_PATH)
+        trade_db_path = _zeus_trade_db_path()
+        if not trade_db_path.exists():
+            raise FileNotFoundError(f"{trade_db_path} does not exist")
+        conn = _ro_conn(trade_db_path)
         try:
-            assert_db_matches_registry(conn, DBIdentity.FORECASTS)
-            results.append(("forecasts_registry", True, "forecasts table-set matches registry — OK"))
+            assert_db_matches_registry(conn, DBIdentity.TRADE)
+            results.append(("trade_registry", True, "trade table-set matches registry — OK"))
         finally:
             conn.close()
     except Exception as exc:
-        results.append(("forecasts_registry", False, str(exc)))
+        results.append(("trade_registry", False, str(exc)))
 
     return results
 
@@ -788,14 +936,6 @@ def evaluate_edli_stage_readiness(
 
     if reasons:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_FAIL, live_entries_allowed=False, reasons=tuple(reasons))
-    if stage == "edli_submit_disabled_bridge":
-        return EdliStageReadiness(
-            stage=stage,
-            status=EDLI_STAGE_PASS,
-            live_entries_allowed=False,
-            submit_allowed=False,
-            scaleout_allowed=False,
-        )
     return EdliStageReadiness(
         stage=stage,
         status=EDLI_STAGE_PASS,
@@ -939,10 +1079,14 @@ def _edli_stage_loaded_sha_reasons(path: str) -> list[str]:
         return [f"EDLI_STAGE_LOADED_SHA_INVALID_JSON:{path}"]
     loaded_sha = str(payload.get("loaded_sha") or payload.get("boot_sha") or payload.get("current_sha") or "").strip()
     expected_sha = str(_BOOT_STATE.get("sha") or "").strip()
-    if expected_sha and loaded_sha and loaded_sha != expected_sha:
-        return [f"EDLI_STAGE_LOADED_SHA_MISMATCH:loaded={loaded_sha}:expected={expected_sha}"]
     if not loaded_sha:
         return ["EDLI_STAGE_LOADED_SHA_MISSING_VALUE"]
+    if not _is_full_git_sha(loaded_sha):
+        return [f"EDLI_STAGE_LOADED_SHA_INVALID_VALUE:{loaded_sha}"]
+    if expected_sha and not _is_full_git_sha(expected_sha):
+        return [f"EDLI_STAGE_EXPECTED_SHA_INVALID_VALUE:{expected_sha}"]
+    if expected_sha and loaded_sha and loaded_sha != expected_sha:
+        return [f"EDLI_STAGE_LOADED_SHA_MISMATCH:loaded={loaded_sha}:expected={expected_sha}"]
     return []
 
 
@@ -978,7 +1122,10 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     age = (now - parsed.astimezone(timezone.utc)).total_seconds()
-    if age < 0 or age > max_age_seconds:
+    if age < -EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS:
+        return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
+    age = max(0.0, age)
+    if age > max_age_seconds:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     return []
 
@@ -1009,7 +1156,7 @@ def _build_edli_status_pulse(
     FIX-4 (P2, 2026-06-09): separates proof_accepted from live_submit_attempts.
     ``proof_accepted`` counts events whose money-path proof was accepted (i.e.,
     final intent was built). ``live_submit_attempts`` counts ONLY actual venue
-    submit calls made this cycle — 0 in no-submit / degraded cycles. Dashboards
+    submit calls made this cycle — 0 when the live-submit lane is not selected. Dashboards
     MUST NOT treat proof_accepted as evidence of a venue interaction.
 
     ``live_venue_acks`` counts venue responses where ``venue_ack_received`` is
@@ -1435,6 +1582,8 @@ def _write_heartbeat() -> None:
             "alive": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": get_mode(),
+            "pid": os.getpid(),
+            "process": "src.main",
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
@@ -1467,7 +1616,6 @@ def _write_heartbeat() -> None:
 
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
-            import os
             os._exit(1)
 
 
@@ -1487,6 +1635,9 @@ COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 # state (held across cycles so a bare price wiggle does not re-fire — R6). Plain dict mutated only
 # under the lock-held job; no cross-thread contention beyond the advisory acquire.
 _edli_redecision_screen_lock = threading.Lock()
+_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS = 20 * 60
+_REDECISION_PENDING_EXPIRY_GRACE_SECONDS = 300
+_REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS = 75
 _edli_redecision_acted_state: dict = {}
 
 
@@ -2131,12 +2282,60 @@ import time as _time
 
 _edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
 _edli_redecision_cycle_index: int = 0
+_edli_redecision_screen_belief_cursor: int = 0
 # Wave-1 2026-06-12: fixed per-cycle re-decision/screen batch fed to the WRAPPING fair
 # cursor (CoverageFairnessRequest.select_rows). Replaces the deleted redecision_max_per_cycle
 # settings cap. The cursor wraps modulo the family count, so this batch reaches EVERY family
 # within ceil(N/batch) cycles and never silently drops the tail. Sized to sweep the full live
 # family universe (~108 city×metric families) within ~2 cycles at the ~60-90s reactor cadence.
 _EDLI_REDECISION_FAIR_BATCH: int = 60
+
+
+def _edli_belief_family_key(belief) -> tuple[str, str, str, str]:
+    return (
+        str(getattr(belief, "city", "") or "").strip(),
+        str(getattr(belief, "target_date", "") or "").strip(),
+        str(getattr(belief, "metric", "") or "").strip(),
+        str(getattr(belief, "family_id", "") or "").strip(),
+    )
+
+
+def _edli_redecision_screen_belief_batch(
+    beliefs: list,
+    *,
+    max_families: int,
+) -> tuple[list, set[tuple[str, str, str, str]], int]:
+    """Return the fair-cursor entry-screen belief slice for this tick.
+
+    The redecision screen used to feed every cached belief into the price reader,
+    which meant a live table with millions of executable snapshots could keep one
+    scheduler worker busy for minutes before the reactor reached any event. This
+    is a fairness cursor, not an edge cap: it wraps through the complete belief
+    universe over successive ticks and bounds the per-tick DB read surface.
+    """
+    global _edli_redecision_screen_belief_cursor
+    if not beliefs:
+        return [], set(), 0
+    ordered = sorted(beliefs, key=_edli_belief_family_key)
+    total = len(ordered)
+    if max_families <= 0 or max_families >= total:
+        keys = {_edli_belief_family_key(b) for b in ordered}
+        _edli_redecision_screen_belief_cursor = 0
+        return ordered, keys, total
+    start = _edli_redecision_screen_belief_cursor % total
+    selected = [ordered[(start + i) % total] for i in range(max_families)]
+    _edli_redecision_screen_belief_cursor = (start + max_families) % total
+    keys = {_edli_belief_family_key(b) for b in selected}
+    return selected, keys, total
+
+
+def _edli_filter_beliefs_to_family_keys(
+    beliefs: list,
+    family_keys: set[tuple[str, str, str, str]],
+) -> list:
+    if not family_keys:
+        return []
+    return [belief for belief in beliefs if _edli_belief_family_key(belief) in family_keys]
 
 
 def _edli_next_redecision_source() -> str:
@@ -2152,27 +2351,6 @@ def _edli_next_redecision_source() -> str:
     n = _edli_redecision_cycle_index
     _edli_redecision_cycle_index = n + 1
     return f"cycle-{_edli_redecision_boot_token}-{n}"
-
-
-def _edli_next_escalation_cross_source() -> str:
-    """Return the next ESCALATION-cross re-decision emit source.
-
-    Format ``escalation_cross-{TOKEN}-{N}`` — same restart-/within-process-unique
-    scheme as ``_edli_next_redecision_source`` (shared boot token + monotonic N) so
-    each escalation re-decision gets a distinct idempotency_key and does NOT dedup
-    against the consumed FSR or the continuous ``cycle-*`` re-emit. The
-    ``escalation_cross-`` PREFIX is the discriminator the claim-tier authority
-    (``src.events.event_priority.claim_tier_expr_sql``) keys off to rank these
-    re-decisions at Tier 0 — below the 49-deep per-city round-robin (redecide-block
-    fix 2026-06-16). N has no internal hyphens, so ``split('-')[-1]`` stays an int
-    for the fairness-cursor parse in scan_committed_snapshots.
-    """
-    from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
-
-    global _edli_redecision_cycle_index
-    n = _edli_redecision_cycle_index
-    _edli_redecision_cycle_index = n + 1
-    return f"{ESCALATION_CROSS_SOURCE_PREFIX}{_edli_redecision_boot_token}-{n}"
 
 
 def _reset_edli_redecision_cycle_index() -> None:
@@ -2416,38 +2594,94 @@ def _pending_family_rows_for_refresh(
     *,
     consumer_name: str,
     event_window_limit: int | None = None,
+    now_utc: datetime | None = None,
 ):
+    from src.events.event_store import EventStore, _oceania_frontier_target_floor
+
     if event_window_limit is None:
         event_window_limit = _pending_family_refresh_event_window_limit()
     event_window_limit = max(100, min(10000, int(event_window_limit)))
-    return world_conn.execute(
+    decision_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    stale_target_floor = _oceania_frontier_target_floor(decision_utc)
+    rows = world_conn.execute(
         """
         WITH pending AS (
-            SELECT p.event_id
+            SELECT p.event_id,
+                   p.last_error
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+            JOIN opportunity_events e ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
+              AND (
+                    p.processing_status = 'pending'
+                    OR (
+                        p.processing_status = 'processing'
+                        AND COALESCE(p.last_error, '') <> ''
+                    )
+                  )
+              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+              AND (
+                    e.event_type NOT IN (
+                        'FORECAST_SNAPSHOT_READY',
+                        'EDLI_REDECISION_PENDING',
+                        'DAY0_EXTREME_UPDATED'
+                    )
+                    OR json_extract(e.payload_json, '$.target_date') IS NULL
+                    OR json_extract(e.payload_json, '$.target_date') >= ?
+              )
             ORDER BY p.updated_at DESC
             LIMIT ?
         )
         SELECT
             json_extract(e.payload_json, '$.city')        AS city,
             json_extract(e.payload_json, '$.target_date') AS target_date,
-            json_extract(e.payload_json, '$.metric')      AS metric
+            json_extract(e.payload_json, '$.metric')      AS metric,
+            MAX(CASE e.event_type
+                  WHEN 'DAY0_EXTREME_UPDATED' THEN 4
+                  WHEN 'EDLI_REDECISION_PENDING' THEN 3
+                  WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
+                  ELSE 1
+                END) AS refresh_urgency,
+            MAX(CASE
+                  WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND COALESCE(p.last_error, '') LIKE '%DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE%'
+                  THEN 1 ELSE 0
+                END) AS day0_hourly_blocked
         FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
         GROUP BY city, target_date, metric
-        -- Refresh the newest target date first. Old target-date rows can remain
-        -- pending after a market has disappeared from Gamma; if they consume the
-        -- per-cycle cap, fresh executable snapshots starve and no receipt is
-        -- emitted even though the reactor itself is healthy.
+        -- Refresh live-money urgency first. Day0 hard facts and price-driven
+        -- redecisions are the rows whose stale executable substrate directly
+        -- blocks hold/exit/shift/new-entry decisions. Target date remains a
+        -- freshness tiebreak, not the primary ordering law; otherwise future
+        -- families can bury same-day Day0 rows.
         ORDER BY
-            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
+            MAX(CASE e.event_type
+                  WHEN 'DAY0_EXTREME_UPDATED' THEN 4
+                  WHEN 'EDLI_REDECISION_PENDING' THEN 3
+                  WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
+                  ELSE 1
+                END) DESC,
+            MAX(CASE
+                  WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND COALESCE(p.last_error, '') LIKE '%DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE%'
+                  THEN 1 ELSE 0
+                END) DESC,
             MAX(e.priority) DESC,
             MAX(e.available_at) DESC,
+            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name, event_window_limit),
+        (consumer_name, decision_utc.isoformat(), stale_target_floor, event_window_limit),
     ).fetchall()
+    return [
+        row
+        for row in rows
+        if not EventStore._strictly_past_in_tz(
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            decision_utc,
+        )
+    ]
 
 
 def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
@@ -2461,22 +2695,32 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     full order-fact history.
     """
 
-    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+    from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     try:
         command_cols = {
             str(row[1])
             for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
         }
+        fact_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()
+        }
         token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
         snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
+        state_select = "state" if "state" in command_cols else "'' AS state"
+        state_filter = (
+            "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
+        )
+        remaining_select = "remaining_size" if "remaining_size" in fact_cols else "NULL AS remaining_size"
         commands = trade_conn.execute(
             f"""
-            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}
+            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}, {state_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
                AND venue_order_id != ''
+               {state_filter}
             """
         ).fetchall()
     except Exception:  # noqa: BLE001
@@ -2490,8 +2734,8 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
             continue
         try:
             fact = trade_conn.execute(
-                """
-                SELECT state
+                f"""
+                SELECT state, {remaining_select}
                   FROM venue_order_facts
                  WHERE venue_order_id = ?
                  ORDER BY local_sequence DESC
@@ -2502,6 +2746,16 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         except Exception:  # noqa: BLE001
             continue
         if fact is None or str(fact[0] or "") not in open_states:
+            continue
+        remaining_value = fact[1] if len(fact) > 1 else None
+        raw_remaining = "" if remaining_value is None else str(remaining_value).strip()
+        if raw_remaining:
+            try:
+                if float(raw_remaining) <= 0.000001:
+                    continue
+            except ValueError:
+                continue
+        if str(fact[0] or "") == VenueOrderStatus.PARTIALLY_MATCHED and not raw_remaining:
             continue
         position_id = str(row[1] or "")
         family: tuple[str, str, str] | None = None
@@ -2653,42 +2907,9 @@ def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
-    rows = write_conn.execute(
-        """
-        SELECT yes_token_id, no_token_id, selected_outcome_token_id
-        FROM executable_market_snapshots
-        WHERE condition_id = ? AND freshness_deadline >= ?
-        ORDER BY captured_at DESC, snapshot_id DESC
-        """,
-        (condition_id, fresh_at_iso),
-    ).fetchall()
-    if not rows:
-        return False
+    from src.state.snapshot_repo import condition_buy_sides_fresh
 
-    yes_token_id = ""
-    no_token_id = ""
-    fresh_selected_tokens: set[str] = set()
-
-    def _cell(row, key: str, index: int) -> str:
-        try:
-            value = row[key] if hasattr(row, "keys") else row[index]
-        except (KeyError, IndexError, TypeError):
-            value = None
-        return str(value or "").strip()
-
-    for row in rows:
-        yes = _cell(row, "yes_token_id", 0)
-        no = _cell(row, "no_token_id", 1)
-        selected = _cell(row, "selected_outcome_token_id", 2)
-        if yes and not yes_token_id:
-            yes_token_id = yes
-        if no and not no_token_id:
-            no_token_id = no
-        if selected:
-            fresh_selected_tokens.add(selected)
-    if not yes_token_id or not no_token_id:
-        return False
-    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
+    return condition_buy_sides_fresh(write_conn, condition_id, fresh_at_iso)
 
 
 def _prune_fresh_market_outcomes_for_snapshot_refresh(
@@ -2696,7 +2917,13 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     markets: list[dict],
     *,
     fresh_at_iso: str,
+    restrict_to_condition_ids: Iterable[str] | None = None,
 ) -> tuple[list[dict], int, int]:
+    scoped_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (restrict_to_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
     pruned: list[dict] = []
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
@@ -2706,6 +2933,8 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
             if not isinstance(outcome, dict):
                 continue
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if scoped_conditions and cid not in scoped_conditions:
+                continue
             if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
                 fresh_conditions_skipped += 1
                 continue
@@ -2731,966 +2960,16 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     refresh_budget_s: float,
     snapshot_reserve_s: float,
     cached_topology_count: int,
+    gamma_family_count: int = 0,
 ) -> float:
-    del refresh_budget_s, cached_topology_count
-    return refresh_deadline - snapshot_reserve_s
-
-
-def _topology_lookup_deadline_for_snapshot_refresh(
-    *,
-    refresh_deadline: float,
-    refresh_budget_s: float,
-    snapshot_reserve_s: float,
-) -> float:
-    """Stop topology reconstruction early enough to attempt direct Gamma lookup.
-
-    FUNNEL-STARVATION FIX (2026-06-09): the topology/reconstruction phase is the
-    phase that SELECTS which families' books to capture this cycle. The prior math
-    reserved a FIXED 15s gamma slice on top of the 12s snapshot reserve, out of a
-    17s budget — i.e. 27s reserved for downstream phases out of 17s, clamping the
-    topology deadline to ``refresh_deadline - refresh_budget_s`` = CYCLE START.
-    With a 0s topology budget the loop time-boxed after 1-2 of ~150 live families
-    every cycle, so only ONE family's executable books were refreshed per ~20s
-    tick. The other ~150 FORECAST_SNAPSHOT_READY events found no fresh snapshot,
-    requeued EXECUTABLE_SNAPSHOT_PENDING, and after 8 cycles dead-lettered as
-    EXECUTABLE_SNAPSHOT_BLOCKED — the visible funnel starvation (the substrate was
-    never swept).
-
-    Gamma HTTP is only needed for families with NO cached topology
-    (``gamma_refresh_families``); in steady state that set is EMPTY (every live
-    family already has market_events topology), so a fixed 15s gamma reserve is
-    pure waste that starves the dominant topology phase. The reserve is now a SMALL
-    FLOOR (default 2s, env-overridable) AND capped to at most half of the
-    available pre-capture window, so the topology/reconstruction phase keeps the
-    MAJORITY of the budget and can sweep its rotating family slice (see the
-    rotating cursor in _refresh_pending_family_snapshots). When a cycle genuinely
-    has gamma families, that small floor still lets the gamma phase begin; it just
-    no longer pre-empts topology before topology has done any work.
-    """
-
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
-    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
-    gamma_min_slice_s = max(
-        0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "2.0")),
-    )
-    # Never let the gamma floor consume more than half the pre-capture window —
-    # the topology phase (which selects the capture set) must always keep the
-    # majority share so it makes real progress through the rotating family slice.
-    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s * 0.5)
-    return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
-
-
-def _snapshot_capture_budget_for_refresh(
-    *,
-    refresh_deadline: float,
-    snapshot_reserve_s: float,
-) -> float:
-    """Return the CLOB capture slice for pending-family snapshot refresh.
-
-    The warm job has two qualitatively different phases: cheap topology/cache
-    selection and price capture.  Live evidence showed the selection phase can
-    consume the full nominal refresh budget; passing the leftover 0.1s to CLOB
-    creates one-row "progress" while every pending family remains effectively
-    blocked.  The reserve is therefore a phase budget, not a leftover hint.
-    """
-
-    min_prefetch_window_s = max(
-        0.0,
-        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")),
-    )
-    target_prefetch_window_s = max(
-        min_prefetch_window_s,
-        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "2.0")),
-    )
-    # refresh_executable_market_substrate_snapshots internally reserves
-    # snapshot_reserve_s for the capture loop and admits /books only before that
-    # reserve starts. Passing exactly snapshot_reserve_s double-reserves the
-    # same phase and makes the batch prefetch deadline effectively immediate.
-    # The admission threshold is not enough as a budget: real scheduler/function
-    # overhead can burn milliseconds between budget construction and prefetch,
-    # making a nominal 0.750s window measure as "below 0.750s" and collapse back
-    # to serial /book reads. Keep prefetch as its own small phase budget.
-    min_budget_s = snapshot_reserve_s + target_prefetch_window_s
-    remaining_s = refresh_deadline - time.monotonic()
-    return max(min_budget_s, remaining_s)
-
-
-def _refresh_pending_family_snapshots(
-    world_conn,
-    forecasts_conn,
-    *,
-    consumer_name: str = "edli_reactor_v1",
-    now_utc: datetime | None = None,
-    extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
-    include_pending_families: bool = True,
-) -> dict:
-    """Targeted, cache-aware snapshot refresh for pending opportunity event families.
-
-    Decision-driven design ("先有下单结果再去找市场"):
-      - Scope: ONLY the families (city/target_date/metric) of PENDING events.
-      - Cache: skip entire families whose ALL bins are still fresh.
-      - Discovery: Gamma slug lookup scoped to pending target_dates — discovers
-        EVERY bin (incl. never-seen illiquid MECE tail bins) via full token payload.
-      - CLOB: max_outcomes=None so all family bins are captured (no city cap).
-        tolerate_missing_book=True (inside refresh) lets illiquid bins snapshot
-        as top_ask=None / executable_allowed=False.
-      - No universe sweep, no market_discovery, no find_weather_markets.
-
-    Reuses refresh_executable_market_substrate_snapshots write path unchanged.
-    Returns a summary dict; never raises (failures are logged and skipped).
-    """
-
-    from src.data.market_scanner import (
-        reconstruct_weather_market_from_static_topology,
-        refresh_executable_market_substrate_snapshots,
-    )
-    from src.data.polymarket_client import PolymarketClient
-    from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-    from src.state.db import get_trade_connection, get_trade_connection_read_only
-    from src.strategy.market_phase import (
-        family_venue_closed as _family_venue_closed,
-    )
-
-    # Injected-now (tests / replay): the venue-close warm-skip and the snapshot
-    # freshness window both key off this single decision clock. Defaults to
-    # wall-clock UTC in production; a test passes a frozen instant so the
-    # venue-close skip is deterministic against fixed-date fixtures.
-    now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
-    now_iso = now_utc.isoformat()
-
-    # Step 1: Collect distinct (city, target_date, metric) for pending events.
-    if include_pending_families:
-        try:
-            pending_rows = _pending_family_rows_for_refresh(
-                world_conn, consumer_name=consumer_name
-            )
-        except Exception as exc:
-            logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
-            return {"status": "error", "reason": str(exc)}
-    else:
-        pending_rows = []
-
-    from src.config import cities_by_name as _refresh_cities_by_name
-
-    def _canonical_refresh_city_name(city: object) -> str:
-        return _substrate_refresh_canonical_city_name(city)
-
-    def _canonical_refresh_metric(metric: object) -> str:
-        return _substrate_refresh_canonical_metric(metric)
-
-    def _refresh_family_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
-        return _substrate_refresh_family_key(city, target_date, metric)
-
-    pending_families: list[tuple[str, str, str]] = []
-    for row in pending_rows:
-        city = _canonical_refresh_city_name(row[0])
-        target_date = str(row[1] or "").strip()
-        metric = _canonical_refresh_metric(row[2])
-        if city and target_date and metric:
-            pending_families.append((city, target_date, metric))
-
-    open_rest_priority_families: list[tuple[str, str, str]] = []
-    try:
-        trade_ro = get_trade_connection_read_only()
-        try:
-            open_rest_priority_families = _open_rest_family_rows_for_refresh(trade_ro)
-        finally:
-            trade_ro.close()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
-            exc,
+    if cached_topology_count > 0 and gamma_family_count <= 0:
+        cached_gamma_s = max(
+            0.1,
+            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
         )
-    held_position_priority_families = sorted(_edli_current_held_position_family_keys())
-
-    # Money-risk families are not ordinary pending-work backlog. A live unfilled
-    # rest already passed submit economics once, and a held family has
-    # chain-confirmed exposure. Keep them at the head of every warm tick and
-    # rotate only the ordinary pending-event tail so backlog fairness cannot
-    # starve active risk.
-    priority_families: list[tuple[str, str, str]] = []
-    priority_keys: set[tuple[str, str, str]] = set()
-    explicit_priority_families = list(extra_priority_families or ())
-    for family in (
-        explicit_priority_families
-        + list(open_rest_priority_families)
-        + list(held_position_priority_families)
-    ):
-        key = _refresh_family_key(*family)
-        if key and key not in priority_keys:
-            priority_families.append(family)
-            priority_keys.add(key)
-
-    families = priority_families + [
-        family for family in pending_families if _refresh_family_key(*family) not in priority_keys
-    ]
-
-    if not families:
-        return {
-            "status": "no_pending_open_rest_or_held_families",
-            "open_rest_priority_families": 0,
-            "held_position_priority_families": 0,
-            "explicit_priority_families": 0,
-            "include_pending_families": bool(include_pending_families),
-        }
-
-    # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
-    # EVERY live family is refreshed within one SWEEP PERIOD instead of the newest
-    # 1-2 being re-refreshed forever while the rest starve.
-    #
-    # Root cause this completes: the warm cycle's wall-clock budget (~17s) cannot
-    # reconstruct all ~150 live families in one tick — each family's
-    # reconstruct_weather_market_from_static_topology is ~225ms (a sort over the
-    # 1.5M-row executable_market_snapshots IN-list), so a full sweep is ~34s, two
-    # cycles' worth. The pending-family query (_pending_family_rows_for_refresh)
-    # returns families target_date DESC, so without rotation the SAME front slice
-    # is processed every cycle and the tail (older target_dates / cities reached
-    # later in the deterministic order) NEVER gets fresh books. Those families'
-    # FORECAST_SNAPSHOT_READY events then retry EXECUTABLE_SNAPSHOT_PENDING until
-    # the 8-attempt cap dead-letters them (EXECUTABLE_SNAPSHOT_BLOCKED) — the
-    # operator-observed "25 events cycle in retried forever / dead=25" funnel.
-    #
-    # The fix is a fair rotating cursor: advance a module-global offset by the
-    # number of families ACTUALLY processed last cycle so consecutive cycles cover
-    # disjoint slices and the whole live set is swept within
-    # ceil(len(families) / families_per_cycle) cycles — bounded minutes, not the
-    # never-completing tail starvation. The order WITHIN the rotated list is still
-    # the freshness-first deterministic order; we only choose a different *start*.
-    # No family is dropped — rotation reorders, it does not filter — so a True from
-    # the freshness check still captures and no candidate is starved.
-    global _SUBSTRATE_REFRESH_CURSOR, _GAMMA_EMPTY_BACKOFF_UNTIL
-    ordinary_families = families[len(priority_families):]
-    n_ordinary_families = len(ordinary_families)
-    start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
-    rotated_ordinary_families = (
-        ordinary_families[start_offset:] + ordinary_families[:start_offset]
-        if ordinary_families
-        else []
-    )
-    families = priority_families + rotated_ordinary_families
-    n_families = len(families)
-
-    # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
-    # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
-    # INTERVAL_SECONDS, 20s) and MUST stay within the 180s executable-price freshness
-    # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
-    # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
-    # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
-    # so every subsequent run is "skipped: maximum number of running instances
-    # reached (1)" (zeus-live.err 2026-06-08) and the universe-wide executable
-    # substrate is never refreshed — coverage NONE, daemon starved of candidates.
-    # The default now fits inside the interval with headroom for scheduler dispatch
-    # and connection teardown; the internal capture reserve (snapshot_reserve_s) and
-    # Gamma slice scale down off this budget below. Env-overridable, but the
-    # interval-fit invariant is asserted at job registration (see add_job below).
-    refresh_budget_s = max(
-        5.0,
-        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
-    )
-    refresh_deadline = time.monotonic() + refresh_budget_s
-    snapshot_reserve_s = min(
-        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
-        max(0.1, refresh_budget_s - 0.1),
-    )
-    # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): cooldown (seconds) a
-    # no-topology, Gamma-empty family is parked before re-probing. 0 disables.
-    _gamma_empty_backoff_s = max(
-        0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
-    )
-    topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
-        refresh_deadline=refresh_deadline,
-        refresh_budget_s=refresh_budget_s,
-        snapshot_reserve_s=snapshot_reserve_s,
-    )
-
-    # Staleness pre-filter REMOVED (STEP 4, consolidated timeliness fix): the
-    # local lexicographic _drop_stale_families is now redundant. Strictly-past
-    # (already-settled) targets can no longer become pending events — the
-    # emission floor (STEP 2, forecast_snapshot_ready.scan_committed_snapshots)
-    # never emits them and the EventStore claim floor (STEP 3, fetch_pending)
-    # never returns them — so no stale family reaches this refresh path. The
-    # pending-event query above is the single source of families; it is sourced
-    # from the same already-timeliness-filtered opportunity_events.
-
-    # Throughput contract: never slice pending families by a fixed count. Live has
-    # hundreds of active weather families across time zones; a hard family cap lets
-    # a small prefix monopolise the freshness window. The wall-clock budget is the
-    # only per-tick bound, with a reserved CLOB capture slice so Gamma lookup cannot
-    # consume the whole tick and leave snapshot insertion at attempted=0.
-
-    # Step 2: Cache-skip: for each family check whether ALL known condition_ids
-    #         (from market_events topology) already have fresh snapshots.
-    #         Families with ANY stale/missing bin still proceed to Gamma fetch.
-    fresh_skipped = 0
-    no_topology = 0
-    no_topology_backed_off = 0
-    venue_closed_skipped = 0
-    gamma_refresh_families: list[tuple[str, str, str]] = []
-    cached_topology_markets: list[dict] = []
-    cached_topology_families = 0
-    cached_topology_incomplete = 0
-    topology_budget_exhausted = False
-    topology_deferred_families = 0
-    # FUNNEL-STARVATION FIX (2026-06-09): how many families this cycle actually
-    # reached in the topology phase. Advances the rotating cursor so the NEXT
-    # cycle resumes from where this one stopped, sweeping every live family within
-    # a bounded number of cycles instead of re-processing the same front slice.
-    families_processed_this_cycle = len(families)
-
-    write_conn = get_trade_connection(write_class="live")
-    try:
-        for index, (city, target_date, metric) in enumerate(families):
-            if time.monotonic() >= topology_deadline and (
-                cached_topology_markets or gamma_refresh_families
-            ):
-                topology_budget_exhausted = True
-                topology_deferred_families = len(families) - index
-                # Resume from the first UNPROCESSED family next cycle.
-                families_processed_this_cycle = index
-                logger.info(
-                    "refresh_pending_family_snapshots: topology time-box hit after %d/%d "
-                    "families; reserving %.1fs for CLOB capture",
-                    index,
-                    len(families),
-                    snapshot_reserve_s,
-                )
-                break
-            # VENUE-CLOSE WARM-SKIP (2026-06-13): a family whose Polymarket weather
-            # market has already entered POST_TRADING/RESOLVED (the F1 12:00-UTC
-            # close of target_date) can produce no fresh executable book — its
-            # capture froze at the last pre-close snapshot and Gamma returns an
-            # empty event list. Re-probing it (topology lookup + Gamma slug fetch)
-            # burns the bounded time-box that LIVE families (PRE_SETTLEMENT_DAY /
-            # SETTLEMENT_DAY) need, starving the live inventory of fresh snapshots.
-            #
-            # This is the EARLIER-than-strictly-past horizon: the venue closes at
-            # 12:00 UTC of target_date, hours before the target LOCAL-day end that
-            # the claim floor (EventStore._strictly_past_in_tz) and the prior STEP-4
-            # comment relied on. So a same-day-but-venue-closed family (e.g. a
-            # 2026-06-13 family at 17:44Z, post the 12:00Z close, pre local
-            # midnight) passes the claim floor and reaches this lane — exactly the
-            # 202/319 closed families measured live 2026-06-13 17:51Z that the
-            # 'gamma_slug_timebox_unattempted' tail re-probed for nothing.
-            #
-            # Authority: market_phase.family_venue_closed reuses the SAME F1
-            # 12:00-UTC POST_TRADING anchor (market_open_at_decision /
-            # market_phase_for_decision) the reactor's _venue_market_closed_horizon
-            # uses — single authority, no new clock. Fail-SOFT: an unresolvable
-            # city/tz/date returns False (NOT closed) so an uncertain family is
-            # KEPT, never dropped (a tradeable family must never be skipped). This
-            # is a focus/efficiency skip, NOT a cap or admission relaxation — it
-            # removes only families whose venue is provably closed.
-            if _family_venue_closed(
-                city=city, target_date=target_date, now_utc=now_utc
-            ):
-                venue_closed_skipped += 1
-                continue
-            payload = {"city": city, "target_date": target_date, "metric": metric}
-            topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
-            if not topology_rows:
-                no_topology += 1
-                # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): if this
-                # no-topology family's last Gamma slug lookup returned an EMPTY
-                # event list (no Polymarket market listed yet for this future
-                # target_date) and we are still inside its cooldown, do NOT re-add
-                # it to the Gamma probe set this cycle. Re-probing not-yet-listed
-                # future families every ~20s warm tick returns empty every time,
-                # exhausts the bounded Gamma time-box, and starves CLOB capture of
-                # families that DO have topology (the fresh_executable_city_count
-                # 0-oscillation, measured 200/200 backed-off were next-day
-                # lows/highs). The family stays a pending event and is re-probed
-                # the moment the cooldown expires — captured as soon as the market
-                # lists. Symmetric twin of the _family_venue_closed past-skip: a
-                # focus/efficiency skip, never a terminal drop. Env
-                # ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS=0 disables.
-                nb_key = _refresh_family_key(city, target_date, metric)
-                if (
-                    _gamma_empty_backoff_s > 0.0
-                    and _GAMMA_EMPTY_BACKOFF_UNTIL.get(nb_key, 0.0) > time.monotonic()
-                ):
-                    no_topology_backed_off += 1
-                    continue
-                logger.debug(
-                    "refresh_pending_family_snapshots: no market topology for %s/%s/%s "
-                    "(no Polymarket market for this family — event will be rejected at gate)",
-                    city, target_date, metric,
-                )
-                # Still include: Gamma may discover bins not yet in topology.
-                gamma_refresh_families.append((city, target_date, metric))
-                continue
-            topology_rows = [
-                {
-                    **dict(trow),
-                    "city": city,
-                    "target_date": target_date,
-                    "temperature_metric": metric,
-                }
-                for trow in topology_rows
-            ]
-
-            any_stale = False
-            for trow in topology_rows:
-                cid = str(trow.get("condition_id") or "").strip()
-                if not cid:
-                    continue
-                if not _condition_buy_sides_fresh(write_conn, cid, now_iso):
-                    any_stale = True
-                    break
-
-            if any_stale:
-                reconstructed = reconstruct_weather_market_from_static_topology(
-                    write_conn,
-                    topology_rows=topology_rows,
-                    now_utc=now_utc,
-                )
-                if reconstructed is not None:
-                    cached_topology_markets.append(reconstructed)
-                    cached_topology_families += 1
-                else:
-                    cached_topology_incomplete += 1
-                    gamma_refresh_families.append((city, target_date, metric))
-            else:
-                fresh_skipped += 1
-
-        # FUNNEL-STARVATION FIX (2026-06-09): advance the rotating cursor by the
-        # families actually processed this cycle so the next cycle resumes at the
-        # first family this one did not reach. This is what converts "always the
-        # newest 1-2 families" into a fair round-robin that sweeps the whole live
-        # set within ceil(n_families / families_per_cycle) cycles. Advanced HERE
-        # (after the topology loop, before any downstream return) so every exit
-        # path — all_fresh, refreshed, or a later gamma/capture error — advances
-        # the cursor identically and no slice is ever skipped or double-swept.
-        _SUBSTRATE_REFRESH_CURSOR = (
-            start_offset
-            + max(1, max(0, families_processed_this_cycle - len(priority_families)))
-        ) % max(1, n_ordinary_families)
-
-        if not gamma_refresh_families and not cached_topology_markets:
-            if venue_closed_skipped:
-                no_work_status = (
-                    "venue_closed"
-                    if venue_closed_skipped == len(families)
-                    else "no_refreshable_families"
-                )
-                logger.info(
-                    "refresh_pending_family_snapshots: no refreshable families, skipped. "
-                    "status=%s families=%d fresh_skipped=%d venue_closed_skipped=%d "
-                    "no_topology=%d no_topology_backed_off=%d cached_topology_incomplete=%d",
-                    no_work_status,
-                    len(families),
-                    fresh_skipped,
-                    venue_closed_skipped,
-                    no_topology,
-                    no_topology_backed_off,
-                    cached_topology_incomplete,
-                )
-                return {
-                    "status": no_work_status,
-                    "families_checked": len(families),
-                    "explicit_priority_families": len(explicit_priority_families),
-                    "include_pending_families": bool(include_pending_families),
-                    "open_rest_priority_families": len(open_rest_priority_families),
-                    "held_position_priority_families": len(held_position_priority_families),
-                    "fresh_skipped": fresh_skipped,
-                    "no_topology": no_topology,
-                    "venue_closed_skipped": venue_closed_skipped,
-                    "no_topology_backed_off": no_topology_backed_off,
-                    "cached_topology_incomplete": cached_topology_incomplete,
-                }
-            logger.info(
-                "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
-                "cached_topology_incomplete=%d",
-                len(families), fresh_skipped, no_topology, venue_closed_skipped,
-                cached_topology_incomplete,
-            )
-            return {
-                "status": "all_fresh",
-                "families_checked": len(families),
-                "explicit_priority_families": len(explicit_priority_families),
-                "include_pending_families": bool(include_pending_families),
-                "open_rest_priority_families": len(open_rest_priority_families),
-                "held_position_priority_families": len(held_position_priority_families),
-                "fresh_skipped": fresh_skipped,
-                "no_topology": no_topology,
-                "venue_closed_skipped": venue_closed_skipped,
-                "cached_topology_incomplete": cached_topology_incomplete,
-            }
-
-        # Step 3: Targeted Gamma slug fetch — one request per pending family.
-        #         Build the exact slug for each (city, date, metric) and fetch
-        #         directly.  This is maximally bounded: N pending families = N
-        #         Gamma calls (vs the background slug-pattern scanner which
-        #         enumerates all 14 cities × all dates and is budget-capped).
-        #         Uses the City's slug_names[0] for the slug fragment.
-        gamma_deadline = _gamma_lookup_deadline_for_snapshot_refresh(
-            refresh_deadline=refresh_deadline,
-            refresh_budget_s=refresh_budget_s,
-            snapshot_reserve_s=snapshot_reserve_s,
-            cached_topology_count=len(cached_topology_markets),
-        )
-        skipped_not_found = 0
-        try:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
-            from datetime import date as _date_cls
-            from src.data.market_scanner import (
-                _gamma_get,
-                _parse_and_persist_weather_events,
-            )
-
-            def _date_to_slug_fragment(date_str: str) -> str:
-                d = _date_cls.fromisoformat(date_str)
-                return d.strftime("%B-%-d-%Y").lower()
-
-            raw_events_seen: set = set()
-            raw_events_collected: list[dict] = []
-            gamma_slug_attempted = 0
-            gamma_slug_empty = 0
-            gamma_slug_http_non_200 = 0
-            gamma_slug_failed = 0
-            gamma_slug_invalid = 0
-            gamma_slug_timebox_unattempted = 0
-            gamma_empty_family_keys: set[tuple[str, str, str]] = set()
-            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): track HARVESTED (result
-            # actually read), not merely SUBMITTED. A future cancelled / not drained
-            # at the gamma time-box — whose HTTP often lands ~140ms LATER, since
-            # `future.cancel()` cannot stop an already-running thread — was previously
-            # counted as "attempted" yet never harvested. The match loop then reported
-            # that transient timing miss as a permanent "did not parse — bin identity
-            # unknown" verdict, pinning real families at the FDR gate forever. The
-            # terminal verdict is now restricted to keys in this set; everything else
-            # (submitted-but-un-harvested) is reported RETRYABLE so the next cycle
-            # re-fetches it. Fail-closed is preserved: a harvested-but-unmatched family
-            # still stays terminal.
-            gamma_harvested_family_keys: set[tuple[str, str, str]] = set()
-
-            gamma_jobs: list[dict] = []
-            for fam_city, fam_date, fam_metric in gamma_refresh_families:
-                family_key = _refresh_family_key(fam_city, fam_date, fam_metric)
-                if time.monotonic() > gamma_deadline:
-                    gamma_slug_timebox_unattempted += 1
-                    continue
-                city_obj = _refresh_cities_by_name.get(_canonical_refresh_city_name(fam_city))
-                if city_obj is None:
-                    gamma_slug_invalid += 1
-                    logger.info(
-                        "refresh_pending_family_snapshots: city %r not in config, skipping",
-                        fam_city,
-                    )
-                    continue
-                slug_fragment = city_obj.slug_names[0] if city_obj.slug_names else fam_city.lower().replace(" ", "-")
-                try:
-                    slug_date = _date_to_slug_fragment(fam_date)
-                except (ValueError, TypeError):
-                    gamma_slug_invalid += 1
-                    logger.info(
-                        "refresh_pending_family_snapshots: invalid date %r for %s, skipping",
-                        fam_date, fam_city,
-                    )
-                    continue
-                prefix = "lowest" if fam_metric == "low" else "highest"
-                slug = f"{prefix}-temperature-in-{slug_fragment}-on-{slug_date}"
-                gamma_jobs.append(
-                    {
-                        "city": fam_city,
-                        "target_date": fam_date,
-                        "metric": fam_metric,
-                        "family_key": family_key,
-                        "slug": slug,
-                    }
-                )
-
-            def _fetch_gamma_slug(job: dict) -> dict:
-                remaining = max(0.1, gamma_deadline - time.monotonic())
-                _gamma_timeout = min(
-                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_GAMMA_TIMEOUT_SECONDS", "10.0"))),
-                    remaining,
-                )
-                slug = str(job["slug"])
-                resp = _gamma_get("/events", params={"slug": slug}, timeout=_gamma_timeout)
-                if resp.status_code != 200:
-                    return {**job, "status": "http_non_200", "status_code": resp.status_code, "events": []}
-                batch = resp.json()
-                if not isinstance(batch, list):
-                    batch = [batch] if isinstance(batch, dict) and batch else []
-                events = [event for event in batch if isinstance(event, dict)]
-                return {**job, "status": "ok" if events else "empty", "events": events}
-
-            gamma_concurrency = max(
-                1,
-                min(32, int(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_CONCURRENCY", "8"))),
-            )
-            pending_futures: dict = {}
-            next_job_index = 0
-
-            def _submit_gamma_jobs(executor: ThreadPoolExecutor) -> None:
-                nonlocal gamma_slug_attempted, next_job_index
-                while (
-                    len(pending_futures) < gamma_concurrency
-                    and next_job_index < len(gamma_jobs)
-                    and time.monotonic() <= gamma_deadline
-                ):
-                    job = gamma_jobs[next_job_index]
-                    next_job_index += 1
-                    gamma_slug_attempted += 1
-                    pending_futures[executor.submit(_fetch_gamma_slug, job)] = job
-
-            def _harvest_gamma_result(result: dict) -> None:
-                """Record a Gamma future's RESULT (not its mere submission).
-
-                Marking the family_key harvested here is what lets the downstream
-                match loop distinguish "we read a response and it did not match this
-                pending family" (terminal: stay at FDR gate, fail-closed) from "we
-                never got to read a response" (retryable). Without this the two were
-                conflated and every time-boxed family was reported as a hard parse
-                failure.
-                """
-                nonlocal gamma_slug_http_non_200, gamma_slug_empty
-                gamma_harvested_family_keys.add(result["family_key"])
-                if result["status"] == "http_non_200":
-                    gamma_slug_http_non_200 += 1
-                    logger.debug(
-                        "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
-                        result["slug"], result.get("status_code"),
-                    )
-                elif result["status"] == "empty":
-                    gamma_slug_empty += 1
-                    gamma_empty_family_keys.add(result["family_key"])
-                else:
-                    for event in result["events"]:
-                        event_id = event.get("id") or event.get("slug")
-                        if event_id and event_id not in raw_events_seen:
-                            raw_events_seen.add(event_id)
-                            raw_events_collected.append(event)
-
-            if gamma_jobs:
-                with ThreadPoolExecutor(
-                    max_workers=gamma_concurrency,
-                    thread_name_prefix="zeus-gamma-refresh",
-                ) as executor:
-                    _submit_gamma_jobs(executor)
-                    while pending_futures:
-                        remaining = gamma_deadline - time.monotonic()
-                        if remaining <= 0.0:
-                            gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
-                            logger.info(
-                                "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
-                                "submitted families; draining %d in-flight, reserving %.1fs for CLOB capture",
-                                max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
-                                gamma_slug_attempted,
-                                len(gamma_jobs),
-                                len(pending_futures),
-                                snapshot_reserve_s,
-                            )
-                            next_job_index = len(gamma_jobs)
-                            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): break WITHOUT
-                            # cancel/clear here. The post-loop drain below harvests any
-                            # futures whose HTTP lands within the bounded grace window
-                            # (live: ~140ms after the time-box) so their bin identity is
-                            # NOT discarded and mislabeled "did not parse". Whatever is
-                            # still pending after the grace is then cancelled and left
-                            # retryable (never harvested -> never terminal).
-                            break
-                        try:
-                            future = next(
-                                as_completed(
-                                    tuple(pending_futures),
-                                    timeout=max(0.05, min(remaining, 0.5)),
-                                )
-                            )
-                        except FuturesTimeoutError:
-                            continue
-                        job = pending_futures.pop(future)
-                        try:
-                            result = future.result()
-                        except Exception as _exc:
-                            gamma_slug_failed += 1
-                            logger.warning(
-                                "refresh_pending_family_snapshots: Gamma fetch failed for %s: %s",
-                                job["slug"], _exc,
-                            )
-                            _submit_gamma_jobs(executor)
-                            continue
-                        _harvest_gamma_result(result)
-                        _submit_gamma_jobs(executor)
-
-                    # FDR-GATE PARSE INCIDENT FIX (2026-06-10): drain futures that are
-                    # ALREADY done but were left in pending_futures when the loop exited
-                    # via the time-box. `future.cancel()` returns False for a running
-                    # future — its worker thread keeps going and the HTTP completes a
-                    # short moment after the time-box. The prior code cleared
-                    # pending_futures without reading those landed results, discarding
-                    # perfectly parseable responses and reporting them as parse failures.
-                    # A small bounded grace lets the near-complete fetches land so their
-                    # bin identity is harvested instead of thrown away. Bounded so the
-                    # CLOB capture reserve is never consumed.
-                    if pending_futures:
-                        # 2.0s (was 1.5s): slice 2.0 + grace must clear the measured
-                        # Gamma /events p95 (2.516s) x 1.5 = 3.774s effective recovery
-                        # window; 1.5s left it at 3.5s — 0.27s short, the same miss
-                        # class that pinned families at the FDR gate on 2026-06-10.
-                        # Relation enforced by tests/test_time_semantics_relations.py.
-                        grace_s = max(
-                            0.0,
-                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
-                        )
-                        # Cap the grace at the absolute refresh deadline so draining
-                        # near-complete fetches never overruns the cycle's total
-                        # wall-clock budget; this only borrows otherwise-idle wait time.
-                        grace_deadline = min(
-                            time.monotonic() + grace_s,
-                            refresh_deadline,
-                        )
-                        # Harvest in COMPLETION order so the futures whose HTTP lands
-                        # first (live: ~140ms after the time-box) are recovered before
-                        # the grace runs out, regardless of dict iteration order.
-                        while pending_futures:
-                            remaining_grace = grace_deadline - time.monotonic()
-                            if remaining_grace <= 0.0:
-                                break
-                            try:
-                                future = next(
-                                    as_completed(
-                                        tuple(pending_futures),
-                                        timeout=remaining_grace,
-                                    )
-                                )
-                            except FuturesTimeoutError:
-                                break
-                            job = pending_futures.pop(future)
-                            try:
-                                result = future.result()
-                            except Exception as _exc:
-                                # Future raised (e.g. network error). Not harvested, so
-                                # it stays retryable next cycle.
-                                gamma_slug_failed += 1
-                                logger.debug(
-                                    "refresh_pending_family_snapshots: Gamma drain fetch failed for %s: %s",
-                                    job["slug"], _exc,
-                                )
-                                continue
-                            _harvest_gamma_result(result)
-                        # Anything still unharvested after the grace is genuinely
-                        # unresolved this cycle; cancel and leave it RETRYABLE (its
-                        # key was never added to gamma_harvested_family_keys).
-                        for future in pending_futures:
-                            future.cancel()
-                        pending_futures.clear()
-
-            gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
-
-            # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): families whose
-            # Gamma slug lookup returned an EMPTY event list this cycle have no
-            # market listed yet; park them for the cooldown so they stop clogging
-            # the Gamma time-box every warm tick. Only genuinely-probed-empty
-            # families are parked — timebox_unattempted (never probed) families
-            # stay immediately retryable next cycle.
-            if _gamma_empty_backoff_s > 0.0 and gamma_empty_family_keys:
-                _eb_deadline = time.monotonic() + _gamma_empty_backoff_s
-                for _eb_key in gamma_empty_family_keys:
-                    _GAMMA_EMPTY_BACKOFF_UNTIL[_eb_key] = _eb_deadline
-
-            # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
-            # families. The old fallback called the global weather discovery scanner,
-            # which performs a tag/slug sweep and routinely exhausts its
-            # request budget before the warm job completes. Current Gamma slug payloads
-            # include the required child fields (conditionId, acceptingOrders,
-            # enableOrderBook, clobTokenIds), so the exact per-family slug responses are
-            # sufficient for parsing, topology persistence, and CLOB snapshot capture.
-            discovered_events = _parse_and_persist_weather_events(
-                raw_events_collected,
-                min_hours_to_resolution=0.0,
-                now=now_utc,
-            )
-            logger.info(
-                "refresh_pending_family_snapshots: slug fetch complete "
-                "gamma_refresh_families=%d cached_topology_families=%d "
-                "raw_events=%d discovered_events=%d attempted=%d empty=%d "
-                "http_non_200=%d failed=%d invalid=%d timebox_unattempted=%d "
-                "concurrency=%d",
-                len(gamma_refresh_families), cached_topology_families,
-                len(raw_events_collected), len(discovered_events),
-                gamma_slug_attempted, gamma_slug_empty, gamma_slug_http_non_200,
-                gamma_slug_failed, gamma_slug_invalid, gamma_slug_timebox_unattempted,
-                gamma_concurrency,
-            )
-        except Exception as exc:
-            logger.warning(
-                "refresh_pending_family_snapshots: Gamma slug lookup failed: %s", exc
-            )
-            return {"status": "error_gamma_lookup", "reason": str(exc)}
-
-        # Build a lookup: (city_name_lower, target_date, metric) -> parsed event dict.
-        gamma_by_family: dict[tuple[str, str, str], dict] = {}
-        for ev in discovered_events:
-            city_obj = ev.get("city")
-            city_name = getattr(city_obj, "name", None) or (city_obj if isinstance(city_obj, str) else "")
-            td = str(ev.get("target_date") or "")
-            metric_ev = str(ev.get("temperature_metric") or "")
-            key = _refresh_family_key(city_name, td, metric_ev)
-            gamma_by_family[key] = ev
-
-        # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
-        markets: list[dict] = []
-        markets.extend(cached_topology_markets)
-        for city, target_date, metric in gamma_refresh_families:
-            key = _refresh_family_key(city, target_date, metric)
-            ev = gamma_by_family.get(key)
-            if ev is None:
-                # FDR-GATE PARSE INCIDENT FIX (2026-06-10): gate the TERMINAL "did not
-                # parse — stay at FDR gate" verdict on whether the family's Gamma
-                # future was actually HARVESTED (its result read), not merely
-                # submitted. A family whose future was cancelled / not drained at the
-                # time-box was "attempted" but never harvested; reporting it as a hard
-                # parse failure pinned real families at the gate forever. Such families
-                # are now reported RETRYABLE so the next cycle re-fetches them.
-                if key in gamma_harvested_family_keys:
-                    skipped_not_found += 1
-                    if key in gamma_empty_family_keys:
-                        logger.warning(
-                            "refresh_pending_family_snapshots: Gamma returned empty event list for "
-                            "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
-                            city, target_date, metric,
-                        )
-                    else:
-                        logger.warning(
-                            "refresh_pending_family_snapshots: Gamma response did not parse to pending family "
-                            "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
-                            city, target_date, metric,
-                        )
-                else:
-                    logger.info(
-                        "refresh_pending_family_snapshots: Gamma fetch not harvested before time-box for "
-                        "%s/%s/%s — family remains retryable",
-                        city, target_date, metric,
-                    )
-                continue
-            markets.append(ev)
-
-        if not markets:
-            logger.warning(
-                "refresh_pending_family_snapshots: no Gamma events matched pending families; "
-                "gamma_refresh_families=%d cached_topology_families=%d skipped_not_found=%d",
-                len(gamma_refresh_families), cached_topology_families, skipped_not_found,
-            )
-            return {
-                "status": "no_refreshable_markets",
-                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
-                "gamma_refresh_families": len(gamma_refresh_families),
-                "cached_topology_families": cached_topology_families,
-                "skipped_not_found": skipped_not_found,
-            }
-
-        # Step 4: CLOB fetch + cache write.
-        #         max_outcomes=0 is the UNLIMITED sentinel: bypass the per-city cap so
-        #         ALL bins of each pending family are captured in ONE cycle (e.g. an
-        #         11-bin negRisk family needs all 11 — incl. non-tradeable tail bins —
-        #         for the FDR full-family proof / entry gate). max_outcomes=None did NOT
-        #         bypass the cap: it fell through to ZEUS_..._MAX_OUTCOMES (default 4),
-        #         so families stalled at 4-of-22 candidates → EXECUTABLE_SNAPSHOT_BLOCKED
-        #         (2026-06-04 root cause). This caller is scoped to pending families only
-        #         (bounded set), so uncapped capture stays within the wall-clock budget.
-        #         tolerate_missing_book=True is already hardwired inside
-        #         refresh_executable_market_substrate_snapshots, so illiquid bins
-        #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
-        _clob_timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-        )
-        markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
-            _prune_fresh_market_outcomes_for_snapshot_refresh(
-                write_conn,
-                markets,
-                fresh_at_iso=now_iso,
-            )
-        )
-        if not markets_for_refresh:
-            return {
-                "status": "all_fresh",
-                "families_checked": len(families),
-                "explicit_priority_families": len(explicit_priority_families),
-                "include_pending_families": bool(include_pending_families),
-                "open_rest_priority_families": len(open_rest_priority_families),
-                "held_position_priority_families": len(held_position_priority_families),
-                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
-                "gamma_refresh_families": len(gamma_refresh_families),
-                "cached_topology_families": cached_topology_families,
-                "cached_topology_incomplete": cached_topology_incomplete,
-                "no_topology": no_topology,
-                "fresh_skipped": fresh_skipped,
-                "venue_closed_skipped": venue_closed_skipped,
-                "gamma_slug_attempted": gamma_slug_attempted,
-                "gamma_slug_empty": gamma_slug_empty,
-                "gamma_slug_http_non_200": gamma_slug_http_non_200,
-                "gamma_slug_failed": gamma_slug_failed,
-                "gamma_slug_invalid": gamma_slug_invalid,
-                "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
-                "fresh_condition_skipped": fresh_condition_skipped,
-                "stale_condition_submitted": stale_condition_submitted,
-            }
-
-        snapshot_budget_s = _snapshot_capture_budget_for_refresh(
-            refresh_deadline=refresh_deadline,
-            snapshot_reserve_s=snapshot_reserve_s,
-        )
-        with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-            summary = refresh_executable_market_substrate_snapshots(
-                write_conn,
-                markets=markets_for_refresh,
-                clob=clob,
-                captured_at=datetime.now(timezone.utc),
-                scan_authority="VERIFIED",
-                max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                budget_seconds=snapshot_budget_s,
-            )
-        write_conn.commit()
-
-    except Exception as exc:
-        logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
-        return {"status": "error", "reason": str(exc)}
-    finally:
-        write_conn.close()
-
-    result = {
-        "status": "refreshed",
-        "families_checked": len(families),
-        "explicit_priority_families": len(explicit_priority_families),
-        "include_pending_families": bool(include_pending_families),
-        "open_rest_priority_families": len(open_rest_priority_families),
-        "held_position_priority_families": len(held_position_priority_families),
-        "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
-        "gamma_refresh_families": len(gamma_refresh_families),
-        "cached_topology_families": cached_topology_families,
-        "cached_topology_incomplete": cached_topology_incomplete,
-        "no_topology": no_topology,
-        "no_topology_backed_off": no_topology_backed_off,
-        "fresh_skipped": fresh_skipped,
-        "venue_closed_skipped": venue_closed_skipped,
-        "topology_budget_exhausted": int(topology_budget_exhausted),
-        "topology_deferred_families": topology_deferred_families,
-        "skipped_not_found": skipped_not_found,
-        "gamma_slug_attempted": gamma_slug_attempted,
-        "gamma_slug_empty": gamma_slug_empty,
-        "gamma_slug_http_non_200": gamma_slug_http_non_200,
-        "gamma_slug_failed": gamma_slug_failed,
-        "gamma_slug_invalid": gamma_slug_invalid,
-        "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
-        "markets_submitted": len(markets_for_refresh),
-        "fresh_condition_skipped": fresh_condition_skipped,
-        "stale_condition_submitted": stale_condition_submitted,
-        "refresh_budget_seconds": refresh_budget_s,
-        "snapshot_reserve_seconds": snapshot_reserve_s,
-        "snapshot_budget_seconds": snapshot_budget_s,
-        **summary,
-    }
-    logger.info("refresh_pending_family_snapshots: %s", result)
-    return result
-
-
-
-
+        return min(pre_capture_deadline, refresh_deadline - refresh_budget_s + cached_gamma_s)
+    return refresh_deadline - snapshot_reserve_s
 
 
 
@@ -3752,6 +3031,12 @@ def _write_loaded_sha_state(boot_sha: str | None) -> None:
             "skipping state/loaded_sha.json write — release gate will read missing_loaded_sha"
         )
         return
+    if not _is_full_git_sha(boot_sha):
+        logger.error(
+            "loaded_sha: refusing to write invalid boot SHA %r — release gate will fail closed",
+            boot_sha,
+        )
+        return
     from src.config import state_path
 
     out_path = state_path("loaded_sha.json")
@@ -3781,12 +3066,10 @@ def _check_deployment_freshness(
     Compares the git HEAD SHA at daemon boot vs the current working-tree HEAD.
     Divergence means a merge/deploy happened after the daemon started.
 
-    Grace windows (by uptime):
-      < 4h   : WARNING log. Normal deploy window; no action (daemon may not have
-               restarted yet after a deploy).
-      4–24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
-               (reason='deployment_freshness_4h_divergence'). Trading paused to
-               prevent operating on stale pricing logic.
+    Live-money enforcement:
+      < 24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
+               (reason='deployment_freshness_mismatch'). Trading paused immediately
+               to prevent stale entry decisions while operator restarts.
       >= 24h : SystemExit fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
 
     Advisory state written to state/deployment_freshness.json (NOT control_plane.json
@@ -3830,10 +3113,31 @@ def _check_deployment_freshness(
         )
         return
 
-    if current_sha == _boot_sha:
-        return  # No divergence.
-
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
+    df_path = state_path("deployment_freshness.json")
+
+    def _write_deployment_freshness_state(payload: dict[str, object]) -> None:
+        try:
+            _tmp = str(df_path) + ".tmp"
+            with open(_tmp, "w") as _f:
+                json.dump(payload, _f, indent=2)
+            os.replace(_tmp, str(df_path))
+        except Exception as _exc:
+            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
+
+    if current_sha == _boot_sha:
+        if df_path.exists():
+            _write_deployment_freshness_state(
+                {
+                    "boot_sha": _boot_sha,
+                    "current_sha": current_sha,
+                    "uptime_hours": round(uptime_hours, 2),
+                    "detected_at": _now.isoformat(),
+                    "pause_reason": None,
+                    "status": "fresh",
+                }
+            )
+        return  # No divergence.
 
     if uptime_hours >= 24.0:
         import signal as _signal
@@ -3852,60 +3156,61 @@ def _check_deployment_freshness(
             f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
             f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
         )
-    elif uptime_hours >= 4.0:
+    else:
         logger.error(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — merged code not reloaded; pausing entries",
+            "uptime_hours=%.1f — merged code not reloaded; pausing entries immediately",
             _boot_sha[:8], current_sha[:8], uptime_hours,
         )
         # Write advisory flag to dedicated state/deployment_freshness.json.
         # NOT control_plane.json — that file is overwritten on every cycle by
         # _write_control_payload (control_plane.py:119) which writes only
         # {commands, acks}. A dedicated file survives all control_plane writes.
-        df_path = state_path("deployment_freshness.json")
-        try:
-            _df: dict = {
+        _write_deployment_freshness_state(
+            {
                 "boot_sha": _boot_sha,
                 "current_sha": current_sha,
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
+                "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
+                "status": "mismatch",
             }
-            _tmp = str(df_path) + ".tmp"
-            with open(_tmp, "w") as _f:
-                json.dump(_df, _f, indent=2)
-            os.replace(_tmp, str(df_path))
-        except Exception as _exc:
-            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
-        # Pause new entries — prevents trading 5h+ on stale pricing code
-        # (the exact 2026-05-17 incident class). Idempotent if already paused.
+        )
+        # Pause new entries immediately. Exit submits are also protected at the
+        # live_venue_submit capability boundary, so stale code cannot keep trading
+        # while the operator restarts.
         try:
             from src.control.control_plane import pause_entries
             # issued_by="system_auto_pause" activates the idempotency guard in
             # control_plane._has_active_auto_pause_override — prevents duplicate
             # control_overrides rows and alert spam on every 60s tick.
             pause_entries(
-                "deployment_freshness_4h_divergence",
+                _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
                 issued_by="system_auto_pause",
                 effective_until=None,
             )
         except Exception as _exc:
             logger.error(
                 "deployment_freshness: pause_entries failed (%s); "
-                "entries NOT paused despite 4h staleness", _exc,
+                "entries NOT paused despite SHA mismatch", _exc,
             )
-    else:
-        logger.warning(
-            "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — within grace window, no action",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
-        )
 
 
-_DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_4h_divergence"
+_DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_mismatch"
+_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
+    {"deployment_freshness_4h_divergence"}
+)
+_LIVE_SIDECAR_BOOT_HEARTBEATS = (
+    ("forecast-live", "forecast-live-heartbeat.json", 120.0),
+    ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
+    ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
+    ("post-trade-capital", "daemon-heartbeat-post-trade-capital.json", 180.0),
+)
+_LIVE_SIDECAR_BOOT_CLOCK_SKEW_SECONDS = 5.0
 
 
 def _boot_deployment_freshness_auto_resume() -> None:
-    """Boot-time auto-resume: clear a deployment_freshness_4h_divergence pause when
+    """Boot-time auto-resume: clear a deployment freshness pause when
     the operator has restarted the daemon with the current git HEAD SHA.
 
     Called AFTER _assert_live_safe_strategies_or_exit() (which hydrates _control_state
@@ -3913,10 +3218,12 @@ def _boot_deployment_freshness_auto_resume() -> None:
     reflect durable DB state, not stale in-memory defaults.
 
     Logic:
-    - If entries are NOT paused → no-op.
-    - If entries are paused for a reason OTHER than deployment_freshness_4h_divergence → no-op;
+    - Always refresh state/deployment_freshness.json to fresh when boot SHA
+      matches filesystem HEAD; this is the deploy script's post-start proof.
+    - If entries are NOT paused → no DB resume action.
+    - If entries are paused for a non-deployment-freshness reason → no-op;
       do not clear operator-issued or other system pauses.
-    - If entries are paused with reason=deployment_freshness_4h_divergence AND the current
+    - If entries are paused with deployment-freshness reason AND the current
       git HEAD matches _BOOT_STATE['sha'] → call resume_entries() to clear the DB override
       + tombstone + refresh in-memory state. Logs at INFO with both SHAs.
     - If SHA is still mismatched → do NOT auto-resume; operator must investigate.
@@ -3924,7 +3231,7 @@ def _boot_deployment_freshness_auto_resume() -> None:
     """
     import subprocess
 
-    from src.config import PROJECT_ROOT
+    from src.config import PROJECT_ROOT, state_path
     from src.control.control_plane import (
         get_entries_pause_reason,
         is_entries_paused,
@@ -3932,11 +3239,6 @@ def _boot_deployment_freshness_auto_resume() -> None:
     )
 
     try:
-        if not is_entries_paused():
-            return
-        pause_reason = get_entries_pause_reason()
-        if pause_reason != _DEPLOYMENT_FRESHNESS_PAUSE_REASON:
-            return
         boot_sha: str | None = _BOOT_STATE.get("sha")
         if not boot_sha:
             logger.warning(
@@ -3963,13 +3265,48 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 boot_sha[:8], current_sha[:8],
             )
             return
+        try:
+            df_path = state_path("deployment_freshness.json")
+            detected_at = datetime.now(timezone.utc)
+            boot_ts = _BOOT_STATE.get("ts")
+            uptime_hours = 0.0
+            if isinstance(boot_ts, datetime):
+                uptime_hours = max(
+                    0.0,
+                    (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                )
+            payload = {
+                "boot_sha": boot_sha,
+                "current_sha": current_sha,
+                "uptime_hours": round(uptime_hours, 2),
+                "detected_at": detected_at.isoformat(),
+                "pause_reason": None,
+                "status": "fresh",
+            }
+            tmp_path = str(df_path) + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, str(df_path))
+        except Exception as exc:
+            logger.warning(
+                "deployment_freshness_auto_resume: failed to refresh deployment_freshness.json (%s)",
+                exc,
+            )
+        if not is_entries_paused():
+            return
+        pause_reason = get_entries_pause_reason()
+        if pause_reason not in (
+            {_DEPLOYMENT_FRESHNESS_PAUSE_REASON}
+            | set(_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS)
+        ):
+            return
         # SHA matches: operator restarted with current code — safe to auto-resume.
         resume_entries(
             "deployment_freshness_resumed_on_sha_match",
             issued_by="control_plane",
         )
         logger.info(
-            "deployment_freshness_auto_resume: cleared deployment_freshness_4h_divergence pause "
+            "deployment_freshness_auto_resume: cleared deployment freshness pause "
             "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",
             boot_sha[:8], current_sha[:8],
         )
@@ -3979,6 +3316,104 @@ def _boot_deployment_freshness_auto_resume() -> None:
             exc,
             exc_info=True,
         )
+
+
+def _parse_sidecar_heartbeat_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _git_head_matches_boot(boot_sha: str, heartbeat_sha: str) -> bool:
+    boot = str(boot_sha or "").strip()
+    heartbeat = str(heartbeat_sha or "").strip()
+    if not boot or not heartbeat:
+        return False
+    if boot == heartbeat:
+        return True
+    return len(heartbeat) >= 7 and boot.startswith(heartbeat)
+
+
+def _startup_required_sidecar_head_check(
+    *,
+    boot_sha: str | None = None,
+    state_dir: Path | str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Fail live boot if required sidecars are stale, missing, or old-code.
+
+    The operator preflight already checks this, but launchd can still be loaded
+    directly. The live order daemon consumes substrate, price-channel, forecast,
+    and capital surfaces produced by these sidecars, so startup must prove they
+    are fresh and running the same code before any entry path can arm.
+    """
+
+    if get_mode() != "live":
+        return
+
+    expected_sha = str(boot_sha or _BOOT_STATE.get("sha") or "").strip()
+    if not expected_sha:
+        raise SystemExit(
+            "LIVE_SIDECAR_BOOT_BLOCKED: missing boot SHA; cannot prove sidecar code identity"
+        )
+
+    from src.config import STATE_DIR
+
+    state_root = (
+        Path(state_dir).expanduser().resolve()
+        if state_dir is not None
+        else Path(STATE_DIR)
+    )
+    checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    failures: list[str] = []
+    ok: list[str] = []
+    for daemon, filename, max_age_seconds in _LIVE_SIDECAR_BOOT_HEARTBEATS:
+        path = state_root / filename
+        if not path.exists():
+            failures.append(f"{daemon}:missing:{path}")
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            failures.append(f"{daemon}:unreadable:{exc.__class__.__name__}")
+            continue
+        heartbeat_sha = str(payload.get("git_head") or "").strip()
+        if not _git_head_matches_boot(expected_sha, heartbeat_sha):
+            failures.append(
+                f"{daemon}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
+                f"boot={expected_sha[:8]}"
+            )
+            continue
+        heartbeat_at = _parse_sidecar_heartbeat_time(
+            payload.get("alive_at") or payload.get("written_at") or payload.get("timestamp")
+        )
+        if heartbeat_at is None:
+            failures.append(f"{daemon}:timestamp_invalid")
+            continue
+        age_seconds = (checked_at - heartbeat_at).total_seconds()
+        if (
+            age_seconds < -_LIVE_SIDECAR_BOOT_CLOCK_SKEW_SECONDS
+            or age_seconds > max_age_seconds
+        ):
+            failures.append(
+                f"{daemon}:stale age_seconds={age_seconds:.1f} max={max_age_seconds:.1f}"
+            )
+            continue
+        ok.append(f"{daemon}@{heartbeat_sha[:8]} age={age_seconds:.1f}s")
+
+    if failures:
+        detail = "; ".join(failures)
+        logger.critical("LIVE_SIDECAR_BOOT_BLOCKED: %s", detail)
+        raise SystemExit(f"LIVE_SIDECAR_BOOT_BLOCKED: {detail}")
+
+    logger.info("live sidecar boot identity/freshness: OK (%s)", ", ".join(ok))
 
 
 def _startup_freshness_check() -> None:
@@ -4056,6 +3491,7 @@ def _startup_world_db_schema_ready_check() -> str:
         "trade_decisions",
     })
     _LIVE_REQUIRED_WORLD_INDEXES = frozenset({
+        "idx_opportunity_events_day0_family_extreme",
         "idx_opportunity_event_processing_pending_retry_floor",
         "idx_opportunity_event_processing_stale_claim",
         "idx_opportunity_event_processing_status",
@@ -4142,6 +3578,9 @@ def _startup_world_db_hot_index_prepare() -> str:
         CREATE_STALE_CLAIM_INDEX_SQL,
         CREATE_STATUS_INDEX_SQL,
     )
+    from src.state.schema.opportunity_events_schema import (
+        CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL,
+    )
 
     path = db_module.ZEUS_WORLD_DB_PATH
     if not path.exists():
@@ -4150,6 +3589,7 @@ def _startup_world_db_hot_index_prepare() -> str:
     conn = db_module.get_world_connection(write_class="live")
     try:
         for sql in (
+            CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL,
             CREATE_STATUS_INDEX_SQL,
             CREATE_PENDING_RETRY_FLOOR_INDEX_SQL,
             CREATE_STALE_CLAIM_INDEX_SQL,
@@ -4394,6 +3834,7 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     bankroll_provider.cached() and already fail closed when it is unavailable.
     """
     balance = None
+    bankroll_unavailable_detail: str | None = None
     if clob is not None:
         # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
         # and keep the same fail-closed semantics. Production never reaches here.
@@ -4433,16 +3874,13 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
                 rec = bankroll_record
         except Exception as exc:
             rec = None
-            logger.critical(
-                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider.current() raised; "
-                "continuing monitor/redecision while new submit remains fail-closed: %s",
-                exc,
+            bankroll_unavailable_detail = (
+                f"bankroll_provider.current() raised: {exc}"
             )
         if rec is None:
-            logger.critical(
-                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider returned None at daemon "
-                "start; continuing monitor/redecision while new submit remains "
-                "fail-closed until a later bankroll warm succeeds."
+            bankroll_unavailable_detail = (
+                bankroll_unavailable_detail
+                or "bankroll_provider returned None at daemon start"
             )
         else:
             balance = rec.value_usd
@@ -4476,47 +3914,51 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
             exc,
         )
 
+    if clob is None and balance is None:
+        try:
+            warm_rec = bankroll_provider.warm_from_collateral_snapshot()
+        except Exception as exc:
+            warm_rec = None
+            logger.warning(
+                "Startup collateral snapshot bankroll warm failed "
+                "(submit remains fail-closed until a later warm succeeds): %s",
+                exc,
+            )
+        if warm_rec is not None:
+            balance = warm_rec.value_usd
+            logger.info(
+                "Startup wallet check: $%.2f pUSD available "
+                "(source=%s cached=%s staleness=%.1fs)",
+                balance,
+                warm_rec.source,
+                warm_rec.cached,
+                warm_rec.staleness_seconds,
+            )
+        else:
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: %s; no fresh collateral ledger "
+                "snapshot was available at daemon start. Continuing "
+                "monitor/redecision while new submit remains fail-closed until "
+                "a later bankroll warm succeeds.",
+                bankroll_unavailable_detail
+                or "wallet query failed before bankroll cache was populated",
+            )
+
 
 def _startup_data_health_check(conn):
     """Warn about deferred data actions on every startup.
 
-    This exists because bias correction activation and Platt recompute
-    are easy to forget. The warnings persist until the actions are taken.
+    The warnings persist until the actions are taken.
     """
     try:
-        # 1. Bias correction reminder (legacy baseline/diagnostics chain flag,
-        # renamed from bias_correction_enabled → baseline_bias_correction_enabled
-        # in T0-3 to disambiguate from edli.edli_bias_correction_enabled).
-        bias_enabled = settings.baseline_bias_correction_enabled
-        bias_data = conn.execute(
-            "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
-        ).fetchone()[0]
-
-        if not bias_enabled and bias_data > 0:
-            logger.warning(
-                "⚠ DEFERRED ACTION: baseline_bias_correction_enabled=false but %d ECMWF bias "
-                "entries ready for the legacy baseline diagnostics chain. This is not the live "
-                "EDLI replacement probability authority. To activate that legacy baseline path: "
-                "1) Recompute calibration_pairs with bias correction 2) Refit legacy Platt models "
-                "3) Set baseline_bias_correction_enabled=true 4) Run test_cross_module_invariants.py",
-                bias_data,
-            )
-
         forecast_city_count = conn.execute(
             "SELECT COUNT(DISTINCT city) FROM forecast_skill"
         ).fetchone()[0]
-        bias_city_count = conn.execute(
-            "SELECT COUNT(DISTINCT city) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
-        ).fetchone()[0]
         configured_city_count = len(cities_by_name)
-        if forecast_city_count < configured_city_count or bias_city_count < configured_city_count:
+        if forecast_city_count < configured_city_count:
             logger.warning(
-                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities; "
-                "mature ECMWF model_bias covers %d/%d. Missing bias data falls back "
-                "to raw ensemble member maxes, archive quality is incomplete (raw ensemble member maxes only).",
+                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities.",
                 forecast_city_count,
-                configured_city_count,
-                bias_city_count,
                 configured_city_count,
             )
 
@@ -5044,31 +4486,21 @@ def _edli_event_reactor_cycle() -> None:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         forecast_emit_limit = _edli_positive_int_or_unbounded(
-            edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
+            edli_cfg, "forecast_snapshot_emit_limit", default=12, maximum=20
         )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
-        # FUNNEL-STARVATION FIX (2026-06-09): raise the per-cycle evaluation ceiling
-        # so the reactor can sweep the FULL live FORECAST_SNAPSHOT_READY set
-        # (~200 events across ~50 cities × 3 target dates) within one or two cycles
-        # once the substrate warmer (now round-robin, see _SUBSTRATE_REFRESH_CURSOR)
-        # keeps books fresh. The prior maximum=50 capped a cycle at 50 evaluations
-        # regardless of config, so even with fresh books the live family set could
-        # not be fully swept per cadence — a throttle on EVALUATION COVERAGE, the
-        # exact thing the operator directive forbids (every live family must be
-        # evaluated, honest no-edge only after a FULL evaluation). The reactor's own
-        # 30s wall-clock budget (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, in reactor.py)
-        # remains the real safety bound on cycle length; this ceiling just stops
-        # truncating the admissible queue below the live family count. Economic
-        # gates (q_lcb, cost floor, Kelly, depth) are untouched.
-        # Wave-1 2026-06-12: the no_submit_proof_limit production cap is DELETED. It
-        # truncated how many pending families the reactor processed per cycle — and thus
-        # how many no-submit proofs/receipts were persisted — which silently dropped the
-        # tail of the admissible queue (an artificial throttle the operator law forbids).
-        # proof_limit is now UNBOUNDED (None): every pending family is processed and every
-        # proof persists. The reactor's own 30s wall-clock budget
-        # (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, reactor.py) remains the real, honest safety
-        # bound on cycle length; any family not reached this cycle requeues for the next.
-        proof_limit = None
+        # Live cadence invariant: full coverage is achieved by fair rotation across
+        # continuous cycles, not by processing an unbounded queue in one cycle. The
+        # unbounded 2026-06-12 setting let stale substrate / slow JIT book events hold
+        # one reactor run past the 60s scheduler cadence, so the next run skipped and
+        # entry/day0/redecision stalled. Bound per-cycle work; events not reached stay
+        # pending and are reached by EventStore's city/lane fairness.
+        proof_limit = _edli_bounded_positive_int(
+            edli_cfg,
+            "reactor_process_limit",
+            default=12,
+            maximum=50,
+        )
         store = EventStore(conn)
         #
         # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
@@ -5086,13 +4518,52 @@ def _edli_event_reactor_cycle() -> None:
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         _log_stage("day0_prefetch")
+        _day0_family_admission: _Day0LiveFamilyAdmission | None = None
+        if (
+            edli_cfg.get("day0_extreme_trigger_enabled")
+            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+        ):
+            try:
+                from src.state.db import get_trade_connection_read_only as _get_trade_ro
+
+                _day0_admission_trade_conn = _get_trade_ro()
+                try:
+                    _day0_family_admission = _edli_day0_live_family_admission(
+                        forecasts_conn,
+                        _day0_admission_trade_conn,
+                        decision_time=now,
+                    )
+                finally:
+                    _day0_admission_trade_conn.close()
+            except Exception as _day0_admission_exc:  # noqa: BLE001
+                logger.warning(
+                    "EDLI day0 live family admission build failed; Day0 execution emit "
+                    "will be restricted this cycle and unmarketed pending expiry skipped: %r",
+                    _day0_admission_exc,
+                )
+                _day0_family_admission = _Day0LiveFamilyAdmission(
+                    admitted_families=frozenset(),
+                    expiry_safe=False,
+                )
         _prune_mutex = _world_write_mutex()
-        _prune_mutex.acquire()
-        try:
-            _edli_prune_pending_working_set(store, decision_time=now)
-            conn.commit()
-        finally:
-            _prune_mutex.release()
+        _prune_lock_timeout_s = _edli_prune_lock_timeout_seconds(edli_cfg)
+        _prune_acquired = _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
+        if _prune_acquired:
+            try:
+                _edli_prune_pending_working_set(
+                    store,
+                    decision_time=now,
+                    day0_family_admission=_day0_family_admission,
+                )
+                conn.commit()
+            finally:
+                _prune_mutex.release()
+        else:
+            logger.warning(
+                "EDLI reactor prune skipped: world write mutex unavailable after %.3fs; "
+                "deferring maintenance so the money-path reactor can drain events.",
+                _prune_lock_timeout_s,
+            )
         _log_stage("pending_prune")
         _fsr_events = []
         if edli_cfg.get("forecast_snapshot_trigger_enabled"):
@@ -5110,6 +4581,7 @@ def _edli_event_reactor_cycle() -> None:
                     source=_fair_source,
                     already_pending_keys=_fsr_pending,
                     suppress_recent_no_value_refutations=True,
+                    budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg),
                 )
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
@@ -5130,86 +4602,89 @@ def _edli_event_reactor_cycle() -> None:
         # the mutex only covers prune/write/commit.
         # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
         _emit_mutex = _world_write_mutex()
-        _emit_mutex.acquire()
-        try:
-            if edli_cfg.get("forecast_snapshot_trigger_enabled"):
-                # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
-                # opportunity_events to the WAL world DB shared with the market-channel
-                # ingestor and CollateralLedger heartbeat. Under live load that DB hits
-                # transient "database is locked" past the 30s busy_timeout. A locked-out
-                # emit must NOT crash the whole reactor cycle — the cycle should still drain
-                # candidates already queued from prior cycles. Catch ONLY the transient lock
-                # (narrow, by message) and continue; real schema/logic faults still propagate.
-                try:
-                    _current_fsr_pending = _edli_pending_entity_keys(
-                        conn,
-                        event_types=("FORECAST_SNAPSHOT_READY",),
-                    )
-                    _fresh_fsr_events = [
-                        event for event in _fsr_events
-                        if event.entity_key not in _current_fsr_pending
-                    ]
-                    from src.events.event_writer import EventWriter
-
-                    EventWriter(conn).write_many(_fresh_fsr_events)
-                    _log_stage("forecast_snapshot_emit")
-                except sqlite3.OperationalError as _emit_lock_exc:
-                    if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
-                        logger.warning(
-                            "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
-                            "(%r) — skipping emit this cycle, draining already-queued candidates.",
-                            _emit_lock_exc,
-                        )
-                    else:
-                        raise
-            # Continuous re-decision admission is intentionally NOT all-universe here.
-            # The dedicated screen job below owns EDLI_REDECISION_PENDING and admits only
-            # families with confirmed trade value, maker rests needing action, or held
-            # positions with money at risk. The reactor still emits ordinary
-            # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
-            if (
-                edli_cfg.get("day0_extreme_trigger_enabled")
-                and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-            ):
-                _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
-                try:
+        _emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+        _emit_acquired = _edli_acquire_mutex(_emit_mutex, timeout=_emit_lock_timeout_s)
+        if _emit_acquired:
+            try:
+                if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+                    # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
+                    # opportunity_events to the WAL world DB shared with the market-channel
+                    # ingestor and CollateralLedger heartbeat. Under live load that DB hits
+                    # transient "database is locked" past the 30s busy_timeout. A locked-out
+                    # emit must NOT crash the whole reactor cycle — the cycle should still drain
+                    # candidates already queued from prior cycles. Catch ONLY the transient lock
+                    # (narrow, by message) and continue; real schema/logic faults still propagate.
                     try:
-                        _edli_emit_day0_extreme_events(
-                            conn,
-                            _day0_trade_conn,
-                            decision_time=now,
-                            received_at=received_at,
-                            limit=day0_emit_limit,
-                            # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
-                            # (_day0_fast_prefetch above, before acquire); this call
-                            # is the pure write phase.
-                            fast_prefetch=_day0_fast_prefetch,
-                            # Stamp scope-aware emission priority. Production live
-                            # scope makes Day0 tradeable.
-                            day0_is_tradeable=day0_is_tradeable_for_scope(
-                                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-                            ),
-                        )
-                        _log_stage("day0_emit")
-                    except sqlite3.OperationalError as _day0_emit_lock_exc:
-                        if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                        from src.events.event_writer import EventWriter
+
+                        EventWriter(conn).write_many(_fsr_events)
+                        _log_stage("forecast_snapshot_emit")
+                    except sqlite3.OperationalError as _emit_lock_exc:
+                        if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
                             logger.warning(
-                                "EDLI reactor: day0 emit still locked after bounded retry "
-                                "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
-                                _day0_emit_lock_exc,
+                                "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
+                                "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                                _emit_lock_exc,
                             )
                         else:
                             raise
-                finally:
-                    _day0_trade_conn.close()
-            # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
-            # while still holding the world-DB write mutex, so the WAL write lock is
-            # released by the COMMIT before any other writer (ingestor / collateral
-            # heartbeat) can interleave. No HTTP/venue work runs inside this block.
-            conn.commit()
-            _log_stage("emit_commit")
-        finally:
-            _emit_mutex.release()
+                # Continuous re-decision admission is intentionally NOT all-universe here.
+                # The dedicated screen job below owns EDLI_REDECISION_PENDING and admits only
+                # families with confirmed trade value, maker rests needing action, or held
+                # positions with money at risk. The reactor still emits ordinary
+                # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
+                if (
+                    edli_cfg.get("day0_extreme_trigger_enabled")
+                    and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+                ):
+                    _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
+                    try:
+                        try:
+                            _edli_emit_day0_extreme_events(
+                                conn,
+                                _day0_trade_conn,
+                                decision_time=now,
+                                received_at=received_at,
+                                limit=day0_emit_limit,
+                                # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                                # (_day0_fast_prefetch above, before acquire); this call
+                                # is the pure write phase.
+                                fast_prefetch=_day0_fast_prefetch,
+                                # Stamp scope-aware emission priority. Production live
+                                # scope makes Day0 tradeable.
+                                day0_is_tradeable=day0_is_tradeable_for_scope(
+                                    str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+                                ),
+                                budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
+                                family_admission=_day0_family_admission,
+                            )
+                            _log_stage("day0_emit")
+                        except sqlite3.OperationalError as _day0_emit_lock_exc:
+                            if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                                logger.warning(
+                                    "EDLI reactor: day0 emit still locked after bounded retry "
+                                    "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
+                                    _day0_emit_lock_exc,
+                                )
+                            else:
+                                raise
+                    finally:
+                        _day0_trade_conn.close()
+                # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
+                # while still holding the world-DB write mutex, so the WAL write lock is
+                # released by the COMMIT before any other writer (ingestor / collateral
+                # heartbeat) can interleave. No HTTP/venue work runs inside this block.
+                conn.commit()
+                _log_stage("emit_commit")
+            finally:
+                _emit_mutex.release()
+        else:
+            logger.warning(
+                "EDLI reactor emit skipped: world write mutex unavailable after %.3fs; "
+                "draining already-queued candidates so heartbeat/monitor/redecision keep cadence.",
+                _emit_lock_timeout_s,
+            )
+            _log_stage("emit_lock_skipped")
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -5238,24 +4713,24 @@ def _edli_event_reactor_cycle() -> None:
         # via refresh_global_allocator; the EDLI cycle does not run that cycle, so without
         # this seam every canary order silently blocks (see /tmp/edli_submit_gate_trace.md).
         # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
-        # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
+        # / baseline undefined / exception), block THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
         # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12): track the TYPED
-        # cause whenever a degrade clears live_submit_effective so the no-submit adapter
+        # cause whenever a live block clears live_submit_effective so the no-submit adapter
         # can name it on every full-pass receipt it consumes (single source of truth —
-        # the same value that drove the selector off the live lane). None => no degrade
+        # the same value that drove the selector off the live lane). None => no live block
         # (the live lane was simply not configured for this reactor_mode).
-        _live_lane_degrade_cause: str | None = None
+        _live_lane_block_cause: str | None = None
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
         if live_submit_effective:
             _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
             if live_bridge_mode and not _alloc_refresh.get("configured"):
                 live_submit_effective = False
                 _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
-                _live_lane_degrade_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
+                _live_lane_block_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
                 logger.error(
                     "EDLI reactor: live-bridge allocator refresh did not configure "
-                    "(fail_closed=%r reason=%r) — degrading to NO-SUBMIT this cycle.",
+                    "(fail_closed=%r reason=%r) — selecting NO-SUBMIT this cycle.",
                     _alloc_refresh.get("fail_closed"),
                     _alloc_refresh.get("entry", {}).get("reason"),
                 )
@@ -5264,23 +4739,23 @@ def _edli_event_reactor_cycle() -> None:
         # the bankroll NET of correlation-weighted committed capital. The
         # provider closure hands the SAME cached snapshot to every event this
         # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
-        # Shadow remains observational when the portfolio snapshot is unavailable.
-        # Real-submit is different: never let the live path fall back to pre-#107
-        # single-asset Kelly sizing, because that ignores open/pending/correlated
-        # exposure.
+        # The no-submit adapter may still build read-only receipts when the portfolio
+        # snapshot is unavailable. Real-submit is different: never let the live path
+        # fall back to pre-#107 single-asset Kelly sizing, because that ignores
+        # open/pending/correlated exposure.
         _portfolio_state_provider = None
         try:
             _portfolio_snapshot = load_portfolio()
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             logger.warning(
-                "EDLI reactor: portfolio snapshot load failed; shadow may observe "
+                "EDLI reactor: portfolio snapshot load failed; no-submit telemetry may observe "
                 "with single-asset sizing, but real-submit will fail closed: %r",
                 _portfolio_exc,
             )
         if real_submit_effective and _portfolio_state_provider is None:
             live_submit_effective = False
-            _live_lane_degrade_cause = "live_submit_effective_false:portfolio_state_unavailable"
+            _live_lane_block_cause = "live_submit_effective_false:portfolio_state_unavailable"
             logger.error(
                 "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )
@@ -5313,20 +4788,20 @@ def _edli_event_reactor_cycle() -> None:
         # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
         # executor never constructs this adapter, so the 293-order mainline is untouched.
         operator_arm = require_operator_arm(edli_cfg)
-        # SUBMIT-LANE STAMP + CYCLE-LEVEL DEGRADE SIGNAL (silent-trade-kill antibody
+        # SUBMIT-LANE STAMP + CYCLE-LEVEL LIVE-BLOCK SIGNAL (silent-trade-kill antibody
         # 2026-06-12; /tmp/allpass_nosubmit_rootcause.md). The selector picks the live
         # adapter ONLY when (live_submit_effective AND operator_arm is not None); else
-        # the no-submit (degrade) adapter. Resolve the TYPED cause once, here, so it is
-        # the single source of truth threaded onto the degrade lane's receipts.
+        # the no-submit adapter. Resolve the TYPED cause once, here, so it is
+        # the single source of truth threaded onto the control-blocked lane's receipts.
         _edli_live_operator_authorized = edli_cfg.get("edli_live_operator_authorized") is True
         _live_lane_selected = bool(live_submit_effective and operator_arm is not None)
-        if operator_arm is None and _live_lane_degrade_cause is None:
-            _live_lane_degrade_cause = "operator_arm_none"
-        if _live_lane_degrade_cause is None and not _live_lane_selected:
-            # live_submit_effective was False without a tracked degrade.
-            _live_lane_degrade_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
-        _no_submit_degrade_cause = _live_lane_degrade_cause or "live_lane_unselected"
-        # LOUD cycle-level degrade signal: the live lane is dark THIS cycle while the
+        if operator_arm is None and _live_lane_block_cause is None:
+            _live_lane_block_cause = "operator_arm_none"
+        if _live_lane_block_cause is None and not _live_lane_selected:
+            # live_submit_effective was False without a tracked live block.
+            _live_lane_block_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
+        _no_submit_live_block_cause = _live_lane_block_cause or "live_lane_unselected"
+        # LOUD cycle-level live-block signal: the live lane is dark THIS cycle while the
         # operator has nominally armed it (reactor_mode=live + operator_authorized). The
         # crash-loop incident ran ~50 min on the no-submit lane with the arm on and NO
         # decision-lane signal. One ERROR per cycle here makes it impossible to miss.
@@ -5336,25 +4811,23 @@ def _edli_event_reactor_cycle() -> None:
                 "(reactor_mode=live, edli_live_operator_authorized=True) — cause=%s. "
                 "Full-pass candidates this cycle are consumed on the NO_SUBMIT_ADAPTER "
                 "lane (receipts stamped with this cause); the live lane submitted nothing.",
-                _no_submit_degrade_cause,
+                _no_submit_live_block_cause,
             )
-        # Decision-triggered targeted family snapshot refresher (zero-order wall fix
-        # 2026-06-11): when the adapter is about to decide and the SELECTED bin's
-        # elected snapshot row is price-stale, it captures FRESH books for THAT family
-        # NOW through the sanctioned warm-job capture path, then re-elects the latest
-        # row. Synchronizes the warm-job's ~5.4min per-family cadence with the 30s
-        # decision price-freshness window at the only point that matters. Topology
-        # authority = forecasts_conn (owns market_events); snapshot WRITE = zeus_trades.
+        # Decision-triggered targeted substrate marker: when the adapter sees stale
+        # executable prices, it marks the family for sidecar capture and returns
+        # False so the stale event requeues fail-closed. Snapshot writes are owned
+        # by the substrate-observer daemon, not the decision critical path.
         _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
             forecasts_conn
         )
         # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): a blocked event must
-        # create visible refresh work, but the live reactor is a consumer, not the
-        # executable-substrate producer. Requeueing the event keeps its family on the
-        # substrate-observer sidecar's pending-family work surface; the reactor drain
-        # records the nudge and stays out of Gamma/CLOB producer I/O.
-        _reactor_family_snapshot_refresher = _edli_reactor_family_snapshot_refresher()
+        # create visible refresh work. The substrate-observer sidecar owns broad
+        # universe warming, but an event that just blocked on stale executable
+        # evidence needs a targeted family recapture; otherwise stale events can
+        # requeue forever while broad warming rotates past them.
+        _reactor_family_snapshot_refresher = _decision_family_snapshot_refresher
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
+        _reactor_day0_hourly_refresher = _edli_reactor_day0_hourly_refresher()
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
@@ -5368,7 +4841,6 @@ def _edli_event_reactor_cycle() -> None:
                 portfolio_state_provider=_portfolio_state_provider,
                 real_order_submit_enabled=real_submit_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
-                live_cap_conn=conn,
                 replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
                 replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
                 replacement_forecast_world_tables=replacement_forecast_world_tables,
@@ -5418,10 +4890,10 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
                 family_snapshot_refresher=_decision_family_snapshot_refresher,
-                # SUBMIT-LANE STAMP: name the degrade cause that selected this lane so a
+                # SUBMIT-LANE STAMP: name the live-block cause that selected this lane so a
                 # full-pass receipt consumed here can never be confused with a genuine
                 # decision-declined no-submit (single source of truth from the selector).
-                degrade_cause=_no_submit_degrade_cause,
+                live_block_cause=_no_submit_live_block_cause,
             )
         )
 
@@ -5442,6 +4914,7 @@ def _edli_event_reactor_cycle() -> None:
             # impossible for refreshable substrate classes.
             family_snapshot_refresher=_reactor_family_snapshot_refresher,
             cycle_advance_enqueuer=_reactor_cycle_advance_enqueuer,
+            day0_hourly_refresher=_reactor_day0_hourly_refresher,
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
             held_family_provider=_edli_reactor_held_family_provider(),
@@ -5621,11 +5094,6 @@ def _edli_command_recovery_cycle() -> None:
     from src.execution.command_recovery import reconcile_unresolved_commands
     from src.state.db import get_trade_connection_with_world_required
 
-    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
-        logger.info(
-            "edli_command_recovery running live_tick despite active trading lane; "
-            "side-effect recovery is a live-safety owner"
-        )
     summary = reconcile_unresolved_commands(scope="live_tick")
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
@@ -5638,6 +5106,133 @@ def _edli_command_recovery_cycle() -> None:
         logger.info(
             "edli_command_recovery: refreshed allocator after recovery mutation: %s",
             allocator_refresh,
+        )
+    _emit_command_recovery_redecision_continuations(summary, log_context="edli_command_recovery")
+
+
+def _edli_boot_command_recovery_once() -> None:
+    """Run one bounded EDLI recovery pass before the first live reactor tick.
+
+    The periodic ``edli_command_recovery`` job starts about a minute after boot.
+    That is too late for restart-relevant live-order projections that can keep
+    family locks active or leave old pre-submit payloads in the restart gate.
+    This boot pass uses a narrower boot_fast recovery contract before any new
+    entry order can be produced. It clears submit/cap/family locks that can
+    block entry, while leaving heavier maker-fill and partial-remainder
+    maintenance for the scheduled live_tick job after the scheduler starts.
+    """
+
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.db import get_trade_connection_with_world_required
+
+    summary = reconcile_unresolved_commands(scope="boot_fast")
+    try:
+        from src.execution.edli_absence_resolver import take_boot_auto_resolution_continuations
+
+        boot_auto_continuations = take_boot_auto_resolution_continuations()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "edli_boot_command_recovery: boot auto-resolution continuation read failed: %r",
+            exc,
+        )
+        boot_auto_continuations = []
+    if boot_auto_continuations:
+        existing = list(summary.get("terminal_no_fill_continuations") or [])
+        summary["terminal_no_fill_continuations"] = existing + boot_auto_continuations
+    logger.warning("edli_boot_command_recovery: %s", summary)
+    if _command_recovery_summary_mutated_allocator_inputs(summary):
+        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        try:
+            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+        finally:
+            trade_conn.close()
+        logger.info(
+            "edli_boot_command_recovery: refreshed allocator after recovery mutation: %s",
+            allocator_refresh,
+        )
+    _emit_command_recovery_redecision_continuations(summary, log_context="edli_boot_command_recovery")
+
+
+def _edli_boot_invalid_pending_entry_authority_cancel_once() -> None:
+    """Cancel invalid zero-fill pending ENTRY rests before the first reactor tick."""
+
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection,
+        get_trade_connection_read_only,
+    )
+
+    trade_ro = get_trade_connection_read_only()
+    try:
+        entries = find_invalid_pending_entry_authority_cancels(trade_ro)
+    finally:
+        trade_ro.close()
+    if not entries:
+        return
+
+    cancelled_entries: list[dict] = []
+    stats = run_persisted_cancels_for_expired_rests(
+        entries,
+        PolymarketClient(),
+        conn_factory=lambda: get_trade_connection(write_class="live"),
+        collect_cancelled=cancelled_entries,
+    )
+    logger.warning(
+        "edli_boot_invalid_pending_entry_authority_cancel: entries=%d stats=%s",
+        len(entries),
+        stats,
+    )
+    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+        trade_post = get_trade_connection_read_only()
+        forecasts_ro = get_forecasts_connection_read_only()
+        try:
+            families = _escalation_families_from_cancelled(
+                cancelled_entries,
+                trade_post,
+                forecasts_ro,
+            )
+        finally:
+            try:
+                trade_post.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                forecasts_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if families:
+            cleared = _clear_redecision_acted_state_for_families(families)
+            now = datetime.now(timezone.utc)
+            emitted = _emit_live_redecision_events_for_families(
+                families,
+                decision_time=now,
+                received_at=now.isoformat(),
+                origin="invalid_pending_entry_authority_cancel",
+            )
+            logger.warning(
+                "edli_boot_invalid_pending_entry_authority_cancel: "
+                "families=%d acted_state_cleared=%d events_emitted=%d",
+                len(families),
+                cleared,
+                emitted,
+            )
+    if int(stats.get("cancelled", 0) or 0) != len(entries):
+        raise RuntimeError(
+            "EDLI_INVALID_PENDING_ENTRY_AUTHORITY_CANCEL_INCOMPLETE:"
+            f"entries={len(entries)} stats={stats}"
         )
 
 
@@ -5663,30 +5258,62 @@ def _escalation_families_from_cancelled(
     resolved (no snapshot, no market_events) is SKIPPED (the standard round-robin
     still reaches it eventually) rather than crashing the cancel job.
     """
+    direct_families: set[tuple[str, str, str]] = set()
+    for entry in cancelled:
+        metric = _substrate_refresh_canonical_metric(
+            entry.get("metric") or entry.get("temperature_metric") or ""
+        )
+        key = (
+            str(entry.get("city") or "").strip(),
+            str(entry.get("target_date") or "").strip(),
+            metric,
+        )
+        if all(key) and key[2] in {"high", "low"}:
+            direct_families.add(key)
+    direct_condition_ids = {
+        str(e.get("condition_id") or "").strip()
+        for e in cancelled
+        if str(e.get("condition_id") or "").strip()
+    }
     token_ids = {str(e.get("token_id") or "") for e in cancelled if e.get("token_id")}
-    if not token_ids:
-        return set()
     cond_by_token: dict[str, str] = {}
-    try:
-        tph = ",".join("?" for _ in token_ids)
-        for cr in trade_conn.execute(
-            f"""
-            SELECT selected_outcome_token_id, condition_id,
-                   ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
-                                      ORDER BY captured_at DESC) AS rn
-            FROM executable_market_snapshots
-            WHERE selected_outcome_token_id IN ({tph})
-            """,
-            tuple(token_ids),
-        ).fetchall():
-            if cr[2] == 1 and cr[0] and cr[1]:
-                cond_by_token[str(cr[0])] = str(cr[1])
-    except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
-        cond_by_token = {}
-    cond_ids = {c for c in cond_by_token.values() if c}
+    if token_ids:
+        try:
+            tph = ",".join("?" for _ in token_ids)
+            for cr in trade_conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, condition_id
+                FROM executable_market_snapshot_latest
+                WHERE selected_outcome_token_id IN ({tph})
+                ORDER BY captured_at DESC
+                """,
+                tuple(token_ids),
+            ).fetchall():
+                if cr[0] and cr[1] and str(cr[0]) not in cond_by_token:
+                    cond_by_token[str(cr[0])] = str(cr[1])
+        except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+            cond_by_token = {}
+        if not cond_by_token:
+            try:
+                tph = ",".join("?" for _ in token_ids)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT selected_outcome_token_id, condition_id,
+                           ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                              ORDER BY captured_at DESC) AS rn
+                    FROM executable_market_snapshots
+                    WHERE selected_outcome_token_id IN ({tph})
+                    """,
+                    tuple(token_ids),
+                ).fetchall():
+                    if cr[2] == 1 and cr[0] and cr[1]:
+                        cond_by_token[str(cr[0])] = str(cr[1])
+            except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+                cond_by_token = {}
+    cond_ids = {c for c in cond_by_token.values() if c} | direct_condition_ids
     if not cond_ids:
-        return set()
-    families: set[tuple[str, str, str]] = set()
+        return direct_families
+    families: set[tuple[str, str, str]] = set(direct_families)
     try:
         cph = ",".join("?" for _ in cond_ids)
         for fr in forecasts_conn.execute(
@@ -5703,36 +5330,44 @@ def _escalation_families_from_cancelled(
             if city and target_date and metric:
                 families.add((city, target_date, metric))
     except Exception:  # noqa: BLE001 — condition->family map is best-effort
-        return set()
+        return families
     return families
 
 
-def _emit_escalation_cross_redecisions(
+def _clear_redecision_acted_state_for_families(
+    families: set[tuple[str, str, str]],
+) -> int:
+    """Release anti-noise latches after terminal no-fill proves the prior rest ended."""
+
+    if not families:
+        return 0
+    removed = 0
+    for key in list(_edli_redecision_acted_state.keys()):
+        if not isinstance(key, tuple):
+            continue
+        family: tuple[str, str, str] | None = None
+        if len(key) == 4 and key[0] == "family":
+            family = (str(key[1]), str(key[2]), str(key[3]))
+        elif len(key) == 5:
+            family = (str(key[0]), str(key[1]), str(key[2]))
+        if family in families:
+            _edli_redecision_acted_state.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _emit_live_redecision_events_for_families(
     families: set[tuple[str, str, str]],
     *,
     decision_time: datetime,
     received_at: str,
+    origin: str,
 ) -> int:
-    """Emit ONE escalation-origin EDLI_REDECISION_PENDING per just-cancelled, ARMED
-    family so the reactor re-decides it on the NEXT cycle (it jumps the 49-deep
-    per-city round-robin via its Tier-0 claim, redecide-block fix 2026-06-16).
+    """Emit standard live redecision rows for already-live order management work."""
 
-    Routed through the EXISTING FSR re-emit machinery (``scan_committed_snapshots``
-    with ``restrict_to_families``), so the payload is the identical committed-snapshot
-    FSR shape the forecast-decision pipeline already binds — only the trigger label
-    (EDLI_REDECISION_PENDING) and the ``escalation_cross-`` source differ. The world
-    DB event-write runs under the world-write mutex (mirrors ``_edli_emit_*`` and the
-    continuous-redecision screen), so the WAL write lock is released by COMMIT before
-    any other writer interleaves.
-
-    ``already_pending_keys`` is DELIBERATELY NOT passed: a pending FSR for this family
-    is exactly what is stuck behind the round-robin, so the escalation re-decision
-    must be emitted regardless of it (the Tier-0 lane is what un-starves it). The
-    phase/strictly-past floors inside scan_committed_snapshots still apply
-    (fail-closed: a phase-closed family emits zero — the cross cannot happen anyway).
-    """
     if not families:
         return 0
+    from src.events.continuous_redecision import REDECISION_EVENT_TYPE
     from src.events.event_writer import EventWriter
     from src.events.triggers.forecast_snapshot_ready import (
         ForecastSnapshotReadyTrigger,
@@ -5747,25 +5382,40 @@ def _emit_escalation_cross_redecisions(
     world = get_world_connection()
     forecasts_ro = get_forecasts_connection_read_only()
     emit_mutex = _world_write_mutex()
-    emit_mutex.acquire()
+    emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(_settings_section("edli", {}) or {})
+    emit_acquired = False
     try:
+        emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+        if not emit_acquired:
+            logger.warning(
+                "live redecision emit skipped for origin=%s families=%d: "
+                "world write mutex unavailable after %.3fs; next cadence will retry.",
+                origin,
+                len(families),
+                emit_lock_timeout_s,
+            )
+            return 0
         trig = ForecastSnapshotReadyTrigger(
             EventWriter(world),
             live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
         )
-        emitted = trig.scan_committed_snapshots(
+        events = trig.build_committed_snapshot_events(
             forecasts_conn=forecasts_ro,
             decision_time=decision_time,
             received_at=received_at,
             limit=None,
-            source=_edli_next_escalation_cross_source(),
-            event_type="FORECAST_SNAPSHOT_READY",
+            source=_edli_next_redecision_source(),
+            event_type=REDECISION_EVENT_TYPE,
             restrict_to_families=families,
         )
+        write_results = EventWriter(world).write_many(
+            [_redecision_event_with_origin(event, origin) for event in events]
+        )
         world.commit()
-        return len(emitted)
+        return sum(1 for result in write_results if result.inserted)
     finally:
-        emit_mutex.release()
+        if emit_acquired:
+            emit_mutex.release()
         try:
             forecasts_ro.close()
         except Exception:  # noqa: BLE001
@@ -5776,105 +5426,316 @@ def _emit_escalation_cross_redecisions(
             pass
 
 
-@_scheduler_job("maker_rest_escalation")
-def _maker_rest_escalation_cycle() -> None:
-    """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
+def _emit_terminal_no_fill_redecision_continuations(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit standard continuous redecision rows after no-fill terminal recovery."""
 
-    Cancels post_only GTC ENTRY rests older than the measured escalation
-    deadline (maker_rest_escalation_deadline, 20min derived from the measured
-    KM hazard curve on n=108 resting facts). GTC rests have NO other TTL owner. The job is
-    deliberately dumb: cancel only. The next reactor cycle re-certifies the
-    family through the FULL standard pipeline; _family_rest_state then sees the
-    cancelled-unfilled >= deadline rest in venue truth and licenses the
-    policy's TAKER_ESCALATED_AFTER_REST cross. Edge decayed -> no candidate ->
-    the standard regret receipt records the decay (free rest-cost measurement).
+    return _emit_live_redecision_events_for_families(
+        families,
+        decision_time=decision_time,
+        received_at=received_at,
+        origin="terminal_no_fill",
+    )
 
-    Read-only on the DB; venue cancels only; fail-soft per order.
+
+def _terminal_no_fill_continuation_families(
+    summary: object,
+    trade_conn,
+    forecasts_conn,
+) -> set[tuple[str, str, str]]:
+    if not isinstance(summary, dict):
+        return set()
+    continuations = summary.get("terminal_no_fill_continuations")
+    if not isinstance(continuations, list):
+        return set()
+    entries = [entry for entry in continuations if isinstance(entry, dict)]
+    if not entries:
+        return set()
+    direct: set[tuple[str, str, str]] = set()
+    unresolved: list[dict] = []
+    for entry in entries:
+        metric = _substrate_refresh_canonical_metric(
+            entry.get("metric") or entry.get("temperature_metric") or ""
+        )
+        key = (
+            str(entry.get("city") or "").strip(),
+            str(entry.get("target_date") or "").strip(),
+            metric,
+        )
+        if all(key) and key[2] in {"high", "low"}:
+            direct.add(key)
+        else:
+            unresolved.append(entry)
+    if not unresolved:
+        return direct
+    return direct | _escalation_families_from_cancelled(unresolved, trade_conn, forecasts_conn)
+
+
+def _emit_command_recovery_redecision_continuations(
+    summary: object,
+    *,
+    log_context: str,
+) -> None:
+    edli_cfg = _settings_section("edli", {})
+    if not (edli_cfg.get("event_writer_enabled") and isinstance(summary, dict)):
+        return
+    try:
+        from datetime import datetime, timezone
+        from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+        trade_ro = get_trade_connection_read_only()
+        forecasts_ro = get_forecasts_connection_read_only()
+        try:
+            families = _terminal_no_fill_continuation_families(
+                summary,
+                trade_ro,
+                forecasts_ro,
+            )
+        finally:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                forecasts_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if families:
+            cleared = _clear_redecision_acted_state_for_families(families)
+            now = datetime.now(timezone.utc)
+            emitted = _emit_terminal_no_fill_redecision_continuations(
+                families,
+                decision_time=now,
+                received_at=now.isoformat(),
+            )
+            logger.info(
+                "%s: terminal no-fill/pre-submit continuation "
+                "families=%d acted_state_cleared=%d events_emitted=%d",
+                log_context,
+                len(families),
+                cleared,
+                emitted,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s: terminal no-fill/pre-submit continuation emit failed "
+            "(non-fatal; family remains eligible for normal redecision): %r",
+            log_context,
+            exc,
+        )
+
+
+def _emit_rest_pull_redecisions(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit one standard redecision per pulled maker rest family.
+
+    This is live order management, not a second forecast lane. A pulled rest has
+    either finished as terminal no-fill or is about to leave the open-rest screen,
+    so continuity must be a durable ``EDLI_REDECISION_PENDING`` row that the normal
+    reactor path consumes on the next cycle.
+    """
+
+    return _emit_live_redecision_events_for_families(
+        families,
+        decision_time=decision_time,
+        received_at=received_at,
+        origin="rest_pull",
+    )
+
+
+_C3_STALENESS_CANCEL_CONSUMER = "c3_staleness_cancel_v1"
+_c3_staleness_rate_budget = None
+
+
+def _get_c3_staleness_rate_budget():
+    """Lazily-constructed, cycle-persistent VenueRateBudget (W2.3) singleton.
+
+    The token bucket must accumulate across ticks to mean anything, so this is
+    memoized at module scope rather than rebuilt per cycle (a fresh bucket every
+    5 minutes would always start full and the cancel-priority reserve floor would
+    never matter). First real production wiring of this module (W4.2) — see its
+    own docstring for why a single shared bucket, not per-class ones.
+    """
+    global _c3_staleness_rate_budget
+    if _c3_staleness_rate_budget is None:
+        from src.venue.rate_budget import VenueRateBudget
+
+        _c3_staleness_rate_budget = VenueRateBudget()
+    return _c3_staleness_rate_budget
+
+
+@_scheduler_job("c3_staleness_cancel")
+def _c3_staleness_cancel_cycle() -> None:
+    """W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring).
+
+    TTL/q-staleness successor to the retired ``maker_rest_escalation``. Two
+    independent clocks, composed as two passes inside
+    ``run_c3_staleness_cancel_cycle`` (not gated on each other):
+
+    - TTL (``rest_deadline_exceeded``) is the GLOBAL, UNCONDITIONAL GTC deadline
+      owner — it scans EVERY open ENTRY rest and runs on EVERY scheduled tick,
+      regardless of whether any ``SOURCE_RUN_ARRIVED`` event is pending. This is
+      the exact behavior the retired maker_rest_escalation job had; gating it
+      behind an event claim would strand expired rests during quiet forecast
+      periods (the orphaned-GTC bug this composition must not reintroduce).
+    - q-version staleness (``is_stale_pending_cancel``) is SCOPED to the
+      ``affected_cities`` of ``SOURCE_RUN_ARRIVED`` events claimed through their
+      own dedicated lane (``_C3_STALENESS_CANCEL_CONSUMER``, isolated from the
+      main reactor's ``edli_reactor_v1`` queue) — it only runs when such events
+      exist, and only against the cities they name.
+
+    Cancels go out through the W2.1 batch cancel gateway (cutover_guard-gated;
+    W2.3 rate budget consulted at CANCEL priority), then a reconciled
+    ``EDLI_REDECISION_PENDING`` is emitted for every family whose cancel is
+    DURABLY confirmed.
     """
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     if get_mode() != "live":
         return
-    if _defer_for_held_position_monitor("maker_rest_escalation"):
+    if _defer_for_held_position_monitor("c3_staleness_cancel"):
         return
-    from src.data.polymarket_client import PolymarketClient
-    from src.execution.maker_rest_escalation import (
-        find_expired_resting_entries,
-        run_persisted_cancels_for_expired_rests,
-    )
-    from src.state.db import get_trade_connection, get_trade_connection_read_only
+    from src.events.event_store import EventStore
+    from src.state.db import get_world_connection
 
-    # Clean shape (dependency_db_locked antibody, 2026-06-11): SNAPSHOT the
-    # expired-rest candidates on a short read-only connection and CLOSE it before
-    # any venue cancel. The read-only connection never takes a WAL write lock, so
-    # holding it across cancels could not have caused the incident — but
-    # close-before-network is the structural shape this lane should still follow,
-    # so a future edit cannot silently turn this into a write-conn-across-network
-    # regression. The cancel loop holds no connection.
-    conn = get_trade_connection_read_only()
+    now = datetime.now(timezone.utc)
+
+    # Recurring invalid-entry-authority cancel (carried over unchanged from the
+    # retired maker_rest_escalation cycle, which piggy-backed this same lane at
+    # its 5-min cadence). Unconditional — independent of whether any
+    # SOURCE_RUN_ARRIVED events are pending this tick, so this lane's cadence is
+    # unaffected by C3 staleness volume. Not itself part of the W4.2 staleness/TTL
+    # scope; only relocated so it keeps a recurring caller after the deletion.
+    from src.data.polymarket_client import PolymarketClient as _PolymarketClient
+    from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    from src.state.db import get_trade_connection as _get_trade_rw, get_trade_connection_read_only as _get_trade_ro
+
+    authority_ro = _get_trade_ro()
     try:
-        expired = find_expired_resting_entries(conn, now=datetime.now(timezone.utc))
+        invalid_authority_pending = find_invalid_pending_entry_authority_cancels(authority_ro)
     finally:
-        conn.close()
+        authority_ro.close()
+    if invalid_authority_pending:
+        authority_stats = run_persisted_cancels_for_expired_rests(
+            invalid_authority_pending,
+            _PolymarketClient(),
+            conn_factory=lambda: _get_trade_rw(write_class="live"),
+        )
+        logger.info(
+            "c3_staleness_cancel: invalid_authority_pending=%d %s",
+            len(invalid_authority_pending),
+            authority_stats,
+        )
 
-    clob = PolymarketClient()
-    # ESCALATION RE-DECISION (redecide-block fix 2026-06-16): harvest the families
-    # whose rest was CONFIRMED-cancelled so we can emit a Tier-0 re-decision for
-    # each — the just-cancelled, ARMED family crosses as TAKER_ESCALATED_AFTER_REST
-    # on the NEXT cycle instead of waiting ~2-3h for the 49-deep per-city
-    # round-robin. The cancel path now journals CANCEL_REQUESTED/CANCEL_ACKED around
-    # the venue side effect so a successfully pulled rest cannot remain a local ACK ghost.
-    cancelled_entries: list[dict] = []
-    stats = run_persisted_cancels_for_expired_rests(
-        expired,
-        clob,
-        conn_factory=lambda: get_trade_connection(write_class="live"),
-        collect_cancelled=cancelled_entries,
+    claimed_ids: list[str] = []
+    affected_cities: set[str] = set()
+    try:
+        world = get_world_connection()
+        try:
+            store = EventStore(world, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+            events = store.fetch_pending_by_event_type(
+                event_type="SOURCE_RUN_ARRIVED", decision_time=now.isoformat(), limit=25
+            )
+            for event in events:
+                if not store.claim(event.event_id):
+                    continue
+                claimed_ids.append(event.event_id)
+                try:
+                    payload = json.loads(event.payload_json or "{}")
+                except Exception:  # noqa: BLE001
+                    payload = {}
+                affected_cities.update(str(c) for c in payload.get("affected_cities") or [])
+            world.commit()
+        finally:
+            world.close()
+    except Exception as _event_lane_exc:  # noqa: BLE001 — FAIL-SOFT: the retired
+        # maker_rest_escalation TTL owner never depended on the event lane at
+        # all; a fault here (connection, schema, EventStore) must degrade to
+        # "no source event claimed this tick," never take down the TTL pass
+        # below (that would be an availability regression versus the deleted
+        # job this one replaces).
+        logger.warning(
+            "c3_staleness_cancel: SOURCE_RUN_ARRIVED claim lane failed "
+            "(degrading to TTL-only this tick): %r",
+            _event_lane_exc,
+        )
+        claimed_ids = []
+        affected_cities = set()
+
+    # UNCONDITIONAL: the TTL pass inside run_c3_staleness_cancel_cycle must run
+    # every tick regardless of claimed_ids — an empty claim this tick means "no
+    # q-version staleness pass," never "skip the GTC deadline scan." Zero
+    # claimed_ids still exercises the TTL pass over every open rest.
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection, get_trade_connection_read_only
+
+    trade_ro = get_trade_connection_read_only()
+    trade_rw = get_trade_connection(write_class="live")
+    forecasts_ro = get_forecasts_connection_read_only()
+    try:
+        stats = run_c3_staleness_cancel_cycle(
+            trade_ro,
+            trade_rw,
+            forecasts_ro,
+            PolymarketClient(),
+            affected_cities=frozenset(affected_cities) if affected_cities else None,
+            now=now,
+            rate_budget=_get_c3_staleness_rate_budget(),
+        )
+    finally:
+        for c in (trade_ro, trade_rw, forecasts_ro):
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if claimed_ids:
+        world2 = get_world_connection()
+        try:
+            store2 = EventStore(world2, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+            for event_id in claimed_ids:
+                store2.mark_processed(event_id)
+            world2.commit()
+        finally:
+            world2.close()
+
+    logger.info(
+        "c3_staleness_cancel: events=%d scanned=%d cancel_set=%d confirmed_families=%d",
+        len(claimed_ids),
+        stats["scanned"],
+        stats["cancel_set_size"],
+        len(stats["confirmed_families"]),
     )
-    if stats["scanned"]:
-        logger.info("maker_rest_escalation: %s", stats)
 
     # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
     # job (the cancels already succeeded; the worst case without the re-decision is
-    # the pre-fix behavior — the family waits for the round-robin). Connection-free
-    # in the cancel phase is preserved: the family-recovery reads and the world-DB
-    # event-write both run HERE in the caller (which owns DB access), AFTER the
-    # venue cancels, never during them.
-    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+    # the family waits for the round-robin).
+    if stats["confirmed_families"] and edli_cfg.get("event_writer_enabled"):
         try:
-            from src.state.db import (
-                get_forecasts_connection_read_only,
-                get_trade_connection_read_only as _get_trade_ro,
-            )
-
-            now = datetime.now(timezone.utc)
-            trade_ro = _get_trade_ro()
-            forecasts_ro = get_forecasts_connection_read_only()
-            try:
-                families = _escalation_families_from_cancelled(
-                    cancelled_entries, trade_ro, forecasts_ro
-                )
-            finally:
-                try:
-                    trade_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    forecasts_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            emitted = _emit_escalation_cross_redecisions(
-                families, decision_time=now, received_at=now.isoformat()
+            emitted = _emit_live_redecision_events_for_families(
+                stats["confirmed_families"],
+                decision_time=now,
+                received_at=now.isoformat(),
+                origin="c3_staleness_cancel",
             )
             logger.info(
-                "maker_rest_escalation: escalation re-decision emit "
-                "cancelled=%d families_resolved=%d events_emitted=%d",
-                len(cancelled_entries), len(families), emitted,
+                "c3_staleness_cancel: re-decision emit families=%d events_emitted=%d",
+                len(stats["confirmed_families"]), emitted,
             )
         except Exception as _redecide_exc:  # noqa: BLE001 — fail-closed: never crash the cancel job
             logger.warning(
-                "maker_rest_escalation: escalation re-decision emit failed "
+                "c3_staleness_cancel: re-decision emit failed "
                 "(non-fatal; family will wait for the round-robin): %r",
                 _redecide_exc,
             )
@@ -5892,7 +5753,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     the rest still gets the book/stale checks (which need no posterior)."""
     from datetime import datetime, timezone
     from src.events.continuous_redecision import OpenRest, _all_latest_beliefs
-    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+    from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     now = datetime.now(timezone.utc)
     try:
@@ -5951,7 +5812,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 f"""
                 SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
                        captured_at
-                FROM executable_market_snapshots
+                FROM executable_market_snapshot_latest
                 WHERE selected_outcome_token_id IN ({tph})
                    OR yes_token_id IN ({tph})
                    OR no_token_id IN ({tph})
@@ -5974,6 +5835,36 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
             side_by_token = {}
+        if not cond_by_token:
+            try:
+                tph = ",".join("?" for _ in token_ids)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
+                           captured_at
+                    FROM executable_market_snapshots
+                    WHERE selected_outcome_token_id IN ({tph})
+                       OR yes_token_id IN ({tph})
+                       OR no_token_id IN ({tph})
+                    ORDER BY captured_at DESC
+                    """,
+                    (*tuple(token_ids), *tuple(token_ids), *tuple(token_ids)),
+                ).fetchall():
+                    selected = str(cr[0] or "")
+                    cond = str(cr[1] or "")
+                    yes_token = str(cr[2] or "")
+                    no_token = str(cr[3] or "")
+                    for token, side in (
+                        (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
+                        (yes_token, "buy_yes"),
+                        (no_token, "buy_no"),
+                    ):
+                        if token and token in token_ids and token not in cond_by_token:
+                            cond_by_token[token] = cond
+                            side_by_token[token] = side
+            except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
+                cond_by_token = {}
+                side_by_token = {}
     if beliefs is None:
         beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).
@@ -5993,6 +5884,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         cond = cond_by_token.get(token_id, "")
         belief_hit = bin_by_cond.get(cond)
         family_id = belief_hit[0].family_id if belief_hit else ""
+        city = str(getattr(belief_hit[0], "city", "") or "") if belief_hit else ""
+        target_date = str(getattr(belief_hit[0], "target_date", "") or "") if belief_hit else ""
+        metric = str(getattr(belief_hit[0], "metric", "") or "") if belief_hit else ""
         bin_label = belief_hit[1] if belief_hit else ""
         resting_posterior = belief_hit[2] if belief_hit else 0.0
         # quote_age_ms from the command's creation (the order has rested since created_at).
@@ -6022,6 +5916,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 created_at=created_at,
                 fact_state=fact_state,
                 matched_size=None if matched_size is None else float(matched_size),
+                city=city,
+                target_date=target_date,
+                metric=metric,
             )
         )
     return out
@@ -6037,7 +5934,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     flagged). ALSO screens OPEN maker rests (§4.5): a rest whose belief decayed on new evidence, or
     whose book moved/went stale, is pulled (re-decide at fresh price) — the fix for "submitted then
     abandoned" (Busan/Beijing). NO new HTTP: reads only what the warm/fast lanes already persisted;
-    the actual cancel reuses maker_rest_escalation's cancel path. Fail-soft: never crashes
+    the actual cancel reuses the shared venue-cancel-journal path. Fail-soft: never crashes
     the scheduler.
 
     Wave-1 2026-06-12: the redecision_screen_enabled gate is DELETED. The screen is the
@@ -6060,6 +5957,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
+            entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
             screen_entry_redecisions,
             screened_family_keys,
@@ -6084,7 +5982,22 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_read_only()
         try:
-            beliefs = _all_latest_beliefs(world_ro)
+            all_beliefs = _all_latest_beliefs(
+                world_ro,
+                decision_time=received_at,
+                forecast_only_admissible=True,
+            )
+            beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
+                all_beliefs,
+                max_families=rd_cap,
+            )
+            if total_beliefs and len(beliefs) < total_beliefs:
+                logger.info(
+                    "edli_redecision_screen: entry belief fair batch size=%d total=%d cursor=%d",
+                    len(beliefs),
+                    total_beliefs,
+                    _edli_redecision_screen_belief_cursor,
+                )
             probe_acted_state = dict(_edli_redecision_acted_state)
             redecisions = screen_entry_redecisions(
                 world_ro,
@@ -6113,13 +6026,31 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
                 entry_redecisions = []
             raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
-            open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+            # Open maker rests are already-live order-management obligations.
+            # They must be screened every cycle even when their family is outside
+            # the entry fair-batch cursor; the fair batch limits new entry scans,
+            # not management of submitted GTC rests that hold the submit mutex.
+            open_rests = _edli_open_maker_rests_for_screen(
+                trade_ro,
+                world_ro,
+                beliefs=all_beliefs,
+            )
+            entry_refresh_condition_scope = entry_substrate_refresh_scope(
+                trade_ro,
+                beliefs=beliefs,
+                decision_time=received_at,
+                max_families=rd_cap,
+                min_edge=min_edge,
+            )
             rest_pulls = screen_resting_orders(
                 world_ro,
                 trade_ro,
                 open_rests=open_rests,
                 decision_time=received_at,
             )
+            entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
+            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)
+            rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
                 world_ro.close()
@@ -6132,14 +6063,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
         # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
         # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
-        # runs through the maker_rest_escalation cancel path below.
+        # runs through the shared venue-cancel-journal path below.
         rest_pull_families: set = set()
         if rest_pulls:
             by_family = {
-                b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+                b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
             }
             for rest, _decision in rest_pulls:
-                key = by_family.get(rest.family_id)
+                key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
@@ -6148,50 +6079,37 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             held_families,
             decision_time=now,
         )
+        entry_refresh_families = set(entry_refresh_condition_scope)
         held_reemit_families = _edli_reemittable_held_position_family_keys(
             held_families,
             decision_time=now,
         )
+        held_condition_scope = _edli_current_held_position_family_condition_scope(
+            held_reemit_families
+        )
         all_families = set(family_keys) | rest_pull_families | held_reemit_families
-        confirmed_entry_scope = set(family_keys)
+        confirmed_entry_scope = set(family_keys) | entry_refresh_families
         confirmed_rest_scope = set(rest_pull_families)
         confirmed_held_scope = set(held_reemit_families)
-        confirm_families = set(all_families) | set(held_families)
+        held_refresh_families = set(held_condition_scope)
+        confirm_families = set(all_families) | held_refresh_families | entry_refresh_families
+        priority_condition_ids = _edli_confirm_priority_condition_ids(
+            rest_condition_scope=rest_condition_scope,
+            held_condition_scope=held_condition_scope,
+            entry_condition_scope=entry_condition_scope,
+            entry_refresh_condition_scope=entry_refresh_condition_scope,
+            open_rest_condition_scope=open_rest_condition_scope,
+            full_family_refresh_families=held_reemit_families,
+        )
         confirm_refresh_summary: dict = {}
         if confirm_families:
             confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
                 confirm_families,
                 now_utc=now,
+                priority_condition_ids=priority_condition_ids,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if _edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary):
-                fresh_confirmed_families = _edli_families_with_fresh_executable_substrate(
-                    confirm_families,
-                    now_utc=now,
-                )
-                confirmed_entry_scope &= fresh_confirmed_families
-                confirmed_rest_scope &= fresh_confirmed_families
-                confirmed_held_scope &= fresh_confirmed_families
-                confirm_families &= fresh_confirmed_families
-                logger.info(
-                    "edli_redecision_screen: partial confirmation refresh admitted "
-                    "fresh families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d summary=%r",
-                    len(fresh_confirmed_families),
-                    len(set(all_families) | set(held_families)),
-                    len(confirmed_entry_scope),
-                    len(confirmed_rest_scope),
-                    len(confirmed_held_scope),
-                    confirm_refresh_summary,
-                )
-                if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
-                    logger.info(
-                        "edli_redecision_screen: confirmation refresh partial but no "
-                        "screened family has complete fresh substrate; skipping emit "
-                        "this tick rather than queueing stale redecision families=%d",
-                        len(set(all_families) | set(held_families)),
-                    )
-                    return
-            elif _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
+            if _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
                 logger.info(
                     "edli_redecision_screen: confirmation refresh not available; "
                     "skipping emit this tick rather than queueing stale redecision "
@@ -6202,6 +6120,74 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     confirm_refresh_summary,
                 )
                 return
+            fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                _edli_merge_condition_scopes(
+                    entry_condition_scope,
+                    entry_refresh_condition_scope,
+                ),
+                now_utc=now,
+            )
+            fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                rest_condition_scope,
+                now_utc=now,
+            )
+            fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                held_condition_scope,
+                now_utc=now,
+            )
+            fresh_confirmed_families = fresh_entry_scope | fresh_rest_scope | fresh_held_scope
+            confirmed_entry_scope &= fresh_entry_scope
+            confirmed_rest_scope &= fresh_rest_scope
+            confirmed_held_scope &= fresh_held_scope
+            confirm_families &= fresh_confirmed_families
+            scoped_filter_reason = (
+                "incomplete_confirmation_refresh"
+                if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)
+                else "confirmation_refresh_verified"
+            )
+            logger.info(
+                "edli_redecision_screen: %s admitted fresh scoped families=%d/%d "
+                "entry_scope=%d rest_scope=%d held_scope=%d entry_conditions=%d "
+                "rest_conditions=%d held_conditions=%d summary=%r",
+                scoped_filter_reason,
+                len(fresh_confirmed_families),
+                len(set(all_families) | held_refresh_families | entry_refresh_families),
+                len(confirmed_entry_scope),
+                len(confirmed_rest_scope),
+                len(confirmed_held_scope),
+                sum(len(v) for v in entry_condition_scope.values())
+                + sum(len(v) for v in entry_refresh_condition_scope.values()),
+                sum(len(v) for v in rest_condition_scope.values()),
+                sum(len(v) for v in held_condition_scope.values()),
+                confirm_refresh_summary,
+            )
+            if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
+                from src.state.db import world_write_mutex as _world_write_mutex
+
+                world = get_world_connection()
+                emit_mutex = _world_write_mutex()
+                emit_mutex.acquire()
+                try:
+                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                        world,
+                        set(),
+                        decision_time=received_at,
+                    )
+                    world.commit()
+                finally:
+                    emit_mutex.release()
+                    try:
+                        world.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                logger.info(
+                    "edli_redecision_screen: confirmation refresh produced no fresh "
+                    "screened money-path substrate; skipping emit this tick rather "
+                    "than queueing stale redecision families=%d expired_unadmitted=%d",
+                    len(set(all_families) | held_refresh_families),
+                    expired_unadmitted,
+                )
+                return
 
             # Re-run the screen against the freshly refreshed money-path
             # substrate. The initial pass only chooses the confirmation scope;
@@ -6209,7 +6195,15 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             world_ro = get_world_connection_read_only()
             trade_ro = get_trade_connection_read_only()
             try:
-                beliefs = _all_latest_beliefs(world_ro)
+                all_beliefs = _all_latest_beliefs(
+                    world_ro,
+                    decision_time=received_at,
+                    forecast_only_admissible=True,
+                )
+                beliefs = _edli_filter_beliefs_to_family_keys(
+                    all_beliefs,
+                    screened_belief_keys,
+                )
                 redecisions = screen_entry_redecisions(
                     world_ro,
                     trade_ro,
@@ -6237,13 +6231,19 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     )
                     entry_redecisions = []
                 raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
-                open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+                open_rests = _edli_open_maker_rests_for_screen(
+                    trade_ro,
+                    world_ro,
+                    beliefs=all_beliefs,
+                )
                 rest_pulls = screen_resting_orders(
                     world_ro,
                     trade_ro,
                     open_rests=open_rests,
                     decision_time=received_at,
                 )
+                entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
+                rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
             finally:
                 try:
                     world_ro.close()
@@ -6257,13 +6257,18 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             rest_pull_families = set()
             if rest_pulls:
                 by_family = {
-                    b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+                    b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
                 }
                 for rest, _decision in rest_pulls:
-                    key = by_family.get(rest.family_id)
+                    key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                     if key is not None and all(key):
                         rest_pull_families.add(key)
             rest_pull_families &= confirmed_rest_scope
+            if rest_pull_families:
+                rest_pull_families &= _edli_families_with_fresh_scoped_executable_substrate(
+                    rest_condition_scope,
+                    now_utc=now,
+                )
             held_families = _edli_current_held_position_family_keys()
             family_keys = _edli_entry_redecision_family_keys(
                 raw_entry_family_keys,
@@ -6271,28 +6276,50 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=now,
             )
             family_keys &= confirmed_entry_scope
+            if family_keys:
+                family_keys &= _edli_families_with_fresh_scoped_executable_substrate(
+                    entry_condition_scope,
+                    now_utc=now,
+                )
             held_reemit_families = _edli_reemittable_held_position_family_keys(
                 held_families,
                 decision_time=now,
             )
             held_reemit_families &= confirmed_held_scope
+            if held_reemit_families:
+                held_reemit_families &= _edli_families_with_fresh_scoped_executable_substrate(
+                    _edli_current_held_position_family_condition_scope(held_reemit_families),
+                    now_utc=now,
+                )
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
+        expired_stale_pending = 0
+        expired_rest_pull_blockers = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
             world = get_world_connection()
             emit_mutex = _world_write_mutex()
-            emit_mutex.acquire()
+            emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+            emit_acquired = False
             try:
-                expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
-                    world,
-                    set(),
-                    decision_time=received_at,
-                )
-                world.commit()
+                emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+                if emit_acquired:
+                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                        world,
+                        set(),
+                        decision_time=received_at,
+                    )
+                    world.commit()
+                else:
+                    logger.warning(
+                        "edli_redecision_screen: stale-pending expiry skipped because "
+                        "world write mutex was unavailable after %.3fs",
+                        emit_lock_timeout_s,
+                    )
             finally:
-                emit_mutex.release()
+                if emit_acquired:
+                    emit_mutex.release()
                 try:
                     world.close()
                 except Exception:  # noqa: BLE001
@@ -6319,9 +6346,46 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         )
         from src.state.db import world_write_mutex as _world_write_mutex
 
-        world_scan_ro = get_world_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
+        world_scan_ro = None
         try:
+            world_prune = get_world_connection()
+            prune_mutex = _world_write_mutex()
+            prune_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+            prune_acquired = _edli_acquire_mutex(prune_mutex, timeout=prune_lock_timeout_s)
+            if not prune_acquired:
+                logger.warning(
+                    "edli_redecision_screen skipped: world write mutex unavailable "
+                    "for stale-pending prune after %.3fs; no venue side effect attempted.",
+                    prune_lock_timeout_s,
+                )
+                try:
+                    world_prune.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            try:
+                expired_stale_pending = _edli_expire_unadmitted_redecision_pending(
+                    world_prune,
+                    set(all_families),
+                    decision_time=received_at,
+                    supersede_stale_admitted=True,
+                )
+                expired_rest_pull_blockers = (
+                    _edli_supersede_pending_redecisions_for_rest_pull_families(
+                        world_prune,
+                        rest_pull_families,
+                        decision_time=received_at,
+                    )
+                )
+                world_prune.commit()
+            finally:
+                prune_mutex.release()
+                try:
+                    world_prune.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            world_scan_ro = get_world_connection_read_only()
             pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
             emit_families = set(all_families) - pending_families
@@ -6348,40 +6412,72 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 forecasts_ro.close()
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                world_scan_ro.close()
-            except Exception:  # noqa: BLE001
-                pass
+            if world_scan_ro is not None:
+                try:
+                    world_scan_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         world = get_world_connection()
         emit_mutex = _world_write_mutex()
-        emit_mutex.acquire()
+        emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+        emit_acquired = False
         try:
+            emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+            if not emit_acquired:
+                logger.warning(
+                    "edli_redecision_screen skipped: world write mutex unavailable "
+                    "for redecision emit after %.3fs; no venue side effect attempted.",
+                    emit_lock_timeout_s,
+                )
+                return
             expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
                 world,
                 set(all_families),
                 decision_time=received_at,
             )
-            current_pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
-            fresh_events = [
-                event for event in events_to_emit
-                if event.entity_key not in current_pending
-            ]
+            expired_rest_pull_blockers += (
+                _edli_supersede_pending_redecisions_for_rest_pull_families(
+                    world,
+                    rest_pull_families,
+                    decision_time=received_at,
+                )
+            )
+            fresh_events = []
+            for event in events_to_emit:
+                if event.entity_key in pending:
+                    continue
+                try:
+                    payload = json.loads(str(event.payload_json or "{}"))
+                    event_family = (
+                        str(payload.get("city") or "").strip(),
+                        str(payload.get("target_date") or "").strip(),
+                        str(payload.get("metric") or "").strip(),
+                    )
+                except Exception:  # noqa: BLE001
+                    event_family = ("", "", "")
+                if event_family in rest_pull_families:
+                    fresh_events.append(_redecision_event_with_origin(event, "rest_pull"))
+                elif event_family in held_reemit_families:
+                    fresh_events.append(_redecision_event_with_origin(event, "held_position"))
+                elif event_family in family_keys:
+                    fresh_events.append(_redecision_event_with_origin(event, "entry_screen"))
             emitted = EventWriter(world).write_many(fresh_events)
             world.commit()
         finally:
-            emit_mutex.release()
+            if emit_acquired:
+                emit_mutex.release()
             try:
                 world.close()
             except Exception:  # noqa: BLE001
                 pass
 
-        # 3) CANCEL the pulled rests via the EXISTING maker_rest_escalation cancel path (no new
+        # 3) CANCEL the pulled rests via the EXISTING shared venue-cancel-journal path (no new
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
         cancelled = 0
         if rest_pulls and get_mode() == "live":
             from src.data.polymarket_client import PolymarketClient
-            from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+            from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
             from src.state.db import get_trade_connection
 
             to_cancel = [
@@ -6403,19 +6499,29 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             "entry_families=%d rest_pulls=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
-            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
+            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d "
+            "expired_stale_pending=%d expired_rest_pull_blockers=%d",
             len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
-            len(emitted), cancelled, expired_unadmitted,
+            len(emitted), cancelled, expired_unadmitted, expired_stale_pending,
+            expired_rest_pull_blockers,
         )
         if confirm_refresh_summary:
             logger.info(
                 "edli_redecision_screen: confirmation_refresh_summary=%r",
                 confirm_refresh_summary,
             )
+    except sqlite3.OperationalError as exc:
+        if not _edli_is_sqlite_lock_error(exc):
+            raise
+        logger.warning(
+            "edli_redecision_screen skipped: database locked during read/write "
+            "coordination; no venue side effect attempted and next tick will retry: %s",
+            exc,
+        )
     finally:
         _edli_redecision_screen_lock.release()
 
@@ -6577,22 +6683,44 @@ def _edli_positive_int_or_unbounded(
     config: dict, key: str, *, default: int, maximum: int
 ) -> int | None:
     raw = config.get(key, default)
-    if raw is False:
-        return None
-    if isinstance(raw, str) and raw.strip().lower() in {
-        "false",
-        "none",
-        "no_cap",
-        "uncapped",
-        "unbounded",
-        "unlimited",
-    }:
-        return None
+    if raw is False or raw is None:
+        raw = default
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"", "false", "none", "default"}:
+            raw = default
+        elif normalized in {"no_cap", "uncapped", "unbounded", "unlimited"}:
+            return None
     try:
         value = int(raw)
     except (TypeError, ValueError):
         value = default
     return max(1, min(maximum, value))
+
+
+def _edli_emit_lock_timeout_seconds(config: dict) -> float:
+    raw = config.get("reactor_emit_lock_timeout_seconds", 0.5)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.0, min(value, 5.0))
+
+
+def _edli_acquire_mutex(mutex: Any, *, timeout: float) -> bool:
+    """Acquire a runtime mutex with a bounded wait.
+
+    Some unit tests use tiny fake mutexes whose ``acquire`` method accepts no
+    timeout and returns ``None``. Treat that shape as acquired so tests can
+    verify call routing without depending on ``threading.Lock`` internals.
+    """
+
+    try:
+        result = mutex.acquire(timeout=timeout)
+    except TypeError:
+        mutex.acquire()
+        return True
+    return True if result is None else bool(result)
 
 
 def _edli_emit_forecast_snapshot_events(
@@ -6636,6 +6764,7 @@ def _edli_build_forecast_snapshot_events(
     source: str | None = None,
     already_pending_keys: set[str] | None = None,
     suppress_recent_no_value_refutations: bool = False,
+    budget_seconds: float | None = None,
 ) -> list[Any]:
     """Build FSR events without mutating world DB.
 
@@ -6651,7 +6780,14 @@ def _edli_build_forecast_snapshot_events(
     )
     from src.state.db import get_forecasts_connection_read_only
 
+    deadline_monotonic = (
+        time.monotonic() + float(budget_seconds)
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else None
+    )
+    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
     forecasts_conn = get_forecasts_connection_read_only()
+    _edli_install_sqlite_deadline(forecasts_conn, deadline_monotonic=deadline_monotonic)
     try:
         trigger = ForecastSnapshotReadyTrigger(
             EventWriter(world_conn),
@@ -6666,7 +6802,18 @@ def _edli_build_forecast_snapshot_events(
             already_pending_keys=already_pending_keys,
             suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
         )
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            logger.warning(
+                "EDLI forecast-snapshot build budget exhausted after %.3fs; "
+                "skipping emit this cycle and draining already-queued candidates.",
+                float(budget_seconds or 0.0),
+            )
+            return []
+        raise
     finally:
+        _edli_clear_sqlite_progress_handler(forecasts_conn)
+        _edli_clear_sqlite_progress_handler(world_conn)
         forecasts_conn.close()
 
 
@@ -6705,18 +6852,413 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     return out
 
 
+def _edli_family_key_from_belief(belief: Any) -> tuple[str, str, str] | None:
+    key = (
+        str(getattr(belief, "city", "") or "").strip(),
+        str(getattr(belief, "target_date", "") or "").strip(),
+        str(getattr(belief, "metric", "") or "").strip(),
+    )
+    if all(key) and key[2] in {"high", "low"}:
+        return key
+    return None
+
+
+def _edli_redecision_condition_scope(
+    redecisions: Iterable[Any],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map screened entry candidates to the exact condition_ids that need fresh books."""
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for redecision in redecisions or ():
+        belief = by_family_id.get(str(getattr(redecision, "family_id", "") or ""))
+        if belief is None:
+            continue
+        family_key = _edli_family_key_from_belief(belief)
+        if family_key is None:
+            continue
+        label = str(getattr(redecision, "bin_label", "") or "")
+        bin_labels = list(getattr(belief, "bin_labels", None) or ())
+        condition_ids = list(getattr(belief, "condition_ids", None) or ())
+        for idx, candidate_label in enumerate(bin_labels):
+            if str(candidate_label or "") != label or idx >= len(condition_ids):
+                continue
+            condition_id = str(condition_ids[idx] or "").strip()
+            if condition_id:
+                out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_merge_condition_scopes(
+    *scopes: dict[tuple[str, str, str], set[str]],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Union condition scopes without mutating the caller-owned maps."""
+
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for scope in scopes:
+        for family_key, condition_ids in (scope or {}).items():
+            clean = {
+                str(condition_id or "").strip()
+                for condition_id in condition_ids
+                if str(condition_id or "").strip()
+            }
+            if clean:
+                out.setdefault(family_key, set()).update(clean)
+    return out
+
+
+def _edli_merge_rest_pulls(*pull_groups: Iterable[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
+    """Merge rest-pull sources without emitting duplicate cancels for one order."""
+
+    out: list[tuple[Any, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for pulls in pull_groups:
+        for rest, decision in pulls or ():
+            command_id = str(getattr(rest, "command_id", "") or "").strip()
+            venue_order_id = str(getattr(rest, "venue_order_id", "") or "").strip()
+            key = (command_id, venue_order_id)
+            if key == ("", ""):
+                key = (str(id(rest)), "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((rest, decision))
+    return out
+
+
+def _edli_rest_pull_condition_scope(
+    rest_pulls: Iterable[tuple[Any, Any]],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map live maker-rest pulls to the exact condition_ids being cancelled/repriced.
+
+    A family-optimum replacement pull cancels the current rest so the existing
+    reactor can re-certify a sibling. The confirmation refresh must therefore
+    prioritize both the cancelled condition and the replacement condition, or
+    the next pass can cancel correctly but still lack fresh substrate for the
+    better sibling.
+    """
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for rest, decision in rest_pulls or ():
+        family_key = _edli_family_key_from_rest(rest)
+        if family_key is None:
+            belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+            family_key = _edli_family_key_from_belief(belief) if belief is not None else None
+        if family_key is None:
+            continue
+        condition_id = str(getattr(rest, "condition_id", "") or "").strip()
+        if condition_id:
+            out.setdefault(family_key, set()).add(condition_id)
+        replacement_condition_id = str(
+            getattr(decision, "replacement_condition_id", "") or ""
+        ).strip()
+        if replacement_condition_id:
+            out.setdefault(family_key, set()).add(replacement_condition_id)
+    return out
+
+
+def _edli_open_rest_condition_scope(
+    open_rests: Iterable[Any],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map all live maker rests to condition_ids that need price refresh.
+
+    A rest cannot decide whether to cancel/reprice from stale books. This scope is
+    intentionally built before ``screen_resting_orders`` so the confirmation
+    refresh can make the rest screen's price inputs current.
+    """
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for rest in open_rests or ():
+        family_key = _edli_family_key_from_rest(rest)
+        if family_key is None:
+            belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+            family_key = _edli_family_key_from_belief(belief) if belief is not None else None
+        if family_key is None:
+            continue
+        condition_id = str(getattr(rest, "condition_id", "") or "").strip()
+        if condition_id:
+            out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_family_key_from_rest(rest: Any) -> tuple[str, str, str] | None:
+    city = str(getattr(rest, "city", "") or "").strip()
+    target_date = str(getattr(rest, "target_date", "") or "").strip()
+    metric = str(getattr(rest, "metric", "") or "").strip()
+    if city and target_date and metric:
+        return (city, target_date, metric)
+    return None
+
+
+def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) -> bool:
+    """Return False only when the latest known substrate says this condition cannot trade."""
+
+    clean_condition_id = str(condition_id or "").strip()
+    if not clean_condition_id:
+        return False
+    try:
+        cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
+        }
+    except sqlite3.Error:
+        return True
+    required = {"condition_id", "captured_at", "snapshot_id"}
+    if not required.issubset(cols):
+        return True
+    selected_cols = [
+        "closed" if "closed" in cols else "0 AS closed",
+        "enable_orderbook" if "enable_orderbook" in cols else "1 AS enable_orderbook",
+        "accepting_orders" if "accepting_orders" in cols else "1 AS accepting_orders",
+    ]
+    try:
+        row = trade_conn.execute(
+            f"""
+            SELECT {", ".join(selected_cols)}
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (clean_condition_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    if row is None:
+        return True
+
+    def _truthy(value: object, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes"}:
+            return True
+        if text in {"0", "false", "no"}:
+            return False
+        return default
+
+    closed = _truthy(row[0], False)
+    enable_orderbook = _truthy(row[1], True)
+    accepting_orders = _truthy(row[2], True)
+    return bool(not closed and enable_orderbook and accepting_orders)
+
+
+def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
+    """Current held-position condition_ids for scoped redecision freshness admission."""
+
+    from src.state.db import get_trade_connection_read_only
+
+    out: dict[tuple[str, str, str], set[str]] = {}
+    trade_ro = None
+    try:
+        trade_ro = get_trade_connection_read_only()
+        try:
+            cols = {
+                str(row[1])
+                for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
+            }
+        except sqlite3.Error:
+            return {}
+        required = {
+            "city",
+            "target_date",
+            "temperature_metric",
+            "phase",
+            "condition_id",
+            "chain_state",
+            "chain_shares",
+        }
+        if not required.issubset(cols):
+            return {}
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        chain_placeholders = ",".join("?" for _ in chain_state_values)
+        rows = trade_ro.execute(
+            f"""
+            SELECT city, target_date, temperature_metric, condition_id
+              FROM position_current
+             WHERE (
+                    (
+                        phase IN ('active', 'day0_window', 'pending_exit')
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
+                    )
+                    OR (
+                        phase = 'quarantined'
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
+                    )
+                   )
+               AND condition_id IS NOT NULL
+               AND TRIM(condition_id) != ''
+               AND COALESCE(chain_shares, 0) > 0.000001
+            """,
+            (*chain_state_values, *chain_state_values),
+        ).fetchall()
+        for row in rows:
+            family_key = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+            )
+            condition_id = str(row[3] or "").strip()
+            if all(family_key) and family_key[2] in {"high", "low"} and condition_id:
+                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
+                    continue
+                out.setdefault(family_key, set()).add(condition_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "edli_redecision_screen: held-position condition scope read failed; "
+            "held condition freshness not admitted this tick: %r",
+            exc,
+        )
+        return {}
+    finally:
+        if trade_ro is not None:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
+def _edli_current_held_position_family_condition_scope(
+    families: set[tuple[str, str, str]] | None = None,
+) -> dict[tuple[str, str, str], set[str]]:
+    """Full family condition scope for held-position redecision.
+
+    Held-position redecision is a family optimization problem, not an old-token
+    refresh.  A stale or unrefreshed sibling can be the best fill-up/shift target,
+    so the confirmation producer must refresh the complete executable family.
+    """
+
+    held_families = (
+        set(_edli_current_held_position_condition_scope())
+        if families is None
+        else set(families)
+    )
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in held_families
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return {}
+
+    from src.data.market_topology_rows import _event_family_market_topology_rows
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+    forecasts_ro = get_forecasts_connection_read_only()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        out: dict[tuple[str, str, str], set[str]] = {}
+        for family in sorted(clean_families):
+            city, target_date, metric = family
+            try:
+                topology_rows = _event_family_market_topology_rows(
+                    forecasts_ro,
+                    {"city": city, "target_date": target_date, "metric": metric},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "edli_redecision_screen: held-family topology read failed; "
+                    "family not admitted for full redecision this tick: city=%r "
+                    "target_date=%r metric=%r error=%r",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            for row in topology_rows or ():
+                condition_id = str(row.get("condition_id") or "").strip()
+                if not condition_id:
+                    continue
+                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
+                    continue
+                out.setdefault(family, set()).add(condition_id)
+        return out
+    finally:
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _edli_families_with_fresh_scoped_executable_substrate(
+    condition_scope: dict[tuple[str, str, str], set[str]],
+    *,
+    now_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families whose scoped money-path conditions have fresh YES and NO books.
+
+    Continuous redecision is triggered by specific entry candidates, maker rests,
+    and held positions. A PARTIAL refresh should therefore prove the exact
+    conditions that are about to re-enter the money path, not require every
+    topology bin in a large weather family to refresh in the same tick.
+    """
+
+    clean_scope: dict[tuple[str, str, str], set[str]] = {}
+    for family, condition_ids in (condition_scope or {}).items():
+        try:
+            city, target_date, metric = family
+        except (TypeError, ValueError):
+            continue
+        family_key = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        clean_condition_ids = {
+            str(condition_id or "").strip()
+            for condition_id in condition_ids or set()
+            if str(condition_id or "").strip()
+        }
+        if all(family_key) and family_key[2] in {"high", "low"} and clean_condition_ids:
+            clean_scope.setdefault(family_key, set()).update(clean_condition_ids)
+    if not clean_scope:
+        return set()
+    from src.state.db import get_trade_connection_read_only
+
+    fresh_at_iso = now_utc.isoformat()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        out: set[tuple[str, str, str]] = set()
+        for family, condition_ids in sorted(clean_scope.items()):
+            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in sorted(condition_ids)):
+                out.add(family)
+        return out
+    finally:
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _edli_refresh_continuous_money_path_families(
     families: set[tuple[str, str, str]],
     *,
     now_utc: datetime,
+    priority_condition_ids: Iterable[str] | None = None,
 ) -> dict:
-    """Refresh only current continuous-money-path families before redecision emit.
+    """Prioritize current continuous-money-path families before redecision emit.
 
-    This is not the broad pending-event warmer. It exists so continuous
-    redecision confirms fresh executable prices for families that already have
-    cheap-screen value, a live rest needing reprice, or chain-confirmed exposure.
-    If its confirmation lock is busy, the caller must skip emit this tick
-    rather than queueing decisions from stale prices.
+    Continuous redecision is a consumer.  The substrate-observer daemon is the
+    executable-snapshot producer.  This function only marks live-money families
+    for priority sidecar capture, then the caller independently admits families
+    whose scoped executable substrate is already fresh.
     """
 
     clean_families = {
@@ -6725,6 +7267,11 @@ def _edli_refresh_continuous_money_path_families(
         if str(city or "").strip()
         and str(target_date or "").strip()
         and str(metric or "").strip() in {"high", "low"}
+    }
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
@@ -6739,57 +7286,52 @@ def _edli_refresh_continuous_money_path_families(
             "lock_timeout_seconds": lock_timeout_s,
             "lock": "edli_redecision_confirm_refresh",
         }
-    from src.state.db import (
-        ZEUS_FORECASTS_DB_PATH,
-        get_forecasts_connection_read_only,
-        get_world_connection,
-    )
-
     try:
-        retry_delays = _edli_confirmation_refresh_lock_retry_delays()
-        for attempt in range(len(retry_delays) + 1):
-            world = get_world_connection()
-            forecasts_ro = get_forecasts_connection_read_only()
-            try:
-                try:
-                    attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
-                    if "forecasts" not in attached:
-                        world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
-                        exc,
-                    )
-                summary = _refresh_pending_family_snapshots(
-                    world,
-                    forecasts_ro,
-                    consumer_name="edli_redecision_confirm",
-                    now_utc=now_utc,
-                    extra_priority_families=clean_families,
-                    include_pending_families=False,
-                )
-            finally:
-                try:
-                    forecasts_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    world.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            if not _edli_refresh_summary_has_sqlite_lock_failures(summary) or attempt >= len(retry_delays):
-                return summary
-            delay_s = retry_delays[attempt]
-            logger.warning(
-                "edli_redecision_screen: confirm-refresh hit sqlite lock; "
-                "retrying with fresh connections in %.1fs (attempt %d/%d) summary=%r",
-                delay_s,
-                attempt + 1,
-                len(retry_delays) + 1,
-                summary,
+        try:
+            from src.data.substrate_priority import mark_money_path_substrate_priority
+
+            request = mark_money_path_substrate_priority(
+                reason="continuous_redecision_confirm_refresh",
+                ttl_seconds=35.0,
+                families=clean_families,
+                condition_ids=priority_conditions,
             )
-            time.sleep(delay_s)
-        return summary
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "edli_redecision_screen: substrate priority marker write failed: %r",
+                exc,
+            )
+            return {
+                "status": "priority_marker_failed",
+                "families_requested": len(clean_families),
+                "reason": str(exc),
+            }
+        request_id = ""
+        if isinstance(request, dict):
+            request_id = str(request.get("request_id") or "").strip()
+        receipt = _edli_wait_for_substrate_priority_receipt(
+            request_id=request_id,
+            now_utc=now_utc,
+        )
+        if isinstance(receipt, dict):
+            receipt_summary = dict(receipt.get("summary") or {})
+            return {
+                **receipt_summary,
+                "families_requested": len(clean_families),
+                "priority_condition_count": len(priority_conditions),
+                "priority_request_id": request_id,
+                "priority_receipt_serviced_at": str(receipt.get("serviced_at") or ""),
+                "priority_receipt_matched": True,
+            }
+        return {
+            "status": "priority_marked",
+            "families_requested": len(clean_families),
+            "priority_condition_count": len(priority_conditions),
+            "executable_substrate_coverage_status": "READ_FILTER_REQUIRED",
+            "marked_at": now_utc.astimezone(timezone.utc).isoformat(),
+            "priority_request_id": request_id,
+            "priority_receipt_matched": False,
+        }
     finally:
         try:
             _edli_redecision_confirm_refresh_lock.release()
@@ -6797,32 +7339,123 @@ def _edli_refresh_continuous_money_path_families(
             pass
 
 
-def _edli_confirmation_refresh_lock_retry_delays() -> tuple[float, ...]:
-    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "2.0,5.0")
-    delays: list[float] = []
-    for piece in raw.split(","):
-        text = piece.strip()
-        if not text:
-            continue
-        try:
-            delay_s = float(text)
-        except ValueError:
-            continue
-        if delay_s > 0:
-            delays.append(delay_s)
-    return tuple(delays)
+def _edli_redecision_confirm_receipt_wait_seconds() -> float:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "45.0")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 45.0
+    return max(0.0, min(value, 60.0))
 
 
-def _edli_refresh_summary_has_sqlite_lock_failures(summary: dict | None) -> bool:
-    if not isinstance(summary, dict):
-        return False
-    fields: list[object] = [summary.get("reason"), summary.get("error")]
-    for sample in summary.get("failure_samples") or ():
-        if isinstance(sample, dict):
-            fields.append(sample.get("error"))
-        else:
-            fields.append(sample)
-    return any("database is locked" in str(field or "").lower() for field in fields)
+def _edli_redecision_confirm_receipt_poll_seconds() -> float:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.5")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.05, min(value, 2.0))
+
+
+def _edli_wait_for_substrate_priority_receipt(
+    *,
+    request_id: str,
+    now_utc: datetime,
+) -> dict | None:
+    request_id = str(request_id or "").strip()
+    wait_s = _edli_redecision_confirm_receipt_wait_seconds()
+    if not request_id or wait_s <= 0.0:
+        return None
+    poll_s = _edli_redecision_confirm_receipt_poll_seconds()
+    deadline = time.monotonic() + wait_s
+    max_age_s = wait_s + 10.0
+    from src.data.substrate_priority import money_path_substrate_priority_receipt
+
+    while True:
+        current = datetime.now(timezone.utc)
+        receipt = money_path_substrate_priority_receipt(
+            request_id=request_id,
+            now=current,
+            max_age_seconds=max_age_s,
+        )
+        if isinstance(receipt, dict):
+            return receipt
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            logger.info(
+                "edli_redecision_screen: sidecar priority receipt wait timed out "
+                "request_id=%s waited=%.3fs since=%s",
+                request_id,
+                wait_s,
+                now_utc.astimezone(timezone.utc).isoformat(),
+            )
+            return None
+        time.sleep(min(poll_s, remaining))
+
+
+def _edli_redecision_priority_condition_limit() -> int:
+    raw = os.environ.get(
+        "ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT",
+        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "32"),
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 32
+    return max(1, min(500, value))
+
+
+def _edli_confirm_priority_condition_ids(
+    *,
+    rest_condition_scope: dict[tuple[str, str, str], set[str]],
+    held_condition_scope: dict[tuple[str, str, str], set[str]],
+    entry_condition_scope: dict[tuple[str, str, str], set[str]],
+    entry_refresh_condition_scope: dict[tuple[str, str, str], set[str]],
+    open_rest_condition_scope: dict[tuple[str, str, str], set[str]],
+    full_family_refresh_families: set[tuple[str, str, str]] | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    """Return a bounded, ordered money-path condition frontier for sidecar capture."""
+
+    condition_limit = _edli_redecision_priority_condition_limit() if limit is None else max(1, int(limit))
+    full_family_refresh = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in (full_family_refresh_families or set())
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add_scope(scope: dict[tuple[str, str, str], set[str]]) -> None:
+        for family_key in sorted(scope or {}):
+            try:
+                normalized_family = tuple(str(part or "").strip() for part in family_key)
+            except TypeError:
+                normalized_family = ("", "", "")
+            if normalized_family in full_family_refresh:
+                continue
+            for condition_id in sorted(scope.get(family_key) or set()):
+                clean = str(condition_id or "").strip()
+                if not clean or clean in seen:
+                    continue
+                seen.add(clean)
+                ordered.append(clean)
+                if len(ordered) >= condition_limit:
+                    return
+
+    for scope in (
+        rest_condition_scope,
+        held_condition_scope,
+        entry_condition_scope,
+        entry_refresh_condition_scope,
+        open_rest_condition_scope,
+    ):
+        if len(ordered) >= condition_limit:
+            break
+        _add_scope(scope)
+    return ordered
 
 
 def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
@@ -6831,29 +7464,28 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
     status = str(summary.get("status") or "")
     if status == "skipped_lock_busy" or status.startswith("error"):
         return True
-    if _edli_refresh_summary_has_sqlite_lock_failures(summary):
-        return True
-    coverage = str(summary.get("executable_substrate_coverage_status") or "")
-    if coverage in {"NONE", "PARTIAL"}:
-        return True
     return False
 
 
-def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
-    # PARTIAL coverage routes to PER-FAMILY freshness admission — including when SOME
-    # families hit a transient `database is locked`. The per-family filter
-    # (_edli_families_with_fresh_executable_substrate) does an INDEPENDENT fresh read of
-    # every condition's executable substrate, so a lock that left some families stale
-    # cannot admit them; it only excludes them. Forcing a full-tick drop on any lock hit
+def _edli_confirmation_refresh_needs_scoped_freshness_filter(summary: dict | None) -> bool:
+    # Incomplete coverage routes to scoped freshness admission — including when SOME
+    # families hit a transient `database is locked` or the batch-prefetch cycle
+    # inserts zero rows while prior quotes are still fresh. The scoped filter
+    # (_edli_families_with_fresh_scoped_executable_substrate) does an INDEPENDENT fresh read of
+    # the money-path conditions' executable substrate, so a lock that left current
+    # rests/candidates/held legs stale cannot admit them; it only excludes them.
+    # Forcing a full-tick drop on any lock hit
     # (the prior `and not _has_sqlite_lock_failures`) discarded EVERY candidate + reprice
     # on the tick — even families with complete fresh substrate — which (with ~757 lock
     # hits/run of WAL contention) was the dominant reason the candidate pipeline emitted
     # for only ~2 families instead of the full universe (2026-06-23 candidate-pipeline fix).
     if not isinstance(summary, dict):
         return False
+    if str(summary.get("status") or "") == "priority_marked":
+        return True
     return (
         str(summary.get("status") or "") == "refreshed"
-        and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
+        and str(summary.get("executable_substrate_coverage_status") or "") in {"NONE", "PARTIAL"}
     )
 
 
@@ -7016,11 +7648,159 @@ def _edli_reemittable_held_position_family_keys(
     )
 
 
+def _redecision_event_with_origin(event: Any, origin: str) -> Any:
+    """Return an equivalent immutable redecision event with explicit scheduler origin."""
+
+    try:
+        from src.events.opportunity_event import make_opportunity_event
+
+        payload = json.loads(str(event.payload_json or "{}"))
+        if not isinstance(payload, dict):
+            return event
+        payload["redecision_origin"] = str(origin)
+        return make_opportunity_event(
+            event_type=event.event_type,
+            entity_key=event.entity_key,
+            source=event.source,
+            observed_at=event.observed_at,
+            available_at=event.available_at,
+            received_at=event.received_at,
+            causal_snapshot_id=event.causal_snapshot_id,
+            payload=payload,
+            priority=event.priority,
+            expires_at=event.expires_at,
+            created_at=event.created_at,
+        )
+    except Exception:  # noqa: BLE001
+        return event
+
+
+def _redecision_payload_origin(payload: Mapping[str, Any]) -> str:
+    return str(payload.get("redecision_origin") or "").strip().lower()
+
+
+def _preserve_recent_rest_pull_redecision(
+    payload: Mapping[str, Any],
+    *,
+    event_created_at: str,
+    decision_dt: datetime,
+) -> bool:
+    """Keep cancel/reprice redecision rows alive long enough for the fresh screen.
+
+    A pulled maker rest is removed from the open-rest input set as soon as the
+    terminal cancel/no-fill fact is reconciled. The follow-on redecision event is
+    the durable continuity proof for that family; expiring it on the next generic
+    no-edge screen erases the price-management chain before the reactor can
+    reprice/re-submit/decline from current evidence.
+    """
+
+    if _redecision_payload_origin(payload) != "rest_pull":
+        return False
+    try:
+        created_dt = datetime.fromisoformat(str(event_created_at).replace("Z", "+00:00"))
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=timezone.utc)
+        age_seconds = (decision_dt - created_dt.astimezone(timezone.utc)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return False
+    return 0.0 <= age_seconds < float(_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS)
+
+
+def _edli_supersede_pending_redecisions_for_rest_pull_families(
+    world_conn,
+    rest_pull_families: set[tuple[str, str, str]],
+    *,
+    decision_time: str,
+) -> int:
+    """Expire generic pending redecision rows that would suppress a rest-pull emit.
+
+    A live OPEN maker rest that has fired ``rest_pull`` is command-management
+    evidence: the order must be cancelled/repriced through a durable
+    ``redecision_origin=rest_pull`` row. A generic market-price or entry-screen
+    pending event for the same family is not equivalent because the rest may
+    disappear from the open-rest set after cancel; if that generic row is the one
+    preserved, the cancel/reprice continuity proof can be lost.
+
+    Only unclaimed ``pending`` rows are superseded. Claimed/processing rows may
+    already be inside the reactor and are left to the normal lease/stale paths.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in rest_pull_families or set()
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return 0
+    from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
+
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.event_id, e.payload_json
+              FROM opportunity_event_processing p
+                   INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'pending'
+               AND e.event_type = ?
+             ORDER BY p.updated_at ASC
+             LIMIT 5000
+            """,
+            (_REDECISION_EVENT_TYPE,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    expire_ids: list[str] = []
+    for row in rows:
+        try:
+            event_id = str(row[0] or "")
+            payload = json.loads(str(row[1] or "{}"))
+            family = (
+                str(payload.get("city") or "").strip(),
+                str(payload.get("target_date") or "").strip(),
+                str(payload.get("metric") or "").strip(),
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not event_id or family not in clean_families:
+            continue
+        if _redecision_payload_origin(payload) == "rest_pull":
+            continue
+        expire_ids.append(event_id)
+    if not expire_ids:
+        return 0
+    now = str(decision_time)
+    changed = 0
+    for start in range(0, len(expire_ids), 250):
+        chunk = expire_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = world_conn.execute(
+            f"""
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   updated_at = ?,
+                   last_error = 'REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice'
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+               AND event_id IN ({placeholders})
+            """,
+            (now, now, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    return changed
+
+
 def _edli_expire_unadmitted_redecision_pending(
     world_conn,
     admitted_families: set[tuple[str, str, str]],
     *,
     decision_time: str,
+    supersede_stale_admitted: bool = False,
+    claim_grace_seconds: float | None = None,
 ) -> int:
     """Expire redecision rows no longer backed by entry edge or rest reprice value.
 
@@ -7037,9 +7817,22 @@ def _edli_expire_unadmitted_redecision_pending(
         decision_dt = datetime.fromisoformat(str(decision_time).replace("Z", "+00:00"))
         if decision_dt.tzinfo is None:
             decision_dt = decision_dt.replace(tzinfo=timezone.utc)
-        stale_processing_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
-        pending_admission_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
+        decision_dt = decision_dt.astimezone(timezone.utc)
+        if claim_grace_seconds is None:
+            claim_grace_seconds = (
+                _REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS
+                if supersede_stale_admitted
+                else _REDECISION_PENDING_EXPIRY_GRACE_SECONDS
+            )
+        claim_grace_seconds = max(0.0, float(claim_grace_seconds))
+        stale_processing_cutoff = (
+            decision_dt - timedelta(seconds=claim_grace_seconds)
+        ).isoformat()
+        pending_admission_cutoff = (
+            decision_dt - timedelta(seconds=claim_grace_seconds)
+        ).isoformat()
     except Exception:  # noqa: BLE001
+        decision_dt = datetime.now(timezone.utc)
         stale_processing_cutoff = ""
         pending_admission_cutoff = ""
 
@@ -7086,7 +7879,7 @@ def _edli_expire_unadmitted_redecision_pending(
             rows.extend(
                 world_conn.execute(
                     f"""
-                    SELECT e.event_id, e.payload_json
+                    SELECT e.event_id, e.payload_json, e.created_at
                       FROM opportunity_events e
                      WHERE e.event_type = ?
                        AND e.created_at <= ?
@@ -7103,11 +7896,12 @@ def _edli_expire_unadmitted_redecision_pending(
             )
     except Exception:  # noqa: BLE001
         return 0
-    expire_ids: list[str] = []
+    expire_by_reason: dict[str, list[str]] = {}
     for row in rows:
         try:
             event_id = str(row[0] or "")
             payload = json.loads(str(row[1] or "{}"))
+            event_created_at = str(row[2] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -7118,36 +7912,47 @@ def _edli_expire_unadmitted_redecision_pending(
         if not event_id or not all(family):
             continue
         if family not in admitted_families:
-            expire_ids.append(event_id)
-    if not expire_ids:
+            if _preserve_recent_rest_pull_redecision(
+                payload,
+                event_created_at=event_created_at,
+                decision_dt=decision_dt,
+            ):
+                continue
+            reason = "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value"
+            expire_by_reason.setdefault(reason, []).append(event_id)
+        elif supersede_stale_admitted:
+            reason = "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed"
+            expire_by_reason.setdefault(reason, []).append(event_id)
+    if not expire_by_reason:
         return 0
     now = str(decision_time)
     changed = 0
-    for start in range(0, len(expire_ids), 250):
-        chunk = expire_ids[start : start + 250]
-        placeholders = ",".join("?" for _ in chunk)
-        cur = world_conn.execute(
-            f"""
-            UPDATE opportunity_event_processing
-               SET processing_status = 'expired',
-                   processed_at = ?,
-                   updated_at = ?,
-                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value'
-             WHERE consumer_name = 'edli_reactor_v1'
-               AND (
-                    processing_status = 'pending'
-                 OR (
-                    processing_status = 'processing'
-                    AND claimed_at IS NOT NULL
-                    AND ? != ''
-                    AND claimed_at <= ?
-                 )
-               )
-               AND event_id IN ({placeholders})
-            """,
-            (now, now, stale_processing_cutoff, stale_processing_cutoff, *chunk),
-        )
-        changed += int(cur.rowcount or 0)
+    for reason, expire_ids in expire_by_reason.items():
+        for start in range(0, len(expire_ids), 250):
+            chunk = expire_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = world_conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?,
+                       last_error = ?
+                 WHERE consumer_name = 'edli_reactor_v1'
+                   AND (
+                        processing_status = 'pending'
+                     OR (
+                        processing_status = 'processing'
+                        AND claimed_at IS NOT NULL
+                        AND ? != ''
+                        AND claimed_at <= ?
+                     )
+                   )
+                   AND event_id IN ({placeholders})
+                """,
+                (now, now, reason, stale_processing_cutoff, stale_processing_cutoff, *chunk),
+            )
+            changed += int(cur.rowcount or 0)
     return changed
 
 
@@ -7423,6 +8228,101 @@ def _edli_prune_interval_seconds(config: dict) -> float:
     return max(0.0, value)
 
 
+def _edli_prune_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_budget_seconds", 6.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 6.0
+    return max(0.0, min(value, 20.0))
+
+
+def _edli_forecast_snapshot_build_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_forecast_snapshot_build_budget_seconds", 8.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 8.0
+    return max(0.0, min(value, 20.0))
+
+
+def _edli_day0_emit_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_day0_emit_budget_seconds", 8.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 8.0
+    return max(0.0, min(value, 20.0))
+
+
+def _edli_day0_emit_busy_timeout_ms(config: dict) -> int:
+    raw = config.get("reactor_day0_emit_busy_timeout_ms", 750)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 750
+    return max(1, min(value, 5_000))
+
+
+def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> None:
+    """Interrupt long SQLite reads/writes once the caller's wall-clock budget is spent."""
+
+    if deadline_monotonic is None:
+        return
+
+    def _deadline_progress() -> int:
+        return 1 if time.monotonic() >= deadline_monotonic else 0
+
+    conn.set_progress_handler(_deadline_progress, 1_000)
+
+
+def _edli_clear_sqlite_progress_handler(conn) -> None:
+    try:
+        conn.set_progress_handler(None, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _edli_sqlite_busy_timeout_ms(conn) -> int | None:
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _edli_set_sqlite_busy_timeout_ms(conn, value: int | None) -> None:
+    if value is None:
+        return
+    try:
+        conn.execute("PRAGMA busy_timeout = %d" % max(1, int(value)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _edli_prune_lock_timeout_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_lock_timeout_seconds", 0.5)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.0, min(value, 5.0))
+
+
+def _edli_prune_busy_timeout_ms(config: dict) -> int:
+    raw = config.get("reactor_prune_busy_timeout_ms", 750)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 750
+    return max(1, min(value, 5_000))
+
+
 def _edli_unready_fsr_prune_min_active_pending(config: dict) -> int:
     raw = config.get("reactor_unready_fsr_prune_min_active_pending", 1_000)
     try:
@@ -7465,7 +8365,12 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 
-def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
+def _edli_prune_pending_working_set(
+    store,
+    *,
+    decision_time: datetime,
+    day0_family_admission: _Day0LiveFamilyAdmission | None = None,
+) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set.
 
     Backlog pruning is maintenance, not trade decision logic. Keep it explicit
@@ -7494,6 +8399,16 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         return
     _EDLI_LAST_PRUNE_MONOTONIC = now_mono
     batch_limit = _edli_prune_batch_limit(edli_cfg)
+    budget_s = _edli_prune_budget_seconds(edli_cfg)
+    prune_started = time.monotonic()
+    saved_busy_timeout_ms: int | None = None
+
+    try:
+        row = store.conn.execute("PRAGMA busy_timeout").fetchone()
+        saved_busy_timeout_ms = int(row[0]) if row is not None else None
+        store.conn.execute("PRAGMA busy_timeout = %d" % _edli_prune_busy_timeout_ms(edli_cfg))
+    except Exception:  # noqa: BLE001
+        saved_busy_timeout_ms = None
 
     def _log_prune_step(step: str, started: float, count: int | None = None) -> None:
         elapsed = time.monotonic() - started
@@ -7501,7 +8416,38 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             count_suffix = "" if count is None else f" count={count}"
             logger.info("EDLI reactor prune step completed: %s elapsed_s=%.3f%s", step, elapsed, count_suffix)
 
+    def _restore_busy_timeout() -> None:
+        nonlocal saved_busy_timeout_ms
+        if saved_busy_timeout_ms is None:
+            return
+        try:
+            store.conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        saved_busy_timeout_ms = None
+
+    prune_deadline = (prune_started + budget_s) if budget_s > 0 else None
+    _edli_install_sqlite_deadline(store.conn, deadline_monotonic=prune_deadline)
+
+    def _budget_exhausted(next_step: str) -> bool:
+        if budget_s <= 0:
+            return False
+        elapsed = time.monotonic() - prune_started
+        if elapsed < budget_s:
+            return False
+        logger.warning(
+            "EDLI reactor prune budget exhausted before %s elapsed_s=%.3f budget_s=%.3f; "
+            "deferring remaining maintenance so the money-path reactor can drain events.",
+            next_step,
+            elapsed,
+            budget_s,
+        )
+        _restore_busy_timeout()
+        return True
+
     try:
+        if _budget_exhausted("archive_orphan_processing_rows"):
+            return
         _step_started = time.monotonic()
         _orphan_archived = store.archive_orphan_processing_rows(batch_limit=batch_limit)
         _log_prune_step("archive_orphan_processing_rows", _step_started, _orphan_archived)
@@ -7518,9 +8464,11 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_orphan_processing_rows sweep failed "
             "(non-fatal; joined readers still ignore orphan IDs): %r",
             _orphan_sweep_exc,
-    )
+        )
 
     try:
+        if _budget_exhausted("archive_expired_candidates"):
+            return
         _step_started = time.monotonic()
         _archived = store.archive_expired_candidates(
             decision_time=decision_time.isoformat(),
@@ -7542,6 +8490,166 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_unmarketed_day0_events"):
+            return
+        _step_started = time.monotonic()
+        _d0_unmarketed_archived = 0
+        if day0_family_admission is not None and day0_family_admission.expiry_safe:
+            _d0_unmarketed_archived = store.archive_unmarketed_day0_events(
+                admitted_families=set(day0_family_admission.admitted_families),
+                normalizer=_substrate_refresh_family_key,
+                batch_limit=batch_limit,
+            )
+        _log_prune_step("archive_unmarketed_day0_events", _step_started, _d0_unmarketed_archived)
+        if _d0_unmarketed_archived:
+            logger.info(
+                "EDLI reactor: expired %d unmarketed DAY0_EXTREME_UPDATED execution "
+                "events with no market topology or live exposure; observation provenance "
+                "kept, but non-executable Day0 facts no longer claim money-path budget",
+                _d0_unmarketed_archived,
+            )
+    except Exception as _d0_unmarketed_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_unmarketed_day0_events sweep failed (non-fatal): %r",
+            _d0_unmarketed_sweep_exc,
+        )
+
+    try:
+        if _budget_exhausted("repair_missing_processing_rows"):
+            return
+        _step_started = time.monotonic()
+        _processing_repaired = store.repair_missing_processing_rows(
+            decision_time=decision_time.isoformat(),
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step("repair_missing_processing_rows", _step_started, _processing_repaired)
+        if _processing_repaired:
+            logger.warning(
+                "EDLI reactor: repaired %d decision events missing processing rows "
+                "so fetch_pending can claim them",
+                _processing_repaired,
+            )
+    except Exception as _missing_processing_repair_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: missing processing-row repair sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _missing_processing_repair_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_misclassified_local_pre_submit_rejections"):
+            return
+        _step_started = time.monotonic()
+        _recovered = store.requeue_misclassified_local_pre_submit_rejections(
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step("requeue_misclassified_local_pre_submit_rejections", _step_started, _recovered)
+        if _recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d processed events that old executor-boundary "
+                "code misclassified as venue rejects for local entries_paused pre-submit blocks",
+                _recovered,
+            )
+    except Exception as _pre_submit_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: local pre-submit rejection recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _pre_submit_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_processed_day0_entries_paused"):
+            return
+        _step_started = time.monotonic()
+        try:
+            from src.control.control_plane import is_entries_paused as _entries_paused_now
+
+            _entries_paused_currently = bool(_entries_paused_now())
+        except Exception as _pause_read_exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI reactor: entries_paused state unavailable during Day0 pause "
+                "requeue sweep; skipping recovery this cycle: %r",
+                _pause_read_exc,
+            )
+            _entries_paused_currently = True
+        _day0_pause_recovered = 0
+        if not _entries_paused_currently:
+            _day0_pause_recovered = store.requeue_processed_day0_entries_paused(
+                decision_time=decision_time.isoformat(),
+                batch_limit=min(batch_limit, 1000),
+            )
+        _log_prune_step("requeue_processed_day0_entries_paused", _step_started, _day0_pause_recovered)
+        if _day0_pause_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events whose latest verdict was "
+                "entries_paused/pause_entries; same observation facts will re-decide "
+                "after the pause cleared",
+                _day0_pause_recovered,
+            )
+    except Exception as _day0_pause_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: processed Day0 entries_paused recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _day0_pause_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_false_static_venue_close_day0_dead_letters"):
+            return
+        _step_started = time.monotonic()
+        _static_close_recovered = store.requeue_false_static_venue_close_day0_dead_letters(
+            decision_time=decision_time.isoformat(),
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step(
+            "requeue_false_static_venue_close_day0_dead_letters",
+            _step_started,
+            _static_close_recovered,
+        )
+        if _static_close_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events falsely dead-lettered by "
+                "old static F1 venue-close horizon",
+                _static_close_recovered,
+            )
+    except Exception as _static_close_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: false static venue-close DAY0 recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _static_close_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_false_executable_snapshot_deadline_day0_dead_letters"):
+            return
+        _step_started = time.monotonic()
+        _snapshot_deadline_recovered = (
+            store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+                decision_time=decision_time.isoformat(),
+                batch_limit=min(batch_limit, 1000),
+            )
+        )
+        _log_prune_step(
+            "requeue_false_executable_snapshot_deadline_day0_dead_letters",
+            _step_started,
+            _snapshot_deadline_recovered,
+        )
+        if _snapshot_deadline_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events falsely dead-lettered by "
+                "old executable-snapshot selection-deadline horizon logic",
+                _snapshot_deadline_recovered,
+            )
+    except Exception as _snapshot_deadline_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: false executable-snapshot selection-deadline DAY0 "
+            "recovery sweep failed (non-fatal; normal pending events still drain): %r",
+            _snapshot_deadline_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("archive_superseded_channel_events"):
+            return
         _step_started = time.monotonic()
         _ch_archived = store.archive_superseded_channel_events(batch_limit=batch_limit)
         _log_prune_step("archive_superseded_channel_events", _step_started, _ch_archived)
@@ -7566,6 +8674,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     # starved the tradeable FORECAST_SNAPSHOT_READY (spine) lane to zero decisions.
     # Past-local-day day0 is handled by archive_expired_candidates (now day0-aware).
     try:
+        if _budget_exhausted("archive_superseded_day0_events"):
+            return
         _step_started = time.monotonic()
         _d0_archived = store.archive_superseded_day0_events(batch_limit=batch_limit)
         _log_prune_step("archive_superseded_day0_events", _step_started, _d0_archived)
@@ -7585,6 +8695,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("expire_unready_forecast_snapshot_pending"):
+            return
         _step_started = time.monotonic()
         _unready_fsr_min_active = _edli_unready_fsr_prune_min_active_pending(edli_cfg)
         _active_rmf_fsr_pending = _edli_active_rmf_forecast_snapshot_pending_count(
@@ -7623,6 +8735,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_recent_no_value_refuted_events"):
+            return
         _step_started = time.monotonic()
         _no_value_refuted_archived = store.archive_recent_no_value_refuted_events(
             decision_time=decision_time.astimezone(timezone.utc).isoformat(),
@@ -7644,6 +8758,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("ignore_channel_cache_events"):
+            return
         _step_started = time.monotonic()
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
         _log_prune_step("ignore_channel_cache_events", _step_started, _ch_ignored)
@@ -7664,6 +8780,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_invalid_forecast_snapshot_events"):
+            return
         _step_started = time.monotonic()
         _invalid_fsr_archived = store.archive_invalid_forecast_snapshot_events(
             batch_limit=batch_limit,
@@ -7685,6 +8803,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_superseded_forecast_snapshot_events"):
+            return
         _step_started = time.monotonic()
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
@@ -7704,6 +8824,9 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "(non-fatal): %r",
             _fsr_sweep_exc,
         )
+    finally:
+        _edli_clear_sqlite_progress_handler(store.conn)
+        _restore_busy_timeout()
 
 
 def _edli_day0_fast_lane_enabled() -> bool:
@@ -7758,6 +8881,11 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
                 seen.add(key)
                 families.append(key)
 
+    # Held money is the first refresh consumer. Pending event queues can grow
+    # large when the reactor is behind; putting them first lets stale candidates
+    # delay fresh held-position Day0 probabilities.
+    add(sorted(_edli_current_held_position_family_keys()))
+
     try:
         world_ro = get_world_connection_read_only()
         try:
@@ -7790,8 +8918,92 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
 
-    add(sorted(_edli_current_held_position_family_keys()))
     return families
+
+
+_DAY0_HOURLY_REFRESH_CURSOR = 0
+
+
+def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
+    try:
+        configured = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "1"))
+    except (TypeError, ValueError):
+        configured = 1
+    try:
+        priority_cap = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "1"))
+    except (TypeError, ValueError):
+        priority_cap = 1
+    if priority_city_count <= 0:
+        return max(0, configured)
+    return max(0, max(configured, min(int(priority_city_count), max(0, priority_cap))))
+
+
+def _day0_hourly_refresh_budget_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "3.0")))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _day0_hourly_fetch_timeout_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5")))
+    except (TypeError, ValueError):
+        return 1.5
+
+
+def _reactor_day0_hourly_refresh_interval_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS",
+        "300.0",
+    )
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def _reactor_day0_hourly_refresh_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_BUDGET_SECONDS",
+        os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "2.5"),
+    )
+    try:
+        return max(0.25, float(raw))
+    except (TypeError, ValueError):
+        return 2.5
+
+
+def _reactor_day0_hourly_fetch_timeout_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REACTOR_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
+        os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5"),
+    )
+    try:
+        return max(0.25, float(raw))
+    except (TypeError, ValueError):
+        return 1.5
+
+
+def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
+    if not items:
+        return []
+    offset = int(cursor) % len(items)
+    return items[offset:] + items[:offset]
+
+
+def _edli_rotate_day0_hourly_refresh_order(
+    ordered: list[Any],
+    *,
+    priority_city_count: int,
+    cursor: int,
+) -> list[Any]:
+    priority = ordered[: max(0, int(priority_city_count))]
+    rest = ordered[max(0, int(priority_city_count)) :]
+    return (
+        _rotate_day0_refresh_segment(priority, cursor)
+        + _rotate_day0_refresh_segment(rest, cursor)
+    )
 
 
 def _edli_order_day0_hourly_refresh_cities(
@@ -7852,6 +9064,8 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     lane is active.
     """
 
+    global _DAY0_HOURLY_REFRESH_CURSOR
+
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
@@ -7866,6 +9080,11 @@ def _edli_day0_hourly_refresh_cycle() -> None:
             decision_time=decision_time,
             priority_families=priority_families,
         )
+        ordered_cities = _edli_rotate_day0_hourly_refresh_order(
+            ordered_cities,
+            priority_city_count=priority_city_count,
+            cursor=_DAY0_HOURLY_REFRESH_CURSOR,
+        )
         trading_lane_active = _edli_reactor_active() or _edli_redecision_screen_lock.locked()
         if trading_lane_active and priority_city_count <= 0:
             logger.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
@@ -7876,22 +9095,37 @@ def _edli_day0_hourly_refresh_cycle() -> None:
                 "priority_cities=%d",
                 priority_city_count,
             )
-        configured_max_cities = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3"))
-        max_cities = max(configured_max_cities, priority_city_count)
-        written = maybe_refresh_day0_hourly_vectors(
+        max_cities = _day0_hourly_refresh_max_cities(
+            priority_city_count=priority_city_count,
+        )
+        stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
-            budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
+            budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
-            timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+            timeout_s=_day0_hourly_fetch_timeout_seconds(),
             persist_lock_blocking=False,
+            return_stats=True,
         )
-        if written or priority_city_count:
+        vectors_written = int(getattr(stats, "vectors_written", stats))
+        cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+        if cities_attempted > 0 and ordered_cities:
+            _DAY0_HOURLY_REFRESH_CURSOR = (
+                _DAY0_HOURLY_REFRESH_CURSOR + cities_attempted
+            ) % max(1, len(ordered_cities))
+        if vectors_written or priority_city_count:
             logger.info(
-                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d max_cities=%d",
-                written,
+                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
+                "max_cities=%d cities_attempted=%d skipped_throttle=%d "
+                "incomplete_expected_bundles=%d budget_exhausted=%s cursor=%d",
+                vectors_written,
                 priority_city_count,
                 max_cities,
+                cities_attempted,
+                int(getattr(stats, "cities_skipped_throttle", 0) or 0),
+                int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                bool(getattr(stats, "budget_exhausted", False)),
+                _DAY0_HOURLY_REFRESH_CURSOR,
             )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
@@ -7906,6 +9140,8 @@ def _edli_emit_day0_extreme_events(
     limit: int,
     fast_prefetch=None,
     day0_is_tradeable: bool = True,
+    budget_seconds: float | None = None,
+    family_admission: _Day0LiveFamilyAdmission | None = None,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
@@ -7921,48 +9157,83 @@ def _edli_emit_day0_extreme_events(
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
+    deadline_monotonic = (
+        time.monotonic() + float(budget_seconds)
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else None
+    )
+    edli_cfg = _settings_section("edli", {})
+    day0_busy_timeout_ms = _edli_day0_emit_busy_timeout_ms(edli_cfg)
+    saved_world_busy_timeout_ms = _edli_sqlite_busy_timeout_ms(world_conn)
+    saved_trade_busy_timeout_ms = _edli_sqlite_busy_timeout_ms(trade_conn)
+    _edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)
+    _edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)
+    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
+    _edli_install_sqlite_deadline(trade_conn, deadline_monotonic=deadline_monotonic)
     fast_emitted = 0
-    if fast_prefetch is not None:
-        try:
-            from src.data.day0_fast_obs import get_fast_obs_emitter
+    try:
+        if fast_prefetch is not None:
+            try:
+                from src.data.day0_fast_obs import get_fast_obs_emitter
 
-            fast_emitted = get_fast_obs_emitter().emit_prefetched(
-                world_conn=world_conn,
-                prefetch=fast_prefetch,
-                received_at=received_at,
-                limit=limit,
-                day0_is_tradeable=day0_is_tradeable,
-            )
-        except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+                fast_emitted = get_fast_obs_emitter().emit_prefetched(
+                    world_conn=world_conn,
+                    prefetch=fast_prefetch,
+                    received_at=received_at,
+                    limit=limit,
+                    day0_is_tradeable=day0_is_tradeable,
+                    family_admission=family_admission,
+                )
+            except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+                logger.warning(
+                    "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
+                    _fast_exc,
+                )
+
+        trigger = Day0ExtremeUpdatedTrigger(
+            EventWriter(world_conn),
+            day0_is_tradeable=day0_is_tradeable,
+            suppress_recent_no_value_refutations=True,
+            family_admission=family_admission,
+        )
+        authority_results, observation_results = _edli_scan_day0_with_lock_retry(
+            trigger=trigger,
+            world_conn=world_conn,
+            trade_conn=trade_conn,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=limit,
+        )
+        # Structured per-lane counters (PR#404 P2 observability fix).
+        logger.info(
+            "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
+            "day0_observation_instants_emitted=%d admitted_families=%d",
+            fast_emitted,
+            len(authority_results),
+            len(observation_results),
+            0 if family_admission is None else len(family_admission.admitted_families),
+        )
+        return fast_emitted + len(authority_results) + len(observation_results)
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
             logger.warning(
-                "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
-                _fast_exc,
+                "EDLI day0 emit budget exhausted after %.3fs; skipping remaining "
+                "Day0 catch-up this cycle and draining already-queued candidates.",
+                float(budget_seconds or 0.0),
             )
-
-    trigger = Day0ExtremeUpdatedTrigger(
-        EventWriter(world_conn),
-        day0_is_tradeable=day0_is_tradeable,
-        suppress_recent_no_value_refutations=True,
-    )
-    authority_results, observation_results = _edli_scan_day0_with_lock_retry(
-        trigger=trigger,
-        trade_conn=trade_conn,
-        decision_time=decision_time,
-        received_at=received_at,
-        limit=limit,
-    )
-    # Structured per-lane counters (PR#404 P2 observability fix).
-    logger.info(
-        "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
-        "day0_observation_instants_emitted=%d",
-        fast_emitted, len(authority_results), len(observation_results),
-    )
-    return fast_emitted + len(authority_results) + len(observation_results)
+            return fast_emitted
+        raise
+    finally:
+        _edli_clear_sqlite_progress_handler(trade_conn)
+        _edli_clear_sqlite_progress_handler(world_conn)
+        _edli_set_sqlite_busy_timeout_ms(trade_conn, saved_trade_busy_timeout_ms)
+        _edli_set_sqlite_busy_timeout_ms(world_conn, saved_world_busy_timeout_ms)
 
 
 def _edli_scan_day0_with_lock_retry(
     *,
     trigger,
+    world_conn,
     trade_conn,
     decision_time: datetime,
     received_at: str,
@@ -7981,7 +9252,7 @@ def _edli_scan_day0_with_lock_retry(
                 limit=limit,
             )
             observation_results = trigger.scan_observation_instants_rows(
-                observation_conn=trade_conn,
+                observation_conn=world_conn,
                 settlement_semantics=_edli_day0_settlement_semantics,
                 decision_time=decision_time,
                 received_at=received_at,
@@ -8128,12 +9399,12 @@ def _edli_pre_submit_inner_io_timeout_seconds() -> float:
     return max(0.01, min(2.0, outer * 0.35))
 
 
-def _edli_run_pre_submit_clob_call(label: str, fn):
+def _edli_run_pre_submit_clob_call(label: str, fn, *, seconds: float | None = None):
     from src.runtime.timeout_guard import run_with_timeout
 
     return run_with_timeout(
         fn,
-        seconds=_edli_pre_submit_clob_timeout_seconds(),
+        seconds=seconds if seconds is not None else _edli_pre_submit_clob_timeout_seconds(),
         label=f"pre_submit_{label}",
     )
 
@@ -8156,11 +9427,35 @@ def _edli_pre_submit_jit_book_timeout():
     import httpx
 
     outer = _edli_pre_submit_clob_timeout_seconds()
-    read, write, pool = 0.85, 0.25, 0.10
-    # 0.3s headroom for Python overhead under the outer guard, halved for the
-    # TCP+TLS double-application of the connect budget.
-    connect = max(0.5, min(2.25, (outer - read - write - pool - 0.3) / 2.0))
+    # A 0.55s read cap was below observed live /book tail latency and caused the
+    # armed submit path to fall back to stale DB feasibility rows. Keep the full
+    # worst-case httpcore budget inside the outer guard, but give the warm read
+    # enough room to complete on real CLOB tails.
+    read, write, pool = 1.75, 0.20, 0.08
+    connect = max(0.25, min(1.80, (outer - read - write - pool - 0.25) / 2.0))
     return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _edli_pre_submit_jit_outer_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_JIT_OUTER_TIMEOUT_SECONDS")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_JIT_OUTER_TIMEOUT_SECONDS=%r; using strict default",
+                raw,
+            )
+        else:
+            if value > 0:
+                return min(value, _edli_pre_submit_clob_timeout_seconds())
+    # The submit-time JIT /book read is the primary pre-submit book authority.
+    # The former 1.6s cap was below observed live CLOB tail latency and caused
+    # armed live cycles to fall back to stale DB rows, globally blocking orders.
+    # Keep a small reserve for the post-book provenance/balance checks while
+    # still letting a warm public /book request complete under the outer guard.
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    return max(0.25, min(4.5, outer * 0.85))
 
 
 def _edli_pre_submit_jit_warmup_timeout():
@@ -8237,6 +9532,7 @@ def _edli_prewarm_pre_submit_jit_client() -> bool:
         return False
 
 
+@_scheduler_job("edli_presubmit_jit_keepalive")
 def _edli_pre_submit_jit_keepalive_tick() -> None:
     """Keepalive pinger: keep the submit-time JIT CLOB connection warm across reactor
     cycles (keepalive_expiry=90s > 60s cycle) so an edge-positive submit candidate
@@ -8268,140 +9564,115 @@ def _edli_pre_submit_jit_book_quote_provider():
         return _edli_run_pre_submit_clob_call(
             "jit_book",
             lambda: clob.get_orderbook_snapshot(token_id),
+            seconds=_edli_pre_submit_jit_outer_timeout_seconds(),
         )
 
     return _fetch
 
 
 def _edli_decision_family_snapshot_refresher(topology_conn):
-    """Build the decision-triggered targeted family snapshot refresher (zero-order
-    wall fix 2026-06-11).
+    """Build the decision-triggered targeted executable-substrate refresher.
 
-    The substrate warm job refreshes ``executable_market_snapshots`` on a fair
-    rotating cursor whose per-family cadence (~5.4 min live) is far slower than the
-    30s price-freshness window the decision path enforces on the SELECTED bin. On
-    that cadence any family is decidable only ~9% of wall-clock time and every
-    transient requeue lands price-stale → the built maker final intents dead-letter
-    MONEY_PATH_TRANSIENT_EXHAUSTED. This callable lets the adapter, AT decision time
-    when the elected row is stale, capture FRESH books for THAT family NOW through
-    the SANCTIONED warm-job capture path (topology reconstruct + CLOB /book +
-    ``snapshot_repo.insert_snapshot``), scoped to ONE family.
-
-    Built in main.py (the CLOB client lives here) and injected into the adapter as a
-    plain callable, so the adapter never imports venue code (architecture ban,
-    tests/engine/test_event_reactor_no_bypass.py).
-
-    LOCK LAW (#95 / INV-37 / three-phase venue-sync): the refresher opens its OWN
-    short-lived write trade connection; the adapter has ALREADY dropped its trade-DB
-    read snapshot (``trade_conn.commit()``) before calling this, so the [NET] /book
-    fetch is never wrapped by an open trade-DB txn — same posture as the submit-time
-    JIT witness /book fetch. ``topology_conn`` (forecasts DB, read-only here) owns
-    ``market_events``; the snapshot WRITE targets zeus_trades only.
-
-    Returns True if it captured/persisted fresh rows, False on a fail-soft skip; the
-    caller re-elects the latest row and the freshness gate still fail-closes if the
-    re-elected row remains stale.
+    Broad warming remains sidecar-owned. When the selected row is already stale
+    inside the money path, the decision needs a current executable book, not just
+    an asynchronous marker. The refresher first leaves the priority marker as a
+    sidecar fallback, then asks the substrate producer for an exact scoped refresh
+    under the shared cross-process lock. It returns True only after a fresh
+    condition read proves the selected scope is current.
     """
 
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
-        from src.data.market_scanner import (
-            reconstruct_weather_market_from_static_topology,
-            refresh_executable_market_substrate_snapshots,
+        family = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
         )
-        from src.data.polymarket_client import PolymarketClient
-        from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-        from src.state.db import get_trade_connection
-
-        payload = {"city": city, "target_date": target_date, "metric": metric}
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            return False
         try:
-            topology_rows = _event_family_market_topology_rows(topology_conn, payload)
-        except Exception as exc:  # noqa: BLE001 — fail-soft: stale rejection stands
-            logger.warning(
-                "decision family refresh: topology lookup failed for %s/%s/%s: %s",
-                city, target_date, metric, exc,
-            )
-            return False
-        if not topology_rows:
-            return False
-        # FAMILY-IDENTITY RE-INJECTION (freshness-throughput starvation fix
-        # 2026-06-14, #92 / binding_wall.md). _event_family_market_topology_rows
-        # binds city/target_date/temperature_metric in its WHERE clause but does NOT
-        # SELECT them, so the returned rows carry NO city/target_date/metric columns.
-        # reconstruct_weather_market_from_static_topology reads first.get("city") /
-        # ("target_date") / ("temperature_metric") and returns None at market_scanner
-        # L3535 (`if not (slug and city_name and target_date and metric)`) whenever
-        # they are absent — which is ALWAYS for this path. That silent None made the
-        # decision-triggered refresher return False for EVERY family (marker
-        # "decision_triggered_targeted_refresh" at ZERO live 2026-06-14), so a STALE
-        # live family could NEVER get a fresh row and requeued forever. The warm-job
-        # lane (refresh_pending_family_snapshots, main.py ~3580) already re-injects
-        # these three fields before calling reconstruct; mirror it here so the
-        # decision-time refresh actually reconstructs and captures. Additive: a row
-        # already carrying the fields is unchanged.
-        topology_rows = [
-            {
-                **dict(trow),
-                "city": city,
-                "target_date": target_date,
-                "temperature_metric": metric,
-            }
-            for trow in topology_rows
-        ]
+            from src.data.substrate_priority import mark_money_path_substrate_priority
 
-        _clob_timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-        )
-        lock_timeout_s = max(
-            0.0,
-            float(os.environ.get("ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),
-        )
-        acquired = _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s)
-        if not acquired:
-            logger.warning(
-                "decision family refresh: substrate refresh lock busy for %s/%s/%s",
-                city, target_date, metric,
+            mark_money_path_substrate_priority(
+                reason="decision_triggered_targeted_refresh",
+                ttl_seconds=45.0,
+                families=[family],
+                condition_ids=condition_ids,
+                merge_existing=True,
             )
-            return False
-        write_conn = get_trade_connection(write_class="live")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decision family refresh: priority marker write failed: %r", exc)
+        clean_condition_ids = tuple(
+            str(condition_id or "").strip()
+            for condition_id in (condition_ids or ())
+            if str(condition_id or "").strip()
+        )
+        summary = None
         try:
-            market = reconstruct_weather_market_from_static_topology(
-                write_conn,
-                topology_rows=topology_rows,
-                now_utc=datetime.now(timezone.utc),
+            from src.data.substrate_observer import refresh_money_path_substrate_now
+
+            refresh_budget_s = max(
+                1.0,
+                float(os.environ.get("ZEUS_DECISION_TARGETED_REFRESH_BUDGET_SECONDS", "8.0")),
             )
-            if market is None:
-                # Static topology cannot reconstruct the full token map (a sibling
-                # lost executable identity). The warm-job Gamma slug path owns that
-                # recovery; the decision-time fast path does NOT do a Gamma fetch.
-                return False
-            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                summary = refresh_executable_market_substrate_snapshots(
-                    write_conn,
-                    markets=[market],
-                    clob=clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                    refresh_reason="decision_triggered_targeted_refresh",
-                    # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
-                    # FDR full-family proof + capital-efficiency economics; refreshing
-                    # only the selected bin would leave stale sibling prices in q/FDR).
-                    max_outcomes=0,
-                )
-            write_conn.commit()
-            return int(summary.get("inserted", 0) or 0) > 0
-        except Exception as exc:  # noqa: BLE001 — fail-soft: never block the decision
+            snapshot_reserve_s = min(
+                max(
+                    0.5,
+                    float(
+                        os.environ.get(
+                            "ZEUS_DECISION_TARGETED_REFRESH_SNAPSHOT_RESERVE_SECONDS",
+                            "2.0",
+                        )
+                    ),
+                ),
+                max(0.1, refresh_budget_s - 0.1),
+            )
+            summary = refresh_money_path_substrate_now(
+                families=[family],
+                condition_ids=clean_condition_ids,
+                reason="decision_triggered_targeted_refresh",
+                refresh_budget_seconds=refresh_budget_s,
+                snapshot_reserve_seconds=snapshot_reserve_s,
+                include_money_risk_families=False,
+            )
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "decision family refresh: capture failed for %s/%s/%s: %s",
-                city, target_date, metric, exc,
+                "decision family refresh: inline substrate refresh failed for %s/%s/%s: %r",
+                family[0],
+                family[1],
+                family[2],
+                exc,
             )
-            return False
-        finally:
-            write_conn.close()
+            summary = {"status": "inline_error", "error": str(exc)}
+        proved_fresh = False
+        if clean_condition_ids:
             try:
-                _market_substrate_refresh_lock.release()
-            except RuntimeError:
-                pass
+                proved_fresh = family in _edli_families_with_fresh_scoped_executable_substrate(
+                    {family: set(clean_condition_ids)},
+                    now_utc=datetime.now(timezone.utc),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "decision family refresh: scoped freshness proof failed for %s/%s/%s: %r",
+                    family[0],
+                    family[1],
+                    family[2],
+                    exc,
+                )
+                proved_fresh = False
+        else:
+            status = str((summary or {}).get("status") or "")
+            proved_fresh = status in {"refreshed", "all_fresh"}
+        logger.info(
+            "decision family refresh completed: %s/%s/%s condition_ids=%d "
+            "proved_fresh=%s summary=%r",
+            family[0],
+            family[1],
+            family[2],
+            len(clean_condition_ids),
+            proved_fresh,
+            summary,
+        )
+        return bool(proved_fresh)
 
     return _refresh
 
@@ -8416,7 +9687,7 @@ def _edli_reactor_family_snapshot_refresher():
     accounting without blocking the reactor on producer I/O.
     """
 
-    def _refresh(*, city, target_date, metric, **_ignored):
+    def _refresh(*, city, target_date, metric, condition_ids=(), **_ignored):
         family = (
             str(city or "").strip(),
             str(target_date or "").strip(),
@@ -8424,6 +9695,18 @@ def _edli_reactor_family_snapshot_refresher():
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             return False
+        try:
+            from src.data.substrate_priority import mark_money_path_substrate_priority
+
+            mark_money_path_substrate_priority(
+                reason="reactor_blocked_family_refresh",
+                ttl_seconds=45.0,
+                families=[family],
+                condition_ids=condition_ids,
+                merge_existing=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reactor family refresh priority marker write failed: %r", exc)
         logger.info(
             "reactor family refresh delegated to substrate-observer sidecar via pending event: %s/%s/%s",
             family[0], family[1], family[2],
@@ -8433,19 +9716,86 @@ def _edli_reactor_family_snapshot_refresher():
     return _refresh
 
 
+def _edli_reactor_day0_hourly_refresher():
+    """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
+
+    def _refresh(*, city, target_date, metric, **_ignored):
+        family = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            return False
+        try:
+            from src.config import runtime_cities_by_name
+            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+            city_obj = runtime_cities_by_name().get(family[0])
+            if city_obj is None:
+                logger.warning(
+                    "reactor day0-hourly refresh skipped: city config missing for %s/%s/%s",
+                    family[0],
+                    family[1],
+                    family[2],
+                )
+                return False
+            stats = maybe_refresh_day0_hourly_vectors(
+                [city_obj],
+                decision_time=datetime.now(timezone.utc),
+                interval_s=_reactor_day0_hourly_refresh_interval_seconds(),
+                budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
+                max_cities=1,
+                timeout_s=_reactor_day0_hourly_fetch_timeout_seconds(),
+                persist_lock_blocking=False,
+                return_stats=True,
+            )
+            vectors_written = int(getattr(stats, "vectors_written", stats) or 0)
+            cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+            logger.info(
+                "reactor day0-hourly refresh attempted for %s/%s/%s: vectors_written=%d "
+                "cities_attempted=%d incomplete_expected_bundles=%d",
+                family[0],
+                family[1],
+                family[2],
+                vectors_written,
+                cities_attempted,
+                int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+            )
+            return vectors_written > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reactor day0-hourly refresh failed for %s/%s/%s (fail-soft): %r",
+                family[0],
+                family[1],
+                family[2],
+                exc,
+            )
+            return False
+
+    return _refresh
+
+
 def _edli_reactor_family_market_absence_provider():
     """Build the reactor's live venue-listing absence proof provider.
 
-    The only authority this provider exposes is the daemon warm lane's current Gamma-empty backoff:
-    a family was explicitly probed and Gamma returned no event list / no parseable listed market for
-    that exact (city, target_date, metric). Plain missing topology, lock-busy, time-boxed probes, or
-    network errors do not set the backoff and therefore do not terminalize reactor events.
+    The only authority this provider exposes is durable market-unavailable
+    evidence written by the substrate-observer sidecar. Plain missing topology,
+    lock-busy, time-boxed probes, or network errors do not write that evidence
+    and therefore do not terminalize reactor events.
     """
 
     def _is_absent(*, city, target_date, metric, **_ignored):
-        key = _substrate_refresh_family_key(city, target_date, metric)
-        until = _GAMMA_EMPTY_BACKOFF_UNTIL.get(key, 0.0)
-        return until > time.monotonic()
+        try:
+            from src.data.market_absence_evidence import has_recent_market_unavailable_evidence
+
+            return has_recent_market_unavailable_evidence(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        except Exception:
+            return False
 
     return _is_absent
 
@@ -8529,7 +9879,7 @@ def _edli_reactor_cycle_advance_enqueuer():
     return _enqueue
 
 
-def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
+def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, side: str | None = None):
     """JIT single-token book fetch for the SELECTED candidate at submit time.
 
     GATE #84 root cause: the shared market-channel feasibility feed stamps
@@ -8540,9 +9890,13 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     candidate we pull its live book ``now`` and anchor freshness to OUR
     observation time — the FOK crosses against exactly this book.
 
-    Returns ``(best_bid, best_ask, book_hash)`` on a usable two-sided book, or
-    ``None`` when the fetch fails or the book is empty/crossed (fail-closed —
-    the caller then falls back to a genuinely-fresh DB row or raises).
+    Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
+    book, or ``None`` only when the fetch itself fails (fail-closed fallback to a
+    genuinely-fresh DB row). If the fetch succeeds but proves the selected side is
+    no longer executable, raise a typed PRE_SUBMIT_BOOK_AUTHORITY_JIT_* reason. That
+    distinction matters in live: a successful JIT read is fresher authority than
+    the old DB row and must force a fresh family redecision, not be masked as
+    PRE_SUBMIT_BOOK_AUTHORITY_STALE.
     """
 
     if book_quote_provider is None:
@@ -8555,12 +9909,35 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     best_bid = _edli_book_best_price(message.get("bids"), best="bid")
     best_ask = _edli_book_best_price(message.get("asks"), best="ask")
     book_hash = str(message.get("hash") or "")
-    if best_bid is None or best_ask is None or not book_hash:
-        return None
-    if best_bid >= best_ask:
+    normalized_side = str(side or "").upper()
+    if normalized_side == "BUY" and best_ask is None:
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:best_bid={best_bid}"
+        )
+    if normalized_side == "SELL" and best_bid is None:
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SELL_BID_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:best_ask={best_ask}"
+        )
+    if normalized_side not in {"BUY", "SELL"} and (best_bid is None or best_ask is None):
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SIDE_MISSING:"
+            f"token_id={token_id}:book_hash={book_hash or 'missing'}:"
+            f"best_bid={best_bid}:best_ask={best_ask}"
+        )
+    if not book_hash:
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_HASH_MISSING:"
+            f"token_id={token_id}:best_bid={best_bid}:best_ask={best_ask}"
+        )
+    if best_bid is not None and best_ask is not None and best_bid >= best_ask:
         # Crossed/locked book is not a usable pre-submit authority.
-        return None
-    return best_bid, best_ask, book_hash
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+            f"token_id={token_id}:best_bid={best_bid}:best_ask={best_ask}"
+        )
+    return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
 
 
 def _edli_book_best_price(levels, *, best: str):
@@ -8653,9 +10030,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         # PRIMARY: just-in-time live book for the selected candidate. Freshness is
         # anchored to OUR observation time (checked_at) — the FOK crosses against
         # exactly this book — so quote_age_ms is the observation-to-submit latency.
-        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id)
+        side = str(intent.get("side") or "").upper()
+        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id, side=side)
         if jit is not None:
-            best_bid, best_ask, book_hash = jit
+            best_bid, best_ask, book_hash, book_observed_at = jit
+            checked_at = book_observed_at.astimezone(timezone.utc)
             quote_seen_at = checked_at.isoformat()
             book_authority_id = "clob_jit_book"
         else:
@@ -8665,6 +10044,7 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             row = _edli_latest_pre_submit_book_row(
                 book_evidence_conn,
                 token_id=token_id,
+                side=side,
                 decision_time=checked_at,
             )
             if row is None:
@@ -8673,7 +10053,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             book_hash = str(_row_get(row, "book_hash_before") or "")
             best_bid = _row_float(row, "best_bid_before")
             best_ask = _row_float(row, "best_ask_before")
-            if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
+            if not quote_seen_at or not book_hash:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if side == "BUY" and best_ask is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if side == "SELL" and best_bid is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
             try:
                 row_quote_dt = datetime.fromisoformat(quote_seen_at.replace("Z", "+00:00"))
@@ -8727,15 +10111,28 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     return _provider
 
 
-def _edli_latest_pre_submit_book_row(book_evidence_conn, *, token_id: str, decision_time: datetime):
+def _edli_latest_pre_submit_book_row(
+    book_evidence_conn,
+    *,
+    token_id: str,
+    side: str | None = None,
+    decision_time: datetime,
+):
+    normalized_side = str(side or "").upper()
+    side_filter = ""
+    if normalized_side == "BUY":
+        side_filter = "AND best_ask_before IS NOT NULL"
+    elif normalized_side == "SELL":
+        side_filter = "AND best_bid_before IS NOT NULL"
+    else:
+        side_filter = "AND best_bid_before IS NOT NULL AND best_ask_before IS NOT NULL"
     return book_evidence_conn.execute(
-        """
+        f"""
         SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
         FROM execution_feasibility_evidence
         WHERE token_id = ?
           AND quote_seen_at <= ?
-          AND best_bid_before IS NOT NULL
-          AND best_ask_before IS NOT NULL
+          {side_filter}
           AND COALESCE(book_hash_before, '') != ''
         ORDER BY quote_seen_at DESC
         LIMIT 1
@@ -9492,11 +10889,14 @@ def main():
     _BOOT_STATE.update(_boot)
     if _boot.get("sha"):
         logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
+        os.environ["ZEUS_PROCESS_BOOT_SHA"] = str(_boot["sha"])
     # EDLI-mode release-gate surface: persist the genuinely-booted HEAD SHA so the
     # live-release gate's loaded_sha check can compare loaded vs expected. Reuses
     # the boot SHA captured above; written once (not refreshed) so a post-boot
     # filesystem divergence is still caught by the gate.
     _write_loaded_sha_state(_boot.get("sha"))
+
+    _startup_required_sidecar_head_check(boot_sha=_boot.get("sha"))
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
@@ -9580,6 +10980,8 @@ def main():
             raise RuntimeError(f"BOOT_GUARD_FAILED:{_gname}: {_gdetail}")
         logger.info("boot-guard %s: %s", _gname, _gdetail)
     logger.info("calibration pin shape + staleness boot-guards: OK")
+
+    _ensure_day0_identity_platt_fit_at_boot()
 
     # N2 — S2 deployment gate (PR-S1, Bug #3).
     # If S1 is deployed but S2 has not been deployed within 4h, refuse boot.
@@ -9698,6 +11100,8 @@ def main():
     edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
+    _edli_boot_command_recovery_once()
+    _edli_boot_invalid_pending_entry_authority_cancel_once()
     # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
     # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
     # is now an unconditional logged no-op (not applicable under single-truth).
@@ -9733,10 +11137,28 @@ def main():
             max_instances=1, coalesce=True,
         )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
+        # W4.3 liveness analysis (2026-07-03, scan demotion packet): process_pending
+        # (src/events/reactor.py:907) is the SOLE consumer of the opportunity_events queue —
+        # grepped every call site (main.py:4942 is the only one) and found no wake-on-write
+        # path, so EVERY event lane (FORECAST_SNAPSHOT_READY, DAY0_EXTREME_UPDATED,
+        # SOURCE_RUN_ARRIVED-derived staleness cancels, W4.1's book-move buckets, the
+        # continuous-redecision screen's EDLI_REDECISION_PENDING output) is only decided
+        # when THIS job's tick runs. The scan interval is therefore not merely a cold-start/
+        # outage backstop — it directly gates the A2 latency SLA (architecture doc §4b: the
+        # current 60-90s IS the detection floor the axiom measures against). Slowing this
+        # cadence would inject latency into every decision lane, not just the
+        # always-decidable substrate-refresh drain (reactor.py:995-1001) that is the scan's
+        # actual backstop content. Per ORCHESTRATOR ruling shape (b): the cadence is NOT
+        # demoted in this packet. Only the config knob lands (default unchanged — zero
+        # decision-behavior change); an actual slowdown is an explicit, evidence-gated
+        # operator decision once a decoupled wake mechanism exists (E5-adjacent).
+        _edli_reactor_scan_interval_seconds = int(
+            edli_cfg.get("reactor_scan_interval_seconds", 60) or 60
+        )
         scheduler.add_job(
             _edli_event_reactor_cycle,
             "interval",
-            minutes=1,
+            seconds=_edli_reactor_scan_interval_seconds,
             id="edli_event_reactor",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 5.0),
             max_instances=1,
@@ -9777,21 +11199,26 @@ def main():
         scheduler.add_job(
             _edli_day0_hourly_refresh_cycle,
             "interval",
-            seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "180")),
+            seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "45")),
             id="edli_day0_hourly_refresh",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
             max_instances=1,
             coalesce=True,
         )
-        # K4.0 REST-THEN-CROSS deadline owner: cancels GTC maker entry rests older
-        # than the measured escalation deadline (20min). 5-min cadence is well inside
-        # the deadline's 60-min derivation slack (taker_immediate_event_end_floor
-        # relation in the time-semantics registry). Cancel-only; never submits.
+        # W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring): the TTL/
+        # q-staleness successor to the retired maker_rest_escalation. Cancels GTC
+        # maker entry rests whose q_version has gone stale (SOURCE_RUN_ARRIVED) OR
+        # that have aged past the deadline (rest_deadline_exceeded — the same
+        # unconditional per-order backstop maker_rest_escalation used to own,
+        # 20min). 5-min cadence is well inside the deadline's 60-min derivation
+        # slack (taker_immediate_event_end_floor relation in the time-semantics
+        # registry). Also carries the recurring invalid-entry-authority cancel
+        # lane forward unchanged.
         scheduler.add_job(
-            _maker_rest_escalation_cycle,
+            _c3_staleness_cancel_cycle,
             "interval",
             minutes=5,
-            id="maker_rest_escalation",
+            id="c3_staleness_cancel",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
             max_instances=1,
             coalesce=True,

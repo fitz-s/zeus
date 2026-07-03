@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-07-01
 # Authority basis: pr36_scaffold.md §5 — R-3.1 through R-3.5 + R-3.NEW-a/b/c
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Relationship tests for DecisionSourceContext PR3 observation-chain ordering validators (R-3.x).
@@ -260,3 +260,87 @@ def test_backward_compat_pre_epoch_no_missing_errors():
     assert new_missing_errors == [], (
         f"Pre-epoch decisions must not emit PR3 new missing_* errors; got {new_missing_errors}"
     )
+
+
+def test_day0_live_observation_context_accepts_observation_authority():
+    ctx = DecisionSourceContext(
+        source_id="day0_live_observation:Chicago:2026-07-01:high:KORD",
+        model_family="day0_observed_probability:replacement_raw_second_moment",
+        forecast_issue_time="2026-07-01T06:00:00Z",
+        forecast_fetch_time="2026-07-01T06:20:00Z",
+        forecast_available_at="2026-07-01T06:20:00Z",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="day0_live_observation",
+        authority_tier="OBSERVATION",
+        decision_time="2026-07-01T21:00:00Z",
+        decision_time_status="OK",
+        observation_time="2026-07-01T20:51:00Z",
+        observation_available_at="2026-07-01T20:55:56Z",
+        polymarket_end_anchor_source="gamma_explicit",
+        zeus_submit_intent_time="2026-07-01T21:00:01Z",
+        venue_ack_time="2026-07-01T21:00:02Z",
+    )
+
+    errors = set(ctx.integrity_errors())
+
+    assert ctx.is_day0_observation_context()
+    assert "forecast_role_not_entry_primary:day0_live_observation" not in errors
+    assert "authority_not_forecast:OBSERVATION" not in errors
+    assert "missing_first_member_observed_time" not in errors
+    assert "missing_run_complete_time" not in errors
+    assert not errors
+
+
+def test_day0_base_distribution_alone_is_not_live_observation_context():
+    ctx = DecisionSourceContext(
+        source_id="replacement_raw_second_moment",
+        model_family="replacement_raw_second_moment",
+        forecast_issue_time="2026-07-01T06:00:00Z",
+        forecast_valid_time="2026-07-01T18:00:00Z",
+        forecast_fetch_time="2026-07-01T06:20:00Z",
+        forecast_available_at="2026-07-01T06:20:00Z",
+        raw_payload_hash="b" * 64,
+        degradation_level="OK",
+        forecast_source_role="day0_base_distribution",
+        authority_tier="FORECAST",
+        decision_time="2026-07-01T21:00:00Z",
+        decision_time_status="OK",
+        observation_time="2026-07-01T20:51:00Z",
+        observation_available_at="2026-07-01T20:55:56Z",
+        polymarket_end_anchor_source="gamma_explicit",
+        first_member_observed_time="2026-07-01T06:00:00Z",
+        run_complete_time="2026-07-01T06:20:00Z",
+        zeus_submit_intent_time="2026-07-01T21:00:01Z",
+        venue_ack_time="2026-07-01T21:00:02Z",
+    )
+
+    errors = set(ctx.integrity_errors())
+
+    assert not ctx.is_day0_observation_context()
+    assert "forecast_role_not_entry_primary:day0_base_distribution" in errors
+    assert "authority_not_observation:FORECAST" not in errors
+
+
+def test_day0_live_observation_context_still_requires_observation_clock():
+    ctx = DecisionSourceContext(
+        source_id="day0_live_observation:Chicago:2026-07-01:high:KORD",
+        model_family="day0_observed_probability:replacement_raw_second_moment",
+        forecast_issue_time="2026-07-01T06:00:00Z",
+        forecast_fetch_time="2026-07-01T06:20:00Z",
+        forecast_available_at="2026-07-01T06:20:00Z",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="day0_live_observation",
+        authority_tier="OBSERVATION",
+        decision_time="2026-07-01T21:00:00Z",
+        decision_time_status="OK",
+        polymarket_end_anchor_source="gamma_explicit",
+        zeus_submit_intent_time="2026-07-01T21:00:01Z",
+        venue_ack_time="2026-07-01T21:00:02Z",
+    )
+
+    errors = set(ctx.integrity_errors())
+
+    assert "missing_observation_time" in errors
+    assert "missing_observation_available_at" in errors

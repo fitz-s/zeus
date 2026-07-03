@@ -63,10 +63,12 @@ scalar transform in place):
          point_fair_value = q @ payoff          # the FULL Arrow-Debreu fair value
          point_edge       = point_fair_value - route.avg_cost.value
 
-     and the robust lower bound is the alpha-quantile of the per-DRAW vector edge:
+     and the robust lower bound is built from the alpha-quantile of the
+     per-DRAW payoff fair value:
 
-         sample_edges = band.samples @ payoff - route.avg_cost.value
-         edge_lcb     = np.quantile(sample_edges, alpha)
+         sample_payoffs = band.samples @ payoff
+         payoff_q_lcb   = min(np.quantile(sample_payoffs, alpha), point_fair_value)
+         edge_lcb       = payoff_q_lcb - route.avg_cost.value
 
      Because ``payoff`` is the instrument's Arrow-Debreu vector over the COMPLETE Omega
      (``e_i`` for YES_i, ``1 - e_i`` for NO_i, the real bundle vector for a basket) and
@@ -231,8 +233,8 @@ class CandidateEconomics:
     * ``candidate_id`` — the candidate this economics is for.
     * ``point_ev`` — the point edge ``q @ payoff - route.avg_cost.value`` (the
       Arrow-Debreu point expected value of the trade, all-in cost deducted).
-    * ``edge_lcb`` — ``np.quantile(band.samples @ payoff - cost, alpha)``: the robust
-      lower credible bound of the VECTOR edge across coherent joint draws.
+    * ``edge_lcb`` — ``payoff_q_lcb - cost``: the robust lower bound of the VECTOR
+      edge across coherent joint draws, tied to the explicit payoff-space qLCB below.
     * ``delta_u_at_min`` — robust ΔU at the venue MIN-ORDER stake (the feasible lower
       bound). Lets the live pass tell a genuine edge reversal (ΔU ≤ 0 even at min order)
       from a stake the optimizer shrank below the venue floor.
@@ -242,8 +244,14 @@ class CandidateEconomics:
     * ``q_dot_payoff`` — ``q @ payoff`` (the point fair value before cost). This is the
       TELEMETRY anchor — the scalar fair value is RECORDED here but the selection runs on
       ``edge_lcb`` / ``optimal_delta_u``, never on this scalar.
+    * ``payoff_q_lcb`` — conservative lower bound on the selected route's payoff
+      probability. This is generated from the q-band/payoff vector directly (or from
+      the empirical qLCB guard), not reverse-derived downstream from ``edge_lcb``.
     * ``cost`` — the route's all-in cost as a typed ``ExecutionPrice`` (spec line 756).
     * ``route_id`` — the route this economics priced against (provenance).
+    * ``chosen_stake_cost`` — the same executable curve priced at ``optimal_stake_usd``.
+      When present, live selection must use this cost/edge pair because it is the
+      exact price boundary the submit path will carry.
     """
 
     candidate_id: str
@@ -255,6 +263,10 @@ class CandidateEconomics:
     q_dot_payoff: float
     cost: ExecutionPrice
     route_id: str
+    payoff_q_lcb: float | None = None
+    chosen_stake_cost: ExecutionPrice | None = None
+    chosen_stake_point_ev: float | None = None
+    chosen_stake_edge_lcb: float | None = None
 
 
 # ===========================================================================
@@ -295,28 +307,49 @@ def point_fair_value(joint_q: JointQ, payoff: np.ndarray) -> float:
     return float(np.asarray(joint_q.q, dtype=float) @ np.asarray(payoff, dtype=float))
 
 
+def payoff_lower_bound(
+    band: JointQBand,
+    payoff: np.ndarray,
+    *,
+    q_dot_payoff: float | None = None,
+    alpha: float | None = _DEFAULT_ALPHA,
+) -> float:
+    """Conservative lower bound on the route payoff probability.
+
+    This is the probability-space companion to ``edge_lcb``. It is read from the
+    same q-band/payoff vector as selection, then capped at the point fair value
+    so a lower-bound certificate can never exceed the live point belief carried
+    into submit/monitor. The cap turns a band/point centering inconsistency into
+    a stricter edge, not into an invalid downstream certificate.
+    """
+
+    a = band.alpha if alpha is None else float(alpha)
+    if not (0.0 < a < 1.0):
+        raise PayoffVectorError(f"DEGENERATE_ALPHA: alpha={a!r} (need 0 < alpha < 1)")
+    sample_fair = np.asarray(band.samples, dtype=float) @ np.asarray(payoff, dtype=float)
+    q_lcb = float(np.quantile(sample_fair, a))
+    if q_dot_payoff is not None:
+        q_lcb = min(q_lcb, float(q_dot_payoff))
+    return float(min(max(q_lcb, 0.0), 1.0))
+
+
 def edge_lower_bound(
     band: JointQBand, payoff: np.ndarray, cost: float, *, alpha: float | None = None
 ) -> float:
-    """``np.quantile(band.samples @ payoff - cost, alpha)`` (spec lines 769-770).
+    """``payoff_lower_bound(band, payoff) - cost`` (spec lines 769-770).
 
     The robust lower credible bound of the VECTOR edge. ``band.samples @ payoff`` is, per
     coherent joint draw, the Arrow-Debreu fair value of the payoff under THAT draw (every
     row sums to 1, the simplex invariant); subtracting the all-in cost gives the per-draw
     edge, and its ``alpha``-quantile is the genuine downside of the edge across draws.
 
-    Because the cost is subtracted INSIDE the quantile argument (it is a constant shift
-    of the per-draw fair value), the quantile of ``samples @ payoff - cost`` equals
-    ``quantile(samples @ payoff) - cost`` — the spec's two writings (line 769) are
-    identical, and there is no separate scalar-edge path. ``alpha`` defaults to the
-    band's own ``alpha`` so the edge bound is read at the same tail the band carries.
+    The payoff lower bound is produced explicitly in probability space and capped at
+    point fair value before cost is subtracted. That keeps the submit/monitor
+    certificate and the selector on one qLCB instead of reconstructing qLCB later
+    from an edge field.
     """
-    a = band.alpha if alpha is None else float(alpha)
-    if not (0.0 < a < 1.0):
-        raise PayoffVectorError(f"DEGENERATE_ALPHA: alpha={a!r} (need 0 < alpha < 1)")
-    sample_fair = np.asarray(band.samples, dtype=float) @ np.asarray(payoff, dtype=float)
-    sample_edges = sample_fair - float(cost)
-    return float(np.quantile(sample_edges, a))
+    q_dot = point_fair_value(band.joint_q, np.asarray(payoff, dtype=float))
+    return float(payoff_lower_bound(band, payoff, q_dot_payoff=q_dot, alpha=alpha) - float(cost))
 
 
 def _route_cost_value(route_cost: RouteCost) -> float:
@@ -756,8 +789,9 @@ def compute_candidate_economics(
     Combines the two corrected transformations into the candidate's economics:
 
       * the VECTOR edge (``point_ev`` = ``q @ payoff - cost``; ``edge_lcb`` =
-        ``quantile(band.samples @ payoff - cost, alpha)`` or, when the empirical qLCB
-        reliability guard supplied a candidate-local lower bound, ``q_safe - cost``); and
+        ``payoff_q_lcb - cost`` where ``payoff_q_lcb`` is read directly from the
+        q-band/payoff vector or, when the empirical qLCB reliability guard supplied
+        a candidate-local lower bound, ``q_safe``); and
       * the VECTOR size (``optimal_stake_usd`` = ``argmax_s robust_delta_u``;
         ``optimal_delta_u`` / ``delta_u_at_min`` the robust ΔU at s* / min-order).
 
@@ -790,11 +824,13 @@ def compute_candidate_economics(
     q_dot = point_fair_value(joint_q, payoff)
     point_ev = q_dot - cost
     q_guard = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
-    edge_lcb = (
-        float(q_guard) - cost
+    payoff_q_lcb = (
+        float(q_guard)
         if q_guard is not None
-        else edge_lower_bound(band, payoff, cost, alpha=alpha)
+        else payoff_lower_bound(band, payoff, q_dot_payoff=q_dot, alpha=alpha)
     )
+    payoff_q_lcb = min(max(float(payoff_q_lcb), 0.0), float(q_dot))
+    edge_lcb = payoff_q_lcb - cost
 
     optimal_stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
         sizing_candidate,
@@ -807,6 +843,32 @@ def compute_candidate_economics(
         guarded_payoff_q_lcb=q_guard,
     )
 
+    chosen_stake_cost = None
+    chosen_stake_point_ev = None
+    chosen_stake_edge_lcb = None
+    if (
+        optimal_stake > Decimal("0")
+        and optimal_delta_u > 0.0
+        and sizing_candidate.executable_cost_curve is not None
+    ):
+        try:
+            chosen_stake_cost = sizing_candidate.executable_cost_curve.avg_cost(
+                optimal_stake
+            )
+            if chosen_stake_cost.currency != "probability_units":
+                raise PayoffVectorError(
+                    "CHOSEN_STAKE_COST_NOT_PROBABILITY_UNITS: "
+                    f"route {candidate_route.route_cost.route_id!r} chosen-stake cost "
+                    f"currency is {chosen_stake_cost.currency!r}"
+                )
+            chosen_cost = float(chosen_stake_cost.value)
+            chosen_stake_point_ev = q_dot - chosen_cost
+            chosen_stake_edge_lcb = payoff_q_lcb - chosen_cost
+        except Exception:  # noqa: BLE001 - computed live economics must not trade unpriced stake.
+            chosen_stake_cost = None
+            chosen_stake_point_ev = None
+            chosen_stake_edge_lcb = float("-inf")
+
     return CandidateEconomics(
         candidate_id=candidate_route.candidate_id,
         point_ev=point_ev,
@@ -817,6 +879,10 @@ def compute_candidate_economics(
         q_dot_payoff=q_dot,
         cost=candidate_route.route_cost.avg_cost,
         route_id=candidate_route.route_cost.route_id,
+        payoff_q_lcb=payoff_q_lcb,
+        chosen_stake_cost=chosen_stake_cost,
+        chosen_stake_point_ev=chosen_stake_point_ev,
+        chosen_stake_edge_lcb=chosen_stake_edge_lcb,
     )
 
 
@@ -840,7 +906,7 @@ def live_candidate_passes(
         candidate.delta_u_at_min > 0
         candidate.optimal_delta_u > 0
         executable route available
-        direction law proof present
+        native side proof present
         market coherence accepted
 
     EVERY condition is a vector / structural quantity. The scalar ``q - price`` trade
@@ -848,11 +914,16 @@ def live_candidate_passes(
     telemetry and is never read here. So the bad selection (promoting on a
     scalar ``q_i - price`` that ignores the rest of the payoff vector and the family
     exposure) is unconstructable: the only inputs to the pass are the vector edge_lcb,
-    the vector ΔU at min and at s*, the route's executability, the direction-law proof,
+    the vector DeltaU at min and at s*, the route's executability, the native-side proof,
     and the coherence report.
     """
+    edge_lcb = (
+        economics.chosen_stake_edge_lcb
+        if economics.chosen_stake_edge_lcb is not None
+        else economics.edge_lcb
+    )
     return (
-        economics.edge_lcb > 0.0
+        edge_lcb > 0.0
         and economics.delta_u_at_min > 0.0
         and economics.optimal_delta_u > 0.0
         and candidate_route.route_cost.executable

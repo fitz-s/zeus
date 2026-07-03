@@ -264,27 +264,31 @@ def _candidate(
     )
 
 
-def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
-    clob = _patch_evaluator(monkeypatch, entry_price=0.01)
-
-    decisions = evaluator_module.evaluate_candidate(
-        _candidate(),
-        conn=None,
-        portfolio=PortfolioState(bankroll=211.37),
-        clob=clob,
-        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
-        decision_time=TEST_DECISION_TIME,
+def test_center_buy_ultra_low_price_marker_is_not_live_veto():
+    edge = SimpleNamespace(
+        direction="buy_yes",
+        entry_price=0.01,
+        bin=SimpleNamespace(is_shoulder=False),
     )
 
-    assert len(decisions) == 1
-    assert decisions[0].should_trade is False
-    assert decisions[0].strategy_key == "center_buy"
-    assert decisions[0].rejection_stage == "MARKET_FILTER"
-    assert decisions[0].rejection_reasons == ["center_buy_ultra_low_price"]
-    assert decisions[0].rejection_reason_detail.startswith("CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02")
-    assert "strategy=center_buy" in decisions[0].rejection_reason_detail
-    assert "tail_topology=false" in decisions[0].rejection_reason_detail
-    assert "strategy_entry_price_floor" in decisions[0].applied_validations
+    telemetry = evaluator_module._center_buy_ultra_low_price_telemetry_reason(
+        "center_buy",
+        edge,
+    )
+    floor_reason = evaluator_module._strategy_entry_price_floor_block_reason(
+        "center_buy",
+        edge,
+    )
+
+    assert telemetry.startswith("CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02")
+    assert floor_reason is not None
+    assert "CENTER_BUY_ULTRA_LOW_PRICE" not in floor_reason
+    assert "strategy=center_buy" in floor_reason
+    assert "tail_topology=false" in floor_reason
+    assert (
+        evaluator_module._live_entry_economic_floor_no_trade_reason(floor_reason)
+        is NoTradeReason.STRATEGY_ECONOMIC_FLOOR
+    )
 
 
 def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch, tmp_path):

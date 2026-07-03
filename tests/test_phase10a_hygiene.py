@@ -220,9 +220,10 @@ class TestRCIIngestMetricStampContractLock:
 
 import sqlite3
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.state.db import (
+    chain_only_entry_block_scope,
     log_selection_family_fact,
     query_chain_only_quarantine_rows,
     query_token_suppression_tokens,
@@ -242,6 +243,56 @@ def _make_ts_conn() -> sqlite3.Connection:
 def _suppress(conn, token_id: str, reason: str) -> dict:
     return record_token_suppression(
         conn, token_id=token_id, suppression_reason=reason, source_module="test_mod"
+    )
+
+
+def _insert_weather_topology(
+    conn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    target_date: str,
+    status: str = "CURRENT",
+    authority_status: str = "VERIFIED",
+) -> None:
+    _ensure_market_topology_state(conn)
+    conn.execute(
+        """
+        INSERT INTO market_topology_state (
+            topology_id, scope_key, market_family, condition_id,
+            city_id, target_local_date, temperature_metric,
+            token_ids_json, source_contract_status, authority_status, status
+        ) VALUES (?, ?, 'weather_temperature', ?, 'Test City', ?, 'high',
+                  '[]', 'MATCH', ?, ?)
+        """,
+        (
+            f"topo-{condition_id}",
+            f"weather_temperature|{condition_id}|Test City|{target_date}|high|test",
+            condition_id,
+            target_date,
+            authority_status,
+            status,
+        ),
+    )
+
+
+def _ensure_market_topology_state(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_topology_state (
+            topology_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            market_family TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            city_id TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            source_contract_status TEXT NOT NULL,
+            authority_status TEXT NOT NULL,
+            status TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT '2026-06-29T00:00:00+00:00'
+        )
+        """
     )
 
 
@@ -374,6 +425,70 @@ class TestRCJTokenSuppressionHistoryView:
         ).fetchall()
         assert len(cur) == 2
         assert {r["suppression_reason"] for r in cur} == {"settled_position", "chain_only_quarantined"}
+
+    def test_chain_only_non_weather_fact_is_position_only_and_ignored(self):
+        conn = _make_ts_conn()
+        _ensure_market_topology_state(conn)
+        result = record_token_suppression(
+            conn,
+            token_id="non-weather-token",
+            suppression_reason="chain_only_quarantined",
+            source_module="test_mod",
+            condition_id="non-weather-condition",
+        )
+        assert result["status"] == "written"
+
+        rows = query_chain_only_quarantine_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["entry_block_scope"] == "position_only"
+        assert "non-weather-token" in query_token_suppression_tokens(conn)
+
+    def test_chain_only_old_weather_fact_is_position_only_and_ignored(self):
+        conn = _make_ts_conn()
+        condition_id = "old-weather-condition"
+        _insert_weather_topology(
+            conn,
+            condition_id=condition_id,
+            target_date="2026-05-19",
+        )
+        result = record_token_suppression(
+            conn,
+            token_id="old-weather-token",
+            suppression_reason="chain_only_quarantined",
+            source_module="test_mod",
+            condition_id=condition_id,
+        )
+        assert result["status"] == "written"
+
+        rows = query_chain_only_quarantine_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["entry_block_scope"] == "position_only"
+        assert chain_only_entry_block_scope(conn, condition_id=condition_id) == "position_only"
+        assert "old-weather-token" in query_token_suppression_tokens(conn)
+
+    def test_chain_only_current_weather_fact_remains_global_blocker(self):
+        conn = _make_ts_conn()
+        condition_id = "current-weather-condition"
+        target_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+        _insert_weather_topology(
+            conn,
+            condition_id=condition_id,
+            target_date=target_date,
+        )
+        result = record_token_suppression(
+            conn,
+            token_id="current-weather-token",
+            suppression_reason="chain_only_quarantined",
+            source_module="test_mod",
+            condition_id=condition_id,
+        )
+        assert result["status"] == "written"
+
+        rows = query_chain_only_quarantine_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["entry_block_scope"] == "global"
+        assert chain_only_entry_block_scope(conn, condition_id=condition_id) == "global"
+        assert "current-weather-token" not in query_token_suppression_tokens(conn)
 
 
 # ---------------------------------------------------------------------------

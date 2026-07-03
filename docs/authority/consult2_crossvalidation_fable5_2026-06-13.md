@@ -1,5 +1,7 @@
 # Consult-2 double-review: Fable 5 independent same-prompt answer (2026-06-13)
 
+Status: ARCHIVED_REFERENCE — cross-validation evidence behind the calibration authority; not standalone live law.
+
 Cross-validation status: CONVERGENT with the GPT consult-2 answer
 (`consult2_era_contamination_fdr_maker_2026-06-13_raw.txt`) on every load-bearing
 result. Refinements folded into `statistical_calibration_addendum_2026-06-13.md`

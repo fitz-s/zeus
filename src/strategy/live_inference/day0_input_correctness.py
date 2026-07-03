@@ -1,6 +1,6 @@
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: docs/operations/day0_multiangle_critique_2026-06-12.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/day0_multiangle_critique_2026-06-12.md
 #   Blind spot C, re-scoped 2026-06-12 per operator anti-over-design directive:
 #   this is an INPUT-CORRECTNESS check, not a configurable ban window. It fires
 #   ONLY when a decision input is genuinely incoherent.

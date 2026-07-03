@@ -445,6 +445,42 @@ def test_guarded_payoff_q_lcb_recomputes_no_delta_u_and_stake():
     assert high.optimal_stake_usd >= low.optimal_stake_usd
 
 
+def test_computed_economics_records_chosen_stake_cost_from_curve():
+    """The executable stake cost is the same curve price submit will carry."""
+
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.82, "b24": 0.05})
+    band = _band_from_point(jq, jitter=0.01)
+    matrix = FamilyPayoffMatrix.over_bins([b.bin_id for b in space.bins if b.executable])
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+
+    yes = _yes_instrument("b25")
+    route = build_candidate_route(
+        candidate_id="cand-yes-25",
+        instrument=yes,
+        route_cost=_route_cost(yes, cost=0.20),
+        omega=space,
+    )
+    sizing = _sizing(space, side="YES", bin_id="b25", q_point=0.82, q_lcb=0.78, price="0.40")
+
+    economics = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+        guarded_payoff_q_lcb=0.78,
+    )
+
+    assert economics.optimal_stake_usd > Decimal("0")
+    assert economics.chosen_stake_cost is not None
+    assert economics.chosen_stake_cost.value == pytest.approx(0.40)
+    assert economics.chosen_stake_edge_lcb == pytest.approx(0.78 - 0.40)
+    assert economics.chosen_stake_edge_lcb < economics.edge_lcb
+
+
 # ===========================================================================
 # RED-on-revert #2 (spec line 1184): the scalar q - cost CANNOT select.
 # ===========================================================================
@@ -508,6 +544,25 @@ def test_scalar_q_minus_cost_cannot_select_candidate():
     )
     assert live_candidate_passes(
         econ_vector_positive,
+        route,
+        direction_law_proof_present=True,
+        market_coherence_accepted=True,
+    )
+
+    econ_route_positive_chosen_negative = CandidateEconomics(
+        candidate_id="cand-yes-25",
+        point_ev=scalar,
+        edge_lcb=0.05,
+        delta_u_at_min=0.01,
+        optimal_stake_usd=Decimal("5"),
+        optimal_delta_u=0.02,
+        q_dot_payoff=point_fair_value(jq, route.payoff_vector),
+        cost=route.route_cost.avg_cost,
+        route_id=route.route_cost.route_id,
+        chosen_stake_edge_lcb=-0.01,
+    )
+    assert not live_candidate_passes(
+        econ_route_positive_chosen_negative,
         route,
         direction_law_proof_present=True,
         market_coherence_accepted=True,

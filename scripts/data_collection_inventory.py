@@ -86,8 +86,6 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     # Trading-adjacent analysis + ops (classified 2026-06-11: not raw data collection;
     # these read already-collected data and produce derived outputs or control signals).
     "settlement_guard_report",    # settlement audit: reads trade/settlement tables → JSON report
-    "shadow_comparator",          # shadow vs live comparison (analysis, not source data)
-    "day0_shadow_enrichment",     # enriches shadow receipts from settlement data (derived)
     "settlement_skill_attribution",  # skill-vs-luck grade of settled positions (derived audit,
                                      # reads edli_live_profit_audit + settlement/forecast tables)
     "new_listing_scout",          # new market detection → intents (trading control, not raw data)
@@ -95,7 +93,7 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "edli_event_reactor",         # EDLI event reactor (trading engine, not data collection)
     "edli_bankroll_warm",         # bankroll cache warm (trading prep, not collection)
     "edli_command_recovery",      # venue command recovery (execution layer)
-    "maker_rest_escalation",      # REST maker order escalation (execution layer)
+    "c3_staleness_cancel",         # C3 staleness/TTL cancel path, W4.2 (execution layer)
     "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
     "edli_continuous_redecision_screen",  # continuous redecision screen over held families
                                           # (trading control loop, reads already-collected data)

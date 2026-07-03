@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math
+from pathlib import Path
 import sqlite3
 from typing import Any
 
@@ -175,12 +176,19 @@ def _load_manual_overrides(
     strategy_key: str,
     now: datetime,
 ) -> list[sqlite3.Row]:
+    control_overrides_ref = _control_overrides_authority_ref(conn)
+    if control_overrides_ref is None:
+        logger.warning(
+            "policy: manual control_overrides skipped — world authority not available "
+            "on trade connection"
+        )
+        return []
     rows = _query_rows(
         conn,
-        """
+        f"""
         SELECT override_id, target_type, target_key, action_type, value, issued_at,
                effective_until, precedence
-        FROM control_overrides
+        FROM {control_overrides_ref}
         WHERE target_type IN ('global', 'strategy')
         ORDER BY precedence DESC, issued_at DESC, override_id DESC
         """,
@@ -195,6 +203,65 @@ def _load_manual_overrides(
             continue
         applicable.append(row)
     return applicable
+
+
+def _control_overrides_authority_ref(conn: sqlite3.Connection) -> str | None:
+    """Return the schema-qualified control override authority for strategy policy.
+
+    Live strategy policy may run on a trade-main connection with the world DB
+    attached. In that shape, an unqualified ``control_overrides`` read resolves
+    to the legacy archived trade ghost, not the canonical world authority. The
+    risk layer must only consume world control authority; test/in-memory DBs keep
+    the unqualified local surface.
+    """
+
+    databases = _database_list(conn)
+    if _schema_has_control_overrides(conn, "world"):
+        return "world.control_overrides"
+    main_file = databases.get("main", "")
+    if Path(main_file).name == "zeus-world.db" and _schema_has_control_overrides(conn, "main"):
+        return "control_overrides"
+    if Path(main_file).name == "zeus_trades.db":
+        return None
+    if _schema_has_control_overrides(conn, "main"):
+        return "control_overrides"
+    return None
+
+
+def _database_list(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        try:
+            name = str(row["name"] or "")
+            file_name = str(row["file"] or "")
+        except (KeyError, IndexError, TypeError):
+            name = str(row[1] or "")
+            file_name = str(row[2] or "")
+        if name:
+            out[name] = file_name
+    return out
+
+
+def _schema_has_control_overrides(conn: sqlite3.Connection, schema: str) -> bool:
+    if schema not in {"main", "world"}:
+        return False
+    try:
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM {schema}.sqlite_master
+            WHERE name = 'control_overrides'
+              AND type IN ('table', 'view')
+            LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 def _load_risk_actions(

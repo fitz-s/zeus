@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
@@ -44,6 +45,12 @@ from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.observability.counters import increment as _cnt_inc
 from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
+from src.venue.batch_submit import (
+    CANCEL_ECHO_CANDIDATE_FIELDS,
+    MAX_ORDERS_PER_BATCH,
+    SUBMIT_ECHO_CANDIDATE_FIELDS,
+    map_batch_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +127,77 @@ PUSD_WRAP_SELECTOR = "0xbf376c7a"  # Deprecated V1 — use COLLATERAL_ONRAMP_WRA
 # Kill switch for autonomous wrap. Default OFF (empty string → dry_run=False = live).
 # Set ZEUS_AUTONOMOUS_WRAP_DRY_RUN=1 to enable dry-run (build+sign, skip broadcast).
 AUTONOMOUS_WRAP_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_WRAP_DRY_RUN"
+
+# W2.4: CTF split/merge/convert selectors. Verified locally via eth_utils.keccak
+# against each function's canonical source signature, and CROSS-VALIDATED by
+# recomputing CTF_REDEEM_POSITIONS_SELECTOR / NEGRISK_REDEEM_POSITIONS_SELECTOR
+# above with the identical methodology — both reproduce the already
+# on-chain-verified pinned values byte-for-byte, confirming the methodology
+# before it is trusted for these new selectors. On-chain bytecode verification
+# of split/merge/convert on THIS deployment is deferred to operator dry-run
+# before first live use — the same posture already declared for
+# POLYGON_CTF_ADDRESS/POLYGON_NEGRISK_ADAPTER_ADDRESS themselves (lines above).
+#
+# splitPosition(address collateralToken, bytes32 parentCollectionId,
+#               bytes32 conditionId, uint256[] partition, uint256 amount)
+# keccak256(...)[:4]. Source: gnosis/conditional-tokens-contracts
+# ConditionalTokens.sol (github.com/gnosis/conditional-tokens-contracts/
+# blob/master/contracts/ConditionalTokens.sol) — the standard CTF ABI already
+# used by CTF_REDEEM_POSITIONS_SELECTOR above.
+CTF_SPLIT_POSITION_SELECTOR = "0x72ce4275"
+# mergePositions(address,bytes32,bytes32,uint256[],uint256) — same signature
+# shape as splitPosition, same source. This selector is IDENTICAL on standard
+# CTF (POLYGON_CTF_ADDRESS) and NegRiskAdapter (POLYGON_NEGRISK_ADAPTER_ADDRESS):
+# both contracts expose this exact 5-arg mergePositions signature. Independently
+# cross-checked against the NegRiskAdapter Go contract bindings (pkg.go.dev/
+# github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-adapter),
+# which report method 0x9e7212ad for this same signature.
+CTF_MERGE_POSITIONS_SELECTOR = "0x9e7212ad"
+# NegRiskAdapter convenience splitPosition(bytes32 conditionId, uint256 amount) —
+# splits directly against NegRiskAdapter's own wcol collateral for a single
+# negRisk-routed condition (no explicit collateral/parent/partition args).
+# Source: Polymarket/neg-risk-ctf-adapter src/NegRiskAdapter.sol
+# (github.com/Polymarket/neg-risk-ctf-adapter). Selector computed locally via
+# keccak256('splitPosition(bytes32,uint256)')[:4]; no third-party binding
+# exposes this overload's selector directly (only the 5-arg form and
+# mergePositions' 2-arg overload are visible in the Go bindings — see
+# NEGRISK_MERGE_POSITIONS_SELECTOR), so this one relies on the source-signature
+# cross-check alone until operator dry-run confirms it on-chain.
+NEGRISK_SPLIT_POSITION_SELECTOR = "0xa3d7da1d"
+# NegRiskAdapter convenience mergePositions(bytes32 conditionId, uint256 amount).
+# Same source as NEGRISK_SPLIT_POSITION_SELECTOR. Cross-checked against Go
+# bindings "MergePositions0", method 0xb10c5c17 for signature
+# mergePositions(bytes32,uint256).
+NEGRISK_MERGE_POSITIONS_SELECTOR = "0xb10c5c17"
+# NegRiskAdapter convertPositions(bytes32 marketId, uint256 indexSet, uint256 amount).
+#
+# CONVENTION ANTIBODY (2026-07-02): indexSet here is a MULTI-MARKET bitfield —
+# NatSpec: "the least significant bit is the first question (index zero)";
+# bit SET = NO position, bit UNSET = YES position. This is a COMPLETELY
+# DIFFERENT convention from the per-condition CTF outcome-slot bitmask used by
+# redeemPositions/splitPosition/mergePositions elsewhere in this file (see
+# _zeus_index_set_to_ctf_bitmask) — do NOT reuse that translation for
+# convert's indexSet; it would silently select the wrong sibling markets.
+#
+# marketId is NegRiskIdLib.getMarketId(questionId) — NOT the standard
+# conditionId used everywhere else in this file. This module does not derive
+# marketId from questionId (that replicates NegRiskIdLib.sol's hashing scheme,
+# out of scope for this inert packet); callers supply it explicitly.
+#
+# Source: Polymarket/neg-risk-ctf-adapter src/NegRiskAdapter.sol. Cross-checked
+# against Go contract bindings method 0xc64748c4 for signature
+# convertPositions(bytes32,uint256,uint256).
+NEGRISK_CONVERT_POSITIONS_SELECTOR = "0xc64748c4"
+# Kill switch for autonomous CTF split/merge/convert (all three — brand-new,
+# never-before-existing capability; INERT this packet, no production caller).
+# Default OFF returns CTF_CONVERSION_DISABLED without any chain I/O, mirroring
+# AUTONOMOUS_REDEEM_ENABLED_ENV's posture for a not-yet-trusted autonomous
+# chain-write path (unlike AUTONOMOUS_WRAP_DRY_RUN_ENV, which defaults to live
+# because wrap was already promoted to production use).
+AUTONOMOUS_CTF_CONVERSION_ENABLED_ENV = "ZEUS_AUTONOMOUS_CTF_CONVERSION_ENABLED"
+# Second-layer dry-run gate (build+sign, skip broadcast) — same shape as
+# AUTONOMOUS_WRAP_DRY_RUN_ENV. Only consulted once the ENABLED switch above is on.
+AUTONOMOUS_CTF_CONVERSION_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_CTF_CONVERSION_DRY_RUN"
 
 
 @dataclass(frozen=True)
@@ -210,6 +288,10 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def cancel(self, order_id: str) -> CancelResult: ...
 
+    def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]: ...
+
+    def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]: ...
+
     def get_order(self, order_id: str) -> OrderState: ...
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]: ...
@@ -222,6 +304,8 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def get_collateral_payload(self) -> dict[str, Any]: ...
 
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]: ...
+
     def get_balance(self, conn=None) -> Any: ...
 
     def redeem(
@@ -229,6 +313,36 @@ class PolymarketV2AdapterProtocol(Protocol):
         condition_id: str,
         *,
         index_sets: list[int] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def split_positions(
+        self,
+        condition_id: str,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
+        neg_risk: bool = False,
+    ) -> dict[str, Any]: ...
+
+    def merge_positions(
+        self,
+        condition_id: str,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
+        neg_risk: bool = False,
+    ) -> dict[str, Any]: ...
+
+    def convert_positions(
+        self,
+        market_id: str,
+        index_set: int,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
     ) -> dict[str, Any]: ...
 
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck: ...
@@ -527,10 +641,29 @@ class PolymarketV2Adapter:
             captured_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def _bind_runtime_submission_envelope(
+        self,
+        envelope: VenueSubmissionEnvelope,
+    ) -> VenueSubmissionEnvelope:
+        envelope_funder = str(envelope.funder_address or "").strip()
+        adapter_funder = str(self.funder_address or "").strip()
+        if envelope_funder in {"", "UNRESOLVED_PRE_SUBMIT_FUNDER"}:
+            raise ValueError("submission envelope missing pre-bound funder_address")
+        if envelope_funder.lower() != adapter_funder.lower():
+            raise ValueError(
+                "submission envelope funder_address does not match adapter funder_address"
+            )
+        return envelope.with_updates(
+            sdk_version=self.sdk_version,
+            host=self.host,
+            chain_id=self.chain_id,
+        )
+
     def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult:
         # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
         # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
         try:
+            envelope = self._bind_runtime_submission_envelope(envelope)
             envelope.assert_live_submit_bound()
         except ValueError as exc:
             _cnt_inc("placeholder_envelope_blocked_total")
@@ -574,38 +707,69 @@ class PolymarketV2Adapter:
             )
         signed_order = None
         signed_hash = None
-        if callable(getattr(client, "create_and_post_order", None)):
-            raw_response = client.create_and_post_order(
-                order_args,
-                options=options,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
-            )
-        elif callable(getattr(client, "create_order", None)) and callable(getattr(client, "post_order", None)):
-            try:
-                signed_order = client.create_order(order_args, options=options)
-                signed_bytes = _signed_order_bytes(signed_order)
+
+        def _submit_once(active_client: Any) -> Any:
+            nonlocal signed_order, signed_hash
+            signed_order = None
+            signed_hash = None
+            create_order = getattr(active_client, "create_order", None)
+            post_order = getattr(active_client, "post_order", None)
+            if callable(create_order) and callable(post_order):
+                local_signed_order = create_order(order_args, options=options)
+                signed_bytes = _signed_order_bytes(local_signed_order)
                 signed_hash = hashlib.sha256(signed_bytes).hexdigest()
-            except Exception as exc:
-                return _rejected_submit_result(
-                    envelope,
-                    error_code="V2_PRE_SUBMIT_EXCEPTION",
-                    error_message=str(exc),
+                signed_order = signed_bytes
+                return post_order(
+                    local_signed_order,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
                 )
-            raw_response = client.post_order(
-                signed_order,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
+            create_and_post = getattr(active_client, "create_and_post_order", None)
+            if callable(create_and_post):
+                return create_and_post(
+                    order_args,
+                    options=options,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
+                )
+            raise V2AdapterError(
+                "SDK client exposes neither two-step nor one-step order submission"
             )
-            signed_order = signed_bytes
-        else:
+
+        if not (
+            callable(getattr(client, "create_order", None))
+            and callable(getattr(client, "post_order", None))
+        ) and not callable(getattr(client, "create_and_post_order", None)):
             return _rejected_submit_result(
                 envelope,
                 error_code="V2_SUBMIT_UNSUPPORTED",
                 error_message="SDK client exposes neither one-step nor two-step order submission",
             )
+
+        try:
+            raw_response = _submit_once(client)
+        except Exception as exc:
+            if _is_polymarket_invalid_safe_signature_error(exc):
+                logger.error(
+                    "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
+                    "order signature; not retrying through L2 credential refresh"
+                )
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_auth_invalid_signature_400",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
+            if signed_order is None:
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_message=str(exc),
+                )
+            raise
         return _submit_result_from_response(
             envelope,
             raw_response,
@@ -624,6 +788,206 @@ class PolymarketV2Adapter:
         else:
             raw = cancel(order_id)
         return _cancel_result_from_response(order_id, raw)
+
+    def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]:
+        """Submit up to MAX_ORDERS_PER_BATCH orders in ONE SDK post_orders call.
+
+        W2.1 (inert, no production call site). Chunking beyond
+        MAX_ORDERS_PER_BATCH is the CALLER's job (src.venue.batch_submit.
+        chunk_orders / src.execution.batch_order_submission) -- this method
+        refuses an oversized call rather than silently splitting it, so
+        callers cannot lose the INV-28 persist-before-side-effect pairing
+        that must happen per chunk.
+
+        Mirrors submit()'s pre-flight shape: envelopes are bound + asserted
+        live-authority first (no SDK contact on a placeholder envelope). A
+        signing failure (create_order) for ANY envelope aborts the WHOLE
+        call before any network contact -- no partial submission of an
+        unsigned order. If the post_orders() HTTP call itself raises AFTER
+        all orders are signed, this method does NOT catch it (mirrors
+        submit()'s _submit_once: the exception propagates so the caller can
+        record the AMBIGUOUS side effect -- signing succeeded, the network
+        outcome is unknown -- as SUBMIT_TIMEOUT_UNKNOWN, matching the
+        single-order executor.py:4697-4759 pattern).
+        """
+        if not envelopes:
+            return []
+        if len(envelopes) > MAX_ORDERS_PER_BATCH:
+            raise ValueError(
+                f"submit_batch: {len(envelopes)} orders exceeds MAX_ORDERS_PER_BATCH="
+                f"{MAX_ORDERS_PER_BATCH}; caller must chunk "
+                f"(see src.venue.batch_submit.chunk_orders)"
+            )
+
+        bound: list[VenueSubmissionEnvelope] = []
+        for envelope in envelopes:
+            try:
+                bound_envelope = self._bind_runtime_submission_envelope(envelope)
+                bound_envelope.assert_live_submit_bound()
+            except ValueError as exc:
+                _cnt_inc("placeholder_envelope_blocked_total")
+                logger.warning(
+                    "telemetry_counter event=placeholder_envelope_blocked_total path=submit_batch"
+                )
+                return [
+                    _rejected_submit_result(
+                        e,
+                        error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                        error_message=str(exc),
+                    )
+                    for e in envelopes
+                ]
+            bound.append(bound_envelope)
+
+        post_only_values = {bool(e.post_only) for e in bound}
+        if len(post_only_values) > 1:
+            # post_orders() takes ONE post_only flag for the whole call
+            # (py_clob_client_v2/client.py:840) -- envelopes with mixed
+            # post_only cannot share a batch. Fail closed rather than
+            # silently applying one envelope's flag to all.
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="BATCH_POST_ONLY_MISMATCH",
+                    error_message="submit_batch requires all envelopes to share one post_only value",
+                )
+                for e in envelopes
+            ]
+        batch_post_only = next(iter(post_only_values), False)
+
+        try:
+            preflight = self.preflight()
+        except Exception as exc:
+            return [
+                _rejected_submit_result(e, error_code="V2_PREFLIGHT_EXCEPTION", error_message=str(exc))
+                for e in envelopes
+            ]
+        if not preflight.ok:
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code=preflight.error_code or "V2_PREFLIGHT_FAILED",
+                    error_message=preflight.message,
+                )
+                for e in envelopes
+            ]
+
+        client = self._sdk_client()
+        if not callable(getattr(client, "create_order", None)) or not callable(
+            getattr(client, "post_orders", None)
+        ):
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="V2_BATCH_SUBMIT_UNSUPPORTED",
+                    error_message="SDK client exposes neither create_order nor post_orders",
+                )
+                for e in envelopes
+            ]
+
+        signed_orders: list[Optional[bytes]] = [None] * len(bound)
+        signed_hashes: list[Optional[str]] = [None] * len(bound)
+        post_orders_args: list[Any] = []
+        try:
+            from py_clob_client_v2.clob_types import PostOrdersV2Args
+
+            for i, envelope in enumerate(bound):
+                order_args = _order_args_from_envelope(envelope)
+                options = SimpleNamespace(tick_size=str(envelope.tick_size), neg_risk=envelope.neg_risk)
+                local_signed_order = client.create_order(order_args, options=options)
+                signed_bytes = _signed_order_bytes(local_signed_order)
+                signed_hashes[i] = hashlib.sha256(signed_bytes).hexdigest()
+                signed_orders[i] = signed_bytes
+                post_orders_args.append(PostOrdersV2Args(order=local_signed_order, orderType=envelope.order_type))
+        except Exception as exc:
+            # Pre-network signing failure -- no side effect crossed for
+            # ANY envelope in this call. Reject the whole batch (matches
+            # single-order submit()'s V2_PRE_SUBMIT_EXCEPTION when
+            # signed_order is None).
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_message=str(exc),
+                    signed_order=signed_orders[i] if i < len(signed_orders) else None,
+                    signed_order_hash=signed_hashes[i] if i < len(signed_hashes) else None,
+                )
+                for i, e in enumerate(envelopes)
+            ]
+
+        # Deliberately NOT wrapped in try/except: a post-signing exception
+        # here is an AMBIGUOUS side effect (venue may have received the
+        # request). Propagate so the caller records SUBMIT_TIMEOUT_UNKNOWN
+        # for every command in this chunk, mirroring executor.py's
+        # single-order post-submit exception handling.
+        raw_response = client.post_orders(post_orders_args, post_only=batch_post_only, defer_exec=False)
+
+        mapped = map_batch_items(
+            raw_response,
+            echo_keys=signed_hashes,
+            echo_candidate_fields=SUBMIT_ECHO_CANDIDATE_FIELDS,
+        )
+        results: list[SubmitResult] = []
+        for i, envelope in enumerate(bound):
+            item = mapped[i]
+            if item.source == "unmapped":
+                results.append(
+                    _unmapped_submit_result(
+                        envelope,
+                        signed_order=signed_orders[i],
+                        signed_order_hash=signed_hashes[i],
+                        raw_response=raw_response,
+                    )
+                )
+            else:
+                results.append(
+                    _submit_result_from_response(
+                        envelope,
+                        item.raw_item,
+                        signed_order=signed_orders[i],
+                        signed_order_hash=signed_hashes[i],
+                    )
+                )
+        return results
+
+    def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]:
+        """Cancel up to MAX_ORDERS_PER_BATCH orders in ONE SDK cancel_orders call.
+
+        W2.1 (inert, no production call site). Same chunking contract as
+        submit_batch: refuses an oversized call, caller chunks.
+        """
+        if not order_ids:
+            return []
+        if len(order_ids) > MAX_ORDERS_PER_BATCH:
+            raise ValueError(
+                f"cancel_batch: {len(order_ids)} orders exceeds MAX_ORDERS_PER_BATCH="
+                f"{MAX_ORDERS_PER_BATCH}; caller must chunk "
+                f"(see src.venue.batch_submit.chunk_orders)"
+            )
+        client = self._sdk_client()
+        cancel_orders = getattr(client, "cancel_orders", None)
+        if not callable(cancel_orders):
+            return [
+                _unmapped_cancel_result(order_id, error_code="CANCEL_BATCH_UNSUPPORTED")
+                for order_id in order_ids
+            ]
+        # Deliberately NOT wrapped in try/except -- mirrors submit_batch:
+        # a post-call exception is an ambiguous side effect the caller must
+        # record, not swallow into a false "rejected".
+        raw_response = cancel_orders(list(order_ids))
+        mapped = map_batch_items(
+            raw_response,
+            echo_keys=list(order_ids),
+            echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
+        )
+        results: list[CancelResult] = []
+        for i, order_id in enumerate(order_ids):
+            item = mapped[i]
+            if item.source == "unmapped":
+                results.append(_unmapped_cancel_result(order_id, raw_response=raw_response))
+            else:
+                results.append(_cancel_result_from_response(order_id, item.raw_item))
+        return results
 
     def get_order(self, order_id: str) -> OrderState:
         _assert_no_world_mutex_held_for_io("venue.get_order")
@@ -699,13 +1063,22 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
-    def _pusd_collateral_payload_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+    def _pusd_collateral_payload_from_raw(
+        self,
+        raw: dict[str, Any],
+        *,
+        allow_chain_allowance_fallback: bool = True,
+    ) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
         allowance_source = "clob_balance_allowance"
         if allowance_int is None or allowance_int == 0:
-            chain_allowance = self._chain_collateral_allowance_micro()
+            chain_allowance = (
+                self._chain_collateral_allowance_micro()
+                if allow_chain_allowance_fallback
+                else None
+            )
             if chain_allowance is not None:
                 pusd_allowance_raw = chain_allowance
                 allowance_source = "chain_erc20_allowance"
@@ -728,11 +1101,14 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": allowance_source,
         }
 
-    def get_pusd_collateral_payload(self) -> dict[str, Any]:
+    def get_pusd_collateral_payload(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Return pUSD balance/allowance facts without CTF position enumeration."""
 
-        raw = self._collateral_balance_allowance_raw()
-        return self._pusd_collateral_payload_from_raw(raw)
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=refresh_allowance)
+        return self._pusd_collateral_payload_from_raw(
+            raw,
+            allow_chain_allowance_fallback=refresh_allowance,
+        )
 
     def get_collateral_payload(self) -> dict[str, Any]:
         """Return SDK-derived collateral facts for CollateralLedger.refresh().
@@ -741,7 +1117,7 @@ class PolymarketV2Adapter:
         ledger receives plain dictionaries and never depends on SDK types.
         """
 
-        raw = self._collateral_balance_allowance_raw()
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
         payload = self._pusd_collateral_payload_from_raw(raw)
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
@@ -800,7 +1176,47 @@ class PolymarketV2Adapter:
         payload["ctf_token_allowances_units"] = allowances
         return payload
 
-    def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]:
+        """Return pUSD facts plus CTF balance/allowance only for requested tokens.
+
+        Exit submit needs inventory proof for the token being sold, not a full
+        wallet fanout across every weather position. Full enumeration can exceed
+        the submit deadline and then leave the sell path reading a pUSD-only
+        snapshot. This targeted surface keeps sell preflight exact while making
+        its runtime proportional to the order being submitted.
+        """
+
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
+        payload = self._pusd_collateral_payload_from_raw(raw)
+        balances: dict[str, int] = {}
+        allowances: dict[str, int] = {}
+        for token_id in dict.fromkeys(str(t or "").strip() for t in token_ids):
+            if not token_id:
+                continue
+            conditional_raw = self._conditional_balance_allowance_raw(token_id)
+            conditional_balance_units = _micro_int_or_none(conditional_raw.get("balance"))
+            balance_units = conditional_balance_units if conditional_balance_units is not None else 0
+            balances[token_id] = balance_units
+            allowance_raw = conditional_raw.get("allowance")
+            allowance_units: int
+            if allowance_raw is not None:
+                allowance_micro = _micro_int_or_none(allowance_raw)
+                allowance_units = (
+                    allowance_micro
+                    if allowance_micro is not None
+                    else _ctf_balance_units(allowance_raw)
+                )
+            elif conditional_balance_units is not None:
+                allowance_units = conditional_balance_units
+            else:
+                allowance_units = 0
+            allowances[token_id] = allowance_units
+        payload["ctf_token_balances_units"] = balances
+        payload["ctf_token_allowances_units"] = allowances
+        payload["ctf_token_scope"] = "targeted"
+        return payload
+
+    def _collateral_balance_allowance_raw(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Read the CLOB collateral balance/allowance surface once."""
 
         client = self._sdk_client()
@@ -822,7 +1238,7 @@ class PolymarketV2Adapter:
         update_balance_allowance = getattr(client, "update_balance_allowance", None)
 
         def _read_once() -> Any:
-            if callable(update_balance_allowance):
+            if refresh_allowance and callable(update_balance_allowance):
                 update_balance_allowance(params)
             return get_balance_allowance(params)
 
@@ -2187,6 +2603,399 @@ class PolymarketV2Adapter:
             "amount_micro": amount_micro,
         }
 
+    def _broadcast_ctf_operation_via_safe(
+        self,
+        operation: str,
+        inner_to: str,
+        inner_data_hex: str,
+        safe_address: str,
+        signer_eoa: str,
+    ) -> dict[str, Any]:
+        """Safe v1.3.0 execTransaction broadcast for a CTF split/merge/convert
+        inner call. Shared by split_positions/merge_positions/convert_positions.
+
+        Mirrors _wrap_via_safe's preflight+build+sign+broadcast shape exactly
+        (same four preflight checks, same dry-run/broadcast gating), generalized
+        from a fixed WRAP/APPROVE inner-call pair to caller-supplied inner
+        calldata for an arbitrary CTF/NegRiskAdapter target.
+
+        Two-layer safety gate, both default OFF (brand-new capability, INERT
+        this packet — nothing calls split_positions/merge_positions/
+        convert_positions in production yet, unlike wrap which was already
+        promoted live):
+          AUTONOMOUS_CTF_CONVERSION_ENABLED_ENV — hard kill switch. OFF returns
+            CTF_CONVERSION_DISABLED without any chain I/O.
+          AUTONOMOUS_CTF_CONVERSION_DRY_RUN_ENV — once enabled, build+sign but
+            skip broadcast when set.
+
+        Returns dict with:
+          success=True, tx_hash=<str>                        (live broadcast)
+          success=False, errorCode="CTF_CONVERSION_DISABLED"  (kill switch off)
+          success=False, errorCode="CTF_CONVERSION_DRY_RUN_LOGGED",
+            dry_run_fingerprint=<16-hex>                      (dry-run mode)
+          success=False, errorCode=<CTF_CONVERSION_*>          (error)
+        """
+        import hashlib as _hashlib
+        import logging
+        import os
+
+        from src.venue.safe_exec import (
+            SAFE_V1_3_VERSION,
+            build_exec_transaction_calldata,
+            build_safe_tx_hash,
+            sign_safe_tx,
+        )
+
+        _logger = logging.getLogger(__name__)
+
+        enabled = os.environ.get(AUTONOMOUS_CTF_CONVERSION_ENABLED_ENV, "").lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not enabled:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_DISABLED",
+                "errorMessage": (
+                    f"{AUTONOMOUS_CTF_CONVERSION_ENABLED_ENV} is not set; CTF "
+                    "split/merge/convert broadcast is disabled by default"
+                ),
+                "operation": operation,
+            }
+
+        dry_run = os.environ.get(AUTONOMOUS_CTF_CONVERSION_DRY_RUN_ENV, "").lower() in (
+            "1", "true", "yes", "on",
+        )
+
+        inner_data = bytes.fromhex(inner_data_hex.removeprefix("0x"))
+
+        # ── Pre-flight 1: Safe VERSION ────────────────────────────────────────
+        try:
+            import eth_abi
+            raw_version = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xffa1ad74"}, "latest"],
+            )
+            version_str = eth_abi.decode(
+                ["string"], bytes.fromhex(str(raw_version).removeprefix("0x"))
+            )[0]
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"VERSION() eth_call failed: {exc}",
+                "operation": operation,
+            }
+        if version_str != SAFE_V1_3_VERSION:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_SAFE_VERSION_UNSUPPORTED",
+                "errorMessage": (
+                    f"Safe at {safe_address} reports VERSION={version_str!r}; "
+                    f"expected {SAFE_V1_3_VERSION!r}"
+                ),
+                "operation": operation,
+            }
+
+        # ── Pre-flight 2: getOwners ───────────────────────────────────────────
+        try:
+            raw_owners = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xa0e67e2b"}, "latest"],
+            )
+            owners_list = eth_abi.decode(
+                ["address[]"], bytes.fromhex(str(raw_owners).removeprefix("0x"))
+            )[0]
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"getOwners() eth_call failed: {exc}",
+                "operation": operation,
+            }
+        if signer_eoa.lower() not in [o.lower() for o in owners_list]:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_SAFE_OWNER_MISMATCH",
+                "errorMessage": f"signer EOA {signer_eoa} not in Safe.getOwners() {owners_list}",
+                "operation": operation,
+            }
+
+        # ── Pre-flight 3: Safe nonce ──────────────────────────────────────────
+        try:
+            raw_nonce = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xaffed0e0"}, "latest"],
+            )
+            safe_nonce = int(str(raw_nonce), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"Safe nonce() eth_call failed: {exc}",
+                "operation": operation,
+            }
+
+        # ── Pre-flight 4: EOA MATIC balance ──────────────────────────────────
+        _MATIC_FLOOR_WEI = 50_000_000_000_000_000  # 0.05 MATIC
+        try:
+            raw_balance = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_getBalance",
+                [signer_eoa, "latest"],
+            )
+            eoa_balance_wei = int(str(raw_balance), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"eth_getBalance failed for signer EOA: {exc}",
+                "operation": operation,
+            }
+        if eoa_balance_wei < _MATIC_FLOOR_WEI:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_EOA_MATIC_INSUFFICIENT",
+                "errorMessage": (
+                    f"signer EOA {signer_eoa} has {eoa_balance_wei} wei MATIC; "
+                    f"need >= {_MATIC_FLOOR_WEI} wei (0.05 MATIC)"
+                ),
+                "operation": operation,
+            }
+
+        # ── Build Safe tx hash + sign ─────────────────────────────────────────
+        try:
+            safe_tx_hash_bytes = build_safe_tx_hash(
+                safe_address=safe_address,
+                chain_id=int(self.chain_id),
+                to=inner_to,
+                value=0,
+                data=inner_data,
+                operation=0,  # CALL
+                nonce=safe_nonce,
+            )
+            signature = sign_safe_tx(safe_tx_hash_bytes, self.signer_key)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_SIGN_FAILED",
+                "errorMessage": f"Safe sign failed: {exc}",
+                "operation": operation,
+            }
+
+        # ── Build outer execTransaction calldata ─────────────────────────────
+        try:
+            exec_calldata = build_exec_transaction_calldata(
+                to=inner_to,
+                value=0,
+                data=inner_data,
+                operation=0,
+                signatures=signature,
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"execTransaction calldata build failed: {exc}",
+                "operation": operation,
+            }
+
+        # ── EOA nonce + gas ───────────────────────────────────────────────────
+        try:
+            eoa_nonce_hex = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_getTransactionCount",
+                [signer_eoa, "pending"],
+            )
+            eoa_nonce = int(str(eoa_nonce_hex), 16)
+            gas_price_hex = self._rpc_call(self.polygon_rpc_url, "eth_gasPrice", [])
+            gas_price = int(str(gas_price_hex), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"EOA nonce/gasPrice fetch failed: {exc}",
+                "operation": operation,
+            }
+
+        try:
+            gas_hex = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_estimateGas",
+                [{"from": signer_eoa, "to": safe_address, "data": exec_calldata}],
+            )
+            gas_limit = (int(str(gas_hex), 16) * 12) // 10
+        except V2AdapterError as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_GAS_ESTIMATE_REVERTED",
+                "errorMessage": f"eth_estimateGas reverted: {exc}",
+                "operation": operation,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_RPC_PRECHECK_FAILED",
+                "errorMessage": f"eth_estimateGas failed: {exc}",
+                "operation": operation,
+            }
+
+        outer_tx = {
+            "to": safe_address,
+            "data": exec_calldata,
+            "value": 0,
+            "chainId": int(self.chain_id),
+            "nonce": eoa_nonce,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+
+        try:
+            from eth_account import Account
+            signed = Account.sign_transaction(outer_tx, self.signer_key)
+            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_SIGN_FAILED",
+                "errorMessage": f"sign_transaction (outer EOA tx) failed: {exc}",
+                "operation": operation,
+            }
+
+        # ── Dry-run gate ──────────────────────────────────────────────────────
+        if dry_run:
+            # SECURITY: never log or return the signed raw_tx_hex (see
+            # _wrap_via_safe's identical rationale — a signed raw transaction
+            # is a broadcastable payload).
+            _dry_run_fingerprint = _hashlib.sha256(exec_calldata.encode()).hexdigest()[:16]
+            _logger.warning(
+                "CTF_CONVERSION_DRY_RUN_LOGGED operation=%s safe_address=%s "
+                "safe_nonce=%d raw_tx_hex_len=%d dry_run_fingerprint=%s",
+                operation, safe_address, safe_nonce, len(raw_hex), _dry_run_fingerprint,
+            )
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_DRY_RUN_LOGGED",
+                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast",
+                "operation": operation,
+                "dry_run_fingerprint": _dry_run_fingerprint,
+                "safe_nonce": safe_nonce,
+            }
+
+        # ── Broadcast ─────────────────────────────────────────────────────────
+        try:
+            tx_hash = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_sendRawTransaction",
+                [raw_hex],
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_BROADCAST_FAILED",
+                "errorMessage": f"eth_sendRawTransaction failed: {exc}",
+                "operation": operation,
+            }
+
+        import re as _re
+        tx_hash_str = str(tx_hash) if tx_hash is not None else None
+        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
+            return {
+                "success": False,
+                "errorCode": "CTF_CONVERSION_INVALID_TX_HASH",
+                "errorMessage": f"eth_sendRawTransaction returned non-hash: {tx_hash!r}",
+                "operation": operation,
+            }
+
+        return {
+            "success": True,
+            "tx_hash": tx_hash_str,
+            "operation": operation,
+            "safe_nonce": safe_nonce,
+            "eoa_nonce": eoa_nonce,
+            "gas_price": gas_price,
+            "gas_limit": gas_limit,
+        }
+
+    def split_positions(
+        self,
+        condition_id: str,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
+        neg_risk: bool = False,
+    ) -> dict[str, Any]:
+        """Split collateral into a full YES+NO position set for condition_id.
+
+        neg_risk=False targets standard CTF (POLYGON_CTF_ADDRESS, USDC.e
+        collateral, 5-arg splitPosition). neg_risk=True targets NegRiskAdapter
+        (POLYGON_NEGRISK_ADAPTER_ADDRESS, wcol collateral, 2-arg convenience
+        splitPosition(bytes32,uint256)) — matching redeem()'s existing
+        neg_risk kw-only routing convention.
+
+        INERT this packet: no production caller. See
+        _broadcast_ctf_operation_via_safe for the two-layer safety gate.
+        """
+        if neg_risk:
+            inner_data = _build_negrisk_split_calldata(condition_id, amount_micro)
+            inner_to = POLYGON_NEGRISK_ADAPTER_ADDRESS
+        else:
+            inner_data = _build_split_calldata(condition_id, amount_micro)
+            inner_to = POLYGON_CTF_ADDRESS
+        return self._broadcast_ctf_operation_via_safe(
+            "SPLIT", inner_to, inner_data, safe_address, signer_eoa,
+        )
+
+    def merge_positions(
+        self,
+        condition_id: str,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
+        neg_risk: bool = False,
+    ) -> dict[str, Any]:
+        """Merge a full YES+NO position set back into collateral for condition_id.
+
+        Same neg_risk routing convention as split_positions. INERT this
+        packet: no production caller.
+        """
+        if neg_risk:
+            inner_data = _build_negrisk_merge_calldata(condition_id, amount_micro)
+            inner_to = POLYGON_NEGRISK_ADAPTER_ADDRESS
+        else:
+            inner_data = _build_merge_calldata(condition_id, amount_micro)
+            inner_to = POLYGON_CTF_ADDRESS
+        return self._broadcast_ctf_operation_via_safe(
+            "MERGE", inner_to, inner_data, safe_address, signer_eoa,
+        )
+
+    def convert_positions(
+        self,
+        market_id: str,
+        index_set: int,
+        amount_micro: int,
+        *,
+        safe_address: str,
+        signer_eoa: str,
+    ) -> dict[str, Any]:
+        """Convert a set of NO positions to the complementary YES + collateral.
+
+        NegRiskAdapter-only (there is no standard-CTF equivalent). market_id
+        and index_set use NegRiskAdapter's own conventions — see
+        NEGRISK_CONVERT_POSITIONS_SELECTOR module comment; do NOT pass a
+        standard conditionId or a CTF outcome-slot bitmask here.
+
+        INERT this packet: no production caller.
+        """
+        inner_data = _build_negrisk_convert_calldata(market_id, index_set, amount_micro)
+        return self._broadcast_ctf_operation_via_safe(
+            "CONVERT", POLYGON_NEGRISK_ADAPTER_ADDRESS, inner_data, safe_address, signer_eoa,
+        )
+
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck:
         raw = self._sdk_client().post_heartbeat(heartbeat_id)
         return HeartbeatAck(ok=True, raw=dict(raw or {}))
@@ -2554,6 +3363,11 @@ def _is_l2_auth_error(exc: BaseException) -> bool:
     return "unauthorized" in text or "invalid api key" in text or "status_code=401" in text
 
 
+def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
+    text = " ".join(f"{type(exc).__name__}:{exc}".split())
+    return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
+
+
 def _api_creds_from_runtime() -> Any | None:
     return _api_creds_from_keychain() or _api_creds_from_env()
 
@@ -2847,6 +3661,156 @@ def _build_negrisk_redeem_calldata(
     return "0x" + (selector + encoded_args).hex()
 
 
+# Full binary partition for split/merge — the two disjoint CTF outcome-slot
+# bitmasks (slot0=1/YES, slot1=2/NO; same convention as
+# _zeus_index_set_to_ctf_bitmask's OUTPUT space, not its Zeus-label input
+# space). A split of ``amount`` collateral against this partition mints
+# ``amount`` of BOTH the YES and NO position, i.e. the full outcome set —
+# the only partition W2.4 builds (a partial/sub-partition split is out of
+# scope for this packet).
+_CTF_FULL_BINARY_PARTITION: tuple[int, int] = (1, 2)
+
+
+def _build_split_calldata(condition_id: str, amount_micro: int) -> str:
+    """ABI-encode standard CTF splitPosition calldata (full YES+NO partition).
+
+    ``splitPosition(address collateralToken, bytes32 parentCollectionId,
+                    bytes32 conditionId, uint256[] partition, uint256 amount)``
+
+    Mirrors _build_redeem_calldata's collateral/parentCollectionId choice:
+    collateral is USDC.e (Polymarket standard-CTF positions are minted
+    against USDC.e, not pUSD), parentCollectionId is the zero word (top-level
+    position, no nested conditions).
+
+    Returns hex-encoded calldata starting with CTF_SPLIT_POSITION_SELECTOR.
+    """
+    from eth_abi import encode as _abi_encode
+
+    amount_int = int(amount_micro)
+    if amount_int <= 0:
+        raise ValueError(f"amount_micro must be positive, got {amount_micro!r}")
+
+    collateral = bytes.fromhex(POLYGON_USDCE_ADDRESS.removeprefix("0x"))
+    if len(collateral) != 20:
+        raise ValueError("POLYGON_USDCE_ADDRESS is not a valid 20-byte address")
+    parent_collection_id = b"\x00" * 32
+    condition_bytes = _normalize_condition_id_bytes32(condition_id)
+    encoded_args = _abi_encode(
+        ["address", "bytes32", "bytes32", "uint256[]", "uint256"],
+        [
+            "0x" + collateral.hex(),
+            parent_collection_id,
+            condition_bytes,
+            list(_CTF_FULL_BINARY_PARTITION),
+            amount_int,
+        ],
+    )
+    return CTF_SPLIT_POSITION_SELECTOR + encoded_args.hex()
+
+
+def _build_merge_calldata(condition_id: str, amount_micro: int) -> str:
+    """ABI-encode standard CTF mergePositions calldata (full YES+NO partition).
+
+    Same argument shape as _build_split_calldata — mergePositions and
+    splitPosition share an identical ABI signature on the Gnosis CTF
+    (github.com/gnosis/conditional-tokens-contracts) — only the selector
+    differs.
+
+    Returns hex-encoded calldata starting with CTF_MERGE_POSITIONS_SELECTOR.
+    """
+    from eth_abi import encode as _abi_encode
+
+    amount_int = int(amount_micro)
+    if amount_int <= 0:
+        raise ValueError(f"amount_micro must be positive, got {amount_micro!r}")
+
+    collateral = bytes.fromhex(POLYGON_USDCE_ADDRESS.removeprefix("0x"))
+    if len(collateral) != 20:
+        raise ValueError("POLYGON_USDCE_ADDRESS is not a valid 20-byte address")
+    parent_collection_id = b"\x00" * 32
+    condition_bytes = _normalize_condition_id_bytes32(condition_id)
+    encoded_args = _abi_encode(
+        ["address", "bytes32", "bytes32", "uint256[]", "uint256"],
+        [
+            "0x" + collateral.hex(),
+            parent_collection_id,
+            condition_bytes,
+            list(_CTF_FULL_BINARY_PARTITION),
+            amount_int,
+        ],
+    )
+    return CTF_MERGE_POSITIONS_SELECTOR + encoded_args.hex()
+
+
+def _build_negrisk_split_calldata(condition_id: str, amount_micro: int) -> str:
+    """ABI-encode NegRiskAdapter splitPosition(bytes32,uint256) calldata.
+
+    The NegRiskAdapter convenience overload — splits against the adapter's
+    own wcol collateral for a single negRisk-routed condition; no explicit
+    collateral/parentCollectionId/partition args (unlike the standard-CTF
+    5-arg form built by _build_split_calldata).
+
+    Returns hex-encoded calldata starting with NEGRISK_SPLIT_POSITION_SELECTOR.
+    """
+    from eth_abi import encode as _abi_encode
+
+    amount_int = int(amount_micro)
+    if amount_int <= 0:
+        raise ValueError(f"amount_micro must be positive, got {amount_micro!r}")
+    condition_bytes = _normalize_condition_id_bytes32(condition_id)
+    encoded_args = _abi_encode(["bytes32", "uint256"], [condition_bytes, amount_int])
+    return NEGRISK_SPLIT_POSITION_SELECTOR + encoded_args.hex()
+
+
+def _build_negrisk_merge_calldata(condition_id: str, amount_micro: int) -> str:
+    """ABI-encode NegRiskAdapter mergePositions(bytes32,uint256) calldata.
+
+    Mirrors _build_negrisk_split_calldata's argument shape; only the selector
+    differs.
+
+    Returns hex-encoded calldata starting with NEGRISK_MERGE_POSITIONS_SELECTOR.
+    """
+    from eth_abi import encode as _abi_encode
+
+    amount_int = int(amount_micro)
+    if amount_int <= 0:
+        raise ValueError(f"amount_micro must be positive, got {amount_micro!r}")
+    condition_bytes = _normalize_condition_id_bytes32(condition_id)
+    encoded_args = _abi_encode(["bytes32", "uint256"], [condition_bytes, amount_int])
+    return NEGRISK_MERGE_POSITIONS_SELECTOR + encoded_args.hex()
+
+
+def _build_negrisk_convert_calldata(market_id: str, index_set: int, amount_micro: int) -> str:
+    """ABI-encode NegRiskAdapter convertPositions(bytes32,uint256,uint256) calldata.
+
+    ``convertPositions(bytes32 marketId, uint256 indexSet, uint256 amount)``
+
+    market_id is NegRiskIdLib.getMarketId(questionId) — NOT the standard
+    conditionId (see NEGRISK_CONVERT_POSITIONS_SELECTOR module comment).
+    index_set is the multi-market NO/YES bitfield convention documented on
+    that same selector constant — NOT the per-condition CTF outcome-slot
+    bitmask used by the other builders in this file. _normalize_condition_id_bytes32
+    is reused here purely as a generic bytes32-hex normalizer (its name is
+    condition_id-specific; its behavior is not).
+
+    Returns hex-encoded calldata starting with NEGRISK_CONVERT_POSITIONS_SELECTOR.
+    """
+    from eth_abi import encode as _abi_encode
+
+    amount_int = int(amount_micro)
+    if amount_int <= 0:
+        raise ValueError(f"amount_micro must be positive, got {amount_micro!r}")
+    index_set_int = int(index_set)
+    if index_set_int <= 0:
+        raise ValueError(f"index_set must be a positive bitfield, got {index_set!r}")
+    market_bytes = _normalize_condition_id_bytes32(market_id)
+    encoded_args = _abi_encode(
+        ["bytes32", "uint256", "uint256"],
+        [market_bytes, index_set_int, amount_int],
+    )
+    return NEGRISK_CONVERT_POSITIONS_SELECTOR + encoded_args.hex()
+
+
 def _build_wrap_calldata(tx_kind: str, safe_address: str, amount_micro: int) -> str:
     """Build inner calldata for one step of the USDC.e → pUSD two-step wrap.
 
@@ -3000,7 +3964,7 @@ def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
         )
     canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
     status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
-    if _nonempty(canceled) or status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"} or raw_dict.get("success") is True:
+    if _nonempty(canceled) or is_cancel_confirmed_status(status) or raw_dict.get("success") is True:
         return CancelResult(
             status="CANCELED",
             order_id=_extract_order_id(raw_dict) or order_id,
@@ -3097,6 +4061,51 @@ def _extract_string_sequence(raw: Any, *keys: str) -> tuple[str, ...]:
         if values:
             return values
     return ()
+
+
+def _unmapped_submit_result(
+    envelope: VenueSubmissionEnvelope,
+    *,
+    signed_order: bytes | None,
+    signed_order_hash: str | None,
+    raw_response: Any,
+) -> SubmitResult:
+    """Fail-closed batch-mapping outcome (ruling 1(c)): a response WAS
+    received for this call, but this envelope could not be attributed to
+    any item in it. NEVER a success -- the caller must record this as
+    SUBMIT_UNKNOWN (command_bus.CommandEventType.SUBMIT_UNKNOWN), distinct
+    from the post-call-exception SUBMIT_TIMEOUT_UNKNOWN case."""
+    updated = envelope.with_updates(
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        raw_response_json=_canonical_json(raw_response or {}),
+        error_code="BATCH_RESPONSE_UNMAPPED",
+        error_message="batch response could not be mapped to this request (unverified response shape)",
+    )
+    return SubmitResult(
+        status="unmapped",
+        envelope=updated,
+        error_code=updated.error_code,
+        error_message=updated.error_message,
+    )
+
+
+def _unmapped_cancel_result(
+    order_id: str,
+    *,
+    error_code: str = "BATCH_RESPONSE_UNMAPPED",
+    raw_response: Any = None,
+) -> CancelResult:
+    """Fail-closed batch-mapping outcome for cancel_batch -- same contract
+    as _unmapped_submit_result. status="UNKNOWN" matches the existing
+    single-order _cancel_result_from_response UNKNOWN branch."""
+    return CancelResult(
+        status="UNKNOWN",
+        order_id=order_id,
+        raw_response_json=_canonical_json(raw_response) if raw_response is not None else None,
+        error_code=error_code,
+        error_message="batch response could not be mapped to this request (unverified response shape)",
+    )
 
 
 def _rejected_submit_result(

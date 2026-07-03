@@ -762,7 +762,7 @@ def load_platt_model(
     # actually loaded.  The evaluator's calibration-transfer gate uses this
     # to detect exact-match between forecast and the loaded calibrator
     # bucket — pre-fix the gate hardcoded calibrator_domain to TIGGE and
-    # produced spurious SHADOW_ONLY rejections when an OpenData calibrator
+    # produced spurious calibration-transfer rejections when an OpenData calibrator
     # was actually selected.
     #
     # Stratification columns are added by migrate_phase2_cycle_stratification

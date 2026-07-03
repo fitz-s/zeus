@@ -147,6 +147,39 @@ def _proof(*, direction, row, token_id, q_posterior, q_lcb_5pct, bin_obj, trade_
     )
 
 
+def _qkernel_selected(proof, *, edge_lcb=None, optimal_delta_u=0.02):
+    side = "YES" if proof.direction == "buy_yes" else "NO"
+    bin_id = era._candidate_bin_id(proof)
+    candidate_id = f"DIRECT_{side}:{bin_id}@proof"
+    cost = float(proof.execution_price.value)
+    edge = float(proof.q_lcb_5pct) - cost if edge_lcb is None else float(edge_lcb)
+    return replace(
+        proof,
+        selection_authority_applied="qkernel_spine",
+        q_source="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": candidate_id,
+            "route_id": candidate_id,
+            "side": side,
+            "bin_id": bin_id,
+            "payoff_q_point": proof.q_posterior,
+            "payoff_q_lcb": proof.q_lcb_5pct,
+            "edge_lcb": edge,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "5",
+            "optimal_delta_u": optimal_delta_u,
+            "cost": cost,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "q_lcb",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": proof.q_lcb_5pct,
+        },
+    )
+
+
 # ===========================================================================
 # Invariant 1 — the selector env var / settings key do not exist in src/.
 # ===========================================================================
@@ -387,7 +420,7 @@ def test_single_selection_path_always_uses_marginal_utility_ranker(monkeypatch):
 
 
 def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
-    """Actual qkernel selections must not be serialized as non-admitted losers."""
+    """Actual qkernel selections are the live admission authority."""
     bin_b = Bin(low=62.0, high=63.0, unit="F", label="62-63F")
     row_b = _row(condition_id="cond-B", yes_token="yesB", no_token="noB",
                  yes_asks=(("0.20", "100000"),), snapshot_id="snap-B")
@@ -397,6 +430,10 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
         "source": "qkernel_spine",
         "candidate_id": "DIRECT_YES:bin-B",
         "route_id": "DIRECT_YES:bin-B@proof",
+        "side": "YES",
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "payoff_q_point": 0.65,
         "payoff_q_lcb": 0.30,
         "edge_lcb": 0.10,
         "delta_u_at_min": 0.01,
@@ -404,6 +441,9 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
         "optimal_delta_u": 0.02,
         "cost": 0.20,
         "false_edge_rate": 0.02,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.30,
     }
     selected = replace(
         proof_b,
@@ -423,10 +463,10 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
     assert book["admitted_count"] == 1
     assert book["selection_authority"] == "qkernel_spine"
     assert book["selected_qkernel_execution_economics"] == qkernel_cert
-    assert rec["legacy_admitted"] is False
     assert rec["admitted"] is True
     assert rec["live_decision_selected"] is True
     assert rec["live_selection_authority"] == "qkernel_spine"
+    assert rec["live_admission_authority"] == "qkernel_spine"
     assert rec["qkernel_execution_economics"] == qkernel_cert
 
 
@@ -464,8 +504,10 @@ def test_direction_law_holds_at_receipt_build_for_yes_winner():
     bin_a = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row_a = _row(condition_id="cond-A", yes_token="yesA", no_token="noA",
                  yes_asks=(("0.40", "100000"),), snapshot_id="snap-A")
-    proof_a = _proof(direction="buy_yes", row=row_a, token_id="yesA",
-                     q_posterior=0.70, q_lcb_5pct=0.62, bin_obj=bin_a)
+    proof_a = _qkernel_selected(
+        _proof(direction="buy_yes", row=row_a, token_id="yesA",
+               q_posterior=0.70, q_lcb_5pct=0.62, bin_obj=bin_a)
+    )
 
     selected = era._selected_candidate_proof(
         {"family_id": "fam", "event_id": "evt"}, (proof_a,)
@@ -512,11 +554,15 @@ def test_one_primary_leg_per_family():
     for i, bin_obj in enumerate(bins):
         row = _row(
             condition_id=f"cond-{i}", yes_token=f"yes{i}", no_token=f"no{i}",
-            yes_asks=(("0.30", "100000"),), snapshot_id=f"snap-{i}",
+            no_asks=(("0.30", "100000"),), snapshot_id=f"snap-{i}",
         )
         proofs.append(
-            _proof(direction="buy_yes", row=row, token_id=f"yes{i}",
-                   q_posterior=0.55, q_lcb_5pct=0.50, bin_obj=bin_obj)
+            _qkernel_selected(
+                _proof(direction="buy_no", row=row, token_id=f"no{i}",
+                       q_posterior=0.70, q_lcb_5pct=0.65, bin_obj=bin_obj),
+                edge_lcb=None,
+                optimal_delta_u=0.01 + i * 0.001,
+            )
         )
 
     selected = era._selected_candidate_proof(

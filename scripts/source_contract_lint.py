@@ -7,15 +7,14 @@
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md
 """Inter-registry coherence lint — PLAN §PR1.
 
-Checks 6 assertions across 3 registries:
+Checks 5 assertions across 3 registries:
   1. calendar.source_id ⊆ data_sources_registry.sources[].id
   2. forecast_source_registry entry_primary ROLE ⇒ calendar live_authorization=true
      (and diagnostic-only / experimental-backfill ⇒ NOT live; keyed on allowed_roles, not tier)
-  3. calendar partial_policy=SHADOW_ONLY ⇒ live_authorization=false
-  4. calendar backfill_only=true ⇒ live_authorization=false
-  5. code data_version param (snapshot_ingest_contract) matches SDK param (ecmwf_open_data.py);
+  3. calendar backfill_only=true ⇒ live_authorization=false
+  4. code data_version param (snapshot_ingest_contract) matches SDK param (ecmwf_open_data.py);
      calendar parameter field drift is advisory only
-  6. HKO source never carries WU/VHHH station mapping
+  5. HKO source never carries WU/VHHH station mapping
 
 Advisory by default (exit 0 with warnings).
 --strict: exit 1 when any violation or drift finding is detected.
@@ -118,7 +117,7 @@ def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any
     The prior version keyed on ``tier == "primary"``, which is WRONG: tier='primary' means
     "primary forecast TABLE", not live-trading authority. openmeteo_previous_runs is
     tier=primary but allowed_roles=('diagnostic',) with calendar live_authorization=false —
-    a CONSISTENT shadow/diagnostic source, not drift. Keying on allowed_roles removes the
+    a CONSISTENT blocked/diagnostic source, not drift. Keying on allowed_roles removes the
     permanent false-positive and prevents a future --strict from forcing a diagnostic source
     into live authority.
     """
@@ -168,30 +167,6 @@ def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any
                     f"live_authorization=true — diagnostic sources must NOT be live-authorized"
                 ),
                 source_id=source_id,
-            ))
-
-    return findings
-
-
-# ---------------------------------------------------------------------------
-# Assertion 3: partial_policy=SHADOW_ONLY ⇒ live_authorization=false
-# ---------------------------------------------------------------------------
-
-def run_assertion_3_shadow_implies_not_live() -> list[dict[str, Any]]:
-    """Return violation findings for SHADOW_ONLY entries with live_authorization=true."""
-    entries = _load_calendar()
-    findings = []
-
-    for entry in entries:
-        if entry.get("partial_policy") == "SHADOW_ONLY" and entry.get("live_authorization") is True:
-            findings.append(_make_finding(
-                assertion=3,
-                level="violation",
-                message=(
-                    f"calendar_id={entry['calendar_id']!r}: "
-                    f"partial_policy=SHADOW_ONLY implies live_authorization must be false"
-                ),
-                calendar_id=entry["calendar_id"],
             ))
 
     return findings
@@ -396,11 +371,10 @@ def run_assertion_6_hko_no_wu_vhhh() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def run_all_assertions() -> list[dict[str, Any]]:
-    """Run all 6 assertions and return combined findings list."""
+    """Run all active assertions and return combined findings list."""
     all_findings: list[dict[str, Any]] = []
     all_findings.extend(run_assertion_1_calendar_source_in_registry())
     all_findings.extend(run_assertion_2_primary_tier_implies_live_authorized())
-    all_findings.extend(run_assertion_3_shadow_implies_not_live())
     all_findings.extend(run_assertion_4_backfill_implies_not_live())
     all_findings.extend(run_assertion_5_code_param_vs_calendar())
     all_findings.extend(run_assertion_6_hko_no_wu_vhhh())

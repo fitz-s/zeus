@@ -1,6 +1,6 @@
 """Canonical lifecycle event builders.
 
-F4 invariant (docs/findings_2026_05_28.md §F4, 2026-05-28): each
+F4 invariant (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): each
 ``build_*_canonical_write`` builder accepts an explicit ``phase_after``
 argument from its caller. The builder uses that value verbatim for the
 event's ``phase_after`` field and for the projected ``position_current.phase``
@@ -109,7 +109,7 @@ def _position_env(position: Any) -> str:
 
 def canonical_phase_for_position(position: Any) -> str:
     """Legacy adapter: derive a phase string from a Position's mutable runtime
-    fields. **F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): this helper is
+    fields. **F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): this helper is
     NOT a money-path authority.** It is used by ``build_position_current_projection``
     to provide a default ``phase`` for callers that have not yet migrated to
     supply ``phase_after`` explicitly, and by reconstruction code paths that
@@ -242,6 +242,9 @@ def build_position_current_projection(position: Any) -> dict:
         "last_monitor_market_price_is_fresh": _nullable_bool_int(
             getattr(position, "last_monitor_market_price_is_fresh", None)
         ),
+        "last_monitor_best_bid": _nullable(getattr(position, "last_monitor_best_bid", None)),
+        "last_monitor_best_ask": _nullable(getattr(position, "last_monitor_best_ask", None)),
+        "last_monitor_market_vig": _nullable(getattr(position, "last_monitor_market_vig", None)),
         "decision_snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
         "entry_method": getattr(position, "entry_method", ""),
         "strategy_key": _strategy_key(position),
@@ -274,7 +277,7 @@ def build_position_current_projection(position: Any) -> dict:
         # the rescue path attaches it; non-rescue projections persist NULL.
         "recovery_authority": _nullable(getattr(position, "recovery_authority", "")),
         "chain_shares": _nullable(getattr(position, "chain_shares", None)),
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics carry their own typed projection columns so balance-only
         # rescue persists venue truth on chain_avg_price / chain_cost_basis_usd
         # without overwriting submitted entry_price / cost_basis_usd / size_usd.
@@ -411,7 +414,7 @@ def build_entry_canonical_write(
     # `decision_evidence_reason` instead so the exit-side audit can
     # distinguish missing-because-legacy from missing-because-bug.
     #
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): callers supply
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): callers supply
     # ``phase_after`` explicitly; it MUST be PENDING_ENTRY (pre-fill) or
     # ACTIVE / DAY0_WINDOW (post-fill). The builder overrides the projection's
     # phase with the caller-supplied value so direct mutation of
@@ -529,7 +532,7 @@ def build_day0_window_entered_canonical_write(
             pos.state must be mutated to "day0_window" BEFORE this builder
             is invoked so the projection reflects the transition).
     """
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): require explicit
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): require explicit
     # ``phase_after``; default is DAY0_WINDOW (the event this builder represents).
     if phase_after != DAY0_WINDOW:
         raise ValueError(
@@ -593,22 +596,28 @@ def build_monitor_refreshed_canonical_write(
     sequence_no: int,
     phase_after: str,
     source_module: str = "src.engine.cycle_runtime",
+    occurred_at: str | None = None,
     exit_decision: Any | None = None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
     final_exit_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
-    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}:
         raise ValueError(
             "monitor refreshed canonical builder requires phase_after in "
-            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
-        )
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}}, got {phase_after!r}"
+    )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
-    occurred_at = _non_empty(
+    event_occurred_at = _non_empty(
+        occurred_at,
         getattr(position, "last_monitor_at", ""),
         projection["updated_at"],
+    )
+    projection["updated_at"] = _max_iso_chronological(
+        str(projection["updated_at"] or ""),
+        event_occurred_at,
     )
     trade_id = str(getattr(position, "trade_id"))
     slug = f"monitor_refreshed:{sequence_no}"
@@ -636,6 +645,15 @@ def build_monitor_refreshed_canonical_write(
     family_redecision = getattr(position, "_monitor_family_redecision", None)
     if family_redecision:
         payload_dict["family_redecision"] = family_redecision
+    day0_probability_receipt = getattr(
+        position, "_day0_monitor_probability_receipt", None
+    )
+    if (
+        day0_probability_receipt
+        and str(getattr(position, "selected_method", "") or "")
+        == "day0_observation_remaining_window"
+    ):
+        payload_dict["day0_monitor_probability_receipt"] = day0_probability_receipt
     if exit_decision is not None:
         should_exit = (
             bool(final_should_exit)
@@ -679,7 +697,7 @@ def build_monitor_refreshed_canonical_write(
         "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "MONITOR_REFRESHED",
-        "occurred_at": occurred_at,
+        "occurred_at": event_occurred_at,
         "phase_before": phase_after,
         "phase_after": fold_lifecycle_phase(phase_after, phase_after).value,
         "strategy_key": _strategy_key(position),
@@ -714,7 +732,7 @@ def build_entry_fill_only_canonical_write(
 
     The caller must pass the next available sequence_no.
 
-    F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): caller supplies the
+    F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): caller supplies the
     explicit ``phase_after`` (default ACTIVE; DAY0_WINDOW is permitted for
     day0-window fills). The builder overrides the projection's phase with this
     value so the canonical phase no longer depends on Position.state strings.
@@ -766,7 +784,7 @@ def build_settlement_canonical_write(
     settlement_source: str = "",
     settlement_value: object | None = None,
 ) -> tuple[list[dict], dict]:
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): settlement always
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): settlement always
     # targets SETTLED; phase_after is an explicit argument (default SETTLED)
     # rather than re-derived from runtime Position.state.
     if phase_after != SETTLED:
@@ -834,7 +852,7 @@ def build_economic_close_canonical_write(
     phase_after: str = ECONOMICALLY_CLOSED,
     source_module: str = "src.execution.exit_lifecycle",
 ) -> tuple[list[dict], dict]:
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): the economic-close
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): the economic-close
     # event always lands ECONOMICALLY_CLOSED; phase_after is explicit
     # (default ECONOMICALLY_CLOSED) rather than re-derived from runtime
     # Position.state.
@@ -845,6 +863,9 @@ def build_economic_close_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
+    projection["exit_retry_count"] = 0
+    projection["next_exit_retry_at"] = ""
+    projection["order_status"] = "filled"
 
     occurred_at = _non_empty(
         getattr(position, "last_exit_at", ""),
@@ -912,7 +933,7 @@ def build_venue_position_observed_canonical_write(
     trade fact appends a separate verified ENTRY_ORDER_FILLED / CHAIN_SYNCED
     event upgrading the authority.
     """
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): VENUE_POSITION_OBSERVED
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): VENUE_POSITION_OBSERVED
     # always folds to ACTIVE (held venue balance, no verified fill). phase_after
     # is an explicit argument (default ACTIVE) rather than re-derived from
     # runtime Position.state strings.
@@ -936,7 +957,7 @@ def build_venue_position_observed_canonical_write(
     projection["recovery_authority"] = _RECOVERY_AUTHORITY
     projection["fill_authority"] = _FILL_AUTHORITY
 
-    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
     # the explicit reconcile-time observation timestamp, not a legacy
     # position attribute. Callers pass their ``now`` as venue_observed_at.
     if not venue_observed_at:
@@ -968,7 +989,7 @@ def build_venue_position_observed_canonical_write(
             "recovery_authority": _RECOVERY_AUTHORITY,
             "causality_status": "UNVERIFIED",
             "training_eligible": False,
-            # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain
+            # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain
             # economics on the canonical event grammar. Downstream
             # consumers reading position_events for balance-only rescues
             # consult these directly; the legacy `shares` / `cost_basis_usd`
@@ -1013,7 +1034,7 @@ def build_reconciliation_rescue_canonical_write(
     phase_after: str = ACTIVE,
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): trade-verified rescue
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): trade-verified rescue
     # always folds to ACTIVE (verified fill on chain). phase_after is explicit
     # (default ACTIVE) rather than re-derived from runtime Position.state.
     if phase_after != ACTIVE:
@@ -1024,7 +1045,7 @@ def build_reconciliation_rescue_canonical_write(
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
 
-    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
     # the explicit reconcile-time observation timestamp, not a fallback over
     # legacy position attributes (entered_at could be stale or fabricated).
     if not chain_synced_at:
@@ -1089,7 +1110,7 @@ def build_chain_size_corrected_canonical_write(
     phase_after: str,
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): chain-size correction
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): chain-size correction
     # does NOT transition the canonical phase — caller passes the position's
     # *current* phase (e.g. ACTIVE or DAY0_WINDOW) explicitly as phase_after.
     # The builder uses it for both phase_before and phase_after on the event
@@ -1271,7 +1292,7 @@ def build_review_required_canonical_write(
             detected (callers pass their ``now`` timestamp). F2 invariant: must
             be explicit, not derived from legacy position attributes.
     """
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): REVIEW_REQUIRED always
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): REVIEW_REQUIRED always
     # folds to QUARANTINED. phase_after is explicit (default QUARANTINED).
     if phase_after != QUARANTINED:
         raise ValueError(
@@ -1280,7 +1301,7 @@ def build_review_required_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
-    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
     # the explicit reconcile-time detection timestamp.
     if not review_detected_at:
         raise ValueError("review_detected_at is required for build_review_required_canonical_write")
@@ -1342,7 +1363,7 @@ def build_chain_quarantined_canonical_write(
     if not strategy_key:
         raise ValueError("chain quarantine canonical builder requires explicit strategy_key")
 
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): chain-only quarantine
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): chain-only quarantine
     # always folds to QUARANTINED. phase_after is explicit (default QUARANTINED).
     if phase_after != QUARANTINED:
         raise ValueError(

@@ -100,7 +100,7 @@ class TestFixG:
 
         Before Fix G, the delegation at calibration_transfer_policy.py:166 dropped
         live_promotion_approved entirely, so the legacy function defaulted to False
-        and returned SHADOW_ONLY at line 107-115 → silent live-entry kill at launch.
+        and returned BLOCKED at line 107-115 → silent live-entry kill at launch.
 
         After Fix G + commit 4584c150 (PR #64), _with_evidence accepts
         live_promotion_approved as a kwarg and forwards it to legacy. Caller
@@ -129,7 +129,7 @@ class TestFixG:
         assert decision.status == "LIVE_ELIGIBLE", (
             f"Expected LIVE_ELIGIBLE when flag is OFF + caller-True (Fix G), "
             f"got {decision.status}. reason_codes={decision.reason_codes}. "
-            "If SHADOW_ONLY: live_promotion_approved kwarg was not threaded through."
+            "If BLOCKED: live_promotion_approved kwarg was not threaded through."
         )
         assert decision.live_eligible is True
 
@@ -158,10 +158,10 @@ class TestFixG:
             f"LOW metric flag-off path got {decision.status}: {decision.reason_codes}"
         )
 
-    def test_with_evidence_flag_off_caller_false_returns_shadow_only(self):
+    def test_with_evidence_flag_off_caller_false_returns_blocked(self):
         """Post-PR #64 reconciliation: when caller explicitly passes
         live_promotion_approved=False, the legacy fallback must respect that
-        and return SHADOW_ONLY (operator has not approved live promotion)."""
+        and return BLOCKED (operator has not approved live promotion)."""
         cfg = entry_forecast_config()
 
         with patch.dict("os.environ", {"ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED": "false"}):
@@ -181,8 +181,8 @@ class TestFixG:
                 live_promotion_approved=False,
             )
 
-        assert decision.status == "SHADOW_ONLY", (
-            f"caller-False must yield SHADOW_ONLY, got {decision.status}"
+        assert decision.status == "BLOCKED", (
+            f"caller-False must yield BLOCKED, got {decision.status}"
         )
 
 

@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md (Finding D0, PR D0)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding D0, PR D0)
 """Relationship invariants: fill_authority decouples from entry_fill_verified as rescue authority.
 
 Part-3 audit Finding D0 / PR D0: the rescue branch in chain_reconciliation.py

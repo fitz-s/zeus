@@ -14,7 +14,6 @@ from src.analysis.regret_decomposer import (
     write_regret_decomposition,
 )
 from src.state.db import init_schema
-from src.state.shadow_experiment_registry import register_shadow_experiment
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +135,7 @@ def test_t3_write_roundtrip(world_conn) -> None:
     """write_regret_decomposition inserts a row; values roundtrip correctly."""
     from datetime import datetime, timezone
 
-    # Register a shadow experiment to satisfy the FK-like reference
-    from src.state.shadow_experiment_registry import register_shadow_experiment
-    experiment_id = register_shadow_experiment(
-        "shoulder_sell", {"kelly": 0.0}, "cohort_t3",
-        started_at=datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc),
-        conn=world_conn,
-    )
+    experiment_id = "exp_t3"
 
     # components sum: -0.10 + -0.05 + 0.00 + 0.00 + -0.01 + -0.04 + -0.05 = -0.25
     # realized=1.00, counterfactual=1.25 → total = -0.25
@@ -162,6 +155,8 @@ def test_t3_write_roundtrip(world_conn) -> None:
         experiment_id=experiment_id,
         decision_event_id="de_test_001",
         components=components,
+        strategy_id="shoulder_sell",
+        cohort_tag="cohort_t3",
         conn=world_conn,
         computed_at=datetime(2026, 5, 21, 11, 0, 0, tzinfo=timezone.utc),
     )

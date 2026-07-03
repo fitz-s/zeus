@@ -153,7 +153,7 @@ def test_no_duplicate_surface_ids(surfaces: dict) -> None:
 
 
 def test_fc_coverage_minimum(surfaces: dict) -> None:
-    """At least these surface_ids must exist for FC-01..FC-10 routing."""
+    """At least these surface_ids must exist for active Context Pack routing."""
     must_exist = {
         "execution_cycle_runtime",     # FC-03
         "execution_venue_boundary",    # FC-03
@@ -163,7 +163,6 @@ def test_fc_coverage_minimum(surfaces: dict) -> None:
         "forecast_live_daemon",        # FC-06
         "day0_observation_reader",     # FC-07
         "db_schema_authority",         # FC-08
-        "topology_v_next",             # FC-09 (stdlib shadow)
         "review_scope_collect",        # FC-10
     }
     missing = must_exist - set(surfaces["surfaces"])

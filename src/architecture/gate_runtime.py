@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import pathlib
+import subprocess
 from datetime import datetime, timezone
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -83,11 +84,36 @@ def _risk_level_halt() -> tuple[bool, str]:
     return active, f"ZEUS_RISK_HALT={val!r}"
 
 
+def _deployment_freshness_mismatch() -> tuple[bool, str]:
+    """Block live submits from a process whose boot SHA no longer matches HEAD."""
+
+    boot_sha = os.environ.get("ZEUS_PROCESS_BOOT_SHA", "").strip()
+    if not boot_sha:
+        return False, "ZEUS_PROCESS_BOOT_SHA='' (not a managed live daemon process)"
+    try:
+        current_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).strip().decode()
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        return True, f"current_git_head_unreadable:{type(exc).__name__}"
+    active = current_sha != boot_sha
+    return active, f"boot_sha={boot_sha[:8]} current_sha={current_sha[:8]}"
+
+
 # Map from capabilities.yaml blocked_when condition name → evaluator function.
 _CONDITION_EVALUATORS: dict[str, object] = {
     "kill_switch_active": _kill_switch_active,
     "settlement_window_freeze_active": _settlement_window_freeze_active,
     "risk_level_halt": _risk_level_halt,
+    "deployment_freshness_mismatch": _deployment_freshness_mismatch,
 }
 
 # Capabilities and their blocked_when conditions (mirrors capabilities.yaml).
@@ -95,7 +121,12 @@ _CONDITION_EVALUATORS: dict[str, object] = {
 # Keeping this local (rather than parsing YAML at runtime) avoids I/O on every
 # gate check and makes the gate dependency-free at import time.
 _CAP_BLOCKED_WHEN: dict[str, list[str]] = {
-    "live_venue_submit": ["kill_switch_active", "settlement_window_freeze_active", "risk_level_halt"],
+    "live_venue_submit": [
+        "kill_switch_active",
+        "settlement_window_freeze_active",
+        "risk_level_halt",
+        "deployment_freshness_mismatch",
+    ],
     "settlement_write": ["settlement_window_freeze_active"],
     "on_chain_mutation": ["kill_switch_active"],
     "control_write": [],

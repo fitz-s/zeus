@@ -254,8 +254,6 @@ def main() -> int:
             "activation": f"activated iff n >= n_min ({args.n_min}); else family-level de-bias fallback (no per-city shift)",
             "sign": "delta_c = anchor - settlement; materializer applies corrected = raw - delta_c (bias_shift_c contract)",
             "source": "raw_model_forecasts(previous_runs) JOIN settlement_outcomes(VERIFIED), lead-pooled",
-            "promotion": "OPERATOR_GATED — review walk-forward do_no_harm + activation set, then wire the "
-            "materializer loader (src/calibration/anchor_representativeness_debias.py) and the activation flag.",
         },
         "families": families,
     }

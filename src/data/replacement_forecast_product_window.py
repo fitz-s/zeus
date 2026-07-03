@@ -1,4 +1,4 @@
-"""Product-window policy for replacement forecast shadow products.
+"""Product-window policy for replacement forecast products.
 
 Live B0 forecast coverage still uses ``forecast_target_contract``. Replacement
 products need a separate resolver because AIFS sampled ``2t`` valid times,

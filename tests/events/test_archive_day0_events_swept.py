@@ -19,6 +19,7 @@ is mutated; the immutable opportunity_events row is never deleted.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
 
 from src.events.event_store import EventStore
@@ -150,6 +151,62 @@ def _event_row_still_present(conn: sqlite3.Connection, event_id: str) -> bool:
         conn.execute("SELECT 1 FROM opportunity_events WHERE event_id = ?", (event_id,)).fetchone()
         is not None
     )
+
+
+def test_archive_unmarketed_day0_events_expires_only_non_admitted_processing_rows():
+    conn = _world_conn()
+    store = EventStore(conn)
+    admitted = _day0_event(
+        "Paris",
+        "2026-06-29",
+        "low",
+        available_at="2026-06-29T05:00:00+00:00",
+        seq=1,
+    )
+    unmarketed = _day0_event(
+        "Zhengzhou",
+        "2026-06-29",
+        "high",
+        available_at="2026-06-29T05:01:00+00:00",
+        seq=2,
+    )
+    assert store.insert_or_ignore(admitted) is True
+    assert store.insert_or_ignore(unmarketed) is True
+
+    archived = store.archive_unmarketed_day0_events(
+        admitted_families={("paris", "2026-06-29", "low")}
+    )
+
+    assert archived == 1
+    rows = {
+        row["event_id"]: (row["processing_status"], row["last_error"])
+        for row in conn.execute(
+            """
+            SELECT event_id, processing_status, last_error
+              FROM opportunity_event_processing
+            """
+        ).fetchall()
+    }
+    assert rows[admitted.event_id][0] == "pending"
+    assert rows[unmarketed.event_id] == (
+        "expired",
+        "DAY0_UNMARKETED_EXECUTION_EVENT:no_market_topology_or_exposure",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+
+def test_reactor_prune_archives_unmarketed_day0_before_legacy_repair_sweeps():
+    source = (Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    prune_start = source.index("def _edli_prune_pending_working_set(")
+    prune_source = source[
+        prune_start:
+        source.index("def _edli_day0_hourly_refresh_cycle(", prune_start)
+    ]
+
+    unmarketed_idx = prune_source.index('archive_unmarketed_day0_events"')
+    assert prune_source.index('archive_expired_candidates"') < unmarketed_idx
+    assert unmarketed_idx < prune_source.index('repair_missing_processing_rows"')
+    assert unmarketed_idx < prune_source.index('archive_superseded_channel_events"')
 
 
 # Decision time 2026-06-05T12:00:00Z: Chicago (UTC-5) local 06-05 07:00 → 06-04 is a PAST
@@ -475,10 +532,22 @@ def test_day0_supersession_candidate_query_uses_processing_status_index():
     )
 
 
-def test_day0_supersession_keeper_query_scans_active_processing_set_once():
-    """Live-perf antibody: keeper lookup must not index historical event JSON at boot."""
+def test_day0_supersession_keeper_query_uses_day0_family_extreme_index():
+    """Live-perf antibody: keeper lookup must not scan the whole active Day0 backlog."""
     conn = _world_conn(factory=CaptureConnection)
     store = EventStore(conn)
+
+    index_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_events'"
+        ).fetchall()
+    }
+    assert "idx_opportunity_events_day0_family_extreme" in index_names, (
+        "idx_opportunity_events_day0_family_extreme must be declared in "
+        "opportunity_events_schema.ensure_table(); index is absent from sqlite_master."
+    )
+
     for fam in range(15):
         for j in range(20):
             store.insert_or_ignore(
@@ -494,15 +563,30 @@ def test_day0_supersession_keeper_query_scans_active_processing_set_once():
 
     conn.executed_sql.clear()
     store.archive_superseded_day0_events()
-    keeper_sql, keeper_params = next(
+    extreme_sql, extreme_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "extreme_value" in sql
-        and "INDEXED BY idx_opportunity_event_processing_status" in sql
+        if "ORDER BY" in sql
+        and "LIMIT 1" in sql
+        and "INDEXED BY idx_opportunity_events_day0_family_extreme" in sql
+    )
+    tied_keeper_sql, tied_keeper_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "SELECT e.event_id" in sql
+        and "INDEXED BY idx_opportunity_events_day0_family_extreme" in sql
         and "e.event_type = 'DAY0_EXTREME_UPDATED'" in sql
     )
-    plan = _plan_text(conn, keeper_sql, keeper_params)
-    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan, (
-        f"day0 keeper query must scan active processing set by status index, got: {plan!r}"
-    )
-    assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY" not in plan
+
+    for label, sql, params in (
+        ("extreme", extreme_sql, extreme_params),
+        ("tied-keeper", tied_keeper_sql, tied_keeper_params),
+    ):
+        plan = _plan_text(conn, sql, params)
+        assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY_EXTREME" in plan, (
+            f"{label} query must use idx_opportunity_events_day0_family_extreme after ANALYZE "
+            f"(got: {plan!r}). The expression text in the DDL must match the WHERE/ORDER terms."
+        )
+        assert "SCAN E" not in plan and "SCAN OPPORTUNITY_EVENTS" not in plan, (
+            f"{label} query must not full-scan opportunity_events, got: {plan!r}"
+        )

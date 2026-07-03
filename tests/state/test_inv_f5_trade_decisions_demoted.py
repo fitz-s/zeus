@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §F5
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F5
 """Acceptance tests: F5 — trade_decisions demoted to audit-only legacy export.
 
 F5 invariant: the live entry path (log_trade_entry) runs successfully on a DB

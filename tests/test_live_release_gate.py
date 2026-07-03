@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.check_live_release_gate import (
     PAPER_PROOF_KEYS, FAIL, PASS,
     STALE_REDEEM_TX_HASHED_SECONDS,
@@ -30,6 +32,9 @@ from src.state.db import (
 )
 # B2 (2026-05-28) + operator directive 2026-06-13: PRAGMA user_version mechanism removed.
 # Schema currency is proven via canonical table presence.
+
+_VALID_SHA_A = "a" * 40
+_VALID_SHA_B = "b" * 40
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -113,7 +118,8 @@ def _make_gate_args(
     tmp_path: Path,
     *,
     live_eligibility: str = "UNKNOWN",
-    loaded_sha: str = "sha-a",
+    loaded_sha: str = _VALID_SHA_A,
+    expected_sha: str = _VALID_SHA_A,
     with_forecasts_db: bool = True,
     settings_payload: dict[str, object] | None = None,
 ) -> object:
@@ -143,7 +149,7 @@ def _make_gate_args(
         },
     )
     argv = [
-        "--expected-sha", "sha-a",
+        "--expected-sha", expected_sha,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
         "--forecasts-db", str(forecasts_db),
@@ -165,15 +171,14 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
     # The deleted live_canary_enabled / taker_fok_fak_live_enabled flags are NOT emitted.
     reactor = {
         "legacy_cron": "disabled",
-        "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
         "edli_live": "live",
     }[stage]
     edli = {
         "enabled": stage != "legacy_cron",
         "live_execution_mode": stage,
         "reactor_mode": reactor,
-        "market_channel_ingestor_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
-        "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
+        "market_channel_ingestor_enabled": stage == "edli_live",
+        "edli_user_channel_reconcile_enabled": stage == "edli_live",
         "real_order_submit_enabled": stage == "edli_live",
         "durable_submit_outbox_enabled": stage == "edli_live",
         "edli_live_operator_authorized": stage == "edli_live",
@@ -199,12 +204,9 @@ def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
     bridge_root = tmp_path / "bridge"
     bridge_root.mkdir()
     bridge_args = _make_gate_args(bridge_root)
-    bridge_args.stage = "edli_submit_disabled_bridge"
-    bridge = evaluate_release_gate(bridge_args)
-    assert bridge.status == PASS
-    assert bridge.live_entries_allowed is False
-    assert bridge.submit_allowed is False
-    assert bridge.scaleout_allowed is False
+    bridge_args.stage = "unsupported_live_release_stage"
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_RELEASE_STAGE:unsupported_live_release_stage"):
+        evaluate_release_gate(bridge_args)
 
     # Wave-2 item 5: canary collapsed into edli_live. The single live mode requires the
     # verified promotion artifact for live entries; absent it, the gate fails closed.
@@ -339,7 +341,7 @@ def test_release_gate_stage_settings_accept_matching_live_config(tmp_path: Path)
 
 
 def test_release_gate_fails_on_loaded_sha_mismatch(tmp_path: Path) -> None:
-    args = _make_gate_args(tmp_path, loaded_sha="stale-sha")
+    args = _make_gate_args(tmp_path, loaded_sha=_VALID_SHA_B)
 
     report = evaluate_release_gate(args)
 
@@ -404,6 +406,16 @@ def test_loaded_sha_gate_fails_cleanly_when_git_sha_unavailable(monkeypatch) -> 
     assert result.name == "loaded_sha"
     assert result.status == FAIL
     assert "expected_sha_unavailable" in result.detail
+
+
+def test_loaded_sha_gate_rejects_invalid_sha_shape(tmp_path: Path) -> None:
+    loaded = tmp_path / "loaded_sha.json"
+    _write_json(loaded, {"loaded_sha": "abc123"})
+
+    result = _check_loaded_sha(_VALID_SHA_A, loaded)
+
+    assert result.status == FAIL
+    assert result.detail == "invalid_loaded_sha:abc123"
 
 
 # ---------------------------------------------------------------------------
@@ -614,13 +626,13 @@ def test_release_gate_fails_on_stale_redeem_tx_hashed(tmp_path: Path) -> None:
     status = tmp_path / "status_summary.json"
     proof = tmp_path / "paper_proof.json"
     generated_at = datetime.now(timezone.utc).isoformat()
-    _write_json(loaded, {"loaded_sha": "sha-a"})
+    _write_json(loaded, {"loaded_sha": _VALID_SHA_A})
     _write_json(source, {"generated_at": generated_at})
     _write_json(status, {"generated_at": generated_at})
     _write_json(proof, {"status": PASS, "live_eligibility": "UNKNOWN", **{k: True for k in PAPER_PROOF_KEYS}})
 
     args = parse_args([
-        "--expected-sha", "sha-a",
+        "--expected-sha", _VALID_SHA_A,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
         "--forecasts-db", str(forecasts_db),
@@ -657,13 +669,13 @@ def test_release_gate_passes_with_recent_redeem_tx_hashed(tmp_path: Path) -> Non
     status = tmp_path / "status_summary.json"
     proof = tmp_path / "paper_proof.json"
     generated_at = recent_ts
-    _write_json(loaded, {"loaded_sha": "sha-a"})
+    _write_json(loaded, {"loaded_sha": _VALID_SHA_A})
     _write_json(source, {"generated_at": generated_at})
     _write_json(status, {"generated_at": generated_at})
     _write_json(proof, {"status": PASS, "live_eligibility": "UNKNOWN", **{k: True for k in PAPER_PROOF_KEYS}})
 
     args = parse_args([
-        "--expected-sha", "sha-a",
+        "--expected-sha", _VALID_SHA_A,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
         "--forecasts-db", str(forecasts_db),
@@ -721,7 +733,7 @@ def test_release_gate_fails_when_live_eligible_has_null_expires_at(tmp_path: Pat
         conn.close()
 
     args = parse_args([
-        "--expected-sha", "sha-a",
+        "--expected-sha", _VALID_SHA_A,
         "--loaded-sha-file", str(tmp_path / "loaded_sha.json"),
         "--world-db", str(tmp_path / "zeus-world.db"),
         "--forecasts-db", str(forecasts_db),
@@ -772,7 +784,7 @@ def test_release_gate_fails_when_live_eligible_has_null_strategy_key(tmp_path: P
         conn.close()
 
     args = parse_args([
-        "--expected-sha", "sha-a",
+        "--expected-sha", _VALID_SHA_A,
         "--loaded-sha-file", str(tmp_path / "loaded_sha.json"),
         "--world-db", str(tmp_path / "zeus-world.db"),
         "--forecasts-db", str(forecasts_db),
