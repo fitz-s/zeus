@@ -4964,6 +4964,11 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "settlement_command_events",
     "settlement_commands",
     "settlement_day_observation_authority",
+    # W2.4 (2026-07-02): ctf_conversion_commands DDL lives in
+    # src/execution/ctf_conversion_commands.py (same pattern as
+    # SETTLEMENT_COMMAND_SCHEMA) — imported once below, not duplicated.
+    "ctf_conversion_command_events",
+    "ctf_conversion_commands",
     "trade_decisions",
     "venue_command_events",
     "venue_commands",
@@ -5901,6 +5906,13 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # applies column migrations (idempotent). Must run after SETTLEMENT_COMMAND_SCHEMA
     # so the settlement_commands table exists for the ALTER TABLE steps.
     ensure_settlement_schema_ready(conn)
+
+    # ctf_conversion_commands + ctf_conversion_command_events (W2.4, 2026-07-02)
+    # (DDL lives in src/execution/ctf_conversion_commands.py to keep the schema
+    # co-located with the command implementation — same pattern as
+    # SETTLEMENT_COMMAND_SCHEMA above.)
+    from src.execution.ctf_conversion_commands import CTF_CONVERSION_COMMAND_SCHEMA
+    conn.executescript(CTF_CONVERSION_COMMAND_SCHEMA)
 
     # Re-apply busy_timeout: each executescript() resets the C-level handler.
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")

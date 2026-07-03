@@ -1727,6 +1727,13 @@ files:
     - src/execution/harvester.py
     - src/state/db.py
     - future T1 fake venue parity
+  src/execution/ctf_conversion_commands.py:
+    zone: K2_runtime
+    authority_role: ctf_conversion_command_model
+    why: W2.4 durable command ledger for CTF split/merge/convert; models the conversion lifecycle (INTENT_CREATED -> TX_HASHED -> CONFIRMED/FAILED, fail-closed UNKNOWN on ambiguity) without wiring live callers. Own dedicated table/state enum instead of extending venue_commands.intent_kind — mirrors settlement_commands.py's redemption-journaling precedent (trade DB, condition_id/market_id-scoped), not wrap_unwrap_commands.py's world DB. INERT this packet — no production caller.
+    downstream:
+    - src/state/db.py
+    - src/venue/polymarket_v2_adapter.py
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime

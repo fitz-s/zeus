@@ -343,6 +343,7 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
+      - src/execution/ctf_conversion_commands.py
     public_entry_files:
       - src/execution/executor.py
       - src/execution/exchange_reconcile.py
@@ -353,6 +354,7 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
+      - src/execution/ctf_conversion_commands.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -370,6 +372,7 @@ modules:
       - tests/test_exchange_reconcile.py
       - tests/test_settlement_commands.py
       - tests/test_risk_allocator.py
+      - tests/execution/test_ctf_conversion_commands.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   venue:
@@ -401,6 +404,7 @@ modules:
       - tests/integration/test_p0_live_money_safety.py
       - tests/test_executor_command_split.py
       - tests/test_neg_risk_passthrough.py
+      - tests/test_polymarket_v2_adapter_ctf_conversion.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   ingest:
