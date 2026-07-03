@@ -406,7 +406,11 @@ def test_edli_event_reactor_scan_interval_defaults_to_unchanged_60s(monkeypatch,
     assert reactor_job.trigger == "interval"
     assert reactor_job.kwargs.get("seconds") == 60
     assert "minutes" not in reactor_job.kwargs
-    assert "reactor_scan_interval_seconds" not in settings_copy["edli"]
+    # W4.3 ships the knob in settings.example.json pinned to 60 (shape-b:
+    # knob-only, cadence unchanged). The invariant is the VALUE, not the key's
+    # absence: an example default other than 60 would silently demote the A2
+    # detection floor for fresh deployments.
+    assert settings_copy["edli"].get("reactor_scan_interval_seconds", 60) == 60
 
 
 def test_edli_event_reactor_scan_interval_honors_config_override(monkeypatch, tmp_path):

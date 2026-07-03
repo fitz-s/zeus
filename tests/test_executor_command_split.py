@@ -669,7 +669,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-capability",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         row = mem_conn.execute(
             "SELECT command_id FROM venue_commands WHERE position_id = ?",
             ("trd-entry-capability",),
@@ -762,7 +762,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-pre-submit-audit",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert mock_inst.place_limit_order.called
 
     def test_entry_same_token_open_position_blocks_before_command_persistence(
@@ -1099,7 +1099,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-quality-taker",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert result.order_id == "ord-quality-taker"
         assert mock_inst.place_limit_order.called
 
@@ -1548,7 +1548,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-durable",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert observed["preflight"] is True
         assert observed["durable_command_count"] == 1
         assert observed["durable_command_state"] == "SUBMITTING"
@@ -1643,7 +1643,7 @@ class TestLiveOrderCommandSplit:
         finally:
             submit_conn.close()
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert observed["durable_command_count_before_preflight"] == 1
         assert observed["durable_command_state_before_preflight"] == "SUBMITTING"
         assert observed["durable_envelope_count_before_preflight"] == 1
@@ -1698,7 +1698,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-final-envelope",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         command = mem_conn.execute(
             "SELECT command_id, envelope_id FROM venue_commands WHERE position_id = ?",
             ("trd-entry-final-envelope",),
@@ -2049,7 +2049,7 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-timing",
             )
 
-            assert result.status == "pending"
+            assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
             assert result.zeus_submit_intent_time
             assert result.venue_ack_time
             submit_at = datetime.fromisoformat(result.zeus_submit_intent_time)
@@ -2838,7 +2838,7 @@ class TestExitOrderCommandSplit:
         finally:
             submit_conn.close()
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert observed["durable_command_count_before_sdk"] == 1
         assert observed["durable_command_state_before_sdk"] == "SUBMITTING"
         assert observed["durable_envelope_count_before_sdk"] == 1
@@ -2880,7 +2880,7 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-capability",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         row = mem_conn.execute(
             "SELECT command_id FROM venue_commands WHERE position_id = ?",
             ("trd-exit-capability",),
@@ -2975,7 +2975,7 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-refresh-before-preflight",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert call_order == ["refresh", "assert_sell"]
         command = mem_conn.execute(
             "SELECT command_id FROM venue_commands WHERE position_id = ?",
@@ -3104,7 +3104,7 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-final-envelope",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         command = mem_conn.execute(
             "SELECT command_id, envelope_id FROM venue_commands WHERE position_id = ?",
             ("trd-exit-final-envelope",),
@@ -3360,7 +3360,7 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-004",
             )
 
-        assert result.status == "pending"
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
