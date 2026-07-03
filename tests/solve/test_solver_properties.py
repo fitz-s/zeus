@@ -222,7 +222,7 @@ def test_cvar_objective_concave_along_rays():
         assert not viol, f"CVaR objective non-concave on a ray at indices {viol}"
 
 
-def test_solver_matches_bruteforce_global_optimum():
+def test_solver_matches_bruteforce_global_optimum_1d():
     bins = ("y", "n")
     q = F.two_bin_q_draws([0.68] * 80)
     w = F.flat_wealth_state(bins, 100.0)
@@ -234,6 +234,44 @@ def test_solver_matches_bruteforce_global_optimum():
     brute = max(S._objective(np.array([x]), w0, payoff, q, weights, ALPHA) for x in grid)
     _, u_joint, _, _ = S._optimize_continuous(w0, payoff, caps, q, weights, ALPHA)
     assert u_joint >= brute - 1e-6  # coordinate ascent reached the global optimum
+
+
+def test_solver_matches_bruteforce_global_optimum_3d_coupled():
+    # The real stress (verifier finding): three items whose payoffs are COUPLED through the
+    # shared joint atoms — item i's marginal value depends on the other stakes — so a 1-D
+    # optimizer is not enough. A coarse 3-D brute-force grid must NOT beat cyclic coordinate
+    # ascent. If it ever does, that is a STOP-and-report (the global-optimality claim is false),
+    # NOT a tolerance widen.
+    import itertools
+
+    bins = ("b0", "b1", "b2")
+    q = np.random.default_rng(4242).dirichlet([45, 45, 45], size=96)  # ~uniform -> all edges live
+    w = F.flat_wealth_state(bins, 60.0)
+    m = F.menu([F.buy_item(f"it{j}", bins[j], 0.20, bins, max_units=100000) for j in range(3)])
+    w0, payoff, caps, _ = _arrays(m, w, bins)
+    weights = np.ones(q.shape[0])
+    alpha = 0.1
+
+    x_joint, u_joint, _, _ = S._optimize_continuous(w0, payoff, caps, q, weights, alpha)
+
+    # coarse 3-D grid over each item's feasible range
+    axes = [np.linspace(0, S._feasible_hi(i, np.zeros(3), w0, payoff, caps), 26) for i in range(3)]
+    grid_best = -np.inf
+    grid_arg = None
+    for combo in itertools.product(*axes):
+        u = S._objective(np.array(combo), w0, payoff, q, weights, alpha)
+        if u > grid_best:
+            grid_best = u
+            grid_arg = combo
+
+    # coordinate ascent (fine) must reach or exceed anything the coarse grid found
+    assert u_joint >= grid_best - 1e-6, (
+        f"STOP: 3-D brute-force grid ({grid_best:.8f} at {grid_arg}) BEAT coordinate ascent "
+        f"({u_joint:.8f}) — the global-optimality claim under coordinate coupling is FALSE"
+    )
+    # the optimum is genuinely multi-item (coupling actually exercised, not a 1-D corner)
+    assert int((x_joint > 1e-6).sum()) >= 2
+    assert sum(1 for v in grid_arg if v > 1e-6) >= 2
 
 
 def test_var_nonconcave_where_cvar_stays_concave():

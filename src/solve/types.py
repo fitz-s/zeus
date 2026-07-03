@@ -81,9 +81,11 @@ class JointOutcomeScenarioSet:
     """The joint outcome scenarios the objective integrates over — the ONE ScenarioService
     product (consult REV-2: replaces the concatenated-marginal ``ScenarioSet``).
 
-    ``q_draws`` has shape ``(n_draws, n_atoms)`` aligned 1:1 with ``atoms``. Under
-    ``POSTERIOR_Q_DRAWS`` every row is a coherent simplex over the atoms (the served band's
-    joint draws). ``draw_weights`` (optional) weights the draws; ``None`` means uniform.
+    ``q_draws`` has shape ``(n_draws, n_atoms)`` aligned 1:1 with ``atoms``. EVERY row is a
+    coherent simplex over the atoms (row sum == 1) — a probability measure over the fixed atom
+    axis must normalize regardless of ``semantics`` (POSTERIOR_Q_DRAWS / PRODUCT_MEASURE /
+    MEASURED_JOINT alike; consult REV-2 verifier finding). ``draw_weights`` (optional) weights
+    the draws across the belief ensemble; ``None`` means uniform.
     ``family_projections`` maps each family_key to the atom indices whose ``bins_by_family``
     the marginal reads — a DERIVED convenience view, not the primitive.
 
@@ -115,12 +117,17 @@ class JointOutcomeScenarioSet:
             raise ScenarioValidationError("q_draws contains non-finite values")
         if (q < 0.0).any():
             raise ScenarioValidationError("q_draws contains negative probabilities")
-        if self.semantics == "POSTERIOR_Q_DRAWS":
-            sums = q.sum(axis=1)
-            if not np.allclose(sums, 1.0, atol=1e-9):
-                raise ScenarioValidationError(
-                    "POSTERIOR_Q_DRAWS rows must be simplex points (row sums == 1)"
-                )
+        # Every row is a probability measure over the FIXED atom axis, so it MUST normalize —
+        # regardless of provenance. A sum=0 row zeroes a scenario and a sum=5 row 5x-inflates
+        # it, both of which would silently corrupt the objective's per-draw expectation. There
+        # is no legitimate non-normalized use (consult REV-2 verifier finding): the check spans
+        # all three semantics, not just POSTERIOR_Q_DRAWS.
+        sums = q.sum(axis=1)
+        if not np.allclose(sums, 1.0, atol=1e-9):
+            raise ScenarioValidationError(
+                f"q_draws rows must be simplex points (row sums == 1) for semantics="
+                f"{self.semantics}; got row-sum range [{sums.min():.6g}, {sums.max():.6g}]"
+            )
         if self.draw_weights is not None:
             w = self.draw_weights
             if w.shape != (q.shape[0],):

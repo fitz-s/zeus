@@ -60,6 +60,19 @@ def test_non_simplex_rows_rejected():
         _build(q_draws=np.array([[0.6, 0.5], [0.7, 0.3]], dtype=np.float64))
 
 
+def test_row_sum_normalization_enforced_for_all_semantics():
+    # A probability measure over the fixed atom axis must normalize regardless of provenance
+    # (consult REV-2 verifier finding): sum=0 (zeroed scenario) and sum=5 (5x inflation) rows
+    # must be rejected under PRODUCT_MEASURE and MEASURED_JOINT, not just POSTERIOR_Q_DRAWS.
+    for semantics in ("PRODUCT_MEASURE", "MEASURED_JOINT"):
+        with pytest.raises(ScenarioValidationError, match="simplex"):
+            _build(semantics=semantics, q_draws=np.array([[0.0, 0.0], [0.7, 0.3]], dtype=np.float64))
+        with pytest.raises(ScenarioValidationError, match="simplex"):
+            _build(semantics=semantics, q_draws=np.array([[3.0, 2.0], [0.7, 0.3]], dtype=np.float64))
+        # a properly-normalized set of the same semantics is accepted
+        _build(semantics=semantics, q_draws=np.array([[0.6, 0.4], [0.7, 0.3]], dtype=np.float64))
+
+
 def test_negative_probability_rejected():
     with pytest.raises(ScenarioValidationError, match="negative"):
         _build(q_draws=np.array([[1.2, -0.2], [0.7, 0.3]], dtype=np.float64))
