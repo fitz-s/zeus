@@ -15110,10 +15110,15 @@ def _maker_fill_static_prior() -> tuple[float, str]:
     Settings override carries its own provenance tag so the receipt records
     WHERE the prior came from.
 
-    This is the FALLBACK for the spread-conditioned calibration below: when the
-    spread is unmeasurable, the calibration is disabled, or no realized evidence
-    exists, the honest probability degrades to this all-band scalar (exactly the
-    pre-2026-06-24 behavior).
+    W4.4 (2026-07-03): this is now the SOLE maker-EV fill prior. The
+    spread-conditioned empirical-Bayes calibration (``maker_fill_calibration.py``,
+    a learned Beta-Binomial fill-rate model) was deleted as the anti-pattern
+    §3.4 of the order-engine rebuild design forbids; REST_ELIGIBLE (deterministic,
+    from release_calendar + measured p99s) is the design's replacement CLASS for
+    rest-vs-cancel timing, but does not itself supply a p_fill VALUE for the
+    EV_maker formula, and no such replacement predicate exists yet in this tree —
+    so this all-band scalar (already the pre-2026-06-24 behavior) is the
+    deterministic value that feeds ``EV_maker = p_fill_maker x (q_fill_adj - limit)``.
     """
     from src.strategy.live_inference.mode_consistent_ev import (
         MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
@@ -15142,137 +15147,6 @@ def _maker_fill_static_prior() -> tuple[float, str]:
             MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
         )
     return value, "settings.edli.maker_fill_probability_prior"
-
-
-def _maker_fill_calibration_enabled() -> bool:
-    """Operator toggle for the realized-by-spread maker fill calibration.
-
-    Default ON (edli.maker_fill_spread_calibration_enabled, default True). The
-    calibration only TIGHTENS the existing honest EV gate (an un-fillable band gets
-    p_fill ~ 0); turning it OFF reverts to the spread-blind static scalar.
-    """
-    try:
-        return bool(settings["edli"].get("maker_fill_spread_calibration_enabled", True))
-    except Exception:
-        return True
-
-
-def _maker_fill_calibration_params() -> tuple[float, float]:
-    """(window_days, pseudo_count) for the EB Beta-Binomial calibration.
-
-    Operator-tunable; defaults are the module defaults (7-day window, ~24
-    pseudo-count). The DEFAULT band rate is MEASURED — never a hand-set number.
-    """
-    from src.execution.maker_fill_calibration import (
-        DEFAULT_PSEUDO_COUNT,
-        DEFAULT_WINDOW_DAYS,
-    )
-
-    try:
-        edli = settings["edli"]
-    except Exception:
-        edli = {}
-    try:
-        window = float(edli.get("maker_fill_calibration_window_days", DEFAULT_WINDOW_DAYS))
-    except (TypeError, ValueError):
-        window = DEFAULT_WINDOW_DAYS
-    if not (window > 0.0):
-        window = DEFAULT_WINDOW_DAYS
-    try:
-        kappa = float(edli.get("maker_fill_calibration_pseudo_count", DEFAULT_PSEUDO_COUNT))
-    except (TypeError, ValueError):
-        kappa = DEFAULT_PSEUDO_COUNT
-    if not (kappa > 0.0):
-        kappa = DEFAULT_PSEUDO_COUNT
-    return window, kappa
-
-
-# Per-process cache for the realized band-rate rollup. The trade DB is large
-# (~59 GB live); re-running the SELECT for every candidate would be wasteful, and
-# the realized rate moves on the order of hours, not per cycle. Cache by window for
-# a short TTL; fail-safe to the static prior on any error (see caller).
-_REALIZED_BAND_TABLE_CACHE: dict[float, tuple[float, object]] = {}
-_REALIZED_BAND_TABLE_TTL_SECONDS = 600.0
-
-
-def _realized_band_table_cached(*, window_days: float):
-    """Cached realized-by-spread band-rate rollup (read-only, primary trade DB).
-
-    Opens a short-lived ``mode=ro`` connection to the PRIMARY checkout's
-    ``zeus_trades.db`` (the shared live DB; the worktree-local state/ has no live
-    facts), computes the per-band rollup, and caches it per window for a short TTL.
-    SELECT-only — never writes.
-    """
-    import time as _time
-
-    now = _time.monotonic()
-    cached = _REALIZED_BAND_TABLE_CACHE.get(float(window_days))
-    if cached is not None and (now - cached[0]) < _REALIZED_BAND_TABLE_TTL_SECONDS:
-        return cached[1]
-
-    import sqlite3 as _sqlite3
-
-    from src.execution.maker_fill_calibration import (
-        realized_maker_fill_rate_by_spread_band,
-    )
-    from src.state.db_paths import primary_trade_db_path
-
-    path = primary_trade_db_path()
-    conn = _sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
-    try:
-        table = realized_maker_fill_rate_by_spread_band(conn, window_days=window_days)
-    finally:
-        conn.close()
-    _REALIZED_BAND_TABLE_CACHE[float(window_days)] = (now, table)
-    return table
-
-
-def _maker_fill_probability_prior(
-    *, rel_spread: float | None = None, limit_price: float | None = None
-) -> tuple[float, str]:
-    """Spread-conditioned resting-fill prior (the maker EV's p_fill leg).
-
-    Returns ``(p_fill, source_tag)``. When ``rel_spread`` is given and the
-    calibration is enabled, the probability is the empirical-Bayes Beta-Binomial
-    posterior mean of the REALIZED fill rate in that spread band (sourced from
-    venue_order_facts -> venue_commands -> executable_market_snapshots): a band
-    with many samples and ~0% realized yields p_fill ~ 0 (so the unchanged
-    ``trade_score = EV_maker > 0`` gate REJECTS the un-fillable rest), while a
-    well-sampled tight band reflects its own ~24% rate (keeps trading). A sparse
-    band shrinks SMOOTHLY toward the global pooled rate (no hard cliff, no ad-hoc
-    fallback constant).
-
-    Degrades to the spread-BLIND static scalar (pre-2026-06-24 behavior) when:
-    ``rel_spread`` is None, the calibration is disabled, the band is unmeasurable,
-    there is no realized evidence yet, or ANY DB error occurs (fail-safe: the
-    decision path must never break on a calibration read).
-
-    ``limit_price`` is accepted for forward price-band conditioning (the diagnosis
-    also measured a price-band effect) but is not yet used; the spread band is the
-    dominant, statistically-legible signal today.
-    """
-    fallback_prior, fallback_source = _maker_fill_static_prior()
-    if rel_spread is None or not _maker_fill_calibration_enabled():
-        return fallback_prior, fallback_source
-
-    from src.execution.maker_fill_calibration import maker_fill_probability_for_spread
-
-    window_days, pseudo_count = _maker_fill_calibration_params()
-    try:
-        table = _realized_band_table_cached(window_days=window_days)
-        return maker_fill_probability_for_spread(
-            rel_spread,
-            conn=None,  # table is supplied; no further DB access
-            fallback_prior=fallback_prior,
-            fallback_source=fallback_source,
-            window_days=window_days,
-            pseudo_count=pseudo_count,
-            _table=table,
-        )
-    except Exception:
-        # Fail-safe: a cold/locked/missing DB or any read error must NOT break the
-        # decision path — fall back to the static all-band prior (prior behavior).
-        return fallback_prior, fallback_source
 
 
 def _taker_max_relative_spread() -> float:
@@ -15350,17 +15224,10 @@ def _mode_consistent_ev_for_proof(
     # against q_lcb (rejecting a quote the belief does not clear — test (c)).
     _is_maker_quote = str(getattr(execution_price, "price_type", "")) == "bid"
     taker_all_in_cost = None if _is_maker_quote else c_cost_95pct
-    # Spread-conditioned maker fill prior (live work): relative spread from the in-scope native
-    # top-of-book feeds the EB-shrunk realized-by-spread-band fill rate (0%-band -> p_fill~0 ->
-    # EV_maker~0 -> rejected at the unchanged trade_score gate).
-    from src.strategy.live_inference.mode_consistent_ev import (
-        relative_spread as _relative_spread,
-    )
-
-    _rel_spread = _relative_spread(best_bid, best_ask)
-    p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior(
-        rel_spread=_rel_spread, limit_price=float(execution_price.value)
-    )
+    # Maker fill prior (W4.4, 2026-07-03): the spread-conditioned empirical-Bayes
+    # calibration was deleted (anti-pattern §3.4); this is the all-band static
+    # scalar (measured deadline-horizon KM estimate, operator-tunable override).
+    p_fill_maker, p_fill_maker_source = _maker_fill_static_prior()
     # P0-1 (2026-06-23): PROOF-SIDE mode decision ALSO uses the execution-conditioned selection-curse
     # bound so proof_mode/rest_then_cross_policy is MAKER/no-cross for a side whose settlement-
     # evidenced realized rate cannot support the cross. Absent/unarmed -> identity (== q_lcb).
