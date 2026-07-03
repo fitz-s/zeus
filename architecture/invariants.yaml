@@ -874,3 +874,41 @@ invariants:
       - tests/state/test_daily_obs_cross_db_atomicity.py
     basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §0.3 + §3 A7
     added: 2026-05-14
+
+  - id: INV-42
+    zones: [K2_runtime]
+    statement: >
+      A reservation-bearing venue command reaches a terminal CommandState ONLY
+      through venue_command_repo.append_event's dispatch
+      (venue_command_repo.py:1179-1200) — the sole seam where collateral
+      release/convert fires (convert_reservation_on_fill for fill-class
+      terminals, release_reservation_for_command_state for the remaining
+      zero-fill terminals). The SOLE carve-out is the synthetic
+      external-close direct write at exchange_reconcile.py
+      _book_external_operator_close_exit_fact, guarded by a write-gate
+      assertion that no live reservation exists for that command_id before
+      the direct terminal INSERT — an externally-closed foreign order was
+      never reserve-backed by Zeus, so the assertion firing is a real
+      incident. The A4 orphan sweep (exchange_reconcile.py
+      check_collateral_identity) independently detects the residue class —
+      a live reservation attached to a terminal command — as defense in
+      depth if a future terminalization path bypasses both.
+    why: >
+      SCH-W1.1-CAS-LEDGER closes the live cross-connection check-then-insert
+      collateral TOCTOU and moves reservation settlement to convert-on-fill.
+      That guarantee only holds if collateral release/convert is centralized
+      at one seam; a second terminalization path that sets a command
+      terminal without going through append_event would silently leave a
+      reservation live forever (locked spendable) or double-release it.
+    enforced_by:
+      tests:
+        - tests/test_exchange_reconcile.py::test_external_operator_close_carve_out_guard_raises_on_live_reservation
+        - tests/test_exchange_reconcile.py::test_check_collateral_identity_orphan_sweep_records_finding
+        - tests/test_collateral_ledger.py::test_convert_reservation_on_fill_idempotent_on_replayed_terminal_event
+      negative_constraints: []
+    capability_tags: [venue_command_write]
+    relationship_tests:
+      - tests/test_exchange_reconcile.py::test_external_operator_close_carve_out_guard_raises_on_live_reservation
+      - tests/test_exchange_reconcile.py::test_check_collateral_identity_orphan_sweep_records_finding
+    basis: SCH-W1.1-CAS-LEDGER schema packet (docs/rebuild/schema_packets/w1_1_cas_reservation_ledger_schema_packet_2026-07-02.md), critic ruling 5
+    added: 2026-07-02

@@ -20,7 +20,7 @@ import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, Optional
@@ -37,9 +37,15 @@ AuthorityTier = Literal["CHAIN", "VENUE", "DEGRADED"]
 _MICRO = 1_000_000
 _CTF_SCALE = 1_000_000
 SQLITE_SIGNED_INTEGER_MAX = (2**63) - 1
-_TERMINAL_RESERVATION_STATES = frozenset(
-    {"CANCELED", "CANCELLED", "FILLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
-)
+# SCH-W1.1-CAS-LEDGER: REJECTED/SUBMIT_REJECTED are only reachable before any
+# venue ACK in the command grammar (src/state/venue_command_repo.py _TRANSITIONS)
+# so a fill can never precede them — plain release, no fact-stream lookup needed.
+# The other terminals (FILLED, CANCELED/CANCELLED, EXPIRED) are all reachable
+# from PARTIAL and may carry a nonzero matched_size, so they route through
+# convert_reservation_on_fill, which derives the filled portion and converts it.
+_RELEASE_STATES = frozenset({"REJECTED", "SUBMIT_REJECTED"})
+_CONVERT_STATES = frozenset({"CANCELED", "CANCELLED", "FILLED", "EXPIRED"})
+_TERMINAL_RESERVATION_STATES = _RELEASE_STATES | _CONVERT_STATES
 COLLATERAL_SNAPSHOT_REFRESH_CADENCE_SECONDS = 30.0
 COLLATERAL_SNAPSHOT_REFRESH_JITTER_BUDGET_SECONDS = 150.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = (
@@ -72,16 +78,63 @@ CREATE TABLE IF NOT EXISTS collateral_reservations (
   created_at TEXT NOT NULL,
   released_at TEXT,
   release_reason TEXT,
+  converted_amount INTEGER NOT NULL DEFAULT 0,
   CHECK (
     (reservation_type = 'PUSD_BUY' AND token_id IS NULL)
     OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL)
   )
 );
+CREATE TABLE IF NOT EXISTS collateral_unsettled_proceeds (
+  command_id TEXT PRIMARY KEY,
+  direction TEXT NOT NULL CHECK (direction IN ('OUTGOING_DEDUCTION','INCOMING_PROCEEDS')),
+  reservation_type TEXT NOT NULL CHECK (reservation_type IN ('PUSD_BUY','CTF_SELL')),
+  token_id TEXT,
+  amount_micro INTEGER NOT NULL CHECK (amount_micro >= 0),
+  created_at TEXT NOT NULL,
+  settled_at TEXT,
+  settle_reason TEXT,
+  CHECK (
+    (reservation_type = 'PUSD_BUY' AND token_id IS NULL AND direction = 'OUTGOING_DEDUCTION')
+    OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL AND direction = 'INCOMING_PROCEEDS')
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_unsettled_open
+  ON collateral_unsettled_proceeds (settled_at) WHERE settled_at IS NULL;
+CREATE TRIGGER IF NOT EXISTS trg_reservations_no_overreserve
+AFTER INSERT ON collateral_reservations
+WHEN NEW.reservation_type = 'PUSD_BUY'
+AND (
+  (SELECT pusd_balance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1)
+  - (SELECT COALESCE(SUM(amount),0) FROM collateral_reservations
+     WHERE reservation_type='PUSD_BUY' AND released_at IS NULL)
+  - (SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds
+     WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL)
+) < 0
+BEGIN
+  SELECT RAISE(ABORT, 'COLLATERAL_OVERRESERVE');
+END;
 """
+
+# SCH-W1.1-CAS-LEDGER: additive-column migration for legacy DBs whose
+# collateral_reservations table pre-dates converted_amount. CREATE TABLE IF NOT
+# EXISTS above is a no-op against an already-existing table, so this ALTER
+# covers live DBs; fresh DBs already have the column and hit the
+# duplicate-column no-op branch.
+_COLLATERAL_LEDGER_COLUMN_MIGRATIONS = (
+    "ALTER TABLE collateral_reservations ADD COLUMN converted_amount INTEGER NOT NULL DEFAULT 0",
+)
 
 
 class CollateralInsufficient(RuntimeError):
     """Raised when live submit preflight lacks spendable collateral/inventory."""
+
+
+_CAS_BUSY_RETRY_ATTEMPTS = 5
+
+
+def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "database is locked" in text or "busy" in text or "database table is locked" in text
 
 
 def _collateral_busy_timeout_ms() -> int:
@@ -398,17 +451,142 @@ class CollateralLedger:
         return True
 
     def reserve_pusd_for_buy(self, command_id: str, micro: int) -> None:
+        """Reserve pUSD via a guarded single-statement CAS insert.
+
+        Correctness rests on SQLite's single-writer lock precedence (critic
+        ruling 7a): by CAS time this conn is already the writer (the caller
+        inserts the venue command row first on the same conn), so the guard
+        subqueries evaluate against every previously COMMITTED reservation and
+        no other writer can interleave before commit. buy_preflight() below is
+        an advisory early check only; the CAS insert is the enforcement
+        authority — closing the check-then-insert TOCTOU that buy_preflight
+        alone could not.
+        """
         amount = _positive_int(micro, "micro")
         self.buy_preflight(_dummy_intent(), spend_micro=amount)
-        self._insert_reservation(command_id, "PUSD_BUY", None, amount)
+        if self._conn is None and self._db_path is None:
+            self._insert_reservation(command_id, "PUSD_BUY", None, amount)
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._run_cas(lambda conn: self._cas_insert_pusd_reservation(conn, command_id, amount, now))
 
     def release_pusd_reservation(self, command_id: str) -> None:
         self._release_reservation(command_id, token_id=None, reservation_type="PUSD_BUY", reason="released")
 
     def reserve_tokens_for_sell(self, command_id: str, token_id: str, size: int | float) -> None:
+        """Reserve CTF token inventory via compensating CAS.
+
+        Per-token availability lives in ctf_token_balances_json, not checkable
+        inside one SQL statement — insert, re-aggregate under the same writer
+        lock, delete-own-row-and-raise on violation (collateral_ledger.py:249-252
+        of the packet). Acceptable asymmetry vs the PUSD_BUY single-statement
+        CAS: PUSD_BUY is the high-frequency race (every entry); CTF_SELL is
+        per-position.
+        """
         amount = _token_required_units(size)
         self.sell_preflight(token_id=token_id, size=size)
-        self._insert_reservation(command_id, "CTF_SELL", token_id, amount)
+        if self._conn is None and self._db_path is None:
+            self._insert_reservation(command_id, "CTF_SELL", token_id, amount)
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._run_cas(lambda conn: self._cas_insert_ctf_reservation(conn, command_id, token_id, amount, now))
+
+    def _run_cas(self, fn) -> None:
+        """Dispatch a CAS body to the right connection-ownership mode.
+
+        db_path mode: the ledger owns the transaction — on SQLITE_BUSY /
+        SQLITE_BUSY_SNAPSHOT, roll back (via _connection_scope's except path)
+        and retry on a FRESH connection/snapshot, bounded, within the existing
+        busy_timeout window (critic ruling 7a BUSY handling).
+        conn mode: the caller owns the transaction — propagate immediately,
+        never auto-rollback a caller's transaction.
+        """
+        if self._db_path is not None:
+            attempts = 0
+            while True:
+                attempts += 1
+                try:
+                    with self._connection_scope() as conn:
+                        fn(conn)
+                    return
+                except sqlite3.OperationalError as exc:
+                    if _is_busy_error(exc) and attempts < _CAS_BUSY_RETRY_ATTEMPTS:
+                        continue
+                    raise
+        else:
+            with self._connection_scope() as conn:
+                fn(conn)
+
+    @staticmethod
+    def _cas_insert_pusd_reservation(
+        conn: sqlite3.Connection, command_id: str, amount: int, now: str
+    ) -> None:
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO collateral_reservations (
+                  command_id, reservation_type, token_id, amount, converted_amount, created_at
+                )
+                SELECT ?, 'PUSD_BUY', NULL, ?, 0, ?
+                 WHERE (
+                   (SELECT pusd_balance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1)
+                   - COALESCE((SELECT SUM(amount) FROM collateral_reservations
+                               WHERE reservation_type='PUSD_BUY' AND released_at IS NULL), 0)
+                   - COALESCE((SELECT SUM(amount_micro) FROM collateral_unsettled_proceeds
+                               WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL), 0)
+                 ) >= ?
+                """,
+                (command_id, amount, now, amount),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "COLLATERAL_OVERRESERVE" in str(exc):
+                raise CollateralInsufficient(
+                    f"pusd_insufficient_trigger: command_id={command_id} amount_micro={amount}"
+                ) from exc
+            raise
+        if cursor.rowcount == 0:
+            raise CollateralInsufficient(
+                f"pusd_insufficient_cas: command_id={command_id} amount_micro={amount}"
+            )
+
+    @staticmethod
+    def _cas_insert_ctf_reservation(
+        conn: sqlite3.Connection, command_id: str, token_id: str, amount: int, now: str
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+              command_id, reservation_type, token_id, amount, converted_amount, created_at
+            ) VALUES (?, 'CTF_SELL', ?, ?, 0, ?)
+            """,
+            (command_id, token_id, amount, now),
+        )
+        balance_row = conn.execute(
+            "SELECT ctf_token_balances_json FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        available_balance = 0
+        if balance_row is not None and balance_row[0]:
+            try:
+                available_balance = int(json.loads(balance_row[0]).get(token_id, 0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                available_balance = 0
+        reserved_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM collateral_reservations
+             WHERE reservation_type='CTF_SELL' AND token_id = ? AND released_at IS NULL
+            """,
+            (token_id,),
+        ).fetchone()
+        total_reserved = int(reserved_row[0] or 0)
+        if total_reserved > available_balance:
+            conn.execute(
+                "DELETE FROM collateral_reservations WHERE command_id = ?",
+                (command_id,),
+            )
+            raise CollateralInsufficient(
+                f"ctf_tokens_insufficient_cas: token_id={token_id} command_id={command_id} "
+                f"reserved={total_reserved} available={available_balance}"
+            )
 
     def release_token_reservation(self, command_id: str, token_id: str) -> None:
         self._release_reservation(command_id, token_id=token_id, reservation_type="CTF_SELL", reason="released")
@@ -615,6 +793,7 @@ class CollateralLedger:
         with self._connection_scope() as conn:
             if conn is None:
                 return
+            _clear_matured_unsettled_proceeds(conn, captured_at=_snapshot_time(snapshot))
             conn.execute(
                 """
                 INSERT INTO collateral_ledger_snapshots (
@@ -651,6 +830,12 @@ _GLOBAL_LEDGER: CollateralLedger | None = None
 def init_collateral_schema(conn: sqlite3.Connection) -> None:
     busy_ms = _pragma_busy_timeout_ms(conn)
     conn.executescript(COLLATERAL_LEDGER_SCHEMA)
+    for _alter_sql in _COLLATERAL_LEDGER_COLUMN_MIGRATIONS:
+        try:
+            conn.execute(_alter_sql)
+        except sqlite3.OperationalError as _exc:
+            if "duplicate column" not in str(_exc).lower():
+                raise
     # sqlite3.executescript() can clear the connection busy handler. Preserve the
     # caller's lock-wait contract so collateral initialization does not turn a
     # live writer into an immediate "database is locked" failure surface.
@@ -735,6 +920,158 @@ def release_reservation_for_command_state(
             return False
         raise
     return cursor.rowcount > 0
+
+
+def _max_matched_size(conn: sqlite3.Connection, command_id: str) -> Decimal:
+    """Cumulative filled size for a command (critic ruling 1: MAX() over the
+    venue_order_facts fact stream — same max() semantics as
+    order_truth_reducer.py:108. Replay-idempotent by construction: a
+    re-delivered duplicate fact can never lower the max."""
+    try:
+        rows = conn.execute(
+            "SELECT matched_size FROM venue_order_facts WHERE command_id = ? AND matched_size IS NOT NULL",
+            (command_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: venue_order_facts" in str(exc):
+            return Decimal("0")
+        raise
+    best = Decimal("0")
+    for row in rows:
+        raw = row[0]
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if value > best:
+            best = value
+    return best
+
+
+def convert_reservation_on_fill(
+    conn: sqlite3.Connection,
+    command_id: str,
+    state_after: str,
+) -> bool:
+    """Terminal-time reservation settlement: convert the filled portion, release the rest.
+
+    Called from venue_command_repo.append_event's terminal dispatch (the SOLE
+    terminalization seam, per the terminalization-centrality invariant) for
+    fill-class terminal states (_CONVERT_STATES). No notional crosses the
+    append_event boundary (critic ruling 2) — the filled portion is derived
+    internally from the command's venue_order_facts fact stream at terminal
+    time. Single idempotent terminal write guarded by WHERE released_at IS
+    NULL, so a re-delivered terminal event is a safe no-op.
+
+    PUSD_BUY: the converted portion becomes an OUTGOING_DEDUCTION unsettled
+    row (keeps reducing spendable until the balance snapshot catches up); the
+    unfilled remainder is released.
+    CTF_SELL: the converted portion (tokens that left the wallet) becomes an
+    INCOMING_PROCEEDS unsettled row valued at the command's submit price;
+    the unfilled remainder (unsold tokens) is released back to inventory.
+
+    Rounds the filled-notional fraction toward zero (conservative direction,
+    critic ruling: keep more held, never less).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    row = conn.execute(
+        """
+        SELECT reservation_type, token_id, amount, converted_amount
+          FROM collateral_reservations
+         WHERE command_id = ? AND released_at IS NULL
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    reservation_type, token_id, amount = str(row[0]), row[1], int(row[2])
+
+    try:
+        cmd_row = conn.execute(
+            "SELECT size, price FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: venue_commands" in str(exc):
+            cmd_row = None
+        else:
+            raise
+
+    order_size = Decimal(str(cmd_row[0])) if cmd_row and cmd_row[0] is not None else Decimal("0")
+    price = Decimal(str(cmd_row[1])) if cmd_row and cmd_row[1] is not None else Decimal("0")
+    max_matched = _max_matched_size(conn, command_id)
+
+    converted = 0
+    if order_size > 0 and max_matched > 0:
+        ratio = min(Decimal("1"), max_matched / order_size)
+        converted = int((Decimal(amount) * ratio).to_integral_value(rounding=ROUND_FLOOR))
+        converted = max(0, min(amount, converted))
+
+    release_reason = "CONVERTED_ON_FILL" if converted > 0 else str(state_after).upper()
+
+    cursor = conn.execute(
+        """
+        UPDATE collateral_reservations
+           SET released_at = ?, release_reason = ?, converted_amount = ?
+         WHERE command_id = ? AND released_at IS NULL
+        """,
+        (now, release_reason, converted, command_id),
+    )
+    if cursor.rowcount == 0:
+        # Lost the race to a concurrent terminal write (idempotent no-op).
+        return False
+
+    if converted > 0:
+        if reservation_type == "PUSD_BUY":
+            conn.execute(
+                """
+                INSERT INTO collateral_unsettled_proceeds (
+                  command_id, direction, reservation_type, token_id, amount_micro, created_at
+                ) VALUES (?, 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, ?, ?)
+                ON CONFLICT(command_id) DO NOTHING
+                """,
+                (command_id, converted, now),
+            )
+        else:
+            shares = Decimal(converted) / _CTF_SCALE
+            proceeds_micro = int((shares * price * _MICRO).to_integral_value(rounding=ROUND_FLOOR))
+            proceeds_micro = max(0, proceeds_micro)
+            conn.execute(
+                """
+                INSERT INTO collateral_unsettled_proceeds (
+                  command_id, direction, reservation_type, token_id, amount_micro, created_at
+                ) VALUES (?, 'INCOMING_PROCEEDS', 'CTF_SELL', ?, ?, ?)
+                ON CONFLICT(command_id) DO NOTHING
+                """,
+                (command_id, token_id, proceeds_micro, now),
+            )
+    return True
+
+
+def _clear_matured_unsettled_proceeds(conn: sqlite3.Connection, *, captured_at: datetime) -> int:
+    """Settle unsettled rows once a balance snapshot is new enough to already
+    reflect them (critic ruling 4: settlement-coordinated clearing). The venue
+    applies fills to balance at fill time, so any snapshot captured after
+    converted_at + CLOCK_SKEW already contains the deduction/proceeds —
+    settling then is safe by construction. Called inside the balance-refresh
+    write transaction (same conn as the new snapshot insert).
+    """
+    threshold = captured_at - timedelta(seconds=COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE collateral_unsettled_proceeds
+               SET settled_at = ?, settle_reason = 'BALANCE_REFRESH_OBSERVED'
+             WHERE settled_at IS NULL
+               AND created_at < ?
+            """,
+            (captured_at.isoformat(), threshold.isoformat()),
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table: collateral_unsettled_proceeds" in str(exc):
+            return 0
+        raise
+    return cursor.rowcount
 
 
 def assert_buy_preflight(intent: ExecutionIntent, *, spend_micro: int | None = None) -> None:

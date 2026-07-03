@@ -2667,7 +2667,8 @@ def init_schema(
           finding_id TEXT PRIMARY KEY,
           kind TEXT NOT NULL CHECK (kind IN (
             'exchange_ghost_order','local_orphan_order','unrecorded_trade',
-            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe',
+            'collateral_identity_mismatch'
           )),
           subject_id TEXT NOT NULL,
           context TEXT NOT NULL CHECK (context IN (
@@ -5531,11 +5532,41 @@ CREATE TABLE IF NOT EXISTS collateral_reservations (
   created_at TEXT NOT NULL,
   released_at TEXT,
   release_reason TEXT,
+  converted_amount INTEGER NOT NULL DEFAULT 0,
   CHECK (
     (reservation_type = 'PUSD_BUY' AND token_id IS NULL)
     OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL)
   )
 );
+CREATE TABLE IF NOT EXISTS collateral_unsettled_proceeds (
+  command_id TEXT PRIMARY KEY,
+  direction TEXT NOT NULL CHECK (direction IN ('OUTGOING_DEDUCTION','INCOMING_PROCEEDS')),
+  reservation_type TEXT NOT NULL CHECK (reservation_type IN ('PUSD_BUY','CTF_SELL')),
+  token_id TEXT,
+  amount_micro INTEGER NOT NULL CHECK (amount_micro >= 0),
+  created_at TEXT NOT NULL,
+  settled_at TEXT,
+  settle_reason TEXT,
+  CHECK (
+    (reservation_type = 'PUSD_BUY' AND token_id IS NULL AND direction = 'OUTGOING_DEDUCTION')
+    OR (reservation_type = 'CTF_SELL' AND token_id IS NOT NULL AND direction = 'INCOMING_PROCEEDS')
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_unsettled_open
+  ON collateral_unsettled_proceeds (settled_at) WHERE settled_at IS NULL;
+CREATE TRIGGER IF NOT EXISTS trg_reservations_no_overreserve
+AFTER INSERT ON collateral_reservations
+WHEN NEW.reservation_type = 'PUSD_BUY'
+AND (
+  (SELECT pusd_balance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1)
+  - (SELECT COALESCE(SUM(amount),0) FROM collateral_reservations
+     WHERE reservation_type='PUSD_BUY' AND released_at IS NULL)
+  - (SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds
+     WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL)
+) < 0
+BEGIN
+  SELECT RAISE(ABORT, 'COLLATERAL_OVERRESERVE');
+END;
 CREATE TABLE IF NOT EXISTS decision_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mode TEXT NOT NULL,
@@ -5549,7 +5580,8 @@ CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
           finding_id TEXT PRIMARY KEY,
           kind TEXT NOT NULL CHECK (kind IN (
             'exchange_ghost_order','local_orphan_order','unrecorded_trade',
-            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe',
+            'collateral_identity_mismatch'
           )),
           subject_id TEXT NOT NULL,
           context TEXT NOT NULL CHECK (context IN (
@@ -5834,6 +5866,18 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # OperationalError is the expected fresh-DB no-op path.
     try:
         conn.execute("ALTER TABLE execution_fact ADD COLUMN posterior_id INTEGER;")
+    except sqlite3.OperationalError:
+        pass
+
+    # SCH-W1.1-CAS-LEDGER (2026-07-02): converted_amount on collateral_reservations.
+    # Fresh DBs get it from _TRADE_CLASS_DDL above; legacy live DBs need this ALTER.
+    # NOT NULL DEFAULT 0 preserves every existing row (amount is immutable after
+    # insert; converted_amount starts at 0, written exactly once at terminal
+    # conversion). Duplicate-column OperationalError is the expected fresh-DB no-op.
+    try:
+        conn.execute(
+            "ALTER TABLE collateral_reservations ADD COLUMN converted_amount INTEGER NOT NULL DEFAULT 0;"
+        )
     except sqlite3.OperationalError:
         pass
 

@@ -6355,3 +6355,276 @@ def test_run_reconcile_sweep_proceeds_off_the_world_mutex(conn):
     result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
     assert len(result) == 1
     assert result[0].kind == "exchange_ghost_order"
+
+
+# ---------------------------------------------------------------------------- #
+# SCH-W1.1-CAS-LEDGER: type-aware A4 collateral identity checker + the
+# terminalization-centrality invariant's write-gate carve-out guard.
+# ---------------------------------------------------------------------------- #
+
+
+def _insert_collateral_test_command(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    token_id: str,
+    state: str,
+    intent_kind: str = "EXIT",
+    side: str = "BUY",
+    size: float = 10.0,
+    price: float = 0.5,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            command_id, f"snap-{command_id}", f"env-{command_id}", f"pos-{command_id}",
+            f"dec-{command_id}", f"idem-{command_id}", intent_kind, "z4-market",
+            token_id, side, size, price, state, now, now,
+        ),
+    )
+
+
+def test_check_collateral_identity_orphan_sweep_records_finding(conn):
+    """A4 orphan sweep: a live (unreleased, unconverted) reservation attached
+    to a terminal command records a collateral_identity_mismatch finding —
+    defense in depth if a terminalization path bypasses append_event."""
+    from src.execution.exchange_reconcile import check_collateral_identity
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_collateral_schema(conn)
+    command_id = "orphan-cmd"
+    _insert_collateral_test_command(conn, command_id, token_id=YES_TOKEN, state="FILLED")
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations
+          (command_id, reservation_type, token_id, amount, converted_amount, created_at)
+        VALUES (?, 'PUSD_BUY', NULL, 5000000, 0, ?)
+        """,
+        (command_id, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    findings = check_collateral_identity(conn, context="periodic", observed_at=NOW)
+
+    assert len(findings) == 1
+    assert findings[0].kind == "collateral_identity_mismatch"
+    assert findings[0].subject_id == command_id
+    assert json.loads(findings[0].evidence_json)["reason"] == "orphan_reservation_on_terminal_command"
+
+
+def test_check_collateral_identity_auto_resolves_on_clean_recheck(conn):
+    """Auto-resolve (critic ruling 4): once the orphan reservation is released,
+    the NEXT clean check resolves the prior finding via
+    resolution='auto_clean_recheck' — a transient mismatch never becomes a
+    sticky halt."""
+    from src.execution.exchange_reconcile import (
+        check_collateral_identity,
+        list_unresolved_findings,
+    )
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_collateral_schema(conn)
+    command_id = "orphan-cmd-autoresolve"
+    _insert_collateral_test_command(conn, command_id, token_id=YES_TOKEN, state="FILLED")
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations
+          (command_id, reservation_type, token_id, amount, converted_amount, created_at)
+        VALUES (?, 'PUSD_BUY', NULL, 5000000, 0, ?)
+        """,
+        (command_id, now),
+    )
+    conn.commit()
+
+    findings = check_collateral_identity(conn, context="periodic", observed_at=NOW)
+    assert len(findings) == 1
+    unresolved = list_unresolved_findings(conn, kind="collateral_identity_mismatch")
+    assert len(unresolved) == 1
+
+    conn.execute(
+        "UPDATE collateral_reservations SET released_at = ?, release_reason = 'FILLED' WHERE command_id = ?",
+        (now, command_id),
+    )
+    conn.commit()
+
+    findings2 = check_collateral_identity(conn, context="periodic", observed_at=NOW + timedelta(seconds=1))
+    assert findings2 == []
+    unresolved2 = list_unresolved_findings(conn, kind="collateral_identity_mismatch")
+    assert unresolved2 == []
+
+
+def test_check_collateral_identity_zero_findings_under_fill_cancel_settle_storm(conn):
+    """IDENTITY STORM (acceptance): fill/partial-fill/cancel/settle storm —
+    after every event the type-aware reconstruction holds; A4 checker zero
+    findings."""
+    from src.execution.exchange_reconcile import check_collateral_identity
+    from src.state.collateral_ledger import CollateralLedger, init_collateral_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_collateral_schema(conn)
+    ledger = CollateralLedger(conn)
+    balance_time = datetime.now(timezone.utc)
+    ledger.set_snapshot(
+        _collateral_storm_snapshot(pusd=200_000_000, captured_at=balance_time)
+    )
+
+    payload = {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {"component": "entry_economics", "allowed": True},
+                {"component": "entry_actionable_certificate", "allowed": True},
+            ],
+        }
+    }
+
+    # Command A: fully filled.
+    _insert_collateral_test_command(conn, "storm-a", token_id=YES_TOKEN, state="INTENT_CREATED")
+    ledger.reserve_pusd_for_buy("storm-a", 5_000_000)
+    now = datetime.now(timezone.utc).isoformat()
+    append_event(conn, command_id="storm-a", event_type="SUBMIT_REQUESTED", occurred_at=now, payload=payload)
+    append_event(conn, command_id="storm-a", event_type="SUBMIT_ACKED", occurred_at=now)
+    append_order_fact(
+        conn, venue_order_id="storm-a-vo", command_id="storm-a", state="MATCHED",
+        remaining_size="0", matched_size="10", source="WS_USER",
+        observed_at=datetime.now(timezone.utc), raw_payload_hash="1" * 64,
+    )
+    append_event(conn, command_id="storm-a", event_type="FILL_CONFIRMED", occurred_at=now)
+
+    # Command B: partial fill then cancel.
+    _insert_collateral_test_command(conn, "storm-b", token_id=YES_TOKEN, state="INTENT_CREATED")
+    ledger.reserve_pusd_for_buy("storm-b", 5_000_000)
+    append_event(conn, command_id="storm-b", event_type="SUBMIT_REQUESTED", occurred_at=now, payload=payload)
+    append_event(conn, command_id="storm-b", event_type="SUBMIT_ACKED", occurred_at=now)
+    append_order_fact(
+        conn, venue_order_id="storm-b-vo", command_id="storm-b", state="PARTIALLY_MATCHED",
+        remaining_size="6", matched_size="4", source="WS_USER",
+        observed_at=datetime.now(timezone.utc), raw_payload_hash="2" * 64,
+    )
+    append_event(conn, command_id="storm-b", event_type="PARTIAL_FILL_OBSERVED", occurred_at=now)
+    append_event(conn, command_id="storm-b", event_type="CANCEL_REQUESTED", occurred_at=now)
+    append_event(conn, command_id="storm-b", event_type="CANCEL_ACKED", occurred_at=now)
+
+    # Command C: rejected before any venue exposure (zero-fill).
+    _insert_collateral_test_command(conn, "storm-c", token_id=YES_TOKEN, state="INTENT_CREATED")
+    ledger.reserve_pusd_for_buy("storm-c", 5_000_000)
+    append_event(conn, command_id="storm-c", event_type="SUBMIT_REQUESTED", occurred_at=now, payload=payload)
+    append_event(conn, command_id="storm-c", event_type="SUBMIT_REJECTED", occurred_at=now)
+
+    # Settle: a later balance snapshot clears the matured unsettled rows.
+    settle_time = balance_time + timedelta(seconds=200)
+    ledger.set_snapshot(_collateral_storm_snapshot(pusd=192_000_000, captured_at=settle_time))
+
+    findings = check_collateral_identity(conn, context="periodic", observed_at=settle_time)
+    assert findings == []
+
+
+def _collateral_storm_snapshot(*, pusd: int, captured_at: datetime):
+    from src.state.collateral_ledger import CollateralSnapshot
+
+    return CollateralSnapshot(
+        pusd_balance_micro=pusd,
+        pusd_allowance_micro=pusd,
+        usdc_e_legacy_balance_micro=0,
+        ctf_token_balances={},
+        ctf_token_allowances={},
+        reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={},
+        captured_at=captured_at,
+        authority_tier="CHAIN",
+    )
+
+
+def test_external_operator_close_carve_out_guard_raises_on_live_reservation(conn):
+    """Terminalization-centrality invariant (INV-42): the synthetic
+    external-close direct write is the SOLE carve-out, guarded by a write-gate
+    assertion that no live reservation exists for that command_id — an
+    externally-closed foreign order was never reserve-backed by Zeus."""
+    from hashlib import sha256
+
+    from src.execution.exchange_reconcile import _book_external_operator_close_exit_fact
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_collateral_schema(conn)
+    token_id = "carve-out-token"
+    entry_command_id = "entry-cmd-carve-out"
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'z4-market', ?, 'BUY', 10.0, 0.5, 'FILLED', ?, ?)
+        """,
+        (entry_command_id, "snap-carve", "env-carve", "pos-carve", "dec-carve", "idem-carve", token_id, now, now),
+    )
+
+    synthetic_command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations
+          (command_id, reservation_type, token_id, amount, converted_amount, created_at)
+        VALUES (?, 'CTF_SELL', ?, 1000000, 0, ?)
+        """,
+        (synthetic_command_id, token_id, now),
+    )
+    conn.commit()
+
+    with pytest.raises(AssertionError, match="terminalization_centrality_violation"):
+        _book_external_operator_close_exit_fact(
+            conn,
+            token_id=token_id,
+            close_size=Decimal("10"),
+            close_price=Decimal("0.5"),
+            observed_at=datetime.now(timezone.utc),
+        )
+
+
+def test_external_operator_close_carve_out_proceeds_without_live_reservation(conn):
+    """REGRESSION: the carve-out's normal path (no reserve-backed command for
+    the synthetic id) is unaffected by the new write-gate guard."""
+    from hashlib import sha256
+
+    from src.execution.exchange_reconcile import _book_external_operator_close_exit_fact
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_collateral_schema(conn)
+    token_id = "carve-out-token-clean"
+    entry_command_id = "entry-cmd-carve-out-clean"
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'z4-market', ?, 'BUY', 10.0, 0.5, ?, 'FILLED', ?, ?)
+        """,
+        (entry_command_id, "snap-c", "env-c", "pos-c", "dec-c", "idem-c", token_id, "vo-entry-c", now, now),
+    )
+    conn.commit()
+
+    booked = _book_external_operator_close_exit_fact(
+        conn,
+        token_id=token_id,
+        close_size=Decimal("10"),
+        close_price=Decimal("0.5"),
+        observed_at=datetime.now(timezone.utc),
+    )
+    assert booked is True
+
+    synthetic_command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    row = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?", (synthetic_command_id,)
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "FILLED"

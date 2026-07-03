@@ -2347,15 +2347,47 @@ tables:
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    notes: >
+      SCH-W1.1-CAS-LEDGER (2026-07-02): the prior "Ghost...Drop after 2026-08-09"
+      note here was STALE and contradicted domains.py CANONICAL_OWNER
+      ('collateral_ledger_snapshots': Domain.TRADE, domains.py:45) and the live
+      singleton wiring at main.py:3905 (CollateralLedger(db_path=_zeus_trade_db_path())).
+      This table is LIVE canonical truth on zeus_trades.db, written by
+      src/state/collateral_ledger.py. Do not drop.
 
   - name: collateral_reservations
     db: trade
     schema_class: trade_class
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    pk_col: command_id
+    notes: >
+      SCH-W1.1-CAS-LEDGER (2026-07-02): the prior "Ghost...Drop after 2026-08-09"
+      note here was STALE and contradicted domains.py CANONICAL_OWNER
+      ('collateral_reservations': Domain.TRADE, domains.py:46) and the live
+      singleton wiring at main.py:3905 (CollateralLedger(db_path=_zeus_trade_db_path())).
+      This table is LIVE canonical truth on zeus_trades.db, written by
+      src/state/collateral_ledger.py via the CAS reserve path plus
+      convert_reservation_on_fill at the venue_command_repo.append_event
+      terminal dispatch seam. Do not drop.
+
+  - name: collateral_unsettled_proceeds
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: command_id
+    notes: >
+      SCH-W1.1-CAS-LEDGER (2026-07-02): new direction-aware unsettled bucket.
+      OUTGOING_DEDUCTION rows keep reducing spendable_pusd until the venue
+      balance snapshot catches up (closes the phantom-cash window between a
+      FILLED event and the balance reflecting the spend); INCOMING_PROCEEDS
+      rows are tracked expected-incoming pUSD from CTF_SELL fills, never
+      spendable while unsettled. Writers: collateral_ledger.py
+      convert_reservation_on_fill (insert) and the balance-refresh clearing
+      step inside _persist_snapshot (settle). Readers: the CAS reserve guard,
+      the A4 type-aware identity checker (exchange_reconcile.py
+      check_collateral_identity).
 
   - name: control_overrides
     db: trade

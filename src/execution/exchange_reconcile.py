@@ -53,7 +53,7 @@ import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from types import SimpleNamespace
@@ -73,6 +73,7 @@ FindingKind = Literal[
     "position_drift",
     "heartbeat_suspected_cancel",
     "cutover_wipe",
+    "collateral_identity_mismatch",
 ]
 ReconcileContext = Literal["periodic", "ws_gap", "heartbeat_loss", "cutover", "operator"]
 
@@ -84,6 +85,7 @@ _FINDING_KINDS = frozenset(
         "position_drift",
         "heartbeat_suspected_cancel",
         "cutover_wipe",
+        "collateral_identity_mismatch",
     }
 )
 _CONTEXTS = frozenset({"periodic", "ws_gap", "heartbeat_loss", "cutover", "operator"})
@@ -148,7 +150,8 @@ CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
   finding_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN (
     'exchange_ghost_order','local_orphan_order','unrecorded_trade',
-    'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+    'position_drift','heartbeat_suspected_cancel','cutover_wipe',
+    'collateral_identity_mismatch'
   )),
   subject_id TEXT NOT NULL,
   context TEXT NOT NULL CHECK (context IN ('periodic','ws_gap','heartbeat_loss','cutover','operator')),
@@ -1607,6 +1610,31 @@ def _absorb_operator_external_close(
     return booked
 
 
+def _assert_no_live_reservation_for_carve_out(conn: sqlite3.Connection, command_id: str) -> None:
+    """Write-gate for the sole terminalization-centrality carve-out (SCH-W1.1-CAS-LEDGER).
+
+    Raises if a live (unreleased, unconverted) collateral reservation exists for
+    a command_id about to be minted terminal by a direct write instead of
+    append_event.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM collateral_reservations WHERE command_id = ? AND released_at IS NULL",
+            (command_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: collateral_reservations" in str(exc):
+            return
+        raise
+    if row is not None:
+        raise AssertionError(
+            "terminalization_centrality_violation: live collateral reservation "
+            f"exists for externally-closed synthetic command_id={command_id!r} — "
+            "the append_event terminalization seam was bypassed for a "
+            "reserve-backed command."
+        )
+
+
 def _book_external_operator_close_exit_fact(
     conn: sqlite3.Connection,
     *,
@@ -1657,6 +1685,15 @@ def _book_external_operator_close_exit_fact(
     if conn.execute(
         "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1", (command_id,)
     ).fetchone() is None:
+        # SCH-W1.1-CAS-LEDGER terminalization-centrality invariant: this synthetic
+        # command is born already-terminal via this DIRECT write, bypassing
+        # append_event (the sole seam that converts/releases collateral). It is
+        # the ONE sanctioned carve-out — an externally-closed foreign order was
+        # never reserve-backed by Zeus, so no live reservation can legitimately
+        # exist for this command_id. If one does, that is a real incident: fail
+        # loudly instead of silently minting a synthetic terminal command over a
+        # phantom hold.
+        _assert_no_live_reservation_for_carve_out(conn, command_id)
         conn.execute(
             """
             INSERT INTO venue_commands (
@@ -2496,6 +2533,189 @@ def resolve_finding(
         """,
         (_coerce_dt(resolved_at).isoformat(), resolution, resolved_by, finding),
     )
+
+
+# SCH-W1.1-CAS-LEDGER: collateral-reservation ledger (src/state/collateral_ledger.py)
+# identity checker. Money model: spendable_pusd = latest(pusd_balance_micro)
+# - Sum(amount) over live PUSD_BUY reservations - Sum(amount_micro) over
+# unsettled OUTGOING_DEDUCTION rows.
+_COLLATERAL_RECONSTRUCTION_SUBJECT = "pusd_reconstruction_negative"
+
+
+def check_collateral_identity(
+    conn: sqlite3.Connection,
+    *,
+    context: ReconcileContext,
+    observed_at: datetime | str | None = None,
+) -> list[ReconcileFinding]:
+    """Type-aware A4 collateral identity check (critic ruling 3/4).
+
+    Runs on a SINGLE consistent read snapshot (one connection, one read
+    transaction covering the balance row, reservation aggregate, and unsettled
+    aggregate) so it is never computed across the balance-refresh boundary.
+    Three independent signals route to the SAME finding kind
+    ``collateral_identity_mismatch``:
+
+    1. Orphan sweep: a live (unreleased, unconverted) reservation attached to
+       a terminal venue_commands row — the terminalization-centrality seam
+       (append_event) was bypassed for that command.
+    2. Stuck unsettled row: an unsettled OUTGOING_DEDUCTION/INCOMING_PROCEEDS
+       row older than COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS that a newer balance
+       snapshot (captured_at > created_at + CLOCK_SKEW) has already had the
+       chance to clear but did not — the clearing rule failed to fire. Rows
+       younger than the tolerance are excluded (expected venue lag, not a
+       mismatch — false-RED protection, critic ruling 4).
+    3. Reconstruction went negative: the type-aware spendable_pusd identity
+       must hold EXACTLY by construction (the CAS trigger enforces it at
+       insert time); a negative value can only mean some writer bypassed the
+       CAS path. Defense in depth.
+
+    Auto-resolve (critic ruling 4): callers should invoke this on every clean
+    check; if the previous check's findings are absent this time, resolve them
+    via resolve_finding(resolution='auto_clean_recheck') so a transient
+    mismatch never becomes a sticky halt.
+    """
+
+    init_exchange_reconcile_schema(conn)
+    from src.state.collateral_ledger import (
+        COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS,
+        COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+        init_collateral_schema,
+    )
+
+    init_collateral_schema(conn)
+    observed = _coerce_dt(observed_at)
+    findings: list[ReconcileFinding] = []
+    live_subjects: set[str] = set()
+
+    # --- One consistent read snapshot ---------------------------------
+    balance_row = conn.execute(
+        "SELECT pusd_balance_micro, captured_at FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    live_buy_row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM collateral_reservations "
+        "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL"
+    ).fetchone()
+    unsettled_outgoing_row = conn.execute(
+        "SELECT COALESCE(SUM(amount_micro), 0) FROM collateral_unsettled_proceeds "
+        "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL"
+    ).fetchone()
+    unsettled_rows = conn.execute(
+        "SELECT command_id, direction, amount_micro, created_at FROM collateral_unsettled_proceeds "
+        "WHERE settled_at IS NULL"
+    ).fetchall()
+    orphan_rows = conn.execute(
+        """
+        SELECT r.command_id, vc.state
+          FROM collateral_reservations r
+          JOIN venue_commands vc ON vc.command_id = r.command_id
+         WHERE r.released_at IS NULL
+        """
+    ).fetchall()
+
+    # --- Signal 1: orphan sweep ----------------------------------------
+    from src.execution.command_bus import TERMINAL_STATES as _TERMINAL_COMMAND_STATES
+
+    terminal_state_values = {state.value for state in _TERMINAL_COMMAND_STATES}
+    for row in orphan_rows:
+        command_id, state = str(row[0]), str(row[1])
+        if state.upper() in terminal_state_values:
+            live_subjects.add(command_id)
+            findings.append(
+                record_finding(
+                    conn,
+                    kind="collateral_identity_mismatch",
+                    subject_id=command_id,
+                    context=context,
+                    evidence={
+                        "reason": "orphan_reservation_on_terminal_command",
+                        "command_id": command_id,
+                        "state": state,
+                    },
+                    recorded_at=observed,
+                )
+            )
+
+    # --- Signal 2: stuck unsettled row (venue-comparison tolerance) ----
+    if balance_row is not None and balance_row[0] is not None:
+        try:
+            latest_captured_at = _coerce_dt(str(balance_row[1]))
+        except Exception:
+            latest_captured_at = observed
+        for row in unsettled_rows:
+            command_id, direction, amount_micro, created_at_raw = (
+                str(row[0]), str(row[1]), int(row[2] or 0), row[3]
+            )
+            try:
+                created_at = _coerce_dt(str(created_at_raw))
+            except Exception:
+                continue
+            age_seconds = (observed - created_at).total_seconds()
+            if age_seconds < COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:
+                continue  # expected venue lag — not a mismatch (false-RED protection)
+            snapshot_had_the_chance = (
+                latest_captured_at - created_at
+            ).total_seconds() > COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS
+            if not snapshot_had_the_chance:
+                continue
+            live_subjects.add(command_id)
+            findings.append(
+                record_finding(
+                    conn,
+                    kind="collateral_identity_mismatch",
+                    subject_id=command_id,
+                    context=context,
+                    evidence={
+                        "reason": "unsettled_row_stuck_past_clearing_tolerance",
+                        "command_id": command_id,
+                        "direction": direction,
+                        "amount_micro": amount_micro,
+                        "age_seconds": age_seconds,
+                        "latest_balance_captured_at": latest_captured_at.isoformat(),
+                    },
+                    recorded_at=observed,
+                )
+            )
+
+    # --- Signal 3: internal reconstruction went negative (defense in depth) --
+    if balance_row is not None and balance_row[0] is not None:
+        spendable_pusd = (
+            int(balance_row[0])
+            - int(live_buy_row[0] or 0)
+            - int(unsettled_outgoing_row[0] or 0)
+        )
+        if spendable_pusd < 0:
+            live_subjects.add(_COLLATERAL_RECONSTRUCTION_SUBJECT)
+            findings.append(
+                record_finding(
+                    conn,
+                    kind="collateral_identity_mismatch",
+                    subject_id=_COLLATERAL_RECONSTRUCTION_SUBJECT,
+                    context=context,
+                    evidence={
+                        "reason": "type_aware_identity_reconstruction_negative",
+                        "pusd_balance_micro": int(balance_row[0]),
+                        "live_pusd_buy_reservations_micro": int(live_buy_row[0] or 0),
+                        "unsettled_outgoing_deduction_micro": int(unsettled_outgoing_row[0] or 0),
+                        "spendable_pusd_micro": spendable_pusd,
+                    },
+                    recorded_at=observed,
+                )
+            )
+
+    # --- Auto-resolve: clean recheck clears any prior unresolved finding ----
+    for prior in list_unresolved_findings(conn, kind="collateral_identity_mismatch"):
+        if prior.subject_id in live_subjects:
+            continue
+        resolve_finding(
+            conn,
+            prior.finding_id,
+            resolution="auto_clean_recheck",
+            resolved_by="check_collateral_identity",
+            resolved_at=observed,
+        )
+
+    return findings
 
 
 def _record_position_drift_findings(

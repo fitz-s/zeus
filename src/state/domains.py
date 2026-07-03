@@ -44,6 +44,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'chronicle': Domain.WORLD,
     'collateral_ledger_snapshots': Domain.TRADE,
     'collateral_reservations': Domain.TRADE,
+    'collateral_unsettled_proceeds': Domain.TRADE,
     'control_overrides_history': Domain.WORLD,
     'cycle_advance_enqueues': Domain.FORECASTS,
     'daily_observation_revisions': Domain.WORLD,
