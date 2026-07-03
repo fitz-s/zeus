@@ -1510,8 +1510,11 @@ files:
       payoff_vector's 1-D robust ΔU to a plan over the route menu — then κ-scales and discretely
       repairs (re-evaluating the rounded plan; submit-worthy only if ΔU still > 0). Deterministic
       coordinate ascent, seeded at the best single item so it provably dominates the top-1 picker.
-      SolveEngineShim is the FamilyDecision-shaped seam (sub-slice 3). Swaps in at
-      qkernel_spine_bridge.py:1332 behind w3_solve_enabled; replaces family_decision_engine.py.
+      W3.3: SolveEngineShim.decide() implemented — composes an inner FamilyDecisionEngine for the
+      scaffolding, replaces selection with the joint solver, re-scores the primary leg standalone at
+      its post-haircut size (LegacyDecisionProjection stamped into selected so evidence grades the
+      projection, not the joint plan), emits coherence_allows=True. Swaps in at
+      qkernel_spine_bridge.py:1332 behind w3_solve_enabled (seam swap = next packet); nothing imports it yet.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/kappa.py:
@@ -1531,7 +1534,9 @@ files:
       Exits-as-same-solve: a held position is an endowment the solver re-evaluates; the C5
       marginal rule (b·Σq_j/W_j > q_i/W_i) is the mathematical form of "move wealth out of
       outcome i". Reuses ExitContext/precedence tripwires; replaces the economic rule body.
-      Bodies land in a later sub-slice (interface only at W3.2).
+      W3.3: build_wealth_by_atom is implemented (entry-side, pure core, INJECTED spendable cash
+      net of reservations + per-atom holdings payout, ZeroWealthOutcomeError on non-positive);
+      marginal_exit_condition + the full C5 ledger builder remain a later sub-slice.
   src/solve/AGENTS.md:
     zone: docs
     authority_role: registry

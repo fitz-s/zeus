@@ -835,19 +835,67 @@ def solve(
     )
 
 
+def _read_config_kelly_multiplier() -> float:
+    """The downstream kelly_multiplier config factor — the ONE reproducible piece of the submit
+    boundary haircut at decide() time (consult REV-2 follow-up judgment call).
+
+    The FULL variance-adjusted haircut (SizingContext / evaluate_kelly, event_reactor_adapter.py
+    :5657) also needs bankroll + portfolio-state provider + lead_days that are NOT in the frozen
+    :1379 kwargs, so the shim reproduces only the config base factor and the promotion evidence
+    grades the ACTUAL submitted size from the settlement receipt. Never invent a bankroll side
+    channel. Defaults to 1.0 (the W3 κ posture) if the config is unreadable.
+    """
+    try:
+        from src.config import settings
+
+        value = float(settings["sizing"]["kelly_multiplier"])
+        return value if value > 0.0 else 1.0
+    except Exception:  # noqa: BLE001 - a config read fault must not crash the decision path
+        return 1.0
+
+
 class SolveEngineShim:
     """Drop-in replacement at the qkernel_spine_bridge.py:1332 construction seam.
 
     Accepts the SAME constructor surface the bridge passes to FamilyDecisionEngine and the SAME
-    decide() call of :1379. Internally: assemble SolveMenu (menu_adapter) → solve() → derive
-    FamilyDecision + a LegacyDecisionProjection (phase-1 evidence grades the projection, never
-    SolutionPlan.expected_delta_log_wealth — consult REV-2).
+    decide() call of :1379. It COMPOSES an inner FamilyDecisionEngine for the decision scaffolding
+    (predictive, served joint_q/band pass-through, family_book, market_coherence, market_implied_q,
+    and the enumerated candidate economics) and REPLACES the selection with the joint solver over
+    a SolveMenu built from the same route surface. The primary leg is re-scored STANDALONE at its
+    post-downstream-haircut size (``LegacyDecisionProjection``); phase-1 evidence grades that
+    projection — its ΔU/size are stamped into ``selected`` so the existing proof overlay / facts
+    writer grade the projection, NEVER the joint plan's ΔU (consult REV-2).
+
+    INJECTED INPUTS (W3.3 ruling): ``spendable_cash_provider`` (the CAS ledger's spendable amount,
+    net of reservations — the seam-swap threads the real read; tests inject) and, optionally,
+    ``ledger_snapshot_id_provider``. The endowment wealth VECTOR is the legacy ``portfolio`` A_y
+    (like-for-like with the picker). ``engine`` may be injected for tests in place of a real
+    FamilyDecisionEngine. NOTHING wires this shim yet — the seam swap + G3 harness are the next packet.
     """
 
-    def __init__(self, **engine_kwargs: Any) -> None:
-        # Sub-slice 3 wires: store the injected builders/readers; the shim reuses the bridge's
-        # served-belief inputs verbatim (one-belief law — never rebuild σ).
+    def __init__(
+        self,
+        *,
+        engine: Any = None,
+        spendable_cash_provider: Any = None,
+        ledger_snapshot_id_provider: Any = None,
+        **engine_kwargs: Any,
+    ) -> None:
+        self._engine = engine
         self._engine_kwargs = engine_kwargs
+        self._spendable_cash_provider = spendable_cash_provider
+        self._ledger_snapshot_id_provider = ledger_snapshot_id_provider
+        self._route_set_builder = engine_kwargs.get("route_set_builder")
+        self._enable_negrisk_routes = bool(engine_kwargs.get("enable_negrisk_routes", False))
+        # Surfaced for tests / audit; the projection VALUES also flow via ``selected`` downstream.
+        self.last_projection: Any = None
+
+    def _inner_engine(self) -> Any:
+        if self._engine is None:
+            from src.decision.family_decision_engine import FamilyDecisionEngine
+
+            self._engine = FamilyDecisionEngine(**self._engine_kwargs)
+        return self._engine
 
     def decide(
         self,
@@ -865,15 +913,151 @@ class SolveEngineShim:
         served_band: Any,
         served_payoff_q_lcb_by_side: Any,
     ) -> "FamilyDecision":
-        """EXACT seam signature (qkernel_spine_bridge.py:1379). Returns FamilyDecision.
+        """EXACT seam signature (qkernel_spine_bridge.py:1379). Returns a validated FamilyDecision."""
+        from dataclasses import replace
 
-        Derivation contract (sub-slice 3): plan's primary order → ``selected``; full plan →
-        candidate_decisions provenance (coherence_allows=True per §4 decision 1); no-trade →
-        no_trade_reason; a LegacyDecisionProjection re-scoring the primary leg standalone at its
-        post-downstream-haircut size (phase-1 no-trade if that ΔU ≤ 0); ``max_stake_usd``
-        converted to a cash constraint here (shim-only); then ``validate_family_decision_contract``.
-        """
-        raise NotImplementedError(
-            "W3 sub-slice 3: menu assembly + solve() + FamilyDecision derivation + "
-            "LegacyDecisionProjection + validate_family_decision_contract — see class docstring"
+        from src.solve.exits import build_wealth_by_atom
+        from src.solve.kappa import promotion_window_policy
+        from src.solve.menu_adapter import build_solve_menu
+        from src.solve.scenario_service import TransitionalIndependentProduct
+        from src.solve.types import JointOutcomeAtom, LegacyDecisionProjection
+
+        self.last_projection = None
+        legacy = self._inner_engine().decide(
+            case, omega, snapshots,
+            portfolio=portfolio, matrix=matrix, captured_at_utc=captured_at_utc,
+            sizing_candidates=sizing_candidates, max_stake_usd=max_stake_usd,
+            shares_for_routing=shares_for_routing, served_joint_q=served_joint_q,
+            served_band=served_band, served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
+
+        # Ineligible / no-q path: no belief was integrated — pass the legacy no-trade through.
+        if legacy.joint_q is None or legacy.band is None or legacy.family_book is None:
+            return validate_family_decision_contract(legacy)
+
+        family_key = str(case.family_id)
+        bin_ids = [b.bin_id for b in omega.bins]
+        atom_ids = tuple(JointOutcomeAtom.canonical_id({family_key: b}) for b in bin_ids)
+
+        # Same route surface the engine used, reshaped into the solver menu (phase-1 direct-native).
+        route_set = self._route_set_builder(
+            legacy.family_book, shares=shares_for_routing, enable_negrisk_routes=self._enable_negrisk_routes
+        )
+        menu = build_solve_menu(
+            route_set, family_key=family_key, family_book=legacy.family_book, holdings_by_bin_id={}
+        )
+
+        # Endowment wealth = legacy A_y (like-for-like); spendable cash for the budget is INJECTED.
+        spendable = float(self._spendable_cash_provider()) if self._spendable_cash_provider is not None else None
+        if spendable is None:
+            # No injected ledger read (pre-seam-swap default): fall back to the endowment min so the
+            # budget never fabricates spendable cash the ledger has not confirmed.
+            spendable = float(min(float(portfolio.a(b)) for b in bin_ids))
+        ledger_snapshot_id = (
+            self._ledger_snapshot_id_provider() if self._ledger_snapshot_id_provider is not None else None
+        )
+        holdings_payout = {
+            JointOutcomeAtom.canonical_id({family_key: b}): float(portfolio.a(b)) - spendable
+            for b in bin_ids
+        }
+        wealth = build_wealth_by_atom(
+            family_key=family_key, atom_ids=atom_ids, holdings_payout_by_atom_id=holdings_payout,
+            spendable_cash_usd=spendable, ledger_snapshot_id=ledger_snapshot_id,
+        )
+
+        scenarios = TransitionalIndependentProduct()
+        bands_by_family = {family_key: legacy.band}
+        q_version = str(legacy.joint_q.identity_hash)
+        plan = solve(
+            menu, scenarios=scenarios, wealth=wealth, kappa_policy=promotion_window_policy(),
+            bands_by_family=bands_by_family, q_version=q_version,
+        )
+
+        # candidate_decisions: coherence lockstep — the shim emits coherence_allows=True (§4 dec 1).
+        candidate_decisions = tuple(replace(d, coherence_allows=True) for d in legacy.candidate_decisions)
+        econ_by_route = {c.route_id: c for c in legacy.candidates}
+
+        selected, no_trade_reason, projection = self._project_primary_leg(
+            plan=plan, menu=menu, wealth=wealth, scenarios=scenarios, bands_by_family=bands_by_family,
+            atom_ids=atom_ids, econ_by_route=econ_by_route, replace=replace,
+            LegacyDecisionProjection=LegacyDecisionProjection,
+        )
+        self.last_projection = projection
+
+        receipt_hash = _hash(
+            legacy.decision_id, plan.plan_id, q_version,
+            selected.route_id if selected is not None else f"NO_TRADE:{no_trade_reason}",
+        )
+        decision = replace(
+            legacy,
+            selected=selected,
+            no_trade_reason=no_trade_reason,
+            candidate_decisions=candidate_decisions,
+            receipt_hash=receipt_hash,
+        )
+        return validate_family_decision_contract(decision)
+
+    def _project_primary_leg(
+        self, *, plan, menu, wealth, scenarios, bands_by_family, atom_ids, econ_by_route, replace,
+        LegacyDecisionProjection,
+    ):
+        """Phase-1 selection: derive the primary leg, re-score it STANDALONE at its post-haircut
+        size, and gate on ``phase1_tradeable``. Returns ``(selected, no_trade_reason, projection)``.
+        """
+        from decimal import Decimal
+
+        haircut = _read_config_kelly_multiplier()
+
+        if not plan.orders:
+            projection = LegacyDecisionProjection(
+                primary_order_id=None, projected_selected=None, standalone_primary_delta_u=0.0,
+                projection_reason=plan.no_trade_reason or "NO_TRADE", downstream_haircut_alive=True,
+                submitted_size_after_haircut=Decimal("0"),
+            )
+            return None, (plan.no_trade_reason or "NO_IMPROVING_DISCRETE_PLAN"), projection
+
+        primary = min(plan.orders, key=lambda o: o.safe_prefix_index)  # safe_prefix_index 0
+        econ = econ_by_route.get(primary.menu_item_id)
+
+        # Standalone re-score of the primary leg ALONE at the post-haircut size.
+        scenario_set = scenarios.scenarios(bands_by_family)
+        q_draws = scenario_set.q_draws
+        weights = (
+            scenario_set.draw_weights if scenario_set.draw_weights is not None
+            else np.ones(q_draws.shape[0], dtype=np.float64)
+        )
+        alpha = scenario_set.alpha
+        w0, payoff, caps, costs, items = _build_arrays(menu, wealth, atom_ids)
+        idx = next((i for i, it in enumerate(items) if it.item_id == primary.menu_item_id), None)
+        post_haircut_units = Decimal(str(float(primary.size) * haircut))
+        standalone_du = float("-inf")
+        if idx is not None:
+            x = np.zeros(payoff.shape[0], dtype=np.float64)
+            x[idx] = float(post_haircut_units)
+            standalone_du = _objective(x, w0, payoff, q_draws, weights, alpha)
+
+        direct_executable = primary.kind in ("buy_yes", "buy_no") and idx is not None
+        projection = LegacyDecisionProjection(
+            primary_order_id=primary.order_id,
+            projected_selected=primary.menu_item_id,
+            standalone_primary_delta_u=standalone_du,
+            projection_reason="PHASE1_PRIMARY_LEG",
+            downstream_haircut_alive=True,
+            submitted_size_after_haircut=post_haircut_units,
+        )
+        # Phase-1 gate: primary leg must be direct-executable AND still improving alone post-haircut.
+        if not (direct_executable and projection.phase1_tradeable):
+            return None, "PHASE1_PRIMARY_LEG_NOT_TRADEABLE", projection
+
+        # Stamp the PROJECTION (standalone post-haircut ΔU + size) into `selected` so downstream
+        # evidence grades the executed leg, never the joint plan's ΔU. Size in USD = units × cost.
+        unit_cost = float(items[idx].unit_payoff.unit_cost_usd)
+        post_haircut_stake_usd = Decimal(str(float(post_haircut_units) * unit_cost))
+        if econ is not None:
+            selected = replace(
+                econ, optimal_stake_usd=post_haircut_stake_usd, optimal_delta_u=standalone_du,
+            )
+        else:
+            selected = None
+            return None, "PHASE1_PRIMARY_LEG_ECONOMICS_MISSING", projection
+        return selected, None, projection
