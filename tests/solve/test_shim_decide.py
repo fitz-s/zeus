@@ -130,7 +130,13 @@ def _decide(shim, bin_ids=("y", "n"), portfolio_wealth=100.0):
 
 # --- tests ------------------------------------------------------------------
 
-def test_shim_trades_and_stamps_projection():
+def test_shim_trades_and_stamps_projection(monkeypatch):
+    # Pin the downstream-haircut factor to a known < 1 so the projection is re-scored at a strictly
+    # SMALLER post-haircut size than the joint plan — makes the projection/plan distinction
+    # deterministic regardless of the ambient config kelly_multiplier.
+    import src.solve.solver as S
+    monkeypatch.setattr(S, "_read_config_kelly_multiplier", lambda: 0.5)
+
     bin_ids = ("y", "n")
     band = _band(bin_ids, [0.75] * 64)  # clear edge on y vs cost 0.45
     legacy = _legacy_decision(bin_ids, ("r_y",), band)
@@ -144,6 +150,13 @@ def test_shim_trades_and_stamps_projection():
     proj = shim.last_projection
     assert proj is not None and proj.phase1_tradeable
     assert d.selected.optimal_delta_u == proj.standalone_primary_delta_u > 0.0
+    # DISTINCTION (verifier finding): the projection ΔU (single primary leg re-scored at the
+    # post-haircut-SMALLER size) must NOT be the joint plan's ΔU. The concave objective at a
+    # strictly smaller stake is strictly less, so this is the tighter `<` variant — a refactor that
+    # sourced both from plan.expected_delta_log_wealth would violate it.
+    assert shim.last_plan is not None
+    assert d.selected.optimal_delta_u < shim.last_plan.expected_delta_log_wealth
+    assert d.selected.optimal_delta_u != shim.last_plan.expected_delta_log_wealth
     # coherence lockstep: every candidate_decision emits coherence_allows=True
     assert all(cd.coherence_allows is True for cd in d.candidate_decisions)
     assert d.receipt_hash and d.receipt_hash != "legacy_hash"

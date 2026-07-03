@@ -888,7 +888,10 @@ class SolveEngineShim:
         self._route_set_builder = engine_kwargs.get("route_set_builder")
         self._enable_negrisk_routes = bool(engine_kwargs.get("enable_negrisk_routes", False))
         # Surfaced for tests / audit; the projection VALUES also flow via ``selected`` downstream.
+        # ``last_plan`` is the joint SolutionPlan (its ΔU is DISTINCT from the projection's
+        # standalone post-haircut ΔU — the two must never be sourced from the same quantity).
         self.last_projection: Any = None
+        self.last_plan: Any = None
 
     def _inner_engine(self) -> Any:
         if self._engine is None:
@@ -923,6 +926,7 @@ class SolveEngineShim:
         from src.solve.types import JointOutcomeAtom, LegacyDecisionProjection
 
         self.last_projection = None
+        self.last_plan = None
         legacy = self._inner_engine().decide(
             case, omega, snapshots,
             portfolio=portfolio, matrix=matrix, captured_at_utc=captured_at_utc,
@@ -972,6 +976,7 @@ class SolveEngineShim:
             menu, scenarios=scenarios, wealth=wealth, kappa_policy=promotion_window_policy(),
             bands_by_family=bands_by_family, q_version=q_version,
         )
+        self.last_plan = plan
 
         # candidate_decisions: coherence lockstep — the shim emits coherence_allows=True (§4 dec 1).
         candidate_decisions = tuple(replace(d, coherence_allows=True) for d in legacy.candidate_decisions)
