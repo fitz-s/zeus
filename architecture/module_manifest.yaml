@@ -353,6 +353,7 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
+      - src/execution/self_trade_guard.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -369,6 +370,7 @@ modules:
       - tests/test_exit_safety.py
       - tests/test_exchange_reconcile.py
       - tests/test_settlement_commands.py
+      - tests/test_self_trade_guard.py
       - tests/test_risk_allocator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial

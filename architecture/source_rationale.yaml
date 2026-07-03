@@ -1774,6 +1774,11 @@ files:
     downstream:
     - src/main.py
     - src/execution/harvester.py
+  src/execution/self_trade_guard.py:
+    zone: K2_runtime
+    authority_role: self_trade_guard_predicate
+    why: "SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family, to avoid double-blocking legitimate opposite-token hedges already governed by src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively by src/state/venue_command_repo.py insert_command), so the operator's independently-placed orders are invisible to this query and can never be blocked. No venue-side self-trade prevention exists in the installed Polymarket SDK, so this is the primary defense, not defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build."
+    downstream: []  # not yet wired; W3 consumes (envelope build)
   src/signal/AGENTS.md:
     zone: docs
     authority_role: registry
