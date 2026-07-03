@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import sqlite3
+import inspect
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -196,12 +197,35 @@ def test_family_pending_truth_ignores_materialized_filled_command():
     assert truth.has_pending_or_unknown is False
 
 
+def test_family_pending_truth_blocks_unmaterialized_filled_command():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-filled-gap', 'dec-filled-gap', 'ENTRY', 'tok-A', 'FILLED',
+            10.0, 0.25, '2026-07-02T00:00:00+00:00',
+            '2026-07-02T00:00:00+00:00'
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A",),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert "venue_commands_filled_unmaterialized" in truth.sources
+
+
 def test_live_cap_representation_matches_execution_command_id_to_command_id():
     conn = _conn()
     conn.execute(
         """
         INSERT INTO venue_commands VALUES (
-            'cmd-execution', 'dec-different', 'ENTRY', 'tok-A', 'FILLED',
+            'cmd-execution', 'dec-different', 'ENTRY', 'tok-A', 'REJECTED',
             10.0, 0.25, '2026-07-02T00:00:00+00:00',
             '2026-07-02T00:00:00+00:00'
         )
@@ -213,6 +237,38 @@ def test_live_cap_representation_matches_execution_command_id_to_command_id():
         execution_command_id="cmd-execution",
         final_intent_id="edli_intent:event-1:tok-A",
     ) is True
+
+
+def test_live_cap_filled_without_position_truth_still_blocks_family():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage VALUES (
+            'u-filled-gap', 'e-filled-gap', 'edli_intent:e-filled-gap:tok-A',
+            'cmd-filled-gap', 7.0, 'RESERVED'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-filled-gap', 'dec-filled-gap', 'ENTRY', 'tok-A', 'FILLED',
+            10.0, 0.70, '2026-07-02T00:00:00+00:00',
+            '2026-07-02T00:00:00+00:00'
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A",),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(7.0)
+    assert "family_pending_notional" in truth.sources
 
 
 def test_fill_up_unknown_entry_keeps_family_lease_active():
@@ -246,6 +302,46 @@ def test_fill_up_unknown_entry_keeps_family_lease_active():
     assert row["status"] == "ENTRY_UNKNOWN"
     assert row["new_entry_command_id"] == "cmd-entry"
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_entries_pause_gate_runs_before_fill_up_lease_planning():
+    src = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    pause_gate = src.index("_entry_pause_blocks_live_submit(live_cap_conn or trade_conn)")
+    receipt_build = src.index("no_submit_receipt = build_event_bound_no_submit_receipt(")
+
+    assert pause_gate < receipt_build
+
+
+def test_post_plan_no_submit_aborts_fill_up_lease():
+    conn = _conn()
+    lease = fuw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="FILL_UP",
+        now_iso="t0",
+        held_position_id="p1",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-A",
+        selected_bin_id="60-61F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    era._abort_family_rebalance_entry_payloads_after_no_submit(
+        conn,
+        fill_up_lease_payload={"intent_id": lease},
+        now_iso="t1",
+        reason="RISK_GUARD_BLOCKED",
+    )
+
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["abort_reason"] == "FILL_UP_POST_PLAN_NO_SUBMIT:RISK_GUARD_BLOCKED"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
 
 
 def test_fill_up_submit_exception_unknown_advances_family_lease():

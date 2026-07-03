@@ -1130,6 +1130,36 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
+def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_pause_guard_indefinite", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    class Result:
+        returncode = 0
+        stdout = "entries pause guard armed\n"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    ok, detail = dl._pause_entries_for_live_restart_if_needed([dl.LIVE_TRADING_LABEL])
+
+    assert ok is True
+    assert "entries pause guard armed" in detail
+    assert calls
+    code = calls[0][0][2]
+    assert "deploy_live_restart_guard" in code
+    assert "issued_by='control_plane'" in code
+    assert "effective_until=None" in code
+    assert "system_auto_pause" not in code
+
+
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     dl = _load("deploy_live_restart_order_all", "deploy_live.py")
     calls = []

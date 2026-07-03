@@ -1883,9 +1883,11 @@ class TestLiveOrderCommandSplit:
         assert result.status == "unknown_side_effect"
         assert result.command_state == "REVIEW_REQUIRED"
         command = mem_conn.execute(
-            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
             ("trd-entry-no-final-envelope",),
         ).fetchone()
+        assert result.command_id == command["command_id"]
+        assert result.idempotency_key == command["idempotency_key"]
         assert command["state"] == "REVIEW_REQUIRED"
         events = list_events(mem_conn, command["command_id"])
         event_types = [event["event_type"] for event in events]
@@ -1985,6 +1987,8 @@ class TestLiveOrderCommandSplit:
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REVIEW_REQUIRED", (
             f"Expected state=REVIEW_REQUIRED after None return, got {cmd['state']!r}"
         )
@@ -2027,6 +2031,9 @@ class TestLiveOrderCommandSplit:
         assert result.reason == "missing_order_id"
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REJECTED"
         event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
         assert "SUBMIT_REJECTED" in event_types
@@ -2074,6 +2081,9 @@ class TestLiveOrderCommandSplit:
         assert result.reason == "INSUFFICIENT_BALANCE"
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REJECTED"
         event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
         assert "SUBMIT_REJECTED" in event_types

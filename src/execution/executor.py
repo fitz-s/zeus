@@ -6205,6 +6205,7 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REVIEW_REQUIRED",
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
@@ -6248,6 +6249,7 @@ def _live_order(
                 order_role="entry",
                 venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REVIEW_REQUIRED",
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
@@ -6314,6 +6316,7 @@ def _live_order(
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                command_state="REJECTED",
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
             )
@@ -6368,6 +6371,7 @@ def _live_order(
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                command_state="REJECTED",
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
             )

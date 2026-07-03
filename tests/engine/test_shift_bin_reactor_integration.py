@@ -127,6 +127,24 @@ def test_existing_and_new_shift_paths_share_old_leg_live_predicate():
     assert "> float(_dust_floor_usd)" not in src[existing:sibling]
 
 
+def test_existing_shift_continuation_rereads_family_pending_before_counter_entry():
+    src = inspect.getsource(era)
+    existing = src.index("if str(selected_token_id or \"\") == _existing_shift_lease.selected_token_id:")
+    record = src.index("_shift_bin_wiring.record_entry_submitted(", existing)
+
+    assert "_family_pending_entry_truth(" in src[existing:record]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_BLOCKED:" in src[existing:record]
+
+
+def test_shift_enter_new_bin_final_build_has_family_pending_reread():
+    src = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    phase_check = src.index("str(_shift_entry_lease.get(\"phase\") or \"\") == \"ENTER_NEW_BIN\"")
+    command_build = src.index("_build_live_execution_command_certificates(", phase_check)
+
+    assert "_family_pending_entry_truth(" in src[phase_check:command_build]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:" in src[phase_check:command_build]
+
+
 def test_reactor_fails_closed_when_held_family_cannot_bind_sibling():
     """Held-family truth with no old-leg binding must not fall through to fresh entry."""
 
@@ -393,6 +411,44 @@ def test_shift_bin_unknown_counter_entry_keeps_family_lease_active():
     assert row["status"] == "ENTRY_UNKNOWN"
     assert row["new_entry_command_id"] == "cmd-entry"
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+
+    era._abort_family_rebalance_entry_payloads_after_no_submit(
+        conn,
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+        now_iso="t2",
+        reason="ACTUAL_SUBMIT_QUALITY_REJECTED",
+    )
+
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:ACTUAL_SUBMIT_QUALITY_REJECTED"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
 
 
 def test_shift_bin_submit_exception_unknown_advances_family_lease():

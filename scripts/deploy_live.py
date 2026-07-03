@@ -743,7 +743,7 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
         py = sys.executable
     code = (
         "from src.control.control_plane import pause_entries; "
-        "pause_entries('deploy_live_restart_guard', issued_by='system_auto_pause'); "
+        "pause_entries('deploy_live_restart_guard', issued_by='control_plane', effective_until=None); "
         "print('entries pause guard armed')"
     )
     try:
