@@ -42,6 +42,26 @@ def mem_conn():
     c.close()
 
 
+@pytest.fixture
+def file_conn(tmp_path):
+    """File-backed DB (not :memory:) so a genuinely SEPARATE connection can
+    read it mid-call. A :memory: DB is private to its one connection object
+    -- a "spy" that reads through that SAME connection would see uncommitted
+    writes too (same-connection reads always do), making a persist-before-
+    call proof built on it non-load-bearing. This fixture exists
+    specifically so TestSubmitOrdersBatchPersistBeforeCall's proof is real.
+    """
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "batch_persist_proof.db"
+    c = sqlite3.connect(str(db_path))
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    init_schema(c)
+    yield c, db_path
+    c.close()
+
+
 @dataclass(frozen=True)
 class FakeSnapshot:
     """Minimal executable-snapshot stand-in for create_submission_envelope."""
@@ -216,21 +236,31 @@ def _unmapped() -> dict:
 
 
 class TestSubmitOrdersBatchPersistBeforeCall:
-    def test_commands_committed_before_sdk_call_fires(self, mem_conn):
-        _ensure_snapshot(mem_conn)
+    def test_commands_committed_before_sdk_call_fires(self, file_conn):
+        # W2.1 verifier finding (2026-07-02): a spy that reads via the SAME
+        # connection object always sees uncommitted writes too (that's just
+        # how a single sqlite3.Connection works), so that shape "passes"
+        # even if the implementation's conn.commit() were deleted -- not
+        # load-bearing proof. Fixed here: the DB is file-backed (file_conn
+        # fixture) and the spy opens a GENUINELY SEPARATE, read-only
+        # connection to that file mid-call. A separate connection can only
+        # see rows the writer connection actually committed.
+        conn, db_path = file_conn
+        _ensure_snapshot(conn)
         seen_committed_rows_at_call_time = {}
 
         class SpyGatewayClient(FakeGatewayClient):
             def place_limit_orders_batch(self, envelopes):
-                # Read via a SEPARATE connection to the same file to prove
-                # COMMIT already happened, not just that the row exists in
-                # this transaction's uncommitted buffer.
-                rows = mem_conn.execute("SELECT command_id, state FROM venue_commands").fetchall()
+                reader = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                try:
+                    rows = reader.execute("SELECT command_id, state FROM venue_commands").fetchall()
+                finally:
+                    reader.close()
                 seen_committed_rows_at_call_time["rows"] = [(r[0], r[1]) for r in rows]
                 return super().place_limit_orders_batch(envelopes)
 
         client = SpyGatewayClient(submit_responses=[[_accepted("ord-0")]])
-        outcomes = submit_orders_batch(mem_conn, _adapter(), client, [_request(0)])
+        outcomes = submit_orders_batch(conn, _adapter(), client, [_request(0)])
 
         assert outcomes[0].status == "acked"
         rows_at_call_time = seen_committed_rows_at_call_time["rows"]
