@@ -301,3 +301,21 @@ JUDGMENT CALLS (flagged for review):
 - **Wealth vector = `portfolio.a(bin)`** (legacy A_y) with injected spendable as the budget; when no
   spendable provider is injected (pre-seam-swap default) the shim floors spendable at the minimum
   endowment so it never fabricates cash the ledger has not confirmed.
+
+### PHASE-1 EVIDENCE-GRADING CONTRACT (approved 2026-07-03)
+
+Binding rule for how phase-1 promotion evidence treats the primary-leg size and ΔU:
+
+- The `LegacyDecisionProjection` stamps BOTH the pre-haircut size and the **config-multiplier**
+  post-haircut size (`post = pre × settings.sizing.kelly_multiplier`), and its standalone
+  primary-leg ΔU (re-scored at that post-haircut size) flows into `selected.optimal_delta_u` /
+  `selected.optimal_stake_usd` — the overlay/facts-writer path.
+- The config-multiplier post-haircut size is a **reproducible APPROXIMATION** computed at decide()
+  time. It MAY DIFFER from the full variance-adjusted downstream haircut
+  (`SizingContext`/`evaluate_kelly`, event_reactor_adapter.py:5657), which depends on
+  bankroll + portfolio-state provider + lead_days that are NOT available in the frozen :1379 kwargs.
+- **The settlement-graded ACTUAL submitted size is AUTHORITATIVE.** The promotion-evidence gate
+  grades the actual submitted size read from the settlement receipts, not the projection's
+  approximation. Receipt = truth; projection = reproducible approximation; they reconcile at
+  grading time. No bankroll/portfolio side channel is threaded into the shim to close the gap
+  (STOP-rule: never invent a side channel the frozen contract does not carry).
