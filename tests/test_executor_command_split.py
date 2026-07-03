@@ -51,6 +51,13 @@ def _cutover_guard_live_enabled(monkeypatch):
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    # Pre-submit identity binding resolves the canonical funder address via the
+    # operator Keychain (OPENCLAW_HOME) — absent in CI. Not this file's subject;
+    # same hermetic stub as tests/test_unknown_side_effect.py's conn fixture.
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000abc",
+    )
     world_conn = sqlite3.connect(":memory:")
     world_conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(world_conn)
