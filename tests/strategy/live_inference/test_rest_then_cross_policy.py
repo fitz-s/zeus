@@ -447,8 +447,15 @@ class TestTakerQualityLiveGate:
     def test_negative_surplus_still_fails_closed(self):
         """The conservative law is NEVER loosened: ask + fee > q_lcb (negative
         after-cost edge) still fails closed — only the EXTRA cap was removed."""
-        proof = self._proof(q_lcb=0.50, ask=0.55)  # edge clearly negative
+        # q_lcb must clear LIVE_DIRECTION_WIN_RATE_FLOOR (0.51,
+        # src/strategy/live_inference/live_admission.py) — a separate, earlier
+        # gate in _build_event_bound_taker_quality_proof — or the function
+        # short-circuits there and returns the placeholder
+        # taker_fee_adjusted_edge="0" used by every early-return branch,
+        # never reaching the after-cost edge computation this test targets.
+        proof = self._proof(q_lcb=0.55, ask=0.65)  # edge clearly negative
         assert proof is not None
+        assert proof["reason"] == "negative_conservative_after_cost_surplus"
         assert float(proof["taker_fee_adjusted_edge"]) < 0.0
         assert proof["passed"] is False
 
