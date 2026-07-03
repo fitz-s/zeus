@@ -21,10 +21,14 @@ promotion flag; nothing imports this package yet.
 """
 
 from src.solve.types import (  # noqa: F401
+    AtomPayoffProjector,
+    JointOutcomeAtom,
+    JointOutcomeScenarioSet,
+    LegacyDecisionProjection,
     MenuItem,
     PlannedOrder,
-    ScenarioSet,
+    RepairCertificate,
     SolutionPlan,
     SolveMenu,
-    WealthByOutcome,
+    WealthStateByAtom,
 )

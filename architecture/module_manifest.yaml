@@ -357,6 +357,8 @@ modules:
       - tests/solve/test_solver_numerical.py
       - tests/solve/test_scenario_service.py
       - tests/solve/test_menu_adapter.py
+      - tests/solve/test_types_validation.py
+      - tests/solve/test_contract_validator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   execution:

@@ -27,31 +27,44 @@ promotion flag. Nothing wires it in yet; the math core is inert until sub-slice 
 
 ## Domain rules
 
+- **Joint outcome atom axis (consult REV-2).** Scenarios (`JointOutcomeScenarioSet`) and
+  wealth (`WealthStateByAtom`) live on ONE axis of `JointOutcomeAtom` — each atom a full
+  joint outcome `{family_key: bin_id}`. Single-family W3 is the degenerate case; per-family
+  marginals are DERIVED projections. This is what makes the C4 provider swap a solver no-op.
 - **One-belief law.** The solver NEVER rebuilds q or the band. The bridge serves them
-  verbatim (`_served_joint_belief_from_proofs`), the ScenarioService integrates over the
-  served samples, and the objective reads band SAMPLES (never the precomputed per-bin
-  q_lcb — W3.MATH brief risk #3).
-- **Objective is joint, not greedy.** `solve()` maximizes the robust (band-α-quantile)
-  expected Δlog-wealth of the WHOLE stake vector against `WealthByOutcome`, not a per-item
-  sum. The optimizer is deterministic (no RNG, no wall-clock): cyclic coordinate ascent
-  with payoff_vector's coarse-to-fine 1-D grid per coordinate, seeded at the best single
-  item so the plan provably dominates the top-1 picker.
-- **κ single-owner.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
-  `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ
-  ownership transfers atomically in the W5 commit that deletes `kelly_multiplier`.
-- **Discrete repair must PROVE it did not harm.** κ scales the continuous solution first;
-  quantized/capped stakes are RE-EVALUATED under the same robust objective; a plan is
-  submit-worthy only if its re-evaluated ΔU is still `> 0`, else no-trade. The
-  re-evaluation IS the proof (design §3.3) — never skip it.
-- **Log-domain safety.** A non-positive endowment bin is refused up front
-  (`ZeroWealthOutcomeError`); coordinate feasibility bounds keep `W_end(j) > 0` strictly,
-  so `log` never sees a non-positive wealth.
+  verbatim (`_served_joint_belief_from_proofs`); the ScenarioService integrates over the
+  served `q_draws` (band SAMPLES, never the precomputed per-bin q_lcb — W3.MATH brief risk #3).
+- **Objective is joint CVaR, not greedy, not a raw quantile.** `solve()` maximizes the
+  lower-tail **CVaR** at the band's α of per-draw expected Δlog-wealth of the WHOLE stake
+  vector against `WealthStateByAtom`. CVaR (not the α-quantile) is deliberate: it is
+  concavity-preserving, so coordinate ascent reaches the GLOBAL optimum — the legacy
+  payoff_vector "quantile-of-concave is unimodal" assertion is UNSAFE and not inherited.
+  Deterministic (no RNG, no wall-clock): coarse-to-fine 1-D grid per coordinate, seeded at
+  the best single item so the plan dominates the top-1 picker.
+- **Single-family only.** Multi-family joint scenarios FAIL CLOSED until C4
+  (`MultiFamilyJointUnavailableError`) — index-pairing is not a certifiable independent
+  product, and caps limit loss, they never license the log-utility objective.
+- **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
+  `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ is a
+  typed `Kappa` Decimal value object. Ownership transfers atomically in the W5 commit that
+  deletes `kelly_multiplier`.
+- **Discrete repair must PROVE it did not harm — carry a `RepairCertificate`.** κ scales the
+  continuous solution first; quantized/capped stakes (each on their OWN per-item tick/min
+  grid) are RE-EVALUATED under the worst-price model; a non-empty plan is submit-worthy only
+  if its repaired ΔU is still `> 0`, proven by a `RepairCertificate` (enforced in
+  `SolutionPlan.__post_init__`), else no-trade.
+- **Phase-1 evidence grades the projection, not the plan.** The shim emits a
+  `LegacyDecisionProjection` re-scoring the primary leg STANDALONE at its post-haircut size;
+  if that ΔU ≤ 0 → no-trade in phase 1. Promotion evidence NEVER grades
+  `SolutionPlan.expected_delta_log_wealth`.
+- **Log-domain safety.** A non-positive endowment atom is refused up front
+  (`ZeroWealthOutcomeError`); coordinate feasibility bounds keep `W_end(a) > 0` strictly.
 - **Coherence lockstep (§4 decision 1).** The shim emits `coherence_allows=True`; the
   overlay's COHERENCE_BLOCKED guard retires in the flag-ON packet. Do not add a coherence
   veto here.
 - **Correlation rail is "caps" until C4.** Cross-family risk stays with the risk_allocator
-  correlation caps; every plan stamps `correlation_rail="caps"` so settlement grading can
-  measure what the C4 scenario service later changes.
+  correlation caps; every single-family plan stamps `correlation_rail="caps"`. Any future
+  degraded multi-family mode stamps `caps_degraded_not_optimal` with promotion evidence BLOCKED.
 
 ## Common mistakes
 

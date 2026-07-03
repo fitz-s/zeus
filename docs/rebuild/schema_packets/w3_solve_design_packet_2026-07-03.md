@@ -139,3 +139,59 @@ regime-agnostic Ledoit-Wolf (strip the WeatherRegimeTag cache/taxonomy — W5 de
 data: `settlement_outcomes` (city,date,metric) joins. Granularity mismatch to resolve in the C4
 packet: risk_allocator correlation_key is city-cluster-grained; WeatherFamilyKey is
 city+date+metric-grained (W3.C4 brief risk #2). Until C4: `correlation_rail="caps"` on every plan.
+
+## APPENDIX — CONSULT REV-2 RULINGS (2026-07-03)
+
+External deep review (ChatGPT Pro consult REQ-20260702-212900-e935c9) ruled **NO-GO** for
+building the math core on the rev-1 skeleton types and identified six blockers. The orchestrator
+ACCEPTED all six. This appendix records the rulings; they are law for the W3.2 packet and
+SUPERSEDE the rev-1 type shapes (`ScenarioSet`, `WealthByOutcome`, the Mapping-payoff `MenuItem`,
+the certificate-less `SolutionPlan`) wherever they conflict.
+
+1. **Joint outcome atom axis (BLOCKER).** `ScenarioSet` (concatenated marginal bins) → 
+   `JointOutcomeScenarioSet`: `atoms: tuple[JointOutcomeAtom,…]` (each atom maps
+   `family_key→bin_id`), `q_draws[n_draws, n_atoms]`, optional `draw_weights`, derived
+   `family_projections`, and ambiguity metadata (`alpha`, `band_hashes_by_family`,
+   `provider`+`provider_version`, `semantics` ∈ {POSTERIOR_Q_DRAWS, PRODUCT_MEASURE,
+   MEASURED_JOINT}). `WealthByOutcome` → `WealthStateByAtom` on the SAME atom axis, including
+   reservations / resting orders / unsettled proceeds / `ledger_snapshot_id` (CAS ledger W1.1 is
+   the source of truth). Single-family W3 is the degenerate projection (one entry per atom). This
+   is what makes the C4 provider swap a no-op for the solver.
+
+2. **Transitional rail scope + correlation tightening (BLOCKER).** Index-pairing is INVALID for
+   sorted/quantile-ordered draws (comonotone, not independent). Ruling: the transitional service
+   serves **single-family only**; multi-family joint construction **FAILS CLOSED** until C4.
+   Numeric proof (two identical q=0.60, f=0.20 even-money bets): independent expected log **+0.039**
+   vs comonotone **−0.0024** (both-lose prob 0.16→0.40). Caps limit loss, they are NEVER a
+   log-utility correctness license. Any future degraded multi-family mode stamps
+   `correlation_rail="caps_degraded_not_optimal"` with **promotion evidence BLOCKED**.
+
+3. **RepairCertificate (BLOCKER).** `SolutionPlan` gains `RepairCertificate`: continuous objective,
+   repaired objective under the worst-price model, tick/min-size deltas, promoted/dropped items,
+   ≤15 batch partition, per-safe-prefix objective bounds, budget after repair. A non-empty plan
+   REQUIRES a certificate with repaired ΔU > 0 (enforced in `SolutionPlan.__post_init__`).
+
+4. **LegacyDecisionProjection + phase-1 grading invariant (BLOCKER).** Shim-side artifact:
+   `primary_order_id`, `projected_selected`, the STANDALONE re-scored ΔU of the primary leg alone
+   at post-downstream-haircut size, `projection_reason`, `downstream_haircut_alive`. **Phase-1
+   invariant:** promotion evidence grades the projection, NEVER
+   `SolutionPlan.expected_delta_log_wealth`; if the standalone primary-leg ΔU ≤ 0 (the leg is only
+   good because of unexecuted hedges) → **NO-TRADE in phase 1**.
+
+5. **Validators (BLOCKER).** `JointOutcomeScenarioSet` constructor validates finite values, simplex
+   rows (POSTERIOR_Q_DRAWS), nonnegative weights, shape coherence, canonical float64 dtype before
+   hashing; the scenario hash covers provider+version+atom axis+draw weights+semantics.
+   `_assert_contract_fields` → `validate_family_decision_contract` (presence + non-null semantics +
+   candidate_decisions tuple + exactly-one selected/no_trade_reason), backed by a sentinel
+   facts-writer test proving no getattr default fires.
+
+6. **Robust objective + smaller rulings.** Objective is lower-tail **CVaR** (concavity-preserving),
+   NOT the raw α-quantile — the legacy payoff_vector unimodality assertion is unsafe and is not
+   inherited (tests include a non-unimodal counterexample). Dominance baseline = top-1 candidate in
+   the SAME feasible set (menu/budget/repair/worst-price), not the legacy raw score. `max_stake_usd`
+   removed from core `solve()` (shim-only → cash constraint). Per-LEG tick/min-size on MenuItem.
+   κ is a typed `Kappa` value object (Decimal, canonical serialization). MenuItem payoff is a typed
+   `AtomPayoffProjector` over atoms. Maker lane disabled (W3 taker-only). `exits.py` stays
+   interface-only but gains `ZeroWealthOutcomeError` + `ExitPrecheckResult` (tripwire precedence
+   consumed BEFORE economics). `PlannedOrder` gains `plan_generation` + `ledger_snapshot_id` +
+   `invalidation_snapshot_id` (phase-2 INV-28/29 envelope metadata; fields now, wiring later).
