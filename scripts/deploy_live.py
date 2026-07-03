@@ -725,6 +725,45 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
 
 
+def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, str]:
+    """Durably pause entries before a live-trading restart can boot new code.
+
+    Restarting ``src.main`` creates a short window where deployment-freshness
+    mismatch clears before an operator can manually re-apply an entry pause.
+    Write the DB control override first so the new daemon starts in observe /
+    monitor-only posture. ``pause_entries`` preserves an existing indefinite
+    operator pause instead of overwriting it.
+    """
+
+    if LIVE_TRADING_LABEL not in labels:
+        return True, "entry pause not required for this daemon"
+    live_repo = _require_live_repo()
+    py = os.path.join(live_repo, ".venv", "bin", "python")
+    if not os.path.exists(py):
+        py = sys.executable
+    code = (
+        "from src.control.control_plane import pause_entries; "
+        "pause_entries('deploy_live_restart_guard', issued_by='system_auto_pause'); "
+        "print('entries pause guard armed')"
+    )
+    try:
+        res = subprocess.run(
+            [py, "-c", code],
+            cwd=live_repo,
+            env=_live_trading_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"live restart entry pause guard could not run: {exc}"
+    output = (res.stdout or res.stderr or "").strip()
+    tail = "\n".join(output.splitlines()[-20:]) if output else "<no output>"
+    if res.returncode != 0:
+        return False, f"live restart entry pause guard failed rc={res.returncode}:\n{tail}"
+    return True, f"live restart entry pause guard armed: {tail}"
+
+
 def _dedupe_labels(labels: list[str]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -788,6 +827,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+
+    pause_ok, pause_detail = _pause_entries_for_live_restart_if_needed(labels)
+    if not pause_ok:
+        print("REFUSING to restart — live entry pause guard is not armed:")
+        print(pause_detail)
+        return 1
+    print(pause_detail)
 
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
     for label in non_live_labels:

@@ -1083,6 +1083,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("recovery", tuple(labels)))
         return True, "live restart recovery passed"
 
+    def _pause(labels):
+        calls.append(("pause_entries", tuple(labels)))
+        return True, "live restart entry pause guard armed"
+
     def _launch(label):
         calls.append(("launch", label))
         return True, f"bootstrapped {label}"
@@ -1100,6 +1104,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         return True, "post-start EDLI queue progress verified"
 
     monkeypatch.setattr(dl, "_stop_label", _stop)
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", _pause)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
@@ -1112,6 +1117,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert rc == 0
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
+        ("pause_entries", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),
@@ -1131,6 +1137,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+    )
     monkeypatch.setattr(
         dl,
         "_stop_label",
@@ -1170,7 +1181,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     rc = dl.main(["restart", "all"])
 
     assert rc == 0
-    assert calls[0][0] == "launch"
+    assert calls[0] == ("pause_entries", tuple(dl.DAEMONS.values()))
     stop_index = calls.index(("stop", dl.LIVE_TRADING_LABEL))
     recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
@@ -1198,6 +1209,11 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+    )
+    monkeypatch.setattr(
+        dl,
         "_stop_label",
         lambda label: (calls.append(("stop", label)) or (True, f"stopped {label}")),
     )
@@ -1222,6 +1238,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     assert rc == 1
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
+        ("pause_entries", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),
