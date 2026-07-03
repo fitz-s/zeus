@@ -540,7 +540,128 @@ one-owner). - W4.4 DONE + MERGED → 46211c52e, pushed. Disposition table clean 
   tests/state/ + test_venue_command_repo + test_command_bus_types fail because
   _validate_entry_submit_payload now requires full execution_capability payload on ENTRY
   SUBMIT_REQUESTED and older fixtures don't supply it — likely fallout from a W1-era packet on
-  this base; needs a standalone fixture-hygiene packet (verifier will ledger representative names).
+  this base; needs a standalone fixture-hygiene packet. REPRESENTATIVE NAMES (verifier-confirmed
+  byte-identical on base, error at venue_command_repo.py:1230):
+  test_command_bus_types.py::TestCancelPendingInRecoveryFilter::test_cancel_pending_command_returned_by_find_unresolved;
+  test_venue_command_repo.py::TestAppendEventStateTransitionIsGrammarChecked::{test_intent_created_to_submitting,
+  test_submitting_to_acked, test_submitting_to_rejected, test_submitting_to_unknown}.
+  ALSO LEDGERED: 4 pre-existing collection errors blocking wide-scope runs
+  (test_backtest_skill_economics.py + 3 replacement-forecast test files).
+  W4.2 VERIFIER VERDICT: VERIFIED-WITH-FINDINGS — item 5 (fresh-re-read gating) CLEAN; item 6b
+  refuted as stated (relocation functionally identical but NOT byte-identical: deadline_minutes
+  fallback hardcoded 0.0 → misleading "deadline=0min" at all 4 production call sites) + 1 F401.
+  FIX IN FLIGHT (w42): fallback → bootstrap_rest_deadline_minutes() (successor TTL owner) + ruff.
+  Fixes landed 41773c4c7 (honest precision note: 0min bug not live-visible today — all call sites
+  set reasons — fixed regardless). W4.2 MERGED → 6194344cb, pushed (33-name events set diffed
+  byte-identical pre/post; cross-packet 185 green; zero maker_rest imports).
+- W4.3 DONE — 7dbfd6ff, SHAPE (b) knob-only, with an ARCHITECTURE DISCOVERY that amends the
+  design doc's premise: the reactor poll interval is NOT a mere backstop — it is the CONSUMPTION
+  CLOCK for every event lane (process_pending's sole caller is the scheduled job; NO wake-on-write
+  exists anywhere; even the redecision screen writes to the queue and waits for the next tick).
+  "Demote the scan" as written would be an all-lanes latency regression contradicting A2.
+  Landed: reactor_scan_interval_seconds knob (default 60 = byte-identical schedule), 3
+  freshness-gate no-false-alarm PROOF tests (all three gates confirmed cadence-blind or
+  independently-floored), liveness analysis inline. TRUE DEMOTION ENABLER RECORDED as follow-up:
+  wake-on-write mechanism (EventWriter signals, reactor waits with timeout=cadence) decouples
+  event latency from poll cadence — after that lands, the knob demotes safely. Candidate for the
+  A2-driven post-promotion improvement list (E4 measurement will show whether the 60s pull clock
+  is the binding latency term).
+  MERGED → fba4cee21, pushed.
+══ W4 WAVE CLOSED 2026-07-03 ══ — ALL FIVE WAVES (W0-W4) COMPLETE on rebuild/w0-instrumentation
+@ fba4cee21 (local + origin). W5 deletions remain post-promotion per DAG.
+══ ENDGAME E1 RUNNING ══ — full-branch consult review submitted (REQ-20260703-020827-28de42,
+Pro Extended, conversation 6a475ff6…, compare 0380fe3f...fba4cee21 = the whole rebuild diff;
+answer → /tmp/cgc/answer_REQ-20260703-020827-28de42.txt). Task bars: cross-packet seams
+(ledger↔batch↔cancel composition; shim state under event cadence + reactor threading;
+SOURCE_RUN_ARRIVED replay drive; OFF-path identity survivability after W4.2/W4.4 legacy-behavior
+deletions), deletion completeness (runbooks/monitoring grep), pre-existing-ledger triage,
+EXPLICIT dual verdict: MERGE-TO-MAIN vs DEPLOY-READY (can differ).
+E1 VERDICT: NOT DEPLOY-READY / NOT MERGE-AS-IS (confidence 0.78) — ONE REAL BLOCKER + evidence
+gaps. THE BLOCKER (validates w42's own disclosure — the bug lives exactly in the untested
+scheduler glue): _c3_staleness_cancel_cycle early-returns when no SOURCE_RUN_ARRIVED claimed AND
+affected_cities filters BEFORE TTL classification → the deleted maker_rest job's unconditional
+every-tick expired-rest scan has NO unconditional successor → orphaned GTC in quiet forecast
+periods + cross-city TTL starvation. Consult's minimum fix RATIFIED: two-clock split — global TTL
+pass every tick (unconditional, unfiltered) + q-stale pass scoped to claimed events' cities.
+Other E1 rulings: cross-packet money/order seam test required (W1.1+W2.1+W4.2 interleaving:
+partial-fill in flight × cancel ack × chunk-2 exception); pre-existing clusters must be
+repaired/frozen BEFORE deploy (they mask regressions on the exact deploy surface); deletion grep
+ops cleanup; migration rehearsal as explicit release op (prod-sized copy, lock duration
+captured); OFF-deploy language corrected — deploy is "legacy engine + approved deletions"
+(W4.4 maker prior + W4.2 TTL owner are flag-independent behavior deltas, monitor maker/taker/rest
+mix in E4). E5-ONLY items (before flag ON, not before OFF deploy): ledger-provider threading,
+shim last_plan/last_projection thread-local or per-call assertion, two-worker concurrent decide
+stress, G3 rerun.
+FIX ROUND IN FLIGHT: w42 (BLOCKER two-clock split + 3 named tests + seam integration test + 
+deletion-grep disposition) ∥ fixture-hygiene agent (4 clusters: ~94 execution_capability fixture
+repairs [validator-wrong = STOP], 33 events triage, 4 collection errors, taker-quality
+investigate-first [gate-wrong = STOP]; NO production src/ changes).
+[2026-07-03 update] Both agents hit transient API 429 before starting; RESUMED via SendMessage.
+[2026-07-03 08:15] w42 FIX ROUND CLOSED + MERGED: integration branch rebuild/w0-instrumentation
+now @ 26bb6f96e (pushed). 4 commits: dfe33429c (BLOCKER: unconditional TTL pass, q-stale scoped
+to affected_cities, main.py early-return removed), 774d77f7e (cross-packet W1.1+W2.1+W4.2 seam
+test, 4 assertions, no production bug), 1b9256075 (PLAN.md SUPERSEDED annotation), f0035dbf5
+(glue-layer regression test on main._c3_staleness_cancel_cycle — closes verifier's coverage gap;
+mutation-probe verified). Verifier verdict VERIFIED, zero claim discrepancies, 6 pre-existing
+collateral_ledger failures byte-identical at parent commit. Post-merge suites 202 passed.
+fixture-hygiene: cluster 1 DONE (32 execution_capability + 2 stale illegal-transition rows,
+47 unrelated failures flagged OUT-OF-SCOPE for routing), cluster 2 DONE (tests/events 33→0:
+1 ghost-table, 2 renames, 20 payload-key, 1 test-design bug, 1 retired test + topology.yaml),
+cluster 3 in flight. Per-cluster commits ruled.
+hook-doctor CLOSED: worktree-reaper convention drift (only knew .claude/worktrees + claude/*;
+native isolation worktrees invisible) — fixed by AGENT_WT_ROOTS root-membership scoping +
+--git-common-dir resolution; diff audited; memory saved (worktree-reaper-scope-by-root-not-branch).
+[2026-07-03 08:35] FIX ROUND FULLY CLOSED. fixture-hygiene: all 4 clusters done as 4 per-cluster
+commits (7ecd65d35/45fb01c04/09cfd32a9/be45c2118), verifier content-checks 5/5 VERIFIED (its
+commit-hygiene FAIL was a race — inspected mid reset/re-commit; adjudicated moot against live
+branch state: 4 commits present, tree clean, diff vs dangling full-packet SHA empty). Notable:
+2 test files (15 tests) RETIRED with safety trace (Wilson q_lcb mechanism deleted by a1c2163e4;
+_replacement_is_live_layer admits only FUSED_NORMAL+certified basis — never live);
+47+2 pre-existing failures enumerated as out-of-scope routing backlog (schema/registry/enum
+drift + NC-18 exchange_reconcile guard). MERGED: integration @ 1fc6cd687 (pushed); post-merge
+suites show only the 2 enumerated pre-existing reds. All wave worktrees removed; only
+rebuild-w0 remains (+3 foreign /private/tmp/zeus-pr421-* left untouched).
+E1 CONSULT FOLLOW-UP SUBMITTED (same thread 6a475ff6-8de8-83ea-a35c-1b4c02e1948b,
+rid REQ-20260703-033058-75c6ab): asks re-verdict on merge-to-main + OFF-deploy readiness of
+1fc6cd687, verification of BLOCKER fix as landed, disposition re-check, and whether the 49
+enumerated pre-existing reds block OFF-deploy. Detached waiter running; answer lands at
+/tmp/cgc_answer_REQ-20260703-033058-75c6ab.txt.
+[2026-07-03 09:05] CONSULT ROUND-2 VERDICT (answer: /tmp/cgc_answer_REQ-20260703-033058-75c6ab.txt):
+E1 BLOCKER + glue gap + city-starvation all CONFIRMED FIXED. Still NOT merge/deploy-ready — new
+findings: [BLOCKER] confirmed_families lacks family-level suppression (staleness_cancel.py:~386 —
+family with acked + REVIEW_REQUIRED cancels in same cycle still emitted → redecision against
+ambiguous recovery-owned exposure); [BLOCKER] seam test is a FALSE PROOF of exactly that seam
+(all 16 commands share one FAMILY; assertion =={FAMILY} enshrines the bug — implementer round-1
+claim #4 was wrong); [HIGH] EventStore fetch/claim precedes TTL call with no fail-soft (event-lane
+exception still kills TTL — availability regression vs deleted maker-rest owner); [MEDIUM]
+release-note bullet (added to E3 below); [MEDIUM] freeze known-red baseline (frozen in E2 below);
+[HIGH deferred] shim thread-local stays E5-only. Consult explicitly: after the two code/test fixes
++ baseline freeze → merge-ready and OFF-deploy-ready.
+FIX ROUND 2 IN FLIGHT: w42-implementer on rebuild/w4.2-family-gating off 1fc6cd687 (worktree
+w4-2b): (1) blocked_families conservative suppression, confirmed = acked − blocked;
+(2) seam test split OTHER_FAMILY + same-family suppression test, red-first; (3) EventStore
+fail-soft in main.py glue + test_event_store_failure_still_runs_ttl_pass. TDD + mutation probes.
+[2026-07-03 09:40] FIX ROUND 2 CLOSED + MERGED: integration @ 0afe42f52 (pushed). Commits
+b793167ff (family-level gating: blocked_families from ALL outcomes, confirmed = acked − blocked;
+verifier traced batch_order_submission outcome-array completeness — every command gets an outcome
+under every branch, so batch-exception/deferred/unknown uniformly block) + 468e009e1 (event-lane
+fail-soft: except Exception around world-conn+fetch/claim/commit only, TTL call outside the wrap,
+degrade maps affected_cities→None so q-stale pass cannot fire). Seam test restructured
+(other_family exclusion) + new same-family suppression test = the load-bearing discriminator
+(original seam test alone stays green under old bug — disclosed, verified). Verifier 5/5
+(206/0 sweep claim reproduced exactly by orchestrator — verifier had used the round-1 file set).
+Double mutation probes re-run independently. w4-2b worktree removed post-merge.
+CONSULT ROUND-3 CONFIRMATION SUBMITTED (rid REQ-20260703-040020-bc7d32, detached waiter):
+final go/no-go on 0afe42f52 for merge-to-main + OFF-deploy.
+NEXT: round-3 verdict → (GO) E2 merge-to-main (first: P0.1 parked dirty hotfix tree — hotfix
+branch advanced again this session, re-align at E2) → E3 deploy → E4 → E5 → E6.
+Housekeeping: 14 merged wave worktrees removed (branches kept, all ancestors of
+rebuild/w0-instrumentation@fba4cee21); remaining worktrees = rebuild-w0, w4-2, fixture-hygiene
++ 2 pre-existing DIRTY /private/tmp/zeus-pr421-* (NOT ours — left untouched, surfaced to operator).
+hook-doctor agent dispatched: worktree-cleanup hook failed again — locate/diagnose/fix
+(suspect: omc plugin-update revert; see memory omc-personal-fork-overlay-model).
+THEN: re-merge W4.2 branch + fixture branch → consult follow-up round (same thread) → clean
+verdict → E2 merge-to-main (first: P0.1 parked dirty tree) → E3 deploy → E4 → E5 → E6.
 THEN: W4.2 verify → merge → W4.3 scan demotion (main.py freed; its final main.py state noted by
 verifier item 7) → W4 CLOSED → ENDGAME below.
 
@@ -561,6 +682,20 @@ E1. FULL DEEP BRANCH REVIEW (consult, after W4 closes):
 E2. MERGE TO MAIN:
    - Precondition: E1 clean/accepted + full-suite baseline on the wave branch documented (known
      pre-existing failure ledger frozen as the accepted set).
+   - FROZEN KNOWN-RED BASELINE (captured 2026-07-03 @ 1fc6cd687; consult ruling: does NOT block
+     OFF-deploy IF the failure set stays EXACTLY this — any delta is a fresh stop; consult's "49"
+     was a miscount, verifier-counted 47 = 45 tests/state + 2 test_venue_command_repo):
+     47 node ids at scratchpad/known_red_baseline.txt, summarized by file:
+     test_boot_migration_v28_antibody×7, test_forecast_db_split_invariant×2,
+     test_inv_f1_chain_economics_split×3, test_inv_f5_trade_decisions_demoted×1,
+     test_no_world_market_events_v2×1, test_obs_consolidation_v2_wins×1,
+     test_p2_byte_equivalence×3, test_position_lots_reconciliation×2,
+     test_position_open_idempotency×20, test_table_registry_coherence×5,
+     test_venue_command_repo: test_append_order_fact_preserves_prior_terminal_zero_remainder[MATCHED]
+     + TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo
+     (NC-18 guard — acceptable ONLY as the documented direct-write carve-out for synthetic
+     external closes, W1.1 live-reservation guard + orphan sweep green; re-verify at E2).
+     Full node-id list to be committed alongside the E2 merge record.
    - git checkout main (main worktree /Users/leofitz/zeus — FIRST resolve the parked dirty
      hotfix tree there: P0.1 attribution debt, commit or stash-record it) → merge wave branch
      (--no-ff, milestone message) → full sanity → push origin main.
@@ -573,6 +708,10 @@ E3. DEPLOY (operator-gated, quiet window):
      the deployed path is the one the daemon actually runs).
    - FLAG STATE AT DEPLOY: w3_solve_enabled ABSENT (=OFF) — deploy is byte-identical legacy
      behavior by G3 proof; the deploy itself must show ZERO decision-behavior change.
+   - RELEASE NOTE (consult round-2 MEDIUM, required): the W4.2 TTL-owner change and the W4.4
+     maker-fill-calibration/maker-prior deletion are FLAG-INDEPENDENT behavior deltas — they
+     ship live at OFF-deploy and are NOT covered by the W3 OFF byte-identity claim. State this
+     in the deploy record; E4 monitors maker/taker/rest mix for exactly these deltas.
 E4. REAL-COMBAT MONITORING vs IDEAL DESIGN (the operator axiom made measurable — run a
    comparison dashboard/report over the first N settlement cycles):
    - SPEED (the axiom): latency_from_issue + latency_from_arrival distributions (W0.2) vs the
@@ -601,3 +740,54 @@ THEN: verify W1 packets (fresh verifier incl. ≥20-thread stress rerun) → mer
 W1 wave CLOSED → W2 venue capabilities dispatch (batch wrapper, self-trade guard, rate budget,
 CTF convert/split/merge — CTF first, it is the long pole).
 DEFERRED, NOT ABANDONED: P0.1 dirty-tree attribution in main checkout; P0.2 CWA commit-status check.
+
+## APPENDIX — FROZEN KNOWN-RED BASELINE (exact node ids, captured @ 1fc6cd687, E2 record)
+```
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV28::test_new_reason_insert_succeeds_after_migration
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV28::test_old_reason_still_accepted_after_migration
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV28::test_schema_version_29_insert_accepted
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV29::test_new_reason_insert_succeeds_after_migration
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV29::test_old_v29_reason_still_accepted_after_migration
+tests/state/test_boot_migration_v28_antibody.py::TestNoTradeEventsMigrationFromV29::test_schema_version_30_insert_accepted
+tests/state/test_boot_migration_v28_antibody.py::TestP02StaleV30OnlyMigration::test_schema_version_canonical_insert_accepted_after_migration
+tests/state/test_forecast_db_split_invariant.py::test_rel6_trio_atomicity_commit
+tests/state/test_forecast_db_split_invariant.py::test_rel6_trio_atomicity_rollback
+tests/state/test_inv_f1_chain_economics_split.py::test_balance_only_rescue_preserves_submitted_economics
+tests/state/test_inv_f1_chain_economics_split.py::test_balance_only_rescue_writes_chain_economics_into_projection
+tests/state/test_inv_f1_chain_economics_split.py::test_trade_verified_rescue_still_writes_fill_economics
+tests/state/test_inv_f5_trade_decisions_demoted.py::test_registry_classifies_trade_decisions_as_archive
+tests/state/test_no_world_market_events_v2.py::TestNoWorldMarketEventsV2InSource::test_no_world_market_events_in_src
+tests/state/test_obs_consolidation_v2_wins.py::test_settlement_replay_reads_v2_running_max
+tests/state/test_p2_byte_equivalence.py::TestInitSchemaForecasts0ByteGuard::test_nonexistent_world_db_takes_static_fallback
+tests/state/test_p2_byte_equivalence.py::TestInitSchemaForecasts0ByteGuard::test_zero_byte_stub_takes_static_fallback
+tests/state/test_p2_byte_equivalence.py::TestP2ByteEquivalence::test_world_plus_forecasts_schema_names_match_fixture
+tests/state/test_position_lots_reconciliation.py::test_f108_no_bare_sum_filled_size_without_dedup_guard_in_src
+tests/state/test_position_lots_reconciliation.py::test_f111_live_exposure_sum_shares_excludes_closed_phases
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_chain_covers_db_different_condition_stays_divergent
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_chain_covers_db_same_identity_open_rows_merge
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_consolidate_token_scoped
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_consolidator_idempotent
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_divergent_when_chain_matches_db
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_divergent_when_no_chain_snapshot_skips
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_karachi_safety_singleton_is_noop
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_overbook_voids_oldest_no_token_row
+tests/state/test_position_open_idempotency.py::TestConsolidator::test_overbook_voids_oldest_row
+tests/state/test_position_open_idempotency.py::TestLondonReplay::test_full_replay_then_migration_then_writer_block
+tests/state/test_position_open_idempotency.py::TestMigrationAndIndex::test_migration_refuses_when_duplicates_exist
+tests/state/test_position_open_idempotency.py::TestMigrationAndIndex::test_unique_index_allows_void_then_reopen
+tests/state/test_position_open_idempotency.py::TestMigrationAndIndex::test_unique_index_catches_race_past_writer
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_duplicate_open_raises
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_duplicate_open_raises_for_no_token_identity
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_economically_closed_does_not_block_new_open
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_first_insert_succeeds
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_hard_terminal_same_position_id_is_absorbing
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_same_position_id_upsert_is_noop
+tests/state/test_position_open_idempotency.py::TestWriterIdempotencyCheck::test_voided_row_does_not_block_new_open
+tests/state/test_table_registry_coherence.py::TestA1RegistryVsSqliteMaster::test_a1_world_side_bidirectional
+tests/state/test_table_registry_coherence.py::TestA4AssertDbMatchesRegistry::test_a4_allows_migration_ledger_on_world_and_forecasts
+tests/state/test_table_registry_coherence.py::TestA4AssertDbMatchesRegistry::test_a4_column_shape_check_raises_on_missing_column
+tests/state/test_table_registry_coherence.py::TestA4AssertDbMatchesRegistry::test_a4_passes_on_correct_world_schema
+tests/state/test_table_registry_coherence.py::TestA4ManifestReadyForBootWiring::test_a4_trade_tables_init_schema_creates_runtime_tables_and_migration_ledger
+tests/test_venue_command_repo.py::test_append_order_fact_preserves_prior_terminal_zero_remainder[MATCHED]
+tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo
+```
