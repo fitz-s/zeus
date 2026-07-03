@@ -476,6 +476,7 @@ test_trust_policy:
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case)."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}
+    tests/test_self_trade_guard.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W2.2-SELF-TRADE: full truth table for check_self_trade (CLEAR/WOULD_SELF_CROSS/INDETERMINATE, both sides, exact-price-touch, multi-order, cross-token isolation, malformed-row skip) plus load_own_open_resting_orders DB loader tests (latest-row-per-command, cancelled exclusion, PARTIALLY_MATCHED inclusion, candidate exclusion, missing-table -> None)."}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-05-24"}
     tests/test_settlement_day_observation_authority.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -906,6 +907,7 @@ categories:
     - tests/test_order_truth_reducer.py
     - tests/test_order_state_predicates.py
     - tests/test_ddl_copies_normalized_identical.py
+    - tests/test_self_trade_guard.py
     - tests/test_settlement_commands.py
     - tests/test_settlement_semantics.py
     - tests/test_fake_polymarket_venue.py
