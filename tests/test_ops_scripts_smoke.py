@@ -9,10 +9,13 @@
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1155,9 +1158,67 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
     assert calls
     code = calls[0][0][2]
     assert "deploy_live_restart_guard" in code
+    assert "entries pause guard preserved" in code
+    assert "issued_by IN ('control_plane', 'operator')" in code
     assert "issued_by='control_plane'" in code
     assert "effective_until=None" in code
     assert "system_auto_pause" not in code
+
+
+def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_pause_guard_preserve_operator", "deploy_live.py")
+    pause_calls = []
+    sql_calls = []
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    control_mod = types.ModuleType("src.control.control_plane")
+    state_db_mod = types.ModuleType("src.state.db")
+
+    def fake_pause_entries(*args, **kwargs):
+        pause_calls.append((args, kwargs))
+
+    class _Cursor:
+        def fetchone(self):
+            return ("operator_investigation", "control_plane", "2026-07-03T00:00:00+00:00")
+
+    class _Conn:
+        def execute(self, sql, params=()):
+            sql_calls.append((sql, params))
+            return _Cursor()
+
+        def close(self):
+            return None
+
+    control_mod.pause_entries = fake_pause_entries
+    state_db_mod.get_world_connection = lambda: _Conn()
+    monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
+    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(args[2], {})
+        return Result(out.getvalue())
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    ok, detail = dl._pause_entries_for_live_restart_if_needed([dl.LIVE_TRADING_LABEL])
+
+    assert ok is True
+    assert "entries pause guard preserved" in detail
+    assert "operator_investigation" in detail
+    assert pause_calls == []
+    assert sql_calls
+    assert "effective_until IS NULL" in sql_calls[0][0]
 
 
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):

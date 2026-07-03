@@ -1421,7 +1421,7 @@ def _family_pending_entry_usd(
                AND token_id IN ({placeholders})
                AND state IN ('INTENT_CREATED', 'SUBMITTING', 'ACKED', 'POST_ACKED',
                              'UNKNOWN', 'REVIEW_REQUIRED', 'PARTIAL',
-                             'PARTIALLY_FILLED')
+                             'PARTIALLY_FILLED', 'CANCEL_PENDING')
             """,
             tuple(sorted(tokens)),
         ).fetchall()
@@ -1495,7 +1495,8 @@ def _family_pending_entry_truth(
                    AND state IN ('INTENT_CREATED', 'SNAPSHOT_BOUND', 'SIGNED_PERSISTED',
                                  'SUBMITTING', 'POSTING', 'ACKED', 'POST_ACKED',
                                  'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT',
-                                 'REVIEW_REQUIRED', 'PARTIAL', 'PARTIALLY_FILLED')
+                                 'REVIEW_REQUIRED', 'PARTIAL', 'PARTIALLY_FILLED',
+                                 'CANCEL_PENDING')
                  LIMIT 1
                 """,
                 tuple(sorted(tokens)),
@@ -3689,14 +3690,21 @@ def event_bound_live_adapter_from_trade_conn(
                         not _family_pending_truth.truth_available
                         or _family_pending_truth.has_pending_or_unknown
                     ):
+                        _shift_pending_reason = (
+                            "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:"
+                            f"{','.join(_family_pending_truth.sources) or 'unknown'}"
+                        )
+                        _abort_family_rebalance_entry_payloads_after_no_submit(
+                            trade_conn,
+                            shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                            now_iso=decision_time.astimezone(UTC).isoformat(),
+                            reason=_shift_pending_reason,
+                        )
                         return dataclass_replace(
                             no_submit_receipt,
                             submitted=False,
                             side_effect_status="NO_SUBMIT",
-                            reason=(
-                                "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:"
-                                f"{','.join(_family_pending_truth.sources) or 'unknown'}"
-                            ),
+                            reason=_shift_pending_reason,
                             proof_accepted=False,
                         )
                 # D1 FILL-UP PRE-SUBMIT REREAD (2026-06-22 lifecycle consult §"final

@@ -220,6 +220,60 @@ def test_family_pending_truth_blocks_unmaterialized_filled_command():
     assert "venue_commands_filled_unmaterialized" in truth.sources
 
 
+def test_cancel_pending_sibling_blocks_fill_up_plan_until_cancelled():
+    conn = _conn()
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0)
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-cancel-pending', 'dec-cancel-pending', 'ENTRY', 'tok-B',
+            'CANCEL_PENDING', 8.0, 0.50, '2026-07-03T00:00:00+00:00',
+            '2026-07-03T00:00:00+00:00'
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B"),
+        trade_conn=conn,
+    )
+    held = fuw.read_held_same_token_exposure(conn, token_id="tok-A")
+    assert held is not None
+
+    plan = fuw.plan_fill_up(
+        conn,
+        is_redecision_event=True,
+        family_key="live|Tokyo|2026-06-23|high",
+        event_id="event-1",
+        selected_token_id="tok-A",
+        selected_bin_id="60-61F",
+        selected_direction="buy_yes",
+        held=held,
+        q_current_lcb=0.60,
+        target_total_exposure_usd=10.0,
+        same_token_pending_entry_usd=0.0,
+        venue_min_increment_usd=1.0,
+        now_iso="2026-07-03T00:00:00+00:00",
+        has_unowned_pending_or_unknown_entry=truth.has_pending_or_unknown,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(4.0)
+    assert plan.kind == "ABORT"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+    conn.execute("UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-cancel-pending'")
+    cleared = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B"),
+        trade_conn=conn,
+    )
+    assert cleared.truth_available is True
+    assert cleared.has_pending_or_unknown is False
+
+
 def test_live_cap_representation_matches_execution_command_id_to_command_id():
     conn = _conn()
     conn.execute(

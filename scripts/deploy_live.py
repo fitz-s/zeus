@@ -53,6 +53,7 @@ import plistlib
 import sqlite3
 import subprocess
 import sys
+import textwrap
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -741,11 +742,44 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    code = (
-        "from src.control.control_plane import pause_entries; "
-        "pause_entries('deploy_live_restart_guard', issued_by='control_plane', effective_until=None); "
-        "print('entries pause guard armed')"
-    )
+    code = textwrap.dedent(
+        """
+        from datetime import datetime, timezone
+        from src.control.control_plane import pause_entries
+        from src.state.db import get_world_connection
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_world_connection()
+        try:
+            row = conn.execute(
+                '''
+                SELECT reason, issued_by, issued_at
+                  FROM control_overrides
+                 WHERE target_type = 'global'
+                   AND target_key = 'entries'
+                   AND action_type = 'gate'
+                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
+                   AND issued_by IN ('control_plane', 'operator')
+                   AND effective_until IS NULL
+                   AND issued_at <= ?
+                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
+                 LIMIT 1
+                ''',
+                (now,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is not None:
+            print(
+                'entries pause guard preserved: '
+                f"issued_by={row[1]} reason={row[0]}"
+            )
+        else:
+            pause_entries('deploy_live_restart_guard', issued_by='control_plane', effective_until=None)
+            print('entries pause guard armed')
+        """
+    ).strip()
     try:
         res = subprocess.run(
             [py, "-c", code],
