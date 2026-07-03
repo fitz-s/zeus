@@ -158,7 +158,7 @@ def _seed_open_entry(
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.execution.command_bus import IntentKind
     from src.state.snapshot_repo import insert_snapshot
-    from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope
+    from src.state.venue_command_repo import insert_command, insert_submission_envelope
 
     snapshot_id = f"snap-{command_id}"
     insert_snapshot(

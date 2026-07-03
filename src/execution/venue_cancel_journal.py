@@ -342,6 +342,18 @@ def run_persisted_cancels_for_expired_rests(
                 entry.get("matched_size"),
             )
         elif event_type == "CANCEL_ACKED":
+            if deadline_minutes is not None:
+                logged_deadline_minutes = float(deadline_minutes)
+            else:
+                # No caller-supplied deadline: fall back to the live TTL owner's
+                # operating value (src.state.order_state_predicates, the
+                # successor to this module's own retired deadline read) rather
+                # than a hardcoded stand-in, so this log line stays truthful for
+                # on-call even when a caller (e.g. the invalid-entry-authority
+                # lanes) never had a deadline to pass in the first place.
+                from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
+
+                logged_deadline_minutes = bootstrap_rest_deadline_minutes()
             logger.info(
                 "venue_cancel_journal: cancelled expired rest command=%s order=%s "
                 "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin)",
@@ -350,7 +362,7 @@ def run_persisted_cancels_for_expired_rests(
                 entry.get("created_at"),
                 entry.get("fact_state"),
                 entry.get("matched_size"),
-                float(deadline_minutes) if deadline_minutes is not None else 0.0,
+                logged_deadline_minutes,
             )
     return stats
 

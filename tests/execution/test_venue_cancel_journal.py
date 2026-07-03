@@ -370,3 +370,30 @@ class TestPersistedRestCancel:
         assert [row["event_type"] for row in events] == [
             "POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_VOIDED",
         ]
+
+
+class TestDeadlineMinutesLogFallback:
+    """None of the 4 production call sites pass deadline_minutes to
+    run_persisted_cancels_for_expired_rests. The CANCEL_ACKED "cancelled expired
+    rest" branch (entries with an empty cancel_reason -- the code path this
+    function's own deadline= log field was written for) must fall back to the
+    live TTL owner's operating value, not a hardcoded stand-in that would
+    misreport "deadline=0min" to on-call."""
+
+    def test_no_deadline_minutes_arg_logs_the_bootstrap_ttl_value(self, caplog):
+        from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
+
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        clob = _FakeClob()
+
+        with caplog.at_level("INFO", logger="zeus.venue_cancel_journal"):
+            run_persisted_cancels_for_expired_rests(
+                [_entry("c1", "o1", cancel_reason="")],
+                clob, conn_factory=lambda: conn, close_connections=False,
+            )
+
+        [record] = [r for r in caplog.records if "cancelled expired rest" in r.getMessage()]
+        expected = f"deadline={bootstrap_rest_deadline_minutes():.0f}min"
+        assert expected in record.getMessage()
+        assert "deadline=0min" not in record.getMessage()
