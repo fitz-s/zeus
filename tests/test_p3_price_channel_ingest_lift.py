@@ -636,6 +636,112 @@ def test_price_channel_held_tokens_resolve_separately_from_entry_candidates():
     ) == {("Paris", "2026-06-20", "low")}
 
 
+def _seed_minimal_venue_order_tables(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            price REAL NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def test_price_channel_resting_order_tokens_resolve_bypassing_screen():
+    from src.ingest.price_channel_ingest import (
+        _edli_own_resting_order_token_ids,
+        _edli_resting_family_keys_for_tokens,
+    )
+
+    trade = sqlite3.connect(":memory:")
+    _seed_minimal_venue_order_tables(trade)
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "resting-yes", "resting-yes", "resting-no"),
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-rest", "resting-yes", "BUY", 0.5, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        ("vof-1", "cmd-rest", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+    )
+    # A resting command whose latest fact has already left the open states
+    # (cancel-confirmed) must NOT resolve — only the latest local_sequence
+    # row per command governs "open".
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-cancelled", "cancelled-token", "SELL", 0.6, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade.executemany(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        [
+            ("vof-2a", "cmd-cancelled", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+            ("vof-2b", "cmd-cancelled", "CANCEL_CONFIRMED", "REST", "2026-06-20T00:01:00", 2),
+        ],
+    )
+
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?)",
+        ("0xrest", "Denver", "2026-06-20", "low"),
+    )
+
+    resolved_tokens = _edli_own_resting_order_token_ids(
+        trade, {"resting-yes", "cancelled-token", "unknown-token"}
+    )
+    assert resolved_tokens == {"resting-yes"}
+
+    assert _edli_resting_family_keys_for_tokens(
+        trade,
+        forecasts,
+        {"resting-yes", "cancelled-token", "unknown-token"},
+    ) == {("Denver", "2026-06-20", "low")}
+
+
 def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
     import src.ingest.price_channel_ingest as pci
 
@@ -644,9 +750,188 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
     assert "held_families = _edli_held_family_keys_for_tokens" in src
     assert "entry_families = _edli_screened_entry_family_keys_for_price_channel" in src
     assert "set(families) - set(held_families)" in src
-    assert "families = held_families | entry_families" in src
+    assert "resting_families = _edli_resting_family_keys_for_tokens" in src
+    assert "families = held_families | entry_families | resting_families" in src
     assert src.index("families = held_families | entry_families") < src.index(
         "trigger.build_committed_snapshot_events"
+    )
+    assert src.index("resting_families = _edli_resting_family_keys_for_tokens") < src.index(
+        "trigger.build_committed_snapshot_events"
+    )
+    # Resting bucket is resolved AFTER (independently of) the entry screen call,
+    # never fed as one of its inputs.
+    assert src.index("entry_families = _edli_screened_entry_family_keys_for_price_channel") < src.index(
+        "resting_families = _edli_resting_family_keys_for_tokens"
+    )
+
+
+def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:
+    """COMPLETE/LIVE_ELIGIBLE Denver low coverage for target 2026-06-20 (same
+    shape as tests/events/test_forecast_snapshot_ready.py's Chicago seed)."""
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_available_at, captured_at, target_local_date,
+            city_id, city_timezone, temperature_metric, dataset_id,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            completeness_status, status
+        ) VALUES (
+            'run-rest-1', 'ecmwf-open-data', 'ens', '2026-06-20T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            '2026-06-20T00:00:00+00:00', '2026-06-20T04:15:00+00:00', '2026-06-20T04:16:00+00:00',
+            '2026-06-20', 'denver', 'America/Denver', 'low', 'v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members, expected_steps_json,
+            observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+            completeness_status, readiness_status, computed_at, expires_at
+        ) VALUES (
+            'cov-rest-1', 'run-rest-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-06-20T00', 'ens',
+            'denver', 'Denver', 'America/Denver', '2026-06-20', 'low', 'temperature',
+            'low_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
+            '2026-06-20T05:00:00+00:00', '2026-06-21T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-20T04:16:00+00:00', '2026-06-21T04:16:00+00:00'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+            forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+            members_unit, raw_orderbook_hash_transition_delta_ms
+        ) VALUES (
+            1, 'Denver', '2026-06-20', 'low', 'temperature', 'low_temp',
+            '2026-06-20T00:00:00+00:00', '2026-06-20T06:00:00+00:00',
+            '2026-06-20T04:15:00+00:00', '2026-06-20T04:16:00+00:00', 6,
+            '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]',
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', 'run-rest-1',
+            '2026-06-20T00', '2026-06-20T00:00:00+00:00', '2026-06-20T03:00:00+00:00',
+            '2026-06-20T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-06-20T05:00:00+00:00', 6, 'F', 0
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id, token_id, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "denver-low-2026-06-20",
+            "Denver",
+            "2026-06-20",
+            "low",
+            "0xrest",
+            "resting-yes",
+            "2026-06-20T04:16:00+00:00",
+        ),
+    )
+
+
+def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(monkeypatch):
+    """A family with NO position and NO screen pass (no beliefs seeded, so
+    `_edli_screened_entry_family_keys_for_price_channel` yields nothing) still
+    gets EDLI_REDECISION_PENDING when Zeus has its own open resting order on
+    the token — and the entity-key debounce already in
+    `_edli_pending_redecision_entity_keys` blocks a duplicate on the next tick."""
+    import types
+
+    from src.ingest.price_channel_ingest import _edli_emit_price_channel_redecisions_for_events
+    from src.state.db import init_schema
+
+    # Matches tests/events/test_forecast_snapshot_ready.py's autouse fixture:
+    # exercise the legacy ensemble-committed lane, not the replacement
+    # forecast_posteriors lane, which is orthogonal to this bridge test.
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
+        lambda: False,
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+
+    trade_conn = sqlite3.connect(":memory:")
+    _seed_minimal_venue_order_tables(trade_conn)
+    trade_conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "resting-yes", "resting-yes", "resting-no"),
+    )
+    trade_conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-rest", "resting-yes", "BUY", 0.5, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade_conn.execute(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        ("vof-1", "cmd-rest", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+    )
+
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_denver_2026_06_20(forecasts_conn)
+
+    events = [
+        types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json='{"token_id": "resting-yes"}',
+        )
+    ]
+
+    first_emitted = _edli_emit_price_channel_redecisions_for_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        events,
+        received_at="2026-06-20T05:00:00+00:00",
+    )
+    assert first_emitted == 1
+    assert (
+        world_conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+        == 1
+    )
+
+    second_emitted = _edli_emit_price_channel_redecisions_for_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        events,
+        received_at="2026-06-20T05:05:00+00:00",
+    )
+    assert second_emitted == 0
+    assert (
+        world_conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+        == 1
     )
 
 

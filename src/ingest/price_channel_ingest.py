@@ -2004,6 +2004,92 @@ def _edli_held_family_keys_for_tokens(
     }
 
 
+def _edli_own_resting_order_token_ids(
+    trade_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[str]:
+    """Tokens (from ``token_ids``) carrying one of Zeus's own OPEN resting orders.
+
+    "Open" means the LATEST venue_order_facts row per command_id (by
+    local_sequence — the table is append-only) has a state in the canonical
+    OPEN_ORDER_FACT_STATES. Same predicate as
+    ``self_trade_guard.load_own_open_resting_orders``, generalized here from a
+    single token to a batch of quote-changed tokens.
+    """
+
+    tokens = {
+        str(token or "").strip()
+        for token in (token_ids or set())
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not tokens:
+        return set()
+    if not (
+        _edli_table_exists(trade_conn, "venue_commands", schema=trade_schema)
+        and _edli_table_exists(trade_conn, "venue_order_facts", schema=trade_schema)
+    ):
+        return set()
+
+    from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
+
+    trade_prefix = _edli_schema_prefix(trade_schema)
+    token_placeholders = ",".join("?" for _ in tokens)
+    open_state_placeholders = ",".join("?" for _ in OPEN_ORDER_FACT_STATES)
+    try:
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT vc.token_id
+              FROM {trade_prefix}venue_commands vc
+              JOIN {trade_prefix}venue_order_facts vof ON vof.command_id = vc.command_id
+             WHERE vc.token_id IN ({token_placeholders})
+               AND vof.state IN ({open_state_placeholders})
+               AND vof.local_sequence = (
+                     SELECT MAX(vof2.local_sequence)
+                       FROM {trade_prefix}venue_order_facts vof2
+                      WHERE vof2.command_id = vof.command_id
+               )
+            """,
+            (*tuple(tokens), *sorted(OPEN_ORDER_FACT_STATES)),
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+
+def _edli_resting_family_keys_for_tokens(
+    trade_conn,
+    forecasts_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    """Families with Zeus's own open resting orders on a quote-changed token.
+
+    Resting capital is managing existing exposure (an entry not yet filled, or
+    an exit not yet filled), not proposing a new entry — so this bucket is
+    admitted WITHOUT the live entry screen
+    (``_edli_screened_entry_family_keys_for_price_channel``): the redecision
+    consumer runs the full decide anyway. Reuses the same token->condition_id
+    ->market_events join chain as ``_edli_money_path_family_keys_for_tokens``.
+    """
+
+    resting_tokens = _edli_own_resting_order_token_ids(
+        trade_conn,
+        token_ids,
+        trade_schema=trade_schema,
+    )
+    if not resting_tokens:
+        return set()
+    return _edli_money_path_family_keys_for_tokens(
+        trade_conn,
+        forecasts_conn,
+        resting_tokens,
+        trade_schema=trade_schema,
+    )
+
+
 def _edli_screened_entry_family_keys_for_price_channel(
     world_conn,
     trade_conn,
@@ -2190,7 +2276,26 @@ def _edli_emit_price_channel_redecisions_for_events(
         decision_time=decision_time,
         trade_schema=trade_schema,
     )
-    families = held_families | entry_families
+    # Resting-capital families (Zeus's own open resting orders) bypass the
+    # live entry screen entirely — they are managing existing exposure, not
+    # proposing a new entry, and the redecision consumer runs the full decide
+    # anyway. No new cap is added for this bucket: the entity-key debounce in
+    # _edli_pending_redecision_entity_keys (consumer edli_reactor_v1) already
+    # bounds the lane to one pending row per family by construction.
+    resting_families = _edli_resting_family_keys_for_tokens(
+        trade_conn,
+        forecasts_conn,
+        tokens,
+        trade_schema=trade_schema,
+    )
+    families = held_families | entry_families | resting_families
+    logger.info(
+        "EDLI price-channel redecision buckets held=%d screened=%d resting=%d union=%d",
+        len(held_families),
+        len(entry_families),
+        len(resting_families),
+        len(families),
+    )
     if not families:
         return 0
     from src.events.event_writer import EventWriter
