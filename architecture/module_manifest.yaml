@@ -323,6 +323,42 @@ modules:
       - tests/decision/test_live_receipt_contract.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
+  solve:
+    path: src/solve
+    scoped_agents: src/solve/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional — order-engine rebuild W3 SOLVE core. Math bodies land in
+    # sub-slice 2 (solver.py solve(), menu_adapter, scenario_service); the FamilyDecision
+    # shim + bridge wiring are sub-slice 3. Inert: nothing imports src/solve yet; the ONLY
+    # intended seam is qkernel_spine_bridge.py:1332 behind the w3_solve_enabled flag.
+    maturity: provisional
+    zone: source
+    authority_role: decision_logic
+    high_risk_files:
+      - src/solve/solver.py
+      - src/solve/kappa.py
+      - src/solve/scenario_service.py
+    public_entry_files:
+      - src/solve/solver.py
+      - src/solve/types.py
+      - src/solve/scenario_service.py
+      - src/solve/menu_adapter.py
+      - src/solve/kappa.py
+      - src/solve/exits.py
+    law_dependencies:
+      - AGENTS.md
+      - docs/rebuild/order_engine_first_principles_design_2026-07-02.md
+      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      - docs/rebuild/schema_packets/w3_solve_design_packet_2026-07-03.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/solve/test_solver_properties.py
+      - tests/solve/test_solver_numerical.py
+      - tests/solve/test_scenario_service.py
+      - tests/solve/test_menu_adapter.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md

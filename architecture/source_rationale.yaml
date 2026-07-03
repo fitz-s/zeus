@@ -1470,6 +1470,72 @@ files:
       family_decision_engine.py swap even though the engine does not.
     downstream:
     - src/decision/family_decision_engine.py
+  src/solve/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: >
+      W3 SOLVE package export surface (order-engine rebuild). Re-exports the typed I/O
+      (MenuItem/PlannedOrder/ScenarioSet/SolutionPlan/SolveMenu/WealthByOutcome). Inert
+      until the qkernel_spine_bridge.py:1332 seam swap (sub-slice 3, w3_solve_enabled flag).
+  src/solve/types.py:
+    zone: K2_runtime
+    authority_role: decision_contract
+    why: >
+      Typed inputs/outputs of the W3 SOLVE. Encodes non-weakenable law: PlannedOrder.q_version
+      is mandatory (W1.2 stamp law), every SolutionPlan stamps correlation_rail (arch §4
+      decision 2), WealthByOutcome is derived-not-stored endowment (log-growth baseline).
+  src/solve/scenario_service.py:
+    zone: K2_runtime
+    authority_role: scenario_provider
+    why: >
+      The ONE seam through which outcome scenarios reach the solver. TransitionalIndependentProduct
+      is the W3 rail (single-family = served band samples verbatim, one-belief law; multi-family =
+      index-paired independent product). C4 replaces the provider, not the solver.
+  src/solve/menu_adapter.py:
+    zone: K2_runtime
+    authority_role: menu_reshaper
+    why: >
+      Pure reshaping of the size-aware priced NegRiskRouteSet (+ holdings/cash lanes) into
+      SolveMenu. Never re-prices, never drops non-executable items (audit trail), never
+      synthesizes conversion routes (conversion_routes stays () until the builder + dry-run
+      gate land, packet §5).
+    downstream:
+    - src/solve/solver.py
+  src/solve/solver.py:
+    zone: K2_runtime
+    authority_role: decision_logic
+    why: >
+      The joint SOLVE: solve() maximizes robust (band-α-quantile) expected Δlog-wealth of the
+      whole stake vector over a ScenarioSet against WealthByOutcome as endowment — generalizing
+      payoff_vector's 1-D robust ΔU to a plan over the route menu — then κ-scales and discretely
+      repairs (re-evaluating the rounded plan; submit-worthy only if ΔU still > 0). Deterministic
+      coordinate ascent, seeded at the best single item so it provably dominates the top-1 picker.
+      SolveEngineShim is the FamilyDecision-shaped seam (sub-slice 3). Swaps in at
+      qkernel_spine_bridge.py:1332 behind w3_solve_enabled; replaces family_decision_engine.py.
+    downstream:
+    - src/engine/qkernel_spine_bridge.py
+  src/solve/kappa.py:
+    zone: K2_runtime
+    authority_role: sizing_shading_policy
+    why: >
+      κ — the solver's single fractional-shading policy. κ=1.0 while the downstream
+      kelly_multiplier haircut still executes (single-owner law); a κ<1 with the haircut alive
+      is unconstructable by __post_init__. Ownership transfers to κ in the same W5 commit that
+      deletes the haircut stack — never overlaps, never gaps.
+    downstream:
+    - src/solve/solver.py
+  src/solve/exits.py:
+    zone: K2_runtime
+    authority_role: exit_marginal_rule
+    why: >
+      Exits-as-same-solve: a held position is an endowment the solver re-evaluates; the C5
+      marginal rule (b·Σq_j/W_j > q_i/W_i) is the mathematical form of "move wealth out of
+      outcome i". Reuses ExitContext/precedence tripwires; replaces the economic rule body.
+      Bodies land in a later sub-slice (interface only at W3.2).
+  src/solve/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Scoped router for the SOLVE zone (one-belief law, joint objective, κ single-owner, discrete-repair proof).
   src/decision/qlcb_reliability_guard.py:
     zone: K3_extension
     authority_role: confidence_bound_validator
