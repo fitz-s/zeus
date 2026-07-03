@@ -11113,10 +11113,28 @@ def main():
             max_instances=1, coalesce=True,
         )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
+        # W4.3 liveness analysis (2026-07-03, scan demotion packet): process_pending
+        # (src/events/reactor.py:907) is the SOLE consumer of the opportunity_events queue —
+        # grepped every call site (main.py:4942 is the only one) and found no wake-on-write
+        # path, so EVERY event lane (FORECAST_SNAPSHOT_READY, DAY0_EXTREME_UPDATED,
+        # SOURCE_RUN_ARRIVED-derived staleness cancels, W4.1's book-move buckets, the
+        # continuous-redecision screen's EDLI_REDECISION_PENDING output) is only decided
+        # when THIS job's tick runs. The scan interval is therefore not merely a cold-start/
+        # outage backstop — it directly gates the A2 latency SLA (architecture doc §4b: the
+        # current 60-90s IS the detection floor the axiom measures against). Slowing this
+        # cadence would inject latency into every decision lane, not just the
+        # always-decidable substrate-refresh drain (reactor.py:995-1001) that is the scan's
+        # actual backstop content. Per ORCHESTRATOR ruling shape (b): the cadence is NOT
+        # demoted in this packet. Only the config knob lands (default unchanged — zero
+        # decision-behavior change); an actual slowdown is an explicit, evidence-gated
+        # operator decision once a decoupled wake mechanism exists (E5-adjacent).
+        _edli_reactor_scan_interval_seconds = int(
+            edli_cfg.get("reactor_scan_interval_seconds", 60) or 60
+        )
         scheduler.add_job(
             _edli_event_reactor_cycle,
             "interval",
-            minutes=1,
+            seconds=_edli_reactor_scan_interval_seconds,
             id="edli_event_reactor",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 5.0),
             max_instances=1,
