@@ -74,6 +74,10 @@ _INV24_ALLOWED_CALLER_ABS_PATHS = frozenset(
         "src/data/polymarket_client.py",
         # Operator-only smoke harness; calls v2_preflight() itself per INV-25.
         "scripts/live_smoke_test.py",
+        # W2.1 (inert, no production call site yet): batch submit/cancel
+        # orchestrator calls the place_limit_orders_batch gateway below,
+        # which shares this allowlist per NC-16's two-ring rule.
+        "src/execution/batch_order_submission.py",
     )
 )
 _INV24_OVERRIDE_LOG = _INV24_REPO_ROOT / ".claude" / "logs" / "inv24-overrides.log"
@@ -815,6 +819,23 @@ class PolymarketClient:
             "errorMessage": "live placement requires bind_submission_envelope() before place_limit_order()",
         }
 
+    def place_limit_orders_batch(self, envelopes: list) -> list[Optional[dict]]:
+        """Place up to MAX_ORDERS_PER_BATCH limit orders in ONE SDK call (W2.1).
+
+        INV-24/NC-16 gateway-only, same two-ring enforcement as
+        place_limit_order (see module-level _enforce_inv24_caller_allowlist).
+        Inert: no production call site as of this packet.
+
+        Unlike place_limit_order's legacy positional-args + bind_submission_
+        envelope() single-slot handshake, this takes already-built, already
+        -bound VenueSubmissionEnvelope objects directly -- there is no
+        legacy batch call shape to stay compatible with.
+        """
+        _enforce_inv24_caller_allowlist()
+        adapter = self._ensure_v2_adapter()
+        results = adapter.submit_batch(list(envelopes))
+        return [_legacy_order_result_from_submit(result) for result in results]
+
     def get_order(self, order_id: str) -> Optional[dict]:
         """Fetch a single order by venue order ID. Returns None if not found.
 
@@ -868,6 +889,34 @@ class PolymarketClient:
         }
         logger.info("Order cancel result: %s → %s", order_id, result.status)
         return payload
+
+    def cancel_orders_batch(self, order_ids: list[str]) -> list[Optional[dict]]:
+        """Cancel up to MAX_ORDERS_PER_BATCH orders in ONE SDK call (W2.1).
+
+        Mirrors cancel_order's gate: cutover_guard.gate_for_intent(CANCEL),
+        not the INV-24 place_limit_order allowlist (cancel uses a lighter,
+        separate gate). Inert: no production call site as of this packet.
+        """
+        from src.control.cutover_guard import CutoverPending, gate_for_intent
+        from src.execution.command_bus import IntentKind
+
+        decision = gate_for_intent(IntentKind.CANCEL)
+        if not decision.allow_cancel:
+            raise CutoverPending(decision.block_reason or decision.state.value)
+        results = self._ensure_v2_adapter().cancel_batch(list(order_ids))
+        payloads = []
+        for order_id, result in zip(order_ids, results):
+            payloads.append(
+                {
+                    "orderID": result.order_id,
+                    "status": result.status,
+                    "errorCode": result.error_code,
+                    "errorMessage": result.error_message,
+                    "raw_response_json": result.raw_response_json,
+                }
+            )
+        logger.info("Batch order cancel result: %d orders → %s", len(order_ids), [r.status for r in results])
+        return payloads
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""

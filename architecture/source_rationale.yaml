@@ -1239,6 +1239,28 @@ files:
     - NOT_DAEMON_WIRED
     downstream:
     - tests/venue/test_rate_budget.py
+  src/venue/batch_submit.py:
+    zone: K2_runtime
+    authority_role: batch_submit_pure_primitives
+    why: >
+      W2.1 order-engine rebuild packet (architecture/order_engine_implementation_architecture_2026-07-02.md
+      §1 "batch submit + safe prefixes", BUILD (thin) — SDK post_orders/cancel_orders exist,
+      zero call sites). Pure, side-effect-free primitives shared by the adapter's
+      submit_batch/cancel_batch and the execution-side orchestrator: MAX_ORDERS_PER_BATCH
+      (self-imposed ≤15, not an SDK constraint), chunk_orders, compute_safe_prefixes (the
+      design doc's "every prefix leaves an acceptable exposure if later batches fail" cut,
+      docs/rebuild/order_engine_first_principles_design_2026-07-02.md:118-121), and
+      map_batch_items (fail-closed echo-id/index/unmapped response->request mapping —
+      the post_orders/cancel_orders response shape is UNVERIFIED against the live API,
+      see module docstring TODO).
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W3's solve is the intended
+      future consumer.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - src/venue/polymarket_v2_adapter.py
+    - src/execution/batch_order_submission.py
+    - tests/venue/test_batch_submit.py
   src/ingest/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1806,6 +1828,36 @@ files:
     authority_role: self_trade_guard_predicate
     why: "SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family, to avoid double-blocking legitimate opposite-token hedges already governed by src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively by src/state/venue_command_repo.py insert_command), so the operator's independently-placed orders are invisible to this query and can never be blocked. No venue-side self-trade prevention exists in the installed Polymarket SDK, so this is the primary defense, not defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build."
     downstream: []  # not yet wired; W3 consumes (envelope build)
+  src/execution/batch_order_submission.py:
+    zone: K2_runtime
+    authority_role: batch_command_journal_orchestrator
+    why: >
+      W2.1 order-engine rebuild packet. Extends the single-order INV-28
+      persist-before-side-effect sequence (executor.py:4394-4476) to N
+      orders sharing ONE SDK call per chunk: submit_orders_batch persists
+      insert_command(INTENT_CREATED)+append_event(SUBMIT_REQUESTED) for
+      every order in a chunk, COMMITS, THEN calls the INV-24 gateway
+      place_limit_orders_batch ONCE, THEN maps the one response back onto
+      N SUBMIT_ACKED/SUBMIT_REJECTED/SUBMIT_UNKNOWN events via
+      src.venue.batch_submit.map_batch_items's fail-closed precedence.
+      cancel_commands_batch is the CANCEL_REQUESTED/CANCEL_ACKED/
+      CANCEL_FAILED analog, reusing src.execution.exit_safety's existing
+      cancel machinery rather than inventing new journaling. Accepts
+      optional rate_budget (src.venue.rate_budget) and self_trade_verdicts
+      (src.execution.self_trade_guard) as injected, None-default hooks --
+      honored when supplied, no production wiring. On the INV-24/NC-16
+      gateway allowlist (polymarket_client.py) precisely because it calls
+      place_limit_orders_batch.
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W3's solve
+      is the intended future consumer.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - src/data/polymarket_client.py
+    - src/venue/batch_submit.py
+    - src/execution/self_trade_guard.py
+    - src/venue/rate_budget.py
+    - tests/execution/test_batch_order_submission.py
   src/signal/AGENTS.md:
     zone: docs
     authority_role: registry
