@@ -81,8 +81,12 @@ Skeleton delivered under `src/solve/` (interfaces only; math bodies = sub-slice 
 ## 2. Package layout
 
 `src/solve/{__init__,types,scenario_service,menu_adapter,solver,kappa,exits}.py` — see module
-headers. `TransitionalIndependentProduct` has a real body (index-paired product measure,
-deterministic hash); everything else is contract-annotated `NotImplementedError`.
+headers. **SUPERSEDED by the CONSULT REV-2 appendix below:** the scenario/wealth axis is now the
+joint outcome ATOM axis (`JointOutcomeScenarioSet` / `WealthStateByAtom`), and
+`TransitionalIndependentProduct` serves the SINGLE-FAMILY degenerate case only — multi-family joint
+construction FAILS CLOSED until C4 (it is NOT an index-paired product; index-pairing is not a
+certifiable independent product). `solver.py` + `menu_adapter.py` + `scenario_service.py` + `kappa.py`
+have real bodies; `exits.py` stays interface-only (typed error + precheck).
 
 ## 3. Two-layer output — see decision 1. SolutionPlan fields carry the evidence hooks:
 `delta_u_baseline_top1` (solver≥picker property), `correlation_rail` (§4 decision 2 receipt stamp),
@@ -133,9 +137,123 @@ src/decision omission).
 
 ## 10. C4 swap path
 
-`ScenarioService` is the only seam: C4 returns the same `ScenarioSet` shape with real cross-family
-structure (family_slices already in the type). Reusable math: `correlation_shrinkage.py`'s
+`ScenarioService` is the only seam: C4 returns the same `JointOutcomeScenarioSet` shape (joint
+outcome ATOMS + `q_draws` over atoms + `semantics="MEASURED_JOINT"`) — NOT the rev-1 concatenated
+`ScenarioSet` with family_slices — so the solver needs no code change at the swap. Reusable math:
+`correlation_shrinkage.py`'s
 regime-agnostic Ledoit-Wolf (strip the WeatherRegimeTag cache/taxonomy — W5 deletions). Backing
 data: `settlement_outcomes` (city,date,metric) joins. Granularity mismatch to resolve in the C4
 packet: risk_allocator correlation_key is city-cluster-grained; WeatherFamilyKey is
 city+date+metric-grained (W3.C4 brief risk #2). Until C4: `correlation_rail="caps"` on every plan.
+
+## APPENDIX — CONSULT REV-2 RULINGS (2026-07-03)
+
+External deep review (ChatGPT Pro consult REQ-20260702-212900-e935c9) ruled **NO-GO** for
+building the math core on the rev-1 skeleton types and identified six blockers. The orchestrator
+ACCEPTED all six. This appendix records the rulings; they are law for the W3.2 packet and
+SUPERSEDE the rev-1 type shapes (`ScenarioSet`, `WealthByOutcome`, the Mapping-payoff `MenuItem`,
+the certificate-less `SolutionPlan`) wherever they conflict.
+
+1. **Joint outcome atom axis (BLOCKER).** `ScenarioSet` (concatenated marginal bins) → 
+   `JointOutcomeScenarioSet`: `atoms: tuple[JointOutcomeAtom,…]` (each atom maps
+   `family_key→bin_id`), `q_draws[n_draws, n_atoms]`, optional `draw_weights`, derived
+   `family_projections`, and ambiguity metadata (`alpha`, `band_hashes_by_family`,
+   `provider`+`provider_version`, `semantics` ∈ {POSTERIOR_Q_DRAWS, PRODUCT_MEASURE,
+   MEASURED_JOINT}). `WealthByOutcome` → `WealthStateByAtom` on the SAME atom axis, including
+   reservations / resting orders / unsettled proceeds / `ledger_snapshot_id` (CAS ledger W1.1 is
+   the source of truth). Single-family W3 is the degenerate projection (one entry per atom). This
+   is what makes the C4 provider swap a no-op for the solver.
+
+2. **Transitional rail scope + correlation tightening (BLOCKER).** Index-pairing is INVALID for
+   sorted/quantile-ordered draws (comonotone, not independent). Ruling: the transitional service
+   serves **single-family only**; multi-family joint construction **FAILS CLOSED** until C4.
+   Numeric proof (two identical q=0.60, f=0.20 even-money bets): independent expected log **+0.039**
+   vs comonotone **−0.0024** (both-lose prob 0.16→0.40). Caps limit loss, they are NEVER a
+   log-utility correctness license. Any future degraded multi-family mode stamps
+   `correlation_rail="caps_degraded_not_optimal"` with **promotion evidence BLOCKED**.
+
+3. **RepairCertificate (BLOCKER).** `SolutionPlan` gains `RepairCertificate`: continuous objective,
+   repaired objective under the worst-price model, tick/min-size deltas, promoted/dropped items,
+   ≤15 batch partition, per-safe-prefix objective bounds, budget after repair. A non-empty plan
+   REQUIRES a certificate with repaired ΔU > 0 (enforced in `SolutionPlan.__post_init__`).
+
+4. **LegacyDecisionProjection + phase-1 grading invariant (BLOCKER).** Shim-side artifact:
+   `primary_order_id`, `projected_selected`, the STANDALONE re-scored ΔU of the primary leg alone
+   at post-downstream-haircut size, `projection_reason`, `downstream_haircut_alive`. **Phase-1
+   invariant:** promotion evidence grades the projection, NEVER
+   `SolutionPlan.expected_delta_log_wealth`; if the standalone primary-leg ΔU ≤ 0 (the leg is only
+   good because of unexecuted hedges) → **NO-TRADE in phase 1**.
+
+5. **Validators (BLOCKER).** `JointOutcomeScenarioSet` constructor validates finite values, simplex
+   rows (POSTERIOR_Q_DRAWS), nonnegative weights, shape coherence, canonical float64 dtype before
+   hashing; the scenario hash covers provider+version+atom axis+draw weights+semantics.
+   `_assert_contract_fields` → `validate_family_decision_contract` (presence + non-null semantics +
+   candidate_decisions tuple + exactly-one selected/no_trade_reason), backed by a sentinel
+   facts-writer test proving no getattr default fires.
+
+6. **Robust objective + smaller rulings.** Objective is lower-tail **CVaR** (concavity-preserving),
+   NOT the raw α-quantile — the legacy payoff_vector unimodality assertion is unsafe and is not
+   inherited (tests include a non-unimodal counterexample). Dominance baseline = top-1 candidate in
+   the SAME feasible set (menu/budget/repair/worst-price), not the legacy raw score. `max_stake_usd`
+   removed from core `solve()` (shim-only → cash constraint). Per-LEG tick/min-size on MenuItem.
+   κ is a typed `Kappa` value object (Decimal, canonical serialization). MenuItem payoff is a typed
+   `AtomPayoffProjector` over atoms. Maker lane disabled (W3 taker-only). `exits.py` stays
+   interface-only but gains `ZeroWealthOutcomeError` + `ExitPrecheckResult` (tripwire precedence
+   consumed BEFORE economics). `PlannedOrder` gains `plan_generation` + `ledger_snapshot_id` +
+   `invalidation_snapshot_id` (phase-2 INV-28/29 envelope metadata; fields now, wiring later).
+
+## APPENDIX — CONSULT REV-2 FOLLOW-UP RULINGS (2026-07-03)
+
+Second consult round (answer_w3_rev2_followup.txt): interface foundation CLEARED, GO for the shim
+sub-slice, NO-GO for phase-1 promotion evidence until the math-core gaps below close. All accepted.
+
+**Blockers.**
+1. **Executable-cash budget constraint.** `W_end > 0` does NOT imply affordability — a holding that
+   inflates the worst atom's wealth (or mutually-exclusive claims) can leave positive terminal wealth
+   in every atom while the upfront outlay `Σ positive_cost·x` exceeds spendable cash. A linear budget
+   `Σ cost_i·x_i ≤ cash_usd` (sells free budget) is now enforced in `_feasible_hi`, in `_repair`
+   (drop least-valuable positive-cost orders until affordable), and proven by the certificate
+   (`budget_after_repair_usd ≥ 0`, enforced in `SolutionPlan.__post_init__`; per-prefix budgets are
+   nonnegative as prefixes are cumulative subsets).
+2. **Route depth cap.** `MenuItem.max_units = min(route.max_shares, route.shares)` — never size past
+   the depth `avg_cost` was actually walked at. Per-level cost curves are phase-2.
+
+**Highs.** (3) Phase-1 executable menu = DIRECT NATIVE routes only; synthetic/pair/basket/conversion
+routes are menu-visible but non-executable (`PHASE1_NON_DIRECT_ROUTE`) — their single-instrument
+payoff projection is wrong and multi-leg atomicity would be lost; `PlannedRoute`/`PlannedLeg` is the
+phase-2 shape. (4) `RepairCertificate.chosen_source ∈ {joint, top1}` and `continuous_objective` is
+taken from the CHOSEN parent vector. (5) Safe-prefix positivity: every per-prefix objective bound must
+be `> 0` (enforced at construction); an unsafe multi-order plan (best single prefix negative) emits
+`UNSAFE_PREFIX_DECOMPOSITION`. (6) CVaR filters zero/negative weights before the sort (0·−inf=NaN
+guard) and `JointOutcomeScenarioSet` rejects non-positive weights.
+
+**Mediums.** Row-sum==1 for all three semantics; per-leg NO-ladder quantization (NO buys walk
+`no_asks`); phase-1 leaves PRICE to the submit path (`PlannedOrder.price=None`); `PlannedOrder`
+`__post_init__` validation; AtomPayoffProjector full atom coverage (`structural_zero` opt-in);
+`MIN_TAIL_DRAWS=20` + point-belief STAMPED in diagnostics (`tail_floor_ok`, `effective_tail_draws`,
+`point_belief`); AST sentinel tied to the real `_record_qkernel_selection_family_facts` consumer.
+
+**Optimizer ruling — coordinate ascent RETAINED over the Rockafellar–Uryasev convex program.**
+The continuous solve is deterministic, zero-dependency coordinate ascent, now hardened with three
+moves that close the coupling gaps a pure axis method has on this concave-but-coupled objective:
+(a) **budget-neutral pairwise exchange** for the budget FACE (single-coordinate moves are infeasible
+there); (b) a **diversified multi-start seed** when no single item improves alone, for the from-origin
+diversification hedge (CVaR's directional derivative is superadditive, so `∂U/∂(e_i+e_j)` can be > 0
+while each axis derivative ≤ 0); (c) a **radial balanced-growth step** for the direction both full-set
+arbs and symmetric hedges need. Globality is guarded empirically by 2-D/3-D brute-force fixtures
+(grid-beats-ascent = STOP) and by optimizer-gap diagnostics (`optimizer_sweeps`). Rationale for
+retaining over RU: zero-dependency determinism, the `max(joint, top1)` floor guarantees phase-1
+migration safety (never below the picker), and phase-1 executes only the primary leg so joint
+diversification/arb optimality is not on the live path. RESIDUAL: pathological asymmetric
+multi-item coupling beyond these three moves is a known theoretical gap — SAFE for phase-1, with the
+**RU auxiliary-variable convex program recorded as future hardening** if the gap diagnostics ever show
+a material stall on the live corpus.
+
+**α-sensitivity replay (promotion-evidence-gate item, NOT a solver change).** Before promotion, replay
+the W3 fixture corpus at α ∈ {0.01, 0.05, 0.10} and require decision-stability bands (diff the
+selected/no-trade transitions) so CVaR conservatism is not an artifact of one tail level.
+
+**Re-scoped deferral.** `build_wealth_by_atom` minimal ENTRY-SIDE body is now IN SCOPE for sub-slice 3
+(not deferrable — evidence on a wealth object the live shim cannot derive is not evidence): atom wealth
+from current family holdings + spendable cash net of reservations (CAS ledger read) + `ledger_snapshot_id`.
+Implementation stays sub-slice 3; the full C5 exit ledger builder remains deferred.

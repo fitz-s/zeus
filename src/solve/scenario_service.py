@@ -1,94 +1,100 @@
 # Created: 2026-07-03
 # Last reused or audited: 2026-07-03
-# Authority basis: architecture doc §4 decision 2 (transitional rail ACCEPTED, ScenarioService
-#   interface from day one, C4 = drop-in service swap, not a solver rewrite).
+# Authority basis: architecture doc §4 decision 2 (ScenarioService is the ONE seam, C4 = drop-in
+#   service swap); CONSULT REV-2 rulings 2026-07-03 (joint outcome atom axis; transitional service
+#   serves ONLY the degenerate single-family case; multi-family joint FAILS CLOSED until C4 —
+#   index-pairing is not a certifiable independent product, caps are a loss limiter not a license).
 """ScenarioService — the ONE seam through which outcome scenarios reach the solver.
 
 The solver never samples, never correlates, never touches probability internals: it
-consumes a ``ScenarioSet``. W3 ships ``TransitionalIndependentProduct`` (per-family
-independent product measure — for a single family this is literally the family's own
-``JointQBand.samples``). C4 replaces the provider, not the solver.
+consumes a ``JointOutcomeScenarioSet`` over joint outcome ATOMS. W3 ships
+``TransitionalIndependentProduct``, which serves ONLY the single-family case — for one
+family the joint atom axis IS the family's bins and ``q_draws`` is literally the served
+band's ``samples`` (the one-belief law: the solver integrates over EXACTLY the belief the
+authority served, no second distribution). C4 replaces the provider, not the solver.
+
+WHY MULTI-FAMILY FAILS CLOSED (consult REV-2 blocker + numeric proof): index-pairing draw
+k of family A with draw k of family B is a valid independent product ONLY if each family's
+draws are exchangeable and independently generated; sorted / quantile-ordered draws are
+COMONOTONE, not independent, and the risk_allocator correlation caps limit notional but do
+NOT certify the marginal log-utility condition. Two identical q=0.60, f=0.20 even-money
+bets have +0.039 expected log under independence but −0.0024 under perfect positive
+dependence (both-lose prob 0.16→0.40). So until C4 supplies a MEASURED joint distribution,
+this service refuses to fabricate one — multi-family raises, and any future degraded rail
+must stamp ``correlation_rail="caps_degraded_not_optimal"`` with promotion evidence BLOCKED.
 
 C4 rehoming note (W3.C4 brief): the reusable math for a real joint service is
-``src/strategy/correlation_shrinkage.py``'s regime-agnostic Ledoit-Wolf estimator;
-the regime-keyed cache (``regime_correlation_store.py``) and its taxonomy do NOT move
-here — they are W5 deletions. Historical backing data: ``settlement_outcomes`` rows
-keyed (city, target_date, temperature_metric); offline precedent
+``src/strategy/correlation_shrinkage.py``'s regime-agnostic Ledoit-Wolf estimator; the
+regime-keyed cache (``regime_correlation_store.py``) and its taxonomy do NOT move here —
+W5 deletions. Historical backing data: ``settlement_outcomes`` rows keyed
+(city, target_date, temperature_metric); offline precedent
 ``scripts/measure_member_correlation.py``.
 """
 
 from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
-from src.solve.types import ScenarioSet
+from src.solve.types import JointOutcomeAtom, JointOutcomeScenarioSet
 
 if TYPE_CHECKING:
     from src.probability.joint_q_band import JointQBand
+
+PROVIDER_VERSION = "transitional_independent_product_v1"
+
+
+class MultiFamilyJointUnavailableError(RuntimeError):
+    """Raised when a multi-family joint distribution is requested before C4.
+
+    Fail-closed: the transitional rail cannot certify cross-family log-utility (index-pairing
+    is not a measured joint; caps limit loss, they do not repair the objective). A real joint
+    scenario service (C4) is required — see module header.
+    """
 
 
 @runtime_checkable
 class ScenarioService(Protocol):
     """Provides joint outcome scenarios for a set of families.
 
-    Contract: ``samples`` rows are coherent joint outcomes — within each family's
-    slice every row is a simplex point over that family's bins (JointQBand invariant);
-    across families, coherence is the provider's promise (independent product for the
-    transitional impl; measured joint structure for C4).
+    Contract: the returned ``JointOutcomeScenarioSet`` is over joint outcome ATOMS; under
+    ``POSTERIOR_Q_DRAWS`` every ``q_draws`` row is a coherent joint distribution over those
+    atoms (the served belief). Per-family marginals are derived projections, not the input.
     """
 
-    def scenarios(self, bands_by_family: Mapping[str, "JointQBand"]) -> ScenarioSet:
+    def scenarios(self, bands_by_family: Mapping[str, "JointQBand"]) -> JointOutcomeScenarioSet:
         ...
 
 
 class TransitionalIndependentProduct:
-    """Per-family independent product measure — the W3 transitional rail.
+    """Single-family transitional rail — the ONLY mode wired for W3 (consult REV-2 ruling 2).
 
-    Single family (the W3 case): the family's own band samples pass through verbatim,
-    so the solver integrates over EXACTLY the belief the authority served (no second
-    distribution — the same one-belief law the spine bridge enforces).
-
-    Multiple families: rows are joined index-wise WITHOUT reordering (draw k of family
-    A pairs with draw k of family B). Because each family's draws are exchangeable and
-    independently generated, index-pairing IS the independent product up to Monte-Carlo
-    error, with no combinatorial blow-up. Cross-family risk control stays with the
-    risk_allocator caps (correlation_rail="caps") until C4.
+    One family: the family's own band ``samples`` pass through verbatim as ``q_draws`` over
+    one atom per bin (each row already a coherent simplex — the JointOutcomeScenarioSet
+    validator re-checks). No index-pairing happens, so sort order is irrelevant and the
+    one-belief law holds exactly. Multiple families: FAILS CLOSED (raises) until C4.
     """
 
     provider_name = "transitional_independent_product"
 
-    def scenarios(self, bands_by_family: Mapping[str, "JointQBand"]) -> ScenarioSet:
+    def scenarios(self, bands_by_family: Mapping[str, "JointQBand"]) -> JointOutcomeScenarioSet:
         if not bands_by_family:
             raise ValueError("scenarios() requires at least one family band")
-        families = sorted(bands_by_family)  # deterministic order → stable hash
-        n_draws_set = {int(bands_by_family[f].samples.shape[0]) for f in families}
-        if len(n_draws_set) != 1:
-            raise ValueError(
-                f"independent-product join requires equal n_draws across families, got {n_draws_set}"
+        if len(bands_by_family) != 1:
+            raise MultiFamilyJointUnavailableError(
+                f"transitional rail serves single-family only; got {sorted(bands_by_family)} — "
+                "multi-family joint scenarios require the C4 measured service (fail-closed)"
             )
-        import numpy as np  # local: keep module import light
-
-        bin_ids: list[str] = []
-        slices: dict[str, tuple[int, int]] = {}
-        blocks = []
-        cursor = 0
-        for fam in families:
-            band = bands_by_family[fam]
-            fam_bins = [b.bin_id for b in band.joint_q.omega.bins]
-            slices[fam] = (cursor, cursor + len(fam_bins))
-            cursor += len(fam_bins)
-            bin_ids.extend(fam_bins)
-            blocks.append(band.samples)
-        samples = blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=1)
-        digest = hashlib.sha256()
-        for fam in families:
-            digest.update(fam.encode())
-            digest.update(bands_by_family[fam].sample_hash.encode())
-        return ScenarioSet(
-            bin_ids=tuple(bin_ids),
-            samples=samples,
-            family_slices=slices,
+        (family, band), = bands_by_family.items()
+        fam_bin_ids = [b.bin_id for b in band.joint_q.omega.bins]
+        atoms = tuple(JointOutcomeAtom.of({family: bin_id}) for bin_id in fam_bin_ids)
+        return JointOutcomeScenarioSet.build(
+            atoms=atoms,
+            q_draws=band.samples,
+            semantics="POSTERIOR_Q_DRAWS",
+            alpha=float(band.alpha),
             provider=self.provider_name,
-            sample_hash=digest.hexdigest(),
+            provider_version=PROVIDER_VERSION,
+            band_hashes_by_family={family: band.sample_hash},
+            draw_weights=None,
+            family_projections={family: tuple(range(len(fam_bin_ids)))},
         )
