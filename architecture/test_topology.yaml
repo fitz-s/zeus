@@ -59,6 +59,8 @@ test_trust_policy:
     tests/strategy/live_inference/test_source_clock_city_weights.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Source-clock live replacement city-weight artifact loader: one final scheme per city, normalized fixed weights, missing-source renormalization, and affected-city routing from updated source ids."}
     tests/data/test_openmeteo_model_updates.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Open-Meteo model update metadata parser/probe: supports list and mapping payloads, enforces availability+10m public clock, and does not advance the update cursor before a changed run is publicly usable."}
     tests/data/test_source_run_arrived_event.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W0.3 antibody: probe_openmeteo_source_clock_updates emits exactly one SOURCE_RUN_ARRIVED opportunity event per newly-usable run when passed an EventWriter; replaying the probe over the SAME undelivered run (the real advance_cursor=False live shape) is idempotent (zero additional rows); omitting event_writer preserves prior no-emission behavior."}
+    tests/execution/test_ctf_conversion_commands.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W2.4 antibody: ctf_conversion_commands persist-before-side-effect (INV-28), ack/reject/unknown mapping, fail-closed UNKNOWN on ambiguous adapter outcomes (non-terminal, never guessed success), the SPLIT/MERGE-vs-CONVERT identifier-space CHECK constraint, and receipt-driven reconciliation to CONFIRMED/FAILED."}
+    tests/test_polymarket_v2_adapter_ctf_conversion.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W2.4 antibody: PolymarketV2Adapter.split_positions/merge_positions/convert_positions kill-switch-off-by-default, dry-run no-raw-tx-leak, standard-CTF-vs-NegRiskAdapter routing by neg_risk flag (selector + target contract), and preflight rejects (Safe version/owner mismatch) firing before any broadcast attempt."}
     tests/engine/test_q_exec_lcb_event_seam.py: {created: "2026-06-23", last_used: "2026-06-23", note: "Money-path antibody: _build_event_bound_taker_quality_proof gates its after-cost edge on the price-conditioned selection-curse bound. A mid-price buy_no taker that passes on raw q_lcb is REFUSED once the bound is armed (realized NO rate ~0.66 at price 0.70); favorites + buy_yes untouched; absent/unarmed->identity. Reverting re-admits the refused buy_no cross."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
     tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
@@ -890,6 +892,8 @@ categories:
     - tests/test_venue_envelope_live_bound.py
     - tests/test_polymarket_adapter_submit_safety.py
     - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+    - tests/test_polymarket_v2_adapter_ctf_conversion.py
+    - tests/execution/test_ctf_conversion_commands.py
     - tests/test_ecmwf_open_data_ingest_metric_independence.py
     - tests/test_collateral_ledger.py
     - tests/test_executable_market_snapshot.py

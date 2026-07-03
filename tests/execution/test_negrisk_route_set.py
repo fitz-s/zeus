@@ -35,11 +35,25 @@ behavior the spec replaces:
     reappears — so the flag genuinely gates the neg-risk surface.
 
   * ``test_conversion_routes_omitted_when_venue_primitive_absent`` — the
-    venue-primitive BLOCKER (spec lines 728-732; drift-ledger §7-19): on-chain
-    convert/merge/split is ABSENT, so a ``CONVERSION_SELL_BASKET`` route has no venue
-    primitive to execute and is not emitted. RED-on-revert: if a conversion route is
-    emitted before the primitive exists, this fails. The test also re-runs the
-    spec-mandated grep (spec line 730) to confirm the primitive is in fact absent.
+    venue-primitive BLOCKER (spec lines 728-732; drift-ledger §7-19).
+
+    UPDATED 2026-07-02 (W2.4, order-engine rebuild): the on-chain convert/
+    merge/split venue primitive is NO LONGER absent —
+    PolymarketV2Adapter.split_positions/merge_positions/convert_positions now
+    exist (src/venue/polymarket_v2_adapter.py). W2.4's scope explicitly keeps
+    ``negrisk_routes.py``'s conversion legs ``executable=False`` in THIS
+    packet regardless (W3 flips them) — the adapter methods land INERT, with
+    no caller. So the BLOCKER premise flips from "primitive is absent" to
+    "primitive exists but is not yet wired into negrisk_routes.py's route
+    builder" — a different, narrower, still-true fact. RED-on-revert is
+    re-anchored accordingly: this test now asserts (1) conversion_routes
+    stays empty (unchanged — negrisk_routes.py itself is untouched by W2.4),
+    (2) the venue primitive DOES now exist (positive grep, inverted from the
+    old absence check), and (3) negrisk_routes.py does not import/reference
+    it yet (proving the two are still genuinely disconnected, not just
+    coincidentally both true). If a future packet (W3) wires the primitive
+    into a ``_conversion_route`` builder, (1) and (3) become the intended
+    break points — update them there, not here.
 """
 from __future__ import annotations
 
@@ -308,7 +322,9 @@ def test_negrisk_routes_disabled_when_flag_false():
 # ---------------------------------------------------------------------------
 
 def test_conversion_routes_omitted_when_venue_primitive_absent():
-    """No CONVERSION_SELL_BASKET routes are emitted until the venue primitive exists."""
+    """No CONVERSION_SELL_BASKET routes are emitted — venue primitive exists (W2.4)
+    but is not yet wired into this route builder (deferred to W3). See the
+    module docstring's 2026-07-02 update note for the full re-anchoring."""
     space = _three_bin_space()
     markets = {
         "b25": _market_book("b25", neg_risk=True, yes_ask="0.50", no_ask="0.55"),
@@ -326,24 +342,47 @@ def test_conversion_routes_omitted_when_venue_primitive_absent():
     assert all(r.executable for r in routes.direct_yes.values())
     assert all(r.executable for r in routes.direct_no.values())
 
-    # GROUND TRUTH: re-run the spec-mandated grep (spec line 730). The convert/merge/split
-    # venue primitive must be ABSENT for the omitted route surface to be correct.
-    proc = subprocess.run(
+    # GROUND TRUTH 1 (inverted 2026-07-02, W2.4): the convert/merge/split venue
+    # primitive now EXISTS in src/venue/polymarket_v2_adapter.py — this positively
+    # confirms W2.4 shipped it (the old assertion here checked the OPPOSITE: that
+    # it was absent; that premise is retired).
+    primitive_proc = subprocess.run(
         [
             "grep",
-            "-rnE",
-            r"def convert|mergePositions\(|convertPositions\(|splitPosition\(|def merge_positions|def split_position",
-            "src/venue/",
-            "src/execution/",
+            "-rlE",
+            r"def convert_positions|def merge_positions|def split_positions",
+            "src/venue/polymarket_v2_adapter.py",
         ],
         cwd=_repo_root(),
         capture_output=True,
         text=True,
     )
-    assert proc.returncode == 1 and proc.stdout.strip() == "", (
-        "convert/merge/split venue primitive appears to be WIRED now "
-        f"(grep hit:\n{proc.stdout}\n) — the venue-primitive BLOCKER must be "
-        "re-evaluated and conversion routes re-enabled via the new primitive."
+    assert primitive_proc.returncode == 0 and primitive_proc.stdout.strip(), (
+        "expected PolymarketV2Adapter.split_positions/merge_positions/"
+        "convert_positions (W2.4) to exist in src/venue/polymarket_v2_adapter.py"
+    )
+
+    # GROUND TRUTH 2: negrisk_routes.py itself does not reference the new
+    # primitive — proving conversion_routes staying empty is a genuine "not
+    # wired yet" fact, not a coincidence. If this ever fires, W3 has started
+    # wiring the primitive in and CONVERSION_VENUE_PRIMITIVE_ABSENT / this
+    # test's assertion that conversion_routes == () need updating together.
+    wiring_proc = subprocess.run(
+        [
+            "grep",
+            "-nE",
+            r"split_positions|merge_positions|convert_positions",
+            "src/execution/negrisk_routes.py",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+    )
+    assert wiring_proc.returncode == 1 and wiring_proc.stdout.strip() == "", (
+        "negrisk_routes.py now references the CTF conversion venue primitive "
+        f"(grep hit:\n{wiring_proc.stdout}\n) — W3 has started wiring conversion "
+        "routes live; this test's conversion_routes == () assertion (and "
+        "CONVERSION_VENUE_PRIMITIVE_ABSENT) must be re-evaluated together."
     )
 
 

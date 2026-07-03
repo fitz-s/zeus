@@ -1627,6 +1627,31 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: ctf_conversion_commands
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
+    pk_col: command_id
+    notes: >
+      W2.4 (2026-07-02): durable command ledger for CTF split/merge/convert.
+      DDL lives in src/execution/ctf_conversion_commands.py (imported once
+      into init_schema_trade_only, same pattern as settlement_commands).
+      Trade DB per db/schema_class routing decision documented in the module
+      docstring: condition_id/market_id-scoped like settlement_commands, not
+      world_class like wrap_unwrap_commands. INERT this packet — no
+      production writer yet.
+
+  - name: ctf_conversion_command_events
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
+    pk_col: id
+    notes: >
+      W2.4 (2026-07-02): append-only event log for ctf_conversion_commands.
+      Same DDL co-location and INERT status as ctf_conversion_commands above.
+
   - name: settlement_command_events
     db: trade
     schema_class: trade_class

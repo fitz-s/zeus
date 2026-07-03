@@ -46,6 +46,11 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'collateral_reservations': Domain.TRADE,
     'collateral_unsettled_proceeds': Domain.TRADE,
     'control_overrides_history': Domain.WORLD,
+    # W2.4 (2026-07-02) verifier finding: CTF split/merge/convert command ledger
+    # (src/execution/ctf_conversion_commands.py) — trade DB, same domain as
+    # settlement_commands/settlement_command_events (its journaling precedent).
+    'ctf_conversion_command_events': Domain.TRADE,
+    'ctf_conversion_commands': Domain.TRADE,
     'cycle_advance_enqueues': Domain.FORECASTS,
     'daily_observation_revisions': Domain.WORLD,
     'data_coverage': Domain.WORLD,
