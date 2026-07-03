@@ -5576,19 +5576,26 @@ def _get_c3_staleness_rate_budget():
 def _c3_staleness_cancel_cycle() -> None:
     """W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring).
 
-    TTL/q-staleness successor to the retired ``maker_rest_escalation``: consumes
-    ``SOURCE_RUN_ARRIVED`` events (a q_version-advance signal) through their own
-    dedicated claim lane (``_C3_STALENESS_CANCEL_CONSUMER``, isolated from the main
-    reactor's ``edli_reactor_v1`` queue — this event type is a staleness signal
-    against resting orders, not a forecast-ready decision trigger). For each
-    event's affected cities: classify every open ENTRY rest via the W1.2 DERIVED
-    predicates (``is_stale_pending_cancel`` + ``rest_deadline_exceeded`` —
-    src.state.order_state_predicates), cancel the resulting set through the W2.1
-    batch cancel gateway (cutover_guard-gated; W2.3 rate budget consulted at CANCEL
-    priority), then emit a reconciled ``EDLI_REDECISION_PENDING`` for every family
-    whose cancel is DURABLY confirmed. ``rest_deadline_exceeded`` is now the sole
-    GTC TTL owner (no-orphaned-GTC handover: it fires regardless of q_version, the
-    same unconditional per-order age deadline the retired job used to own).
+    TTL/q-staleness successor to the retired ``maker_rest_escalation``. Two
+    independent clocks, composed as two passes inside
+    ``run_c3_staleness_cancel_cycle`` (not gated on each other):
+
+    - TTL (``rest_deadline_exceeded``) is the GLOBAL, UNCONDITIONAL GTC deadline
+      owner — it scans EVERY open ENTRY rest and runs on EVERY scheduled tick,
+      regardless of whether any ``SOURCE_RUN_ARRIVED`` event is pending. This is
+      the exact behavior the retired maker_rest_escalation job had; gating it
+      behind an event claim would strand expired rests during quiet forecast
+      periods (the orphaned-GTC bug this composition must not reintroduce).
+    - q-version staleness (``is_stale_pending_cancel``) is SCOPED to the
+      ``affected_cities`` of ``SOURCE_RUN_ARRIVED`` events claimed through their
+      own dedicated lane (``_C3_STALENESS_CANCEL_CONSUMER``, isolated from the
+      main reactor's ``edli_reactor_v1`` queue) — it only runs when such events
+      exist, and only against the cities they name.
+
+    Cancels go out through the W2.1 batch cancel gateway (cutover_guard-gated;
+    W2.3 rate budget consulted at CANCEL priority), then a reconciled
+    ``EDLI_REDECISION_PENDING`` is emitted for every family whose cancel is
+    DURABLY confirmed.
     """
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
@@ -5650,9 +5657,11 @@ def _c3_staleness_cancel_cycle() -> None:
         world.commit()
     finally:
         world.close()
-    if not claimed_ids:
-        return
 
+    # UNCONDITIONAL: the TTL pass inside run_c3_staleness_cancel_cycle must run
+    # every tick regardless of claimed_ids — an empty claim this tick means "no
+    # q-version staleness pass," never "skip the GTC deadline scan." Zero
+    # claimed_ids still exercises the TTL pass over every open rest.
     from src.data.polymarket_client import PolymarketClient
     from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
     from src.state.db import get_forecasts_connection_read_only, get_trade_connection, get_trade_connection_read_only
@@ -5677,14 +5686,15 @@ def _c3_staleness_cancel_cycle() -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-    world2 = get_world_connection()
-    try:
-        store2 = EventStore(world2, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
-        for event_id in claimed_ids:
-            store2.mark_processed(event_id)
-        world2.commit()
-    finally:
-        world2.close()
+    if claimed_ids:
+        world2 = get_world_connection()
+        try:
+            store2 = EventStore(world2, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+            for event_id in claimed_ids:
+                store2.mark_processed(event_id)
+            world2.commit()
+        finally:
+            world2.close()
 
     logger.info(
         "c3_staleness_cancel: events=%d scanned=%d cancel_set=%d confirmed_families=%d",

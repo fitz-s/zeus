@@ -410,8 +410,12 @@ class TestRunC3StalenessCancelCycle:
         _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
         client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
 
+        # q-version staleness only fires within a claimed source event's
+        # affected_cities (TestTtlEventClockSplit covers the TTL-vs-event split
+        # itself); this test is about the q-stale classification+confirm path.
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
         )
 
         assert result["cancel_set_size"] == 1
@@ -459,6 +463,7 @@ class TestRunC3StalenessCancelCycle:
 
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=_DenyingBudget(),
+            affected_cities=frozenset({FAMILY[0]}),
         )
 
         assert result["cancel_set_size"] == 1  # classified as cancel-worthy...
@@ -511,9 +516,124 @@ class TestRunC3StalenessCancelCycle:
             affected_cities=frozenset({FAMILY[0]}),
         )
 
-        assert result["scanned"] == 1
+        # scanned reflects the FULL global scan (both cities) -- affected_cities
+        # only scopes the q-version staleness pass, never the TTL pass's scan.
+        assert result["scanned"] == 2
         assert result["confirmed_families"] == {FAMILY}
-        assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city untouched
+        assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city, fresh q, not past TTL -> untouched
+
+
+class TestTtlEventClockSplit:
+    """The composition fix: TTL (rest_deadline_exceeded) is a GLOBAL,
+    UNCONDITIONAL pass over every open rest on every call, independent of
+    whether any SOURCE_RUN_ARRIVED event fired or which cities it named.
+    q-version staleness is the only pass scoped to affected_cities. Regression
+    coverage for the orphaned-GTC scheduler-composition bug: gating the TTL
+    scan behind claimed events, or filtering entries by affected_cities BEFORE
+    classification, stranded expired rests during quiet periods / in
+    non-event cities."""
+
+    def test_no_source_event_still_cancels_expired_rest(self):
+        """affected_cities=None (no SOURCE_RUN_ARRIVED claimed this tick) must
+        NOT suppress the TTL pass -- an expired rest is still cancelled."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        # No market_events/posterior seeded at all -- family is unresolvable,
+        # proving TTL fires without ANY q-version machinery available.
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW, affected_cities=None,
+        )
+
+        assert result["cancel_set_size"] == 1
+        assert client.cancel_calls == [["v1"]]
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+
+    def test_source_event_city_does_not_starve_other_city_ttl(self):
+        """A SOURCE_RUN_ARRIVED for city A must not prevent an expired rest in
+        city B (untouched by the event) from being cancelled by TTL."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        city_b = ("Toronto", "2026-07-04", "high")
+        _seed_open_entry(
+            trade_conn, command_id="c-fresh-a", token_id="tok-a", venue_order_id="v-a",
+            q_version="q-old", created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-expired-b", token_id="tok-b", venue_order_id="v-b",
+            q_version="q-b", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok-a", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-b", city=city_b[0], target_date=city_b[1], metric=city_b[2])
+        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
+        # city_b's rest is well past TTL and NOT stale on q (no posterior is even
+        # seeded for city_b -- TTL alone must carry it). Both commands land in
+        # ONE merged cancel-set, so ONE batch call carries both order IDs.
+        client = _FakeGatewayClient(
+            cancel_responses=[[{"canceled": True, "orderID": "v-a"}, {"canceled": True, "orderID": "v-b"}]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),  # event only names city A
+        )
+
+        assert result["scanned"] == 2
+        cancelled_order_ids = {oid for chunk in client.cancel_calls for oid in chunk}
+        assert cancelled_order_ids == {"v-a", "v-b"}
+        assert conn_state(trade_conn, "c-fresh-a") == "CANCELLED"  # q-stale, scoped pass
+        assert conn_state(trade_conn, "c-expired-b") == "CANCELLED"  # TTL, unscoped pass -- not starved
+
+    def test_duplicate_source_event_replay_is_idempotent_no_double_cancel(self):
+        """A replayed/duplicate SOURCE_RUN_ARRIVED driving a second
+        run_c3_staleness_cancel_cycle call over the SAME already-cancelled
+        order must not produce a duplicate venue side effect -- the second
+        pass sees the command already CANCELLED and cancel_commands_batch
+        skips it as not_requestable (no second SDK call, no second journal
+        entry, no double cancel)."""
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version="q-old", created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}], [None]])
+
+        first = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+        assert first["confirmed_families"] == {FAMILY}
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+
+        cancel_events_after_first = trade_conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0]
+        assert cancel_events_after_first == 1
+
+        # REPLAY: the same command is still returned by find_open_entry_rests'
+        # underlying state? No -- it is CANCELLED now, so a second identical
+        # tick's TTL/q-stale classification would not even re-select it (the
+        # scan only returns state IN ('ACKED','POST_ACKED','PARTIAL')). This
+        # proves the idempotency at the SOURCE: a duplicate SOURCE_RUN_ARRIVED
+        # driving a second cycle finds nothing left to cancel for c1.
+        second = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+        assert second["cancel_set_size"] == 0
+        assert client.cancel_calls == [["v1"]]  # the SDK was never called a second time
+        cancel_events_after_second = trade_conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0]
+        assert cancel_events_after_second == 1  # no duplicate journal entry
 
 
 def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
