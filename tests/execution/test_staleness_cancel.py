@@ -523,6 +523,80 @@ class TestRunC3StalenessCancelCycle:
         assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city, fresh q, not past TTL -> untouched
 
 
+class TestFamilyLevelRedecisionGating:
+    """Consult review round 2 BLOCKER: confirmed_families must be FAMILY-level
+    conservative, not per-command. A family with one durably-cancelled command
+    and one command stuck ambiguous (REVIEW_REQUIRED / not_canceled / unknown)
+    in the SAME cycle must be excluded ENTIRELY -- that family still carries a
+    recovery-owned ambiguous venue exposure; emitting a redecision for it
+    anyway risks a duplicate/overlapping submit against that exposure."""
+
+    def test_mixed_outcomes_in_same_family_suppress_the_whole_family(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        # BOTH commands resolve to the SAME family.
+        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        # ONE batch call, per-order mixed outcome: c-good acks cleanly; c-bad
+        # comes back NOT_CANCELED (ambiguous -- venue truth still open).
+        client = _FakeGatewayClient(
+            cancel_responses=[[
+                {"canceled": True, "orderID": "v-good"},
+                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
+            ]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+
+        assert result["cancel_set_size"] == 2
+        assert conn_state(trade_conn, "c-good") == "CANCELLED"
+        assert conn_state(trade_conn, "c-bad") != "CANCELLED"
+        # The family is excluded ENTIRELY, not partially confirmed, because
+        # c-bad's ambiguous outcome makes the family's venue exposure unclear.
+        assert result["confirmed_families"] == set()
+
+    def test_ambiguous_family_does_not_block_an_unrelated_confirmed_family(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        other_family = ("Toronto", "2026-07-04", "high")
+        _seed_open_entry(
+            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-clean", token_id="tok-clean", venue_order_id="v-clean",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(
+            forecasts_conn, token_id="tok-clean", city=other_family[0], target_date=other_family[1], metric=other_family[2]
+        )
+        client = _FakeGatewayClient(
+            cancel_responses=[[
+                {"canceled": True, "orderID": "v-good"},
+                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
+                {"canceled": True, "orderID": "v-clean"},
+            ]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+
+        assert result["confirmed_families"] == {other_family}  # FAMILY (ambiguous) excluded, other_family confirmed
+
+
 class TestTtlEventClockSplit:
     """The composition fix: TTL (rest_deadline_exceeded) is a GLOBAL,
     UNCONDITIONAL pass over every open rest on every call, independent of

@@ -15,8 +15,9 @@ Scenario (one MAX_ORDERS_PER_BATCH=15 chunk boundary, deliberately straddled):
   - Command 1 ("c-partial", chunk 1) has a PARTIALLY_MATCHED venue_order_facts row recorded
     BEFORE the cancel cycle runs -- the partial-fill-fact-in-flight boundary case.
   - Commands 2-15 (chunk 1, 14 more) cancel cleanly.
-  - Command 16 ("c-chunk2", alone in chunk 2) hits an SDK exception on its chunk's cancel
-    call -- the ambiguous-outcome case that must halt without a false CANCELLED state.
+  - Command 16 ("c-chunk2", alone in chunk 2, in a SEPARATE family OTHER_FAMILY) hits an
+    SDK exception on its chunk's cancel call -- the ambiguous-outcome case that must halt
+    without a false CANCELLED state.
 
 Assertions (all four required by the consult):
   1. No collateral over-release: every reservation's converted_amount stays within
@@ -30,8 +31,20 @@ Assertions (all four required by the consult):
      c-chunk2's ambiguous state is durably recovery-owned (REVIEW_REQUIRED), not re-touched
      by the staleness scan either (it is IN_FLIGHT, not in the open-rest scan's state set).
   4. No redecision emit before durable cancel state: confirmed_families (the gate
-     main._c3_staleness_cancel_cycle's redecision emit reads) includes c-partial's family
-     but excludes c-chunk2's family, which never reached durable CANCELLED.
+     main._c3_staleness_cancel_cycle's redecision emit reads) includes FAMILY (all 15 of
+     its commands durably cancelled) but excludes OTHER_FAMILY (its one command never
+     reached durable CANCELLED).
+
+Consult round-2 finding on the FIRST version of this file: putting c-chunk2 in the SAME
+family as everything else made `confirmed_families == {FAMILY}` true under BOTH the old
+per-command bug and the fixed family-level gate -- the assertion never actually exercised
+family-level suppression, it just happened to read the same either way. Splitting c-chunk2
+into its own family fixes that (assertion 4 above), and
+test_cross_packet_same_family_mixed_outcomes_suppress_whole_family_confirmation below is
+the test that DOES distinguish the two: two commands sharing ONE family, one cancels
+cleanly with correct collateral conversion, the other comes back ambiguous in the SAME
+batch call -- the family-level gate must exclude the WHOLE family despite the clean
+command's OWN collateral accounting being individually correct.
 """
 
 from __future__ import annotations
@@ -129,14 +142,23 @@ def test_cross_packet_partial_fill_batch_exception_seam():
     venue_order_ids = [f"v{i:03d}" for i in range(n_commands)]
     partial_command_id = command_ids[0]
     chunk2_command_id = command_ids[-1]
+    other_family = ("Toronto", "2026-07-04", "high")
 
-    for cid, oid in zip(command_ids, venue_order_ids):
+    for idx, (cid, oid) in enumerate(zip(command_ids, venue_order_ids)):
+        # chunk2's command is in ITS OWN family (other_family) -- a shared
+        # family here would make confirmed_families == {FAMILY} true under
+        # BOTH the old per-command bug and the fixed family-level gate,
+        # never actually exercising suppression (consult round-2 finding).
+        token_id = "tok-chunk2" if cid == chunk2_command_id else "tok-shared"
         _seed_open_entry(
-            trade_conn, command_id=cid, token_id="tok-shared", venue_order_id=oid,
+            trade_conn, command_id=cid, token_id=token_id, venue_order_id=oid,
             q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
         )
         _seed_reservation(trade_conn, command_id=cid, amount_micro=_RESERVE_AMOUNT_MICRO)
     _seed_market_event(forecasts_conn, token_id="tok-shared", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+    _seed_market_event(
+        forecasts_conn, token_id="tok-chunk2", city=other_family[0], target_date=other_family[1], metric=other_family[2]
+    )
 
     # Partial-fill fact IN FLIGHT before the cancel cycle runs: a real matched
     # amount already on file when TTL classification and terminalization see it.
@@ -185,15 +207,14 @@ def test_cross_packet_partial_fill_batch_exception_seam():
     assert chunk2_res["released_at"] is None
     assert chunk2_res["converted_amount"] == 0
 
-    # --- no redecision emit before durable cancel state: confirmed_families gates
-    # on a fresh get_command re-read of CANCELLED, so a family whose ONLY open
-    # order in this batch stuck at REVIEW_REQUIRED must not appear -- but every
-    # command here shares FAMILY, and 14 of them DID durably cancel, so FAMILY is
-    # legitimately confirmed via the 14 successes; the point under test is that
-    # the ambiguous chunk-2 outcome contributes ZERO to that confirmation on its
-    # own (proven by cancel_calls exactly halting at chunk 2, never reaching a
-    # third chunk that does not exist here). ---
+    # --- no redecision emit before durable cancel state: FAMILY (all 15 chunk-1
+    # commands, EVERY one durably CANCELLED) is confirmed; other_family (its
+    # ONE command stuck at REVIEW_REQUIRED) is excluded entirely. Because
+    # chunk-2's command lives in its OWN family, this specifically proves the
+    # gate does not falsely block an UNRELATED clean family -- the same-family
+    # mixed-outcome suppression itself is proven by the sibling test below. ---
     assert result["confirmed_families"] == {FAMILY}
+    assert other_family not in result["confirmed_families"]
     assert len(client.cancel_calls) == 2  # chunk 1, chunk 2 -- no further chunks attempted
 
     cancel_acked_count_after_first = trade_conn.execute(
@@ -224,3 +245,72 @@ def test_cross_packet_partial_fill_batch_exception_seam():
         (partial_command_id,),
     ).fetchone()[0]
     assert cancel_acked_count_after_replay == 1  # no duplicate side effect
+
+
+def test_cross_packet_same_family_mixed_outcomes_suppress_whole_family_confirmation():
+    """The load-bearing proof for the consult round-2 BLOCKER, at the
+    integration level: two commands share ONE family. One (c-partial) has a
+    partial-fill fact in flight and cancels cleanly, with W1.1 correctly
+    converting its collateral to the ACTUAL matched truth -- its OWN
+    accounting is individually perfect. The other (c-ambiguous) comes back
+    NOT_CANCELED in the SAME batch call. confirmed_families must exclude the
+    WHOLE family regardless of c-partial's clean, individually-correct
+    outcome -- the family still carries c-ambiguous's unresolved venue
+    exposure, so a redecision emitted "for FAMILY" would submit against that
+    ambiguity."""
+    trade_conn = _trade_db()
+    forecasts_conn = _forecasts_db()
+    _seed_collateral_snapshot(trade_conn, pusd_balance_micro=100_000_000)
+
+    _seed_open_entry(
+        trade_conn, command_id="c-partial", token_id="tok-partial", venue_order_id="v-partial",
+        q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+    )
+    _seed_reservation(trade_conn, command_id="c-partial", amount_micro=_RESERVE_AMOUNT_MICRO)
+    _seed_open_entry(
+        trade_conn, command_id="c-ambiguous", token_id="tok-ambiguous", venue_order_id="v-ambiguous",
+        q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+    )
+    _seed_reservation(trade_conn, command_id="c-ambiguous", amount_micro=_RESERVE_AMOUNT_MICRO)
+    # BOTH tokens resolve to the SAME family.
+    _seed_market_event(forecasts_conn, token_id="tok-partial", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+    _seed_market_event(forecasts_conn, token_id="tok-ambiguous", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+
+    trade_conn.execute(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, remaining_size, matched_size, "
+        "source, observed_at, local_sequence, raw_payload_hash) "
+        "VALUES ('v-partial', 'c-partial', 'PARTIALLY_MATCHED', '6', '4', 'WS_USER', ?, 1, ?)",
+        (NOW.isoformat(), "a" * 64),
+    )
+    trade_conn.commit()
+
+    class _MixedOutcomeClient:
+        def __init__(self):
+            self.cancel_calls: list[list[str]] = []
+
+        def cancel_orders_batch(self, order_ids):
+            self.cancel_calls.append(list(order_ids))
+            return [
+                {"canceled": True, "orderID": "v-partial"},
+                {"orderID": "v-ambiguous", "status": "NOT_CANCELED", "errorMessage": "still live"},
+            ]
+
+    client = _MixedOutcomeClient()
+
+    result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+
+    assert len(client.cancel_calls) == 1  # both commands fit in one chunk, one batch call
+
+    # c-partial's OWN accounting is individually correct...
+    assert get_command(trade_conn, "c-partial")["state"] == "CANCELLED"
+    partial_res = _reservation_row(trade_conn, "c-partial")
+    assert partial_res["converted_amount"] == 400_000  # floor(1_000_000 * 4/10), the matched truth
+    assert partial_res["released_at"] is not None
+
+    # ...c-ambiguous is untouched (no over-release)...
+    ambiguous_res = _reservation_row(trade_conn, "c-ambiguous")
+    assert ambiguous_res["released_at"] is None
+    assert ambiguous_res["converted_amount"] == 0
+
+    # ...but the WHOLE family is excluded, despite c-partial's clean outcome.
+    assert result["confirmed_families"] == set()
