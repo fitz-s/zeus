@@ -66,6 +66,8 @@ _ROOT = os.path.dirname(_SCRIPT_DIR)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from src.contracts.settlement_semantics import SettlementSemantics
+
 # --- live DBs: ALWAYS the main tree, read-only ------------------------------
 _LIVE_STATE = "/Users/leofitz/zeus/state"
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
@@ -587,7 +589,11 @@ def _winning_bin_id(settled: Settled, bins: list) -> Optional[str]:
 
     # Settled integer in the family's display/settlement unit.
     try:
-        settled_int = int(round(settled.settlement_value))
+        if str(settled.settlement_unit).upper() == "C":
+            semantics = SettlementSemantics.default_wu_celsius("EV_REPLAY")
+        else:
+            semantics = SettlementSemantics.default_wu_fahrenheit("EV_REPLAY")
+        settled_int = int(semantics.round_single(settled.settlement_value))
     except (TypeError, ValueError):
         return None
 

@@ -51,6 +51,8 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.contracts.settlement_semantics import SettlementSemantics
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -93,7 +95,7 @@ def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) ->
 
 
 def _wmo_half_up(val: float) -> float:
-    return float(math.floor(val + 0.5))
+    return SettlementSemantics.default_wu_celsius("EGLL").round_single(float(val))
 
 
 def _containment_check(
