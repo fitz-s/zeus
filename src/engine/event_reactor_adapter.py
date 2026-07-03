@@ -824,16 +824,25 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
         return False
     try:
         if execution_command_id and _adapter_table_exists(trade_conn, "venue_commands"):
+            command_columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+            }
+            match_sql = "decision_id = ?"
+            params: tuple[str, ...] = (execution_command_id,)
+            if "command_id" in command_columns:
+                match_sql = "(command_id = ? OR decision_id = ?)"
+                params = (execution_command_id, execution_command_id)
             row = trade_conn.execute(
-                """
+                f"""
                 SELECT state
                   FROM venue_commands
-                 WHERE decision_id = ?
+                 WHERE {match_sql}
                    AND intent_kind = 'ENTRY'
                  ORDER BY updated_at DESC, created_at DESC
                  LIMIT 1
                 """,
-                (execution_command_id,),
+                params,
             ).fetchone()
             if row is not None:
                 state = str(row[0] if not isinstance(row, sqlite3.Row) else row["state"]).strip().upper()
@@ -1395,7 +1404,7 @@ def _family_pending_entry_usd(
                AND token_id IN ({placeholders})
                AND state IN ('INTENT_CREATED', 'SUBMITTING', 'ACKED', 'POST_ACKED',
                              'UNKNOWN', 'REVIEW_REQUIRED', 'PARTIAL',
-                             'PARTIALLY_FILLED', 'FILLED')
+                             'PARTIALLY_FILLED')
             """,
             tuple(sorted(tokens)),
         ).fetchall()
@@ -3605,88 +3614,17 @@ def event_bound_live_adapter_from_trade_conn(
                     _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
-                # D1 FILL-UP lease terminal advance: COMPLETE on a venue ack, ABORTED
-                # otherwise (a non-ack submit result means no resting order materialized
-                # for this fill-up, so release the family for the next legitimate
-                # rebalance). No-op for non-fill-up receipts.
-                if _fill_up_lease is not None:
-                    _now_iso = certificate_decision_time.isoformat() if hasattr(
-                        certificate_decision_time, "isoformat"
-                    ) else decision_time.astimezone(UTC).isoformat()
-                    _entry_command_id = _execution_command_id_from_command_certificate(command)
-                    if submit_result.venue_ack_received and _entry_command_id:
-                        _fill_up_wiring.complete_fill_up_lease(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            new_entry_command_id=_entry_command_id,
-                        )
-                    elif submit_result.venue_ack_received and not _entry_command_id:
-                        _fill_up_wiring.record_fill_up_entry_unknown(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            new_entry_command_id=None,
-                            reason="fill_up_entry_ack_missing_durable_command_id",
-                        )
-                    elif _submit_result_requires_reconcile(submit_result):
-                        _fill_up_wiring.record_fill_up_entry_unknown(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            new_entry_command_id=_entry_command_id or None,
-                            reason=f"FILL_UP_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
-                        )
-                    else:
-                        _fill_up_wiring.abort_fill_up_lease(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
-                        )
-                # D2 SHIFT-BIN ENTER_NEW_BIN lease terminal advance: this submit IS the
-                # counter-entry (old leg already proven closed). COMPLETE on a venue ack,
-                # ABORTED otherwise (no resting counter-entry materialized → release the
-                # family). No-op for every non-shift / EXIT_OLD_LEG receipt.
-                _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
-                if (
-                    _shift_entry_lease is not None
-                    and str(_shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
-                ):
-                    _now_iso_sb = certificate_decision_time.isoformat() if hasattr(
-                        certificate_decision_time, "isoformat"
-                    ) else decision_time.astimezone(UTC).isoformat()
-                    _entry_command_id_sb = _execution_command_id_from_command_certificate(command)
-                    if submit_result.venue_ack_received and _entry_command_id_sb:
-                        _shift_bin_wiring.complete_shift_bin_lease(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            new_entry_command_id=_entry_command_id_sb,
-                        )
-                    elif submit_result.venue_ack_received and not _entry_command_id_sb:
-                        _shift_bin_wiring.record_entry_unknown(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            new_entry_command_id=None,
-                            reason="shift_bin_entry_ack_missing_durable_command_id",
-                        )
-                    elif _submit_result_requires_reconcile(submit_result):
-                        _shift_bin_wiring.record_entry_unknown(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            new_entry_command_id=_entry_command_id_sb or None,
-                            reason=f"SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
-                        )
-                    else:
-                        _shift_bin_wiring.abort_shift_bin_lease(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            reason=f"SHIFT_BIN_ENTRY_SUBMIT_NO_ACK:{submit_result.status}",
-                        )
+                _advance_family_rebalance_lease_after_submit(
+                    trade_conn=trade_conn,
+                    no_submit_receipt=no_submit_receipt,
+                    command=command,
+                    submit_result=submit_result,
+                    now_iso=(
+                        certificate_decision_time.isoformat()
+                        if hasattr(certificate_decision_time, "isoformat")
+                        else decision_time.astimezone(UTC).isoformat()
+                    ),
+                )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=certificate_decision_time,
@@ -3828,6 +3766,17 @@ def event_bound_live_adapter_from_trade_conn(
                             command,
                             decision_time=certificate_decision_time,
                         )
+                    _advance_family_rebalance_lease_after_submit(
+                        trade_conn=trade_conn,
+                        no_submit_receipt=no_submit_receipt,
+                        command=command,
+                        submit_result=terminal_result,
+                        now_iso=(
+                            certificate_decision_time.isoformat()
+                            if hasattr(certificate_decision_time, "isoformat")
+                            else decision_time.astimezone(UTC).isoformat()
+                        ),
+                    )
                     receipt_cert = build_execution_receipt_certificate(
                         execution_command_cert=command,
                         decision_time=certificate_decision_time,
@@ -7457,6 +7406,92 @@ def _submit_result_requires_reconcile(result: EventBoundExecutorSubmitResult) ->
             or str(result.status or "").upper() in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}
         )
     )
+
+
+def _advance_family_rebalance_lease_after_submit(
+    *,
+    trade_conn: sqlite3.Connection,
+    no_submit_receipt: EventSubmissionReceipt,
+    command: DecisionCertificate,
+    submit_result: EventBoundExecutorSubmitResult,
+    now_iso: str,
+) -> None:
+    """Advance fill-up/shift-bin family leases after an entry submit outcome."""
+
+    entry_command_id = _execution_command_id_from_command_certificate(command)
+    status = str(submit_result.status or "").strip().upper()
+    known_submitted = bool(submit_result.venue_ack_received and status == "SUBMITTED")
+
+    fill_up_lease = no_submit_receipt.fill_up_lease_payload
+    if fill_up_lease is not None:
+        intent_id = fill_up_lease.get("intent_id")
+        if known_submitted and entry_command_id:
+            _fill_up_wiring.complete_fill_up_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id,
+            )
+        elif known_submitted:
+            _fill_up_wiring.record_fill_up_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=None,
+                reason="fill_up_entry_ack_missing_durable_command_id",
+            )
+        elif _submit_result_requires_reconcile(submit_result):
+            _fill_up_wiring.record_fill_up_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id or None,
+                reason=f"FILL_UP_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
+            )
+        else:
+            _fill_up_wiring.abort_fill_up_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
+            )
+
+    shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
+    if (
+        shift_entry_lease is not None
+        and str(shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
+    ):
+        intent_id = shift_entry_lease.get("intent_id")
+        if known_submitted and entry_command_id:
+            _shift_bin_wiring.complete_shift_bin_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id,
+            )
+        elif known_submitted:
+            _shift_bin_wiring.record_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=None,
+                reason="shift_bin_entry_ack_missing_durable_command_id",
+            )
+        elif _submit_result_requires_reconcile(submit_result):
+            _shift_bin_wiring.record_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id or None,
+                reason=f"SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
+            )
+        else:
+            _shift_bin_wiring.abort_shift_bin_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"SHIFT_BIN_ENTRY_SUBMIT_NO_ACK:{submit_result.status}",
+            )
 
 
 def _execution_command_id_from_command_certificate(command: DecisionCertificate) -> str:

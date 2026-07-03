@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
+from src.events.reactor import EventSubmissionReceipt
 from src.state.schema.family_rebalance_intents_schema import ensure_table
 from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
@@ -391,6 +392,53 @@ def test_shift_bin_unknown_counter_entry_keeps_family_lease_active():
     ).fetchone()
     assert row["status"] == "ENTRY_UNKNOWN"
     assert row["new_entry_command_id"] == "cmd-entry"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_shift_bin_submit_exception_unknown_advances_family_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    terminal_result = era._fallback_submit_result_after_live_command_failure(
+        RuntimeError("venue call interrupted"),
+        phase="calling_executor_submit",
+        decision_time=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+    )
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-shift-entry-unknown"})
+
+    era._advance_family_rebalance_lease_after_submit(
+        trade_conn=conn,
+        no_submit_receipt=receipt,
+        command=command,
+        submit_result=terminal_result,
+        now_iso="2026-07-02T00:00:01+00:00",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-shift-entry-unknown"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:POST_SUBMIT_UNKNOWN"
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 

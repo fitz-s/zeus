@@ -4802,6 +4802,7 @@ def execute_exit_order(
                 order_role="exit",
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REVIEW_REQUIRED",
             )
 
@@ -4844,6 +4845,7 @@ def execute_exit_order(
                 external_order_id=_submit_result_order_id(result),
                 venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
                 idempotency_key=idem.value,
+                command_id=command_id,
                 command_state="REVIEW_REQUIRED",
             )
         order_id = _submit_result_order_id(result)
@@ -4907,6 +4909,7 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                command_state="REJECTED",
             )
         if not order_id:
             try:
@@ -4958,6 +4961,7 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                command_state="REJECTED",
             )
 
         order_fact_state = _venue_submit_order_fact_state(result)

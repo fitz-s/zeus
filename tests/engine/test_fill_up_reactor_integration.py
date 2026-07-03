@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
 from src.engine import event_reactor_adapter as era
+from src.events.reactor import EventSubmissionReceipt
 from src.state.schema.family_rebalance_intents_schema import ensure_table
 from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
@@ -56,6 +59,12 @@ CREATE TABLE edli_live_order_projection (
     updated_at TEXT, schema_version INTEGER
 )
 """
+_VENUE_COMMANDS_DDL = """
+CREATE TABLE venue_commands (
+    command_id TEXT, decision_id TEXT, intent_kind TEXT, token_id TEXT,
+    state TEXT, size REAL, price REAL, updated_at TEXT, created_at TEXT
+)
+"""
 
 
 def _conn() -> sqlite3.Connection:
@@ -65,6 +74,7 @@ def _conn() -> sqlite3.Connection:
     conn.execute(_LIVE_CAP_DDL)
     conn.execute(_LIVE_ORDER_EVENTS_DDL)
     conn.execute(_LIVE_ORDER_PROJECTION_DDL)
+    conn.execute(_VENUE_COMMANDS_DDL)
     ensure_table(conn)
     return conn
 
@@ -162,6 +172,49 @@ def test_family_pending_truth_blocks_third_sibling_pending_reconcile():
     assert "edli_live_order_projection" in truth.sources
 
 
+def test_family_pending_truth_ignores_materialized_filled_command():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-filled', 'dec-filled', 'ENTRY', 'tok-A', 'FILLED',
+            10.0, 0.25, '2026-07-02T00:00:00+00:00',
+            '2026-07-02T00:00:00+00:00'
+        )
+        """
+    )
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=2.5)
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A",),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.pending_usd == pytest.approx(0.0)
+    assert truth.has_pending_or_unknown is False
+
+
+def test_live_cap_representation_matches_execution_command_id_to_command_id():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-execution', 'dec-different', 'ENTRY', 'tok-A', 'FILLED',
+            10.0, 0.25, '2026-07-02T00:00:00+00:00',
+            '2026-07-02T00:00:00+00:00'
+        )
+        """
+    )
+
+    assert era._durable_live_cap_usage_is_represented_in_trade_truth(
+        conn,
+        execution_command_id="cmd-execution",
+        final_intent_id="edli_intent:event-1:tok-A",
+    ) is True
+
+
 def test_fill_up_unknown_entry_keeps_family_lease_active():
     conn = _conn()
     lease = fuw.acquire_rebalance_lease(
@@ -193,6 +246,102 @@ def test_fill_up_unknown_entry_keeps_family_lease_active():
     assert row["status"] == "ENTRY_UNKNOWN"
     assert row["new_entry_command_id"] == "cmd-entry"
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_fill_up_submit_exception_unknown_advances_family_lease():
+    conn = _conn()
+    lease = fuw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="FILL_UP",
+        now_iso="t0",
+        held_position_id="p1",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-A",
+        selected_bin_id="60-61F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    terminal_result = era._fallback_submit_result_after_live_command_failure(
+        RuntimeError("venue call interrupted"),
+        phase="calling_executor_submit",
+        decision_time=datetime(2026, 7, 2, tzinfo=UTC),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        fill_up_lease_payload={"intent_id": lease},
+    )
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-entry-unknown"})
+
+    era._advance_family_rebalance_lease_after_submit(
+        trade_conn=conn,
+        no_submit_receipt=receipt,
+        command=command,
+        submit_result=terminal_result,
+        now_iso="2026-07-02T00:00:01+00:00",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-entry-unknown"
+    assert row["abort_reason"] == "FILL_UP_ENTRY_RECONCILE_REQUIRED:POST_SUBMIT_UNKNOWN"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_fill_up_submit_rejected_aborts_family_lease():
+    conn = _conn()
+    lease = fuw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="FILL_UP",
+        now_iso="t0",
+        held_position_id="p1",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-A",
+        selected_bin_id="60-61F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        fill_up_lease_payload={"intent_id": lease},
+    )
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-entry-rejected"})
+    submit_result = era.EventBoundExecutorSubmitResult(
+        status="REJECTED",
+        reason_code="deterministic_reject",
+        venue_call_started=True,
+        venue_ack_received=True,
+        side_effect_known=True,
+    )
+
+    era._advance_family_rebalance_lease_after_submit(
+        trade_conn=conn,
+        no_submit_receipt=receipt,
+        command=command,
+        submit_result=submit_result,
+        now_iso="2026-07-02T00:00:01+00:00",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["new_entry_command_id"] is None
+    assert row["abort_reason"] == "FILL_UP_SUBMIT_NO_ACK:REJECTED"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
 
 
 # ---------------------------------------------------------------------------
