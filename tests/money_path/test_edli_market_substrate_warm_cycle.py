@@ -1470,7 +1470,7 @@ def test_held_position_monitor_does_not_pause_live_decision_line():
         live_decision_jobs = {
             "edli_event_reactor",
             "edli_command_recovery",
-            "maker_rest_escalation",
+            "c3_staleness_cancel",
             "edli_redecision_screen",
             "EDLI market-substrate warm",
             "EDLI market-channel substrate refresh",
