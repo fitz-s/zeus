@@ -64,6 +64,7 @@ modules:
       - src/state/source_run_repo.py
       - src/state/readiness_repo.py
       - src/state/market_topology_repo.py
+      - src/state/order_state_predicates.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
@@ -91,6 +92,9 @@ modules:
       - tests/test_readiness_state_schema.py
       - tests/test_market_topology_state_schema.py
       - tests/state/test_write_coordinator.py
+      - tests/test_order_state_predicates.py
+      - tests/test_ddl_copies_normalized_identical.py
+      - tests/test_schema_fingerprint.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:

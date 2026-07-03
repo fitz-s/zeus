@@ -299,6 +299,7 @@ def seed_command(
     snapshot_outcome_label: str = "YES",
     envelope_yes_token_id: str | None = None,
     envelope_no_token_id: str | None = None,
+    q_version: str | None = None,
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command
 
@@ -333,6 +334,7 @@ def seed_command(
         price=price,
         created_at=created_at.isoformat(),
         venue_order_id=venue_order_id,
+        q_version=q_version,
     )
     if state in {"ACKED", "PARTIAL", "FILLED", "CANCEL_PENDING"}:
         append_event(
@@ -712,6 +714,9 @@ def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(co
         size=18.682141,
         price=0.72,
         state="FILLED",
+        # SCH-W1.2-ORDER-STATE: give the entry a real q_version so the recovered
+        # exit's NULL below proves NULL-BY-RULE, not mere absence upstream.
+        q_version="entry-q-version-must-not-propagate",
     )
     append_trade_fact(
         conn,
@@ -791,7 +796,7 @@ def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(co
     assert not any(f.kind == "exchange_ghost_order" for f in result)
     recovered = conn.execute(
         """
-        SELECT command_id, intent_kind, side, state, venue_order_id, token_id
+        SELECT command_id, intent_kind, side, state, venue_order_id, token_id, q_version
           FROM venue_commands
          WHERE venue_order_id = ?
         """,
@@ -799,6 +804,10 @@ def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(co
     ).fetchone()
     assert recovered is not None
     assert recovered["command_id"].startswith("recovered_exit:")
+    # SCH-W1.2-ORDER-STATE: this row is written by a DIRECT INSERT
+    # (exchange_reconcile.py:1152), not insert_command() — q_version is NULL
+    # BY RULE ("not Zeus's decision basis"), never inherited from the entry.
+    assert recovered["q_version"] is None
     assert dict(recovered) | {"command_id": recovered["command_id"]} == {
         "command_id": recovered["command_id"],
         "intent_kind": "EXIT",
@@ -806,6 +815,7 @@ def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(co
         "state": "PARTIAL",
         "venue_order_id": ghost_order_id,
         "token_id": token,
+        "q_version": None,
     }
     trade_fact = conn.execute(
         """
@@ -6355,3 +6365,50 @@ def test_run_reconcile_sweep_proceeds_off_the_world_mutex(conn):
     result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
     assert len(result) == 1
     assert result[0].kind == "exchange_ghost_order"
+
+
+def test_external_operator_close_synthetic_exit_command_has_null_q_version(conn):
+    """SCH-W1.2-ORDER-STATE: _book_external_operator_close_exit_fact
+    (exchange_reconcile.py:1660) writes venue_commands via a DIRECT INSERT, not
+    insert_command() — its column list omits q_version, so the synthetic EXIT
+    command is NULL BY RULE ("not Zeus's decision basis"), never inherited from
+    the entry it reuses provenance FKs from."""
+    from decimal import Decimal
+
+    from src.execution.exchange_reconcile import _book_external_operator_close_exit_fact
+
+    token = "external-close-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-external-close",
+        venue_order_id="ord-entry-external-close",
+        position_id="pos-external-close",
+        token_id=token,
+        side="BUY",
+        size=10.0,
+        price=0.5,
+        state="FILLED",
+        q_version="entry-q-version-must-not-propagate",
+    )
+
+    booked = _book_external_operator_close_exit_fact(
+        conn,
+        token_id=token,
+        close_size=Decimal("10.0"),
+        close_price=Decimal("0.5"),
+        observed_at=NOW,
+    )
+    assert booked is True
+
+    row = conn.execute(
+        """
+        SELECT intent_kind, side, state, q_version
+          FROM venue_commands
+         WHERE command_id = ?
+        """,
+        ("external_operator_close:" + hashlib.sha256(token.encode()).hexdigest()[:24],),
+    ).fetchone()
+    assert row is not None
+    assert row["intent_kind"] == "EXIT"
+    assert row["side"] == "SELL"
+    assert row["q_version"] is None
