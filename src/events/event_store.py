@@ -257,6 +257,92 @@ class EventStore:
         )
         return int(self.conn.total_changes - before)
 
+    def fetch_pending_by_event_type(
+        self, *, event_type: str, decision_time: str, limit: int = 100
+    ) -> list[OpportunityEvent]:
+        """Fetch pending events of exactly ``event_type`` for THIS consumer, oldest
+        ``available_at`` first.
+
+        A standalone, event-type-scoped sibling of :meth:`fetch_pending` for
+        consumers outside the main forecast/day0 decision lane (W4.2:
+        ``SOURCE_RUN_ARRIVED`` staleness consumption). It does NOT touch
+        ``_DECISION_TRIGGER_EVENT_TYPES``/``_FORECAST_DECISION_EVENT_TYPES`` or the
+        city-fairness/tier ranking those event types share — a caller here should
+        use its own ``consumer_name`` (never ``edli_reactor_v1``) so this claim
+        lane cannot starve or reorder the main reactor's queue.
+
+        Self-backfilling: a processing row for THIS consumer is created lazily
+        (mirrors :meth:`repair_missing_processing_rows`) rather than requiring the
+        writer to have known about this consumer at insert time.
+        """
+
+        self._require_world_event_tables()
+        parsed_decision_time = _parse_utc(decision_time)
+        stale_processing_before = (
+            parsed_decision_time - timedelta(seconds=self.processing_lease_seconds)
+        ).isoformat()
+
+        backfill_rows = self.conn.execute(
+            """
+            SELECT e.event_id
+              FROM opportunity_events e
+              LEFT JOIN opportunity_event_processing p
+                ON p.consumer_name = ?
+               AND p.event_id = e.event_id
+             WHERE p.event_id IS NULL
+               AND e.event_type = ?
+               AND e.available_at <= ?
+             LIMIT ?
+            """,
+            (self.consumer_name, event_type, parsed_decision_time.isoformat(), max(1, limit) * 4),
+        ).fetchall()
+        backfill_ids = [str(row[0] or "") for row in backfill_rows if str(row[0] or "")]
+        if backfill_ids:
+            now = _utc_now()
+            self.conn.executemany(
+                """
+                INSERT OR IGNORE INTO opportunity_event_processing (
+                    consumer_name, event_id, processing_status, attempt_count,
+                    processed_at, last_error, updated_at
+                ) VALUES (?, ?, 'pending', 0, NULL, NULL, ?)
+                """,
+                ((self.consumer_name, event_id, now) for event_id in backfill_ids),
+            )
+
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        rows = self.conn.execute(
+            f"""
+            SELECT {event_cols}
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND e.event_type = ?
+               AND (
+                    p.processing_status = 'pending'
+                 OR (
+                        p.processing_status = 'processing'
+                    AND p.claimed_at IS NOT NULL
+                    AND p.claimed_at <= ?
+                 )
+               )
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+               AND (e.expires_at IS NULL OR e.expires_at > ?)
+             ORDER BY e.available_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (
+                self.consumer_name,
+                event_type,
+                stale_processing_before,
+                parsed_decision_time.isoformat(),
+                parsed_decision_time.isoformat(),
+                parsed_decision_time.isoformat(),
+                limit,
+            ),
+        ).fetchall()
+        return [_event_from_row(row) for row in rows]
+
     def fetch_pending(
         self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True
     ) -> list[OpportunityEvent]:
