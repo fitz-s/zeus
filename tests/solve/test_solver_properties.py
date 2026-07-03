@@ -38,6 +38,9 @@ def _arrays(menu, wealth, bins):
     return S._build_arrays(menu, wealth, atom_ids)
 
 
+_BIG_CASH = 1e9  # isolate the wealth/q effect from the executable-budget bound in unit tests
+
+
 # --- (a) dominance ----------------------------------------------------------
 
 def _random_fixture(rng):
@@ -103,12 +106,12 @@ def test_c_optimal_stake_monotone_in_q():
     bins = ("y", "n")
     m = F.menu([F.buy_item("it", "y", 0.5, bins, max_units=100000)])
     w = F.flat_wealth_state(bins, 100.0)
-    w0, payoff, caps, _ = _arrays(m, w, bins)
+    w0, payoff, caps, costs, _ = _arrays(m, w, bins)
     prev = -1.0
     stakes = []
     for p in (0.52, 0.56, 0.60, 0.66, 0.72, 0.80):
         q = F.two_bin_q_draws(np.clip(p + np.array([-0.03, -0.015, 0.0, 0.015, 0.03]), 0.01, 0.99))
-        _, _, x_top1, _ = S._optimize_continuous(w0, payoff, caps, q, np.ones(q.shape[0]), 0.2)
+        _, _, x_top1, _, _ = S._optimize_continuous(w0, payoff, caps, costs, _BIG_CASH, q, np.ones(q.shape[0]), 0.2)
         stakes.append(float(x_top1.sum()))
         assert stakes[-1] >= prev - 1e-9, f"stake dropped as q rose: {stakes}"
         prev = stakes[-1]
@@ -124,8 +127,8 @@ def test_d_held_position_shrinks_marginal_appetite():
 
     def _stake(wealth_by_atom):
         w = F.wealth_state(wealth_by_atom, 100.0)
-        w0, payoff, caps, _ = _arrays(m, w, bins)
-        _, _, x_top1, _ = S._optimize_continuous(w0, payoff, caps, q, np.ones(q.shape[0]), ALPHA)
+        w0, payoff, caps, costs, _ = _arrays(m, w, bins)
+        _, _, x_top1, _, _ = S._optimize_continuous(w0, payoff, caps, costs, _BIG_CASH, q, np.ones(q.shape[0]), ALPHA)
         return float(x_top1.sum())
 
     stake_a = _stake({F.atom_id("y"): 100.0, F.atom_id("n"): 100.0})
@@ -176,7 +179,7 @@ def test_f_every_emitted_plan_positive_reeval_and_certified():
         assert plan.repair_certificate is not None
         assert plan.repair_certificate.repaired_objective > 0.0
         atom_ids = tuple(F.atom_id(b) for b in bins)
-        w0, payoff, caps, items = S._build_arrays(m, w, atom_ids)
+        w0, payoff, caps, costs, items = S._build_arrays(m, w, atom_ids)
         idx = {it.item_id: i for i, it in enumerate(items)}
         x = np.zeros(payoff.shape[0])
         for o in plan.orders:
@@ -210,12 +213,12 @@ def test_cvar_objective_concave_along_rays():
     q = rng.dirichlet([30, 30, 25], size=200)
     w = F.flat_wealth_state(bins, 200.0)
     m = F.menu([F.buy_item(f"it{j}", bins[j], 0.25, bins, max_units=3000) for j in range(3)])
-    w0, payoff, caps, _ = _arrays(m, w, bins)
+    w0, payoff, caps, costs, _ = _arrays(m, w, bins)
     weights = np.ones(q.shape[0])
     for _ in range(20):
         d = rng.random(3)
         # scale ray to stay inside the feasible box (keep every atom wealth > 0)
-        hi = min(S._feasible_hi(i, np.zeros(3), w0, payoff, caps) / max(d[i], 1e-9) for i in range(3))
+        hi = min(S._feasible_hi(i, np.zeros(3), w0, payoff, caps, costs, _BIG_CASH) / max(d[i], 1e-9) for i in range(3))
         ts = np.linspace(0, 0.98 * hi, 60)
         f = np.array([S._objective(t * d, w0, payoff, q, weights, ALPHA) for t in ts])
         viol = [i for i in range(1, len(f) - 1) if f[i] < 0.5 * (f[i - 1] + f[i + 1]) - 1e-7]
@@ -227,12 +230,13 @@ def test_solver_matches_bruteforce_global_optimum_1d():
     q = F.two_bin_q_draws([0.68] * 80)
     w = F.flat_wealth_state(bins, 100.0)
     m = F.menu([F.buy_item("it", "y", 0.5, bins, max_units=100000)])
-    w0, payoff, caps, _ = _arrays(m, w, bins)
+    w0, payoff, caps, costs, _ = _arrays(m, w, bins)
+    cash = float(w.cash_usd)
     weights = np.ones(q.shape[0])
-    hi = S._feasible_hi(0, np.zeros(1), w0, payoff, caps)
+    hi = S._feasible_hi(0, np.zeros(1), w0, payoff, caps, costs, cash)
     grid = np.linspace(0, hi, 4000)
     brute = max(S._objective(np.array([x]), w0, payoff, q, weights, ALPHA) for x in grid)
-    _, u_joint, _, _ = S._optimize_continuous(w0, payoff, caps, q, weights, ALPHA)
+    _, u_joint, _, _, _ = S._optimize_continuous(w0, payoff, caps, costs, cash, q, weights, ALPHA)
     assert u_joint >= brute - 1e-6  # coordinate ascent reached the global optimum
 
 
@@ -247,18 +251,22 @@ def test_solver_matches_bruteforce_global_optimum_3d_coupled():
     bins = ("b0", "b1", "b2")
     q = np.random.default_rng(4242).dirichlet([45, 45, 45], size=96)  # ~uniform -> all edges live
     w = F.flat_wealth_state(bins, 60.0)
+    cash = float(w.cash_usd)
     m = F.menu([F.buy_item(f"it{j}", bins[j], 0.20, bins, max_units=100000) for j in range(3)])
-    w0, payoff, caps, _ = _arrays(m, w, bins)
+    w0, payoff, caps, costs, _ = _arrays(m, w, bins)
     weights = np.ones(q.shape[0])
     alpha = 0.1
 
-    x_joint, u_joint, _, _ = S._optimize_continuous(w0, payoff, caps, q, weights, alpha)
+    x_joint, u_joint, _, _, _ = S._optimize_continuous(w0, payoff, caps, costs, cash, q, weights, alpha)
 
-    # coarse 3-D grid over each item's feasible range
-    axes = [np.linspace(0, S._feasible_hi(i, np.zeros(3), w0, payoff, caps), 26) for i in range(3)]
+    # coarse 3-D grid over each item's feasible range, RESPECTING the executable budget so the
+    # grid optimizes the SAME feasible set the ascent does (_objective alone ignores the budget).
+    axes = [np.linspace(0, S._feasible_hi(i, np.zeros(3), w0, payoff, caps, costs, cash), 26) for i in range(3)]
     grid_best = -np.inf
     grid_arg = None
     for combo in itertools.product(*axes):
+        if float(costs @ np.array(combo)) > cash + 1e-9:
+            continue  # budget-infeasible combo is not in the ascent's feasible set
         u = S._objective(np.array(combo), w0, payoff, q, weights, alpha)
         if u > grid_best:
             grid_best = u
@@ -293,6 +301,82 @@ def test_var_nonconcave_where_cvar_stays_concave():
 
     assert viol(var) >= 2, "expected the VaR/quantile objective to be non-concave"
     assert viol(cvar) == 0, "the CVaR objective must stay concave (the solver relies on it)"
+
+
+def test_chosen_source_stamps_correct_continuous_parent():
+    # Seed 4: the joint plan rounds worse than the best single item, so top1 is CHOSEN. The
+    # certificate's continuous_objective must come from the TOP1 parent (~0.0018), NOT the joint
+    # parent (~0.136) — the old always-x_joint bug would stamp the joint value (consult REV-2
+    # follow-up HIGH: chosen_source + continuous-from-chosen-parent).
+    rng = np.random.default_rng(4)
+    nb = int(rng.integers(2, 4))
+    bins = tuple(f"b{j}" for j in range(nb))
+    tq = rng.dirichlet(np.full(nb, 3.0))
+    q = rng.dirichlet(tq * float(rng.uniform(40, 120)), size=128)
+    items = []
+    for i in range(int(rng.integers(2, 5))):
+        j = int(rng.integers(0, nb))
+        cost = float(np.clip(tq[j] - rng.uniform(-0.05, 0.15), 0.02, 0.95))
+        mos = float(rng.choice([0.01, 5, 20, 40]))
+        items.append(F.buy_item(f"it{i}", bins[j], cost, bins, max_units=float(rng.uniform(30, 400)), min_order_size=mos))
+    w = F.flat_wealth_state(bins, float(rng.uniform(60, 300)))
+    plan = _solve(F.menu(items), q, w, bins=bins)
+    assert plan.orders
+    cert = plan.repair_certificate
+    assert cert.chosen_source == "top1"
+    # continuous_objective matches the CHOSEN (top1) parent, not the joint parent
+    assert abs(cert.continuous_objective - plan.diagnostics["continuous_delta_u_top1"]) < 1e-9
+    assert abs(cert.continuous_objective - plan.diagnostics["continuous_delta_u_joint"]) > 1e-3
+
+
+def _hedge_fixture():
+    # Two legs with positive MEAN edge but adverse tails that are NEGATIVELY correlated: each leg
+    # alone has non-positive CVaR (top1 no-trade), the pair diversifies the tail to positive CVaR.
+    bins = ("b0", "b1", "b2")
+    n = 200
+    c0 = np.tile([0.66, 0.29, 0.05], (n // 2, 1))
+    c1 = np.tile([0.29, 0.66, 0.05], (n // 2, 1))
+    q = np.vstack([c0, c1])
+    items = [F.buy_item("L0", "b0", 0.40, bins, max_units=3000), F.buy_item("L1", "b1", 0.40, bins, max_units=3000)]
+    return F.menu(items), q, F.flat_wealth_state(bins, 200.0), bins
+
+
+def test_hedge_found_but_unsafe_prefix_no_trade():
+    # The solver FINDS the diversification hedge (joint CVaR > 0, top1 == 0), but each leg alone is
+    # negative so the best single prefix is negative -> the plan is not safe-prefix-decomposable and
+    # must NOT be emitted (consult REV-2 follow-up HIGH: safe-prefix positivity).
+    m, q, w, bins = _hedge_fixture()
+    plan = _solve(m, q, w, bins=bins, alpha=0.1)
+    assert plan.orders == ()
+    assert plan.no_trade_reason == "UNSAFE_PREFIX_DECOMPOSITION"
+    assert plan.diagnostics["continuous_delta_u_joint"] > 0.0   # ascent DID find the hedge
+    assert plan.diagnostics["continuous_delta_u_top1"] == 0.0    # no single leg improves alone
+
+
+def test_diversification_globality_matches_2d_grid():
+    # The diversified multi-start must reach the global continuous optimum on the from-origin hedge
+    # (a 2-D brute-force grid must not beat it) — proving the globality gap is closed, not just
+    # conservatively avoided.
+    import itertools
+
+    m, q, w, bins = _hedge_fixture()
+    w0, payoff, caps, costs, _ = _arrays(m, w, bins)
+    weights = np.ones(q.shape[0])
+    alpha = 0.1
+    x_joint, u_joint, _, _, _ = S._optimize_continuous(w0, payoff, caps, costs, _BIG_CASH, q, weights, alpha)
+    axes = [np.linspace(0, S._feasible_hi(i, np.zeros(2), w0, payoff, caps, costs, _BIG_CASH), 60) for i in range(2)]
+    grid_best = max(S._objective(np.array(c), w0, payoff, q, weights, alpha) for c in itertools.product(*axes))
+    assert u_joint >= grid_best - 1e-6, f"STOP: 2-D grid {grid_best} beat ascent {u_joint} on the hedge"
+    assert (x_joint > 1e-6).sum() == 2  # both legs staked (diversification actually found)
+
+
+def test_orders_carry_no_price_in_phase1():
+    # Phase-1 ruling: the executable price is assigned by the existing submit path; solve() emits
+    # size/leg only (consult REV-2 follow-up MEDIUM).
+    bins = ("y", "n")
+    plan = _solve(F.menu([F.buy_item("it", "y", 0.45, bins, max_units=5000)]), F.two_bin_q_draws([0.72] * 64), F.flat_wealth_state(bins, 200.0))
+    assert plan.orders
+    assert all(o.price is None for o in plan.orders)
 
 
 def test_repair_certificate_fields_populated():

@@ -48,11 +48,27 @@ promotion flag. Nothing wires it in yet; the math core is inert until sub-slice 
   `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ is a
   typed `Kappa` Decimal value object. Ownership transfers atomically in the W5 commit that
   deletes `kelly_multiplier`.
+- **Executable-cash budget is a hard constraint, separate from `W_end > 0`.** `W_end > 0` does
+  NOT imply affordability (a holding inflating the worst atom, or mutually-exclusive claims, can
+  keep terminal wealth positive while the upfront outlay exceeds cash). `Σ cost_i·x_i ≤ cash_usd`
+  is enforced in `_feasible_hi`, in `_repair`, and proven by `RepairCertificate.budget_after_repair_usd ≥ 0`.
+- **Route sizes are capped at the priced depth.** `MenuItem.max_units = min(route.max_shares,
+  route.shares)` — `avg_cost` was walked at `route.shares`; never size past it (per-level cost
+  curves are phase-2).
+- **Phase-1 executable menu = DIRECT NATIVE routes only.** synthetic/pair/basket/conversion routes
+  are menu-visible but non-executable (`PHASE1_NON_DIRECT_ROUTE`); their single-instrument payoff
+  projection is wrong and multi-leg atomicity would be lost (phase-2 `PlannedRoute`/`PlannedLeg`).
+- **The optimizer is coordinate ascent + three coupling moves.** Budget-neutral pairwise exchange
+  (budget face), a diversified multi-start seed (from-origin hedge — CVaR directional derivatives
+  are superadditive), and a radial balanced-growth step (arbs / symmetric hedges). Globality is
+  guarded by 2-D/3-D brute-force fixtures (grid-beats-ascent = STOP). The RU convex program is the
+  recorded future hardening; the `max(joint, top1)` floor guarantees phase-1 safety regardless.
 - **Discrete repair must PROVE it did not harm — carry a `RepairCertificate`.** κ scales the
   continuous solution first; quantized/capped stakes (each on their OWN per-item tick/min
   grid) are RE-EVALUATED under the worst-price model; a non-empty plan is submit-worthy only
-  if its repaired ΔU is still `> 0`, proven by a `RepairCertificate` (enforced in
-  `SolutionPlan.__post_init__`), else no-trade.
+  if its repaired ΔU is still `> 0` AND every safe-prefix bound is `> 0` (`chosen_source` +
+  continuous-from-chosen-parent stamped), proven by a `RepairCertificate` (enforced in
+  `SolutionPlan.__post_init__`), else no-trade. Phase-1 leaves the executable price to the submit path.
 - **Phase-1 evidence grades the projection, not the plan.** The shim emits a
   `LegacyDecisionProjection` re-scoring the primary leg STANDALONE at its post-haircut size;
   if that ΔU ≤ 0 → no-trade in phase 1. Promotion evidence NEVER grades

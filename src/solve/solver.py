@@ -88,11 +88,30 @@ _MAX_SWEEPS = 12
 # Strict interior margin so log() never sees a non-positive wealth.
 _WEALTH_MARGIN = 1e-9
 
+# Budget-face detection: run the (expensive) pairwise-exchange sweeps only when net spend is
+# within this RELATIVE tolerance of spendable cash (so grid discretization of the last coordinate
+# does not hide a binding budget); with real budget slack the single-coordinate optimum is global.
+_BUDGET_BIND_REL = 1e-3
+
 # Venue discretization: sizes on a 0.01 grid; the W2.1 batch executor submits ≤15 per plan.
 _SIZE_QUANTUM = Decimal("0.01")
 _MAX_ORDERS = 15
 
 _WORST_PRICE_MODEL = "avg_cost_size_aware_depth_capped_v1"
+
+# CVaR tail stability (consult REV-2 follow-up): a robust ΔU at alpha needs enough draws in
+# the alpha-tail to be meaningful. Below this the plan is STAMPED (diagnostics) so the promotion
+# evidence gate can down-weight it; a one-draw band is stamped point_belief. Not a hard reject.
+_MIN_TAIL_DRAWS = 20
+
+
+class PayoffCoverageError(ValueError):
+    """A menu item's AtomPayoffProjector does not cover the full scenario atom axis.
+
+    Silently defaulting a missing atom's payoff to 0.0 turns an unmodelled LOSING state into
+    free money (consult REV-2 follow-up). An item must cover every atom, or set
+    ``AtomPayoffProjector.structural_zero=True`` to assert the zeros are intentional.
+    """
 
 # Every field _record_qkernel_selection_family_facts / the proof overlay / receipts read off
 # FamilyDecision (getattr-with-default consumers — silent-degrade class). The contract validator
@@ -163,7 +182,17 @@ def _lower_cvar(du: np.ndarray, weights: np.ndarray, alpha: float) -> float:
     coordinate ascent reaches the global optimum. This replaces the raw α-quantile (VaR), whose
     order statistic of concave functions is not concave. ``-inf`` draws (a ruined atom carries
     positive mass) propagate to ``-inf`` correctly.
+
+    Zero/negative weights are FILTERED before the sort (consult REV-2 follow-up): a zero-weight
+    row would be ``0 * -inf = NaN`` in the tail sum if it were a ruin draw; a weight of exactly
+    zero carries no belief mass and must not contribute.
     """
+    keep = weights > 0.0
+    if not keep.all():
+        du = du[keep]
+        weights = weights[keep]
+    if du.size == 0:
+        return float("-inf")
     order = np.argsort(du, kind="stable")
     d = du[order]
     w = weights[order]
@@ -192,11 +221,13 @@ def _executable_items(menu: SolveMenu) -> list:
 
 def _build_arrays(
     menu: SolveMenu, wealth: WealthStateByAtom, atom_ids: tuple[str, ...]
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
-    """Baseline wealth ``W0``, unit-payoff matrix ``P`` (n_items × n_atoms), depth caps.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list]:
+    """Baseline wealth ``W0``, unit-payoff matrix ``P`` (n_items × n_atoms), depth caps, costs.
 
-    Validates that every atom has a strictly positive endowment (else ``ZeroWealthOutcomeError``)
-    and that the wealth state covers the scenario atom axis.
+    Validates that every atom has a strictly positive endowment (else ``ZeroWealthOutcomeError``),
+    that the wealth state covers the scenario atom axis, and that every executable item's payoff
+    projector covers the full atom axis (else ``PayoffCoverageError`` — a missing atom silently
+    defaulting to 0.0 would turn an unmodelled losing state into free money).
     """
     missing = [a for a in atom_ids if a not in wealth.wealth_by_atom]
     if missing:
@@ -212,10 +243,17 @@ def _build_arrays(
     items = _executable_items(menu)
     payoff = np.zeros((len(items), len(atom_ids)), dtype=np.float64)
     caps = np.zeros(len(items), dtype=np.float64)
+    costs = np.zeros(len(items), dtype=np.float64)
     for i, it in enumerate(items):
+        if not it.unit_payoff.covers(atom_ids):
+            raise PayoffCoverageError(
+                f"menu item {it.item_id!r} payoff projector does not cover all atoms "
+                f"{atom_ids}; set AtomPayoffProjector.structural_zero=True to intend zeros"
+            )
         payoff[i] = it.unit_payoff.vector(atom_ids)
         caps[i] = float(it.max_units)
-    return w0, payoff, caps, items
+        costs[i] = float(it.unit_payoff.unit_cost_usd)
+    return w0, payoff, caps, costs, items
 
 
 def _objective(
@@ -242,8 +280,17 @@ def _objective(
     return _lower_cvar(du, weights, alpha)
 
 
-def _feasible_hi(i: int, x: np.ndarray, w0: np.ndarray, payoff: np.ndarray, caps: np.ndarray) -> float:
-    """Largest stake for coordinate ``i`` (others fixed) keeping every atom's wealth > 0."""
+def _feasible_hi(
+    i: int, x: np.ndarray, w0: np.ndarray, payoff: np.ndarray, caps: np.ndarray, costs: np.ndarray, cash: float
+) -> float:
+    """Largest stake for coordinate ``i`` (others fixed) under all three bounds: depth cap,
+    every-atom wealth > 0, and the executable-cash budget.
+
+    The budget bound is the consult REV-2 follow-up blocker: ``W_end > 0`` does NOT imply
+    affordability — buying several mutually exclusive claims can leave positive terminal wealth in
+    every atom while the UPFRONT outlay ``Σ cost_k·x_k`` exceeds spendable cash. So the coordinate
+    is also capped so that net spend stays within ``cash`` (sells free up budget: ``cost_i < 0``).
+    """
     base = w0 + x @ payoff - x[i] * payoff[i]
     p_i = payoff[i]
     losing = p_i < 0.0
@@ -251,7 +298,40 @@ def _feasible_hi(i: int, x: np.ndarray, w0: np.ndarray, payoff: np.ndarray, caps
     if losing.any():
         ruin = base[losing] / (-p_i[losing])
         hi = min(hi, float(ruin.min()) * (1.0 - _WEALTH_MARGIN))
+    if costs[i] > 0.0:
+        spend_others = float(costs @ x) - float(costs[i]) * float(x[i])
+        remaining = cash - spend_others
+        hi = min(hi, max(remaining, 0.0) / float(costs[i]))
     return max(hi, 0.0)
+
+
+def _coarse_fine_argmax(f, lo: float, hi: float) -> tuple[float, float]:
+    """Coarse-to-fine 1-D argmax of ``f`` over ``[lo, hi]`` (payoff_vector's grid resolution)."""
+    best_u = -np.inf
+    best_x = lo
+    span_lo, span_hi = lo, hi
+    steps = _COARSE_STEPS
+    for _pass in range(_REFINE_PASSES + 1):
+        width = span_hi - span_lo
+        if width <= 0.0:
+            break
+        step = width / steps
+        pass_best_u = -np.inf
+        pass_best_x = span_lo
+        val = span_lo
+        for _ in range(steps + 1):
+            u = f(val)
+            if u > pass_best_u:
+                pass_best_u = u
+                pass_best_x = val
+            val += step
+        if pass_best_u > best_u:
+            best_u = pass_best_u
+            best_x = pass_best_x
+        span_lo = max(lo, pass_best_x - step)
+        span_hi = min(hi, pass_best_x + step)
+        steps = _REFINE_STEPS
+    return best_x, float(best_u)
 
 
 def _grid_max_coordinate(
@@ -275,76 +355,173 @@ def _grid_max_coordinate(
         trial[i] = val
         return _objective(trial, w0, payoff, q_draws, weights, alpha)
 
-    best_u = -np.inf
-    best_x = 0.0
-    span_lo, span_hi = 0.0, hi
-    steps = _COARSE_STEPS
-    for _pass in range(_REFINE_PASSES + 1):
-        width = span_hi - span_lo
-        if width <= 0.0:
-            break
-        step = width / steps
-        pass_best_u = -np.inf
-        pass_best_x = span_lo
-        val = span_lo
-        for _ in range(steps + 1):
-            u = _u(val)
-            if u > pass_best_u:
-                pass_best_u = u
-                pass_best_x = val
-            val += step
-        if pass_best_u > best_u:
-            best_u = pass_best_u
-            best_x = pass_best_x
-        span_lo = max(0.0, pass_best_x - step)
-        span_hi = min(hi, pass_best_x + step)
-        steps = _REFINE_STEPS
-    return best_x, float(best_u)
+    return _coarse_fine_argmax(_u, 0.0, hi)
+
+
+def _pair_exchange(
+    i: int,
+    j: int,
+    x: np.ndarray,
+    w0: np.ndarray,
+    payoff: np.ndarray,
+    costs: np.ndarray,
+    q_draws: np.ndarray,
+    weights: np.ndarray,
+    alpha: float,
+) -> float:
+    """BUDGET-NEUTRAL pairwise exchange for coordinates ``i, j`` — the step pure coordinate
+    ascent cannot take (consult REV-2 follow-up: it stalls on the budget face).
+
+    When the executable-cash budget binds, the optimum lives on the constraint face and moving a
+    single coordinate is infeasible; only a simultaneous transfer stays in budget. Transferring
+    budget ``t`` from ``j`` to ``i`` (``x_i += t/c_i``, ``x_j -= t/c_j``) keeps net spend EXACTLY
+    fixed, so a 1-D search over ``t`` climbs the concave objective along the face. For a single
+    linear budget constraint, pairwise transfers span its feasible directions, so interleaving
+    these with single-coordinate sweeps reaches the global optimum. Returns the ΔU gained.
+    """
+    ci, cj = float(costs[i]), float(costs[j])
+    if ci <= 0.0 or cj <= 0.0:
+        return 0.0  # only positive-cost (buy) pairs are coupled through the budget
+    xi0, xj0 = float(x[i]), float(x[j])
+    lo = -xi0 * ci   # t at which new_x_i hits 0
+    hi = xj0 * cj    # t at which new_x_j hits 0
+    if hi - lo <= 0.0:
+        return 0.0
+    trial = x.copy()
+
+    def _u(t: float) -> float:
+        nxi = xi0 + t / ci
+        nxj = xj0 - t / cj
+        if nxi < 0.0 or nxj < 0.0:
+            return -np.inf
+        trial[i] = nxi
+        trial[j] = nxj
+        return _objective(trial, w0, payoff, q_draws, weights, alpha)
+
+    u0 = _objective(x, w0, payoff, q_draws, weights, alpha)
+    best_t, best_u = _coarse_fine_argmax(_u, lo, hi)
+    if best_u > u0 + _CONVERGENCE_TOL:
+        x[i] = xi0 + best_t / ci
+        x[j] = xj0 - best_t / cj
+        return best_u - u0
+    return 0.0
 
 
 def _optimize_continuous(
     w0: np.ndarray,
     payoff: np.ndarray,
     caps: np.ndarray,
+    costs: np.ndarray,
+    cash: float,
     q_draws: np.ndarray,
     weights: np.ndarray,
     alpha: float,
-) -> tuple[np.ndarray, float, np.ndarray, float]:
+) -> tuple[np.ndarray, float, np.ndarray, float, int]:
     """Joint continuous optimum + the best single-item (top-1 picker) optimum.
 
-    Returns ``(x_joint, U_joint, x_top1, U_top1)``; ``x_joint`` is the coordinate-ascent optimum
-    seeded at the best single item, so ``U_joint ≥ U_top1`` always (the dominance guarantee).
-    Because the CVaR objective is concave, the ascent reaches the global optimum.
+    Returns ``(x_joint, U_joint, x_top1, U_top1, sweeps)``; ``x_joint`` is the coordinate-ascent
+    optimum seeded at the best single item, so ``U_joint ≥ U_top1`` always (dominance guarantee).
+    Because the CVaR objective is concave, the ascent reaches the global optimum; every coordinate
+    respects the depth/wealth/budget feasibility bound. ``sweeps`` is stamped as an optimizer-gap
+    diagnostic (converged before ``_MAX_SWEEPS`` ⇒ a stationary point of the concave objective).
     """
     n_items = payoff.shape[0]
     zeros = np.zeros(n_items, dtype=np.float64)
     if n_items == 0:
-        return zeros, 0.0, zeros.copy(), 0.0
+        return zeros, 0.0, zeros.copy(), 0.0, 0
 
+    total_sweeps = [0]
+
+    def _radial(x: np.ndarray, u_cur: float) -> float:
+        """Scale the whole stake vector by ``t ≥ 0`` — the BALANCED-GROWTH direction that neither a
+        single-coordinate move nor a budget-neutral exchange can climb (both a full-set arb and a
+        symmetric diversification hedge grow all legs proportionally). Returns the gain."""
+        if float(x.sum()) <= 0.0:
+            return 0.0
+        t_max = np.inf
+        spend = float(costs @ x)
+        if spend > 0.0 and cash > 0.0:
+            t_max = min(t_max, cash / spend)
+        pos = x > 0.0
+        if pos.any():
+            t_max = min(t_max, float(np.min(caps[pos] / x[pos])))
+        if not np.isfinite(t_max) or t_max <= 0.0:
+            t_max = 1.0
+        base = x.copy()
+
+        def _u(t: float) -> float:
+            return _objective(t * base, w0, payoff, q_draws, weights, alpha)
+
+        best_t, best_u = _coarse_fine_argmax(_u, 0.0, t_max * (1.0 - _WEALTH_MARGIN))
+        if best_u > u_cur + _CONVERGENCE_TOL:
+            x[:] = best_t * base
+            return best_u - u_cur
+        return 0.0
+
+    def _ascend(seed: np.ndarray) -> tuple[np.ndarray, float]:
+        x = seed.copy()
+        u_cur = _objective(x, w0, payoff, q_draws, weights, alpha)
+        for _sweep in range(_MAX_SWEEPS):
+            total_sweeps[0] += 1
+            sweep_gain = 0.0
+            # single-coordinate sweep (handles the budget-slack interior)
+            for i in range(n_items):
+                hi = _feasible_hi(i, x, w0, payoff, caps, costs, cash)
+                xi, ui = _grid_max_coordinate(i, x, hi, w0, payoff, q_draws, weights, alpha)
+                if ui > u_cur + _CONVERGENCE_TOL:
+                    sweep_gain += ui - u_cur
+                    x[i] = xi
+                    u_cur = ui
+            # budget-neutral pairwise-exchange sweep (handles the budget FACE, where a single
+            # coordinate move is infeasible). ONLY when the budget is (near-)binding: with slack the
+            # concave box optimum is already global, so pairwise is a no-op — skipping it keeps the
+            # live reactor-cycle cost bounded (payoff_vector lesson).
+            if float(costs @ x) >= cash - (_BUDGET_BIND_REL * cash + 1e-9):
+                for i in range(n_items):
+                    for j in range(i + 1, n_items):
+                        sweep_gain += _pair_exchange(i, j, x, w0, payoff, costs, q_draws, weights, alpha)
+            # radial balanced-growth step (handles the direction both arbs and symmetric hedges need)
+            sweep_gain += _radial(x, _objective(x, w0, payoff, q_draws, weights, alpha))
+            u_cur = _objective(x, w0, payoff, q_draws, weights, alpha)
+            if sweep_gain < _CONVERGENCE_TOL:
+                break
+        return x, float(u_cur)
+
+    # Top-1 seed: the best single item alone.
     best_single_u = 0.0
     x_top1 = zeros.copy()
     for i in range(n_items):
-        hi = _feasible_hi(i, zeros, w0, payoff, caps)
+        hi = _feasible_hi(i, zeros, w0, payoff, caps, costs, cash)
         xi, ui = _grid_max_coordinate(i, zeros, hi, w0, payoff, q_draws, weights, alpha)
         if ui > best_single_u:
             best_single_u = ui
             x_top1 = zeros.copy()
             x_top1[i] = xi
 
-    x = x_top1.copy()
-    u_cur = _objective(x, w0, payoff, q_draws, weights, alpha)
-    for _sweep in range(_MAX_SWEEPS):
-        sweep_gain = 0.0
+    x_a, u_a = _ascend(x_top1)
+
+    # Diversified seed — ONLY when no single item improves alone (best_single_u <= 0, so x_top1 is
+    # the origin and its ascend is stuck there). That is exactly the from-origin hedge: a small
+    # stake on every POSITIVE-MEAN item at once lands inside the hedge's basin, because CVaR's
+    # directional derivative is superadditive (∂U/∂(e_i+e_j) can be > 0 while each ∂U/∂e_i ≤ 0).
+    # When a positive single base DOES exist, the top1-seeded sweeps already add diversifying legs,
+    # so the second ascend is skipped — keeping the live reactor-cycle cost bounded.
+    if best_single_u <= 0.0:
+        mean_q = (weights @ q_draws) / float(weights.sum())
+        x_div = zeros.copy()
         for i in range(n_items):
-            hi = _feasible_hi(i, x, w0, payoff, caps)
-            xi, ui = _grid_max_coordinate(i, x, hi, w0, payoff, q_draws, weights, alpha)
-            if ui > u_cur + _CONVERGENCE_TOL:
-                sweep_gain += ui - u_cur
-                x[i] = xi
-                u_cur = ui
-        if sweep_gain < _CONVERGENCE_TOL:
-            break
-    return x, float(u_cur), x_top1, float(best_single_u)
+            if float(mean_q @ payoff[i]) > 0.0:  # positive MEAN edge (tail may be adverse alone)
+                hi = _feasible_hi(i, zeros, w0, payoff, caps, costs, cash)
+                x_div[i] = 0.02 * hi
+        div_spend = float(costs @ x_div)
+        if div_spend > cash > 0.0:
+            x_div *= cash / div_spend  # keep the seed inside the executable budget
+        if float(x_div.sum()) > 0.0:
+            x_b, u_b = _ascend(x_div)
+            if u_b > u_a:
+                x_a, u_a = x_b, u_b
+
+    return x_a, float(u_a), x_top1, float(best_single_u), total_sweeps[0]
 
 
 def _quantize_size(units: float, item: MenuItem) -> Optional[Decimal]:
@@ -376,19 +553,31 @@ def _repair(
     items: list,
     w0: np.ndarray,
     payoff: np.ndarray,
+    costs: np.ndarray,
+    cash: float,
     q_draws: np.ndarray,
     weights: np.ndarray,
     alpha: float,
     kappa: float,
 ) -> dict:
-    """κ-scale, quantize on each item's own grid, cap at _MAX_ORDERS, re-evaluate worst-price.
+    """κ-scale, quantize on each item's own grid, cap at _MAX_ORDERS, ENFORCE the executable
+    budget, re-evaluate under the worst-price model.
 
     Returns a dict with the discrete stake vector, its re-evaluated CVaR ΔU, the surviving
     ``(item_index, size)`` list, and the RepairCertificate provenance (deltas / promoted /
-    dropped). The caller trades only if ``u_disc > 0``.
+    dropped). The caller trades only if ``u_disc > 0``. Rounding UP to ``min_order_size`` can push
+    net spend past the continuous budget, so after quantization the least-valuable positive-cost
+    orders are dropped until ``Σ cost_i·size_i ≤ cash`` (consult REV-2 follow-up blocker).
     """
     n_items = payoff.shape[0]
     scaled = kappa * x_cont
+
+    def _marginal(idx_size: tuple[int, Decimal]) -> float:
+        i, size = idx_size
+        xi = np.zeros(n_items, dtype=np.float64)
+        xi[i] = float(size)
+        return _objective(xi, w0, payoff, q_draws, weights, alpha)
+
     sized: list[tuple[int, Decimal]] = []
     tick_deltas: dict[str, str] = {}
     promoted: list[str] = []
@@ -406,16 +595,23 @@ def _repair(
         sized.append((i, size))
 
     if len(sized) > _MAX_ORDERS:
-        def _marginal(idx_size: tuple[int, Decimal]) -> float:
-            i, size = idx_size
-            xi = np.zeros(n_items, dtype=np.float64)
-            xi[i] = float(size)
-            return _objective(xi, w0, payoff, q_draws, weights, alpha)
-
         sized_sorted = sorted(sized, key=_marginal, reverse=True)
         for i, _s in sized_sorted[_MAX_ORDERS:]:
             dropped.append((items[i].item_id, "batch_cap_15"))
         sized = sized_sorted[:_MAX_ORDERS]
+
+    # Executable-budget enforcement: drop the least-valuable positive-cost orders until the net
+    # buy outlay fits within spendable cash.
+    def _spend(pairs: list[tuple[int, Decimal]]) -> float:
+        return float(sum(float(costs[i]) * float(sz) for i, sz in pairs))
+
+    while _spend(sized) > cash and sized:
+        droppable = [(i, sz) for i, sz in sized if costs[i] > 0.0]
+        if not droppable:
+            break  # only sells/zero-cost left; net spend cannot exceed cash further
+        worst = min(droppable, key=_marginal)
+        sized.remove(worst)
+        dropped.append((items[worst[0]].item_id, "budget_exceeded"))
 
     x_disc = np.zeros(n_items, dtype=np.float64)
     for i, size in sized:
@@ -425,6 +621,7 @@ def _repair(
         "x_disc": x_disc,
         "u_disc": u_disc,
         "sized": sized,
+        "spend": _spend(sized),
         "tick_deltas": tick_deltas,
         "promoted": tuple(promoted),
         "dropped": tuple(dropped),
@@ -441,14 +638,6 @@ def _order_side(kind: str) -> Optional[str]:
     if kind == "sell_holding":
         return "sell"
     return None
-
-
-def _quantize_price(price: Optional[Decimal], min_tick_size: Decimal) -> Optional[Decimal]:
-    if price is None:
-        return None
-    if min_tick_size <= 0:
-        return Decimal(price)
-    return (Decimal(price) / min_tick_size).to_integral_value(rounding=ROUND_HALF_EVEN) * min_tick_size
 
 
 def _hash(*parts: str) -> str:
@@ -487,9 +676,23 @@ def solve(
     alpha = scenario_set.alpha
     kappa = kappa_policy.kappa.as_float()
 
-    w0, payoff, caps, items = _build_arrays(menu, wealth, atom_ids)
+    w0, payoff, caps, costs, items = _build_arrays(menu, wealth, atom_ids)
     provider = scenario_set.provider
     sample_hash = scenario_set.scenario_hash
+    cash = float(wealth.cash_usd)
+
+    # Tail-stability + point-belief stamps (consult REV-2 follow-up): the promotion evidence
+    # gate down-weights a plan whose robust ΔU rests on too few tail draws. ESS handles weights.
+    eff_draws = float(weights.sum() ** 2 / float((weights ** 2).sum())) if weights.size else 0.0
+    tail_draws = alpha * eff_draws
+    base_diag = {
+        "n_draws": float(n_draws),
+        "alpha": float(alpha),
+        "effective_tail_draws": tail_draws,
+        "tail_floor_ok": 1.0 if tail_draws >= _MIN_TAIL_DRAWS else 0.0,
+        "point_belief": 1.0 if n_draws <= 1 else 0.0,
+        "spendable_cash_usd": cash,
+    }
 
     def _no_trade(reason: str, baseline: float, diagnostics: dict) -> SolutionPlan:
         return SolutionPlan(
@@ -510,31 +713,26 @@ def solve(
         )
 
     if not items:
-        return _no_trade("NO_EXECUTABLE_MENU_ITEMS", 0.0, {"n_items": 0.0})
+        return _no_trade("NO_EXECUTABLE_MENU_ITEMS", 0.0, {**base_diag, "n_menu_items": 0.0})
 
-    x_joint, u_joint, x_top1, u_top1 = _optimize_continuous(w0, payoff, caps, q_draws, weights, alpha)
+    x_joint, u_joint, x_top1, u_top1, sweeps = _optimize_continuous(
+        w0, payoff, caps, costs, cash, q_draws, weights, alpha
+    )
 
-    rep_joint = _repair(x_joint, items=items, w0=w0, payoff=payoff, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
-    rep_top1 = _repair(x_top1, items=items, w0=w0, payoff=payoff, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
+    rep_joint = _repair(x_joint, items=items, w0=w0, payoff=payoff, costs=costs, cash=cash, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
+    rep_top1 = _repair(x_top1, items=items, w0=w0, payoff=payoff, costs=costs, cash=cash, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
     baseline_top1 = rep_top1["u_disc"]
 
-    chosen = rep_joint if rep_joint["u_disc"] >= rep_top1["u_disc"] else rep_top1
-    chosen_u = chosen["u_disc"]
-    continuous_obj = _objective(kappa * x_joint, w0, payoff, q_draws, weights, alpha)
-
     diagnostics = {
+        **base_diag,
         "continuous_delta_u_joint": u_joint,
         "continuous_delta_u_top1": u_top1,
         "discrete_delta_u_joint": rep_joint["u_disc"],
         "discrete_delta_u_top1": rep_top1["u_disc"],
         "continuous_units_total": float(x_joint.sum()),
         "n_menu_items": float(len(items)),
-        "n_draws": float(n_draws),
-        "alpha": float(alpha),
+        "optimizer_sweeps": float(sweeps),
     }
-
-    if not chosen["sized"] or not chosen_u > 0.0:
-        return _no_trade("NO_IMPROVING_DISCRETE_PLAN", baseline_top1, diagnostics)
 
     # Safe-prefix ordering: most-improving order first, so every filled prefix improves (W2.1).
     def _marginal(idx_size: tuple[int, Decimal]) -> float:
@@ -543,26 +741,48 @@ def solve(
         xi[i] = float(size)
         return _objective(xi, w0, payoff, q_draws, weights, alpha)
 
-    ordered = sorted(chosen["sized"], key=_marginal, reverse=True)
+    parent_vec = {"joint": kappa * x_joint, "top1": kappa * x_top1}
+
+    def _assemble(rep: dict, source: str) -> Optional[dict]:
+        sized = rep["sized"]
+        if not sized or not rep["u_disc"] > 0.0:
+            return None
+        ordered = sorted(sized, key=_marginal, reverse=True)
+        running = np.zeros(payoff.shape[0], dtype=np.float64)
+        prefix_bounds: list[float] = []
+        for i, size in ordered:
+            running[i] = float(size)
+            prefix_bounds.append(_objective(running, w0, payoff, q_draws, weights, alpha))
+        return {
+            "source": source,
+            "rep": rep,
+            "ordered": ordered,
+            "prefix_bounds": prefix_bounds,
+            "safe": all(b > 0.0 for b in prefix_bounds),          # every prefix improves
+            "affordable": rep["spend"] <= cash + 1e-9,            # net outlay within cash
+            "u_disc": rep["u_disc"],
+        }
+
+    candidates = [c for c in (_assemble(rep_joint, "joint"), _assemble(rep_top1, "top1")) if c is not None]
+    valid = [c for c in candidates if c["safe"] and c["affordable"]]
+    if not valid:
+        if any(not c["safe"] for c in candidates):
+            return _no_trade("UNSAFE_PREFIX_DECOMPOSITION", baseline_top1, diagnostics)
+        if any(not c["affordable"] for c in candidates):
+            return _no_trade("BUDGET_EXCEEDED", baseline_top1, diagnostics)
+        return _no_trade("NO_IMPROVING_DISCRETE_PLAN", baseline_top1, diagnostics)
+    chosen = max(valid, key=lambda c: c["u_disc"])
+    diagnostics["chosen_source_joint"] = 1.0 if chosen["source"] == "joint" else 0.0
 
     orders: list[PlannedOrder] = []
-    prefix_bounds: list[float] = []
-    spent = 0.0
-    running = np.zeros(payoff.shape[0], dtype=np.float64)
-    for prefix_index, (i, size) in enumerate(ordered):
+    for prefix_index, (i, size) in enumerate(chosen["ordered"]):
         it = items[i]
-        running[i] = float(size)
-        prefix_bounds.append(_objective(running, w0, payoff, q_draws, weights, alpha))
-        spent += float(size) * float(it.unit_payoff.unit_cost_usd)
-        route = it.route
         token_id = None
-        price = None
+        route = it.route
         if route is not None:
             legs = getattr(route, "legs", ())
             if legs:
                 token_id = getattr(legs[0], "token_id", None)
-            avg_cost = getattr(route, "avg_cost", None)
-            price = _quantize_price(getattr(avg_cost, "value", avg_cost), it.min_tick_size)
         orders.append(
             PlannedOrder(
                 order_id=_hash(menu.menu_hash, it.item_id, str(size)),
@@ -570,7 +790,7 @@ def solve(
                 kind=it.kind,
                 side=_order_side(it.kind),
                 token_id=token_id,
-                price=price,
+                price=None,  # phase-1: the executable price is assigned by the existing submit path
                 size=size,
                 q_version=q_version,
                 safe_prefix_index=prefix_index,
@@ -583,23 +803,25 @@ def solve(
     batch_partition = tuple(
         tuple(order_ids[k : k + _MAX_ORDERS]) for k in range(0, len(order_ids), _MAX_ORDERS)
     )
+    continuous_obj = _objective(parent_vec[chosen["source"]], w0, payoff, q_draws, weights, alpha)
     certificate = RepairCertificate(
         continuous_objective=continuous_obj,
-        repaired_objective=chosen_u,
+        repaired_objective=chosen["u_disc"],
+        chosen_source=chosen["source"],  # type: ignore[arg-type]
         worst_price_model=_WORST_PRICE_MODEL,
-        tick_size_deltas=chosen["tick_deltas"],
-        min_size_promoted=chosen["promoted"],
-        dropped_items=chosen["dropped"],
+        tick_size_deltas=chosen["rep"]["tick_deltas"],
+        min_size_promoted=chosen["rep"]["promoted"],
+        dropped_items=chosen["rep"]["dropped"],
         batch_partition=batch_partition,
-        safe_prefix_objective_bounds=tuple(prefix_bounds),
-        budget_after_repair_usd=float(wealth.cash_usd) - spent,
+        safe_prefix_objective_bounds=tuple(chosen["prefix_bounds"]),
+        budget_after_repair_usd=cash - chosen["rep"]["spend"],
     )
 
     return SolutionPlan(
         plan_id=_hash(menu.family_key, menu.menu_hash, sample_hash, q_version, *order_ids),
         family_key=menu.family_key,
         orders=tuple(orders),
-        expected_delta_log_wealth=chosen_u,
+        expected_delta_log_wealth=chosen["u_disc"],
         delta_u_baseline_top1=baseline_top1,
         kappa_applied=kappa,
         correlation_rail="caps",

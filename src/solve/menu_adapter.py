@@ -64,9 +64,15 @@ def _ladder_tick_min(ladder) -> tuple[Decimal, Decimal]:
 
 
 def _route_menu_item(
-    route: "RouteCost", *, family_key: str, bin_ids: tuple[str, ...], omega, markets
+    route: "RouteCost", *, family_key: str, bin_ids: tuple[str, ...], omega, markets, phase1_executable: bool
 ) -> MenuItem:
-    """One RouteCost → one MenuItem (net after-cost unit payoff over the joint atoms)."""
+    """One RouteCost → one MenuItem (net after-cost unit payoff over the joint atoms).
+
+    ``phase1_executable=False`` (non-direct routes: synthetic/pair/basket/conversion) forces the
+    item non-executable — their single-instrument payoff projection is WRONG (a riskfree basket
+    is constant across atoms, not a YES claim) and their multi-leg execution loses leg atomicity
+    when collapsed to one order (consult REV-2 follow-up HIGH). They stay menu-visible for audit.
+    """
     instrument = route.instrument
     payoff_vec = instrument.payoff_vector(omega)
     cost = float(route.avg_cost.value)
@@ -76,17 +82,24 @@ def _route_menu_item(
     }
     kind = "buy_yes" if instrument.side == "YES" else "buy_no"
     market = markets.get(instrument.bin_id)
-    tick, min_order = _ladder_tick_min(getattr(market, "yes_asks", None))
+    # side-correct ladder: YES buys walk yes_asks, NO buys walk no_asks (consult REV-2 follow-up)
+    ladder_attr = "yes_asks" if instrument.side == "YES" else "no_asks"
+    tick, min_order = _ladder_tick_min(getattr(market, ladder_attr, None) or getattr(market, "yes_asks", None))
+    executable = bool(route.executable) and phase1_executable
+    reason = route.reason if route.reason is not None else (None if executable else "PHASE1_NON_DIRECT_ROUTE")
+    # Depth cap: avg_cost was walked at route.shares, so never size past the priced depth in
+    # phase 1 (consult REV-2 follow-up blocker) — a per-level cost curve is phase-2.
+    max_units = min(Decimal(route.max_shares), Decimal(route.shares))
     return MenuItem(
         item_id=route.route_id,
         kind=kind,  # type: ignore[arg-type]
         family_key=family_key,
         bin_id=instrument.bin_id,
         route=route,
-        executable=bool(route.executable),
-        non_executable_reason=route.reason,
+        executable=executable,
+        non_executable_reason=reason,
         unit_payoff=AtomPayoffProjector(payoff_by_atom_id=payoff_by_atom, unit_cost_usd=cost),
-        max_units=Decimal(route.max_shares),
+        max_units=max_units,
         min_tick_size=tick,
         min_order_size=min_order,
     )
@@ -175,11 +188,18 @@ def build_solve_menu(
     markets = family_book.markets
 
     items: list[MenuItem] = []
-    for bucket in (route_set.direct_yes, route_set.direct_no, route_set.synthetic_not_i):
+    # Phase-1 executable = DIRECT NATIVE routes only (single-leg direct_yes / direct_no).
+    # synthetic/pair/basket/conversion routes are menu-visible but non-executable in phase 1.
+    for bucket in (route_set.direct_yes, route_set.direct_no):
         for route in bucket.values():
-            items.append(_route_menu_item(route, family_key=family_key, bin_ids=bin_ids, omega=omega, markets=markets))
-    for route in (*route_set.pair_arbs, *route_set.full_basket_arbs, *route_set.conversion_routes):
-        items.append(_route_menu_item(route, family_key=family_key, bin_ids=bin_ids, omega=omega, markets=markets))
+            items.append(_route_menu_item(route, family_key=family_key, bin_ids=bin_ids, omega=omega, markets=markets, phase1_executable=True))
+    for route in (
+        *route_set.synthetic_not_i.values(),
+        *route_set.pair_arbs,
+        *route_set.full_basket_arbs,
+        *route_set.conversion_routes,
+    ):
+        items.append(_route_menu_item(route, family_key=family_key, bin_ids=bin_ids, omega=omega, markets=markets, phase1_executable=False))
 
     for bin_id, shares in holdings_by_bin_id.items():
         if Decimal(shares) > 0 and bin_id in bin_ids:

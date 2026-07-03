@@ -137,9 +137,9 @@ def _order():
 
 def _cert(repaired):
     return RepairCertificate(
-        continuous_objective=0.1, repaired_objective=repaired, worst_price_model="m",
-        tick_size_deltas={}, min_size_promoted=(), dropped_items=(), batch_partition=(("o1",),),
-        safe_prefix_objective_bounds=(repaired,), budget_after_repair_usd=100.0,
+        continuous_objective=0.1, repaired_objective=repaired, chosen_source="joint",
+        worst_price_model="m", tick_size_deltas={}, min_size_promoted=(), dropped_items=(),
+        batch_partition=(("o1",),), safe_prefix_objective_bounds=(repaired,), budget_after_repair_usd=100.0,
     )
 
 
@@ -160,6 +160,42 @@ def test_nonempty_plan_requires_positive_certificate():
         _plan(repair_certificate=None)
     with pytest.raises(ValueError, match="RepairCertificate"):
         _plan(repair_certificate=_cert(-0.01))
+
+
+def test_planned_order_validation():
+    _order()  # ok
+    with pytest.raises(ValueError, match="q_version"):
+        PlannedOrder(order_id="o1", menu_item_id="it", kind="buy_yes", side="buy", token_id=None,
+                     price=None, size=Decimal("10"), q_version="", safe_prefix_index=0, snapshot_id=None)
+    with pytest.raises(ValueError, match="size"):
+        PlannedOrder(order_id="o1", menu_item_id="it", kind="buy_yes", side="buy", token_id=None,
+                     price=None, size=Decimal("0"), q_version="qv", safe_prefix_index=0, snapshot_id=None)
+    with pytest.raises(ValueError, match="safe_prefix_index"):
+        PlannedOrder(order_id="o1", menu_item_id="it", kind="buy_yes", side="buy", token_id=None,
+                     price=None, size=Decimal("10"), q_version="qv", safe_prefix_index=-1, snapshot_id=None)
+    with pytest.raises(ValueError, match="order_id"):
+        PlannedOrder(order_id="", menu_item_id="it", kind="buy_yes", side="buy", token_id=None,
+                     price=None, size=Decimal("10"), q_version="qv", safe_prefix_index=0, snapshot_id=None)
+
+
+def test_nonempty_plan_rejects_negative_budget_and_unsafe_prefix():
+    # executable-budget proof: negative budget after repair is refused
+    bad_budget = _cert(0.1)
+    bad_budget = RepairCertificate(
+        continuous_objective=0.1, repaired_objective=0.1, chosen_source="joint", worst_price_model="m",
+        tick_size_deltas={}, min_size_promoted=(), dropped_items=(), batch_partition=(("o1",),),
+        safe_prefix_objective_bounds=(0.1,), budget_after_repair_usd=-5.0,
+    )
+    with pytest.raises(ValueError, match="budget_after_repair_usd"):
+        _plan(repair_certificate=bad_budget)
+    # safe-prefix positivity: a prefix that leaves worsening exposure is refused
+    unsafe = RepairCertificate(
+        continuous_objective=0.1, repaired_objective=0.1, chosen_source="joint", worst_price_model="m",
+        tick_size_deltas={}, min_size_promoted=(), dropped_items=(), batch_partition=(("o1",),),
+        safe_prefix_objective_bounds=(-0.02, 0.1), budget_after_repair_usd=100.0,
+    )
+    with pytest.raises(ValueError, match="safe-prefix"):
+        _plan(repair_certificate=unsafe)
 
 
 def test_notrade_plan_requires_reason_and_no_orders():

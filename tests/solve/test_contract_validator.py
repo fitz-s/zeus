@@ -87,6 +87,67 @@ def test_candidate_decisions_must_be_tuple():
         validate_family_decision_contract(_good_decision(candidate_decisions=None))
 
 
+def _decision_fields_read_by(func_node, var: str = "decision") -> set:
+    """Every ``getattr(<var>, "X")`` and ``<var>.X`` field read inside a function AST node."""
+    import ast
+
+    fields: set = set()
+    for node in ast.walk(func_node):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == var
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            fields.add(node.args[1].value)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == var:
+            fields.add(node.attr)
+    return fields
+
+
+def _func_node(path: str, name: str):
+    import ast
+
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def test_ast_sentinel_real_facts_writer_fields_are_covered():
+    # Tie the sentinel to the REAL consumer (consult REV-2 follow-up MEDIUM): statically extract
+    # every FamilyDecision field the live facts writer reads and assert the validator's required
+    # list is a SUPERSET. A new getattr(decision, "…") consumer that the validator doesn't cover
+    # breaks this test — it cannot silently degrade attribution.
+    node = _func_node("src/engine/event_reactor_adapter.py", "_record_qkernel_selection_family_facts")
+    assert node is not None, "facts writer function not found — the seam moved; re-point the sentinel"
+    read = _decision_fields_read_by(node, "decision")
+    assert read, "expected the facts writer to read FamilyDecision fields"
+    uncovered = read - set(_REQUIRED_FAMILY_DECISION_FIELDS)
+    assert not uncovered, (
+        f"facts writer reads FamilyDecision fields not in the validator's required list: {uncovered} "
+        "— add them to _REQUIRED_FAMILY_DECISION_FIELDS or the validator will not guard them"
+    )
+
+
+def test_ast_sentinel_detects_a_new_uncovered_consumer():
+    # Prove the mechanism bites: a synthetic consumer that reads an un-required field is flagged.
+    import ast
+
+    src = "def consumer(decision):\n    return getattr(decision, 'brand_new_unguarded_field', None)\n"
+    node = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef))
+    read = _decision_fields_read_by(node, "decision")
+    assert read == {"brand_new_unguarded_field"}
+    assert read - set(_REQUIRED_FAMILY_DECISION_FIELDS), "sentinel must flag an un-required field"
+
+
 def test_selected_xor_no_trade_reason_enforced():
     # both None -> invalid
     with pytest.raises(FamilyDecisionContractError, match="exactly one"):

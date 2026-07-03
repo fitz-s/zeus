@@ -37,12 +37,12 @@ class FakeInstrument:
         return e
 
 
-def _route(route_id, bin_id, side, cost, max_shares, *, executable=True, reason=None):
+def _route(route_id, bin_id, side, cost, max_shares, *, shares=100, executable=True, reason=None):
     return SimpleNamespace(
         route_id=route_id,
         route_type="DIRECT_YES" if side == "YES" else "DIRECT_NO",
         instrument=FakeInstrument(bin_id, side),
-        shares=Decimal("100"),
+        shares=Decimal(str(shares)),
         avg_cost=SimpleNamespace(value=float(cost)),
         max_shares=Decimal(str(max_shares)),
         legs=(SimpleNamespace(bin_id=bin_id, token_id=f"tok_{side}_{bin_id}"),),
@@ -59,11 +59,12 @@ def _ladder(levels, tick="0.01", min_order="0.01"):
     )
 
 
-def _market(bin_id, bids=(), tick="0.01", min_order="0.01"):
+def _market(bin_id, bids=(), tick="0.01", min_order="0.01", no_ask_min_order=None):
     return SimpleNamespace(
         bin_id=bin_id,
         yes_asks=_ladder([], tick, min_order),
         yes_bids=_ladder(bids, tick, min_order),
+        no_asks=_ladder([], tick, no_ask_min_order or min_order),
         no_bids=_ladder([]),
     )
 
@@ -97,7 +98,8 @@ def test_direct_yes_route_becomes_atom_projector():
     assert item.executable is True
     assert item.unit_payoff.payoff_by_atom_id == {AY: 0.6, AN: -0.4}
     assert item.unit_payoff.unit_cost_usd == 0.4
-    assert item.max_units == Decimal("500")
+    # depth cap = min(max_shares=500, priced shares=100) — never size past the priced depth
+    assert item.max_units == Decimal("100")
     assert item.min_tick_size == Decimal("0.01")
 
 
@@ -168,6 +170,44 @@ def test_maker_lane_disabled_even_when_requested():
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
     menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={}, include_maker_lane=True)
     assert all(it.kind != "maker_quote" for it in menu.items)
+
+
+def test_depth_cap_at_priced_shares():
+    # avg_cost was walked at route.shares=10; max_shares=110 exposes deeper (unpriced) depth.
+    # The menu item must cap at min(max_shares, shares)=10 so the solver never sizes past the
+    # priced depth (consult REV-2 follow-up blocker).
+    fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
+    rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 110, shares=10)})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    item = next(it for it in menu.items if it.item_id == "r_y")
+    assert item.max_units == Decimal("10")
+
+
+def test_non_direct_routes_non_executable_in_phase1():
+    # synthetic / pair-arb / full-basket routes are menu-visible but NOT executable in phase 1
+    # (their single-instrument payoff projection is wrong and multi-leg atomicity would be lost).
+    fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
+    rs = _route_set(
+        direct_yes={"y": _route("direct", "y", "YES", 0.4, 500)},
+        synthetic_not_i={"y": _route("synth", "y", "NO", 0.4, 500)},
+        pair_arbs=(_route("pair", "y", "YES", 0.3, 500),),
+        full_basket_arbs=(_route("basket", "y", "YES", 0.2, 500),),
+    )
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    by_id = {it.item_id: it for it in menu.items}
+    assert by_id["direct"].executable is True
+    for nid in ("synth", "pair", "basket"):
+        assert by_id[nid].executable is False
+        assert by_id[nid].non_executable_reason == "PHASE1_NON_DIRECT_ROUTE"
+
+
+def test_direct_no_route_quantizes_on_no_ladder():
+    # a direct NO buy must inherit tick/min-size from the NO ask ladder, not yes_asks.
+    fb = _family_book(("y", "n"), {"y": _market("y", no_ask_min_order="7"), "n": _market("n")})
+    rs = _route_set(direct_no={"y": _route("r_no", "y", "NO", 0.3, 200)})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    item = next(it for it in menu.items if it.item_id == "r_no")
+    assert item.min_order_size == Decimal("7")  # from no_asks, not yes_asks (min_order 0.01)
 
 
 def test_menu_hash_deterministic_and_sensitive():

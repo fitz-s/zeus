@@ -132,8 +132,11 @@ class JointOutcomeScenarioSet:
             w = self.draw_weights
             if w.shape != (q.shape[0],):
                 raise ScenarioValidationError(f"draw_weights shape {w.shape} != ({q.shape[0]},)")
-            if (w < 0.0).any() or not np.isfinite(w).all() or float(w.sum()) <= 0.0:
-                raise ScenarioValidationError("draw_weights must be finite, nonnegative, sum>0")
+            # STRICTLY positive (consult REV-2 follow-up): a zero-weight row is both useless and
+            # a 0*-inf=NaN hazard in the CVaR reduction when that row is a ruin draw — drop the
+            # draw upstream, never weight it zero.
+            if (w <= 0.0).any() or not np.isfinite(w).all():
+                raise ScenarioValidationError("draw_weights must be finite and strictly positive")
         if not (0.0 < self.alpha < 1.0):
             raise ScenarioValidationError(f"DEGENERATE_ALPHA: alpha={self.alpha!r}")
 
@@ -263,11 +266,20 @@ class AtomPayoffProjector:
     ``payoff_by_atom_id`` is the NET (after-cost) Arrow-Debreu payoff of ONE unit in each
     atom — a buy pays ``1 - avg_cost`` in its winning atoms and ``-avg_cost`` elsewhere.
     ``unit_cost_usd`` is the cash outlay per unit (``>= 0`` for a buy, ``< 0`` sell proceeds),
-    carried explicitly for the repair budget accounting.
+    carried explicitly for the executable-budget accounting.
+
+    ``structural_zero`` must be set True to opt into defaulting a MISSING atom's payoff to 0.0
+    (consult REV-2 follow-up): silently zeroing a missing atom turns an unmodelled LOSING state
+    into free money under C4 / an incomplete adapter, so ``_build_arrays`` refuses a projector
+    that does not cover the full atom axis unless this flag asserts the zeros are intentional.
     """
 
     payoff_by_atom_id: Mapping[str, float]
     unit_cost_usd: float
+    structural_zero: bool = False
+
+    def covers(self, atom_ids: Sequence[str]) -> bool:
+        return self.structural_zero or all(a in self.payoff_by_atom_id for a in atom_ids)
 
     def vector(self, atom_ids: Sequence[str]) -> np.ndarray:
         return np.array([float(self.payoff_by_atom_id.get(a, 0.0)) for a in atom_ids], dtype=np.float64)
@@ -338,6 +350,16 @@ class PlannedOrder:
     ledger_snapshot_id: Optional[str] = None
     invalidation_snapshot_id: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if not self.q_version:
+            raise ValueError("PlannedOrder.q_version must be non-empty (W1.2 stamp law)")
+        if not self.order_id:
+            raise ValueError("PlannedOrder.order_id must be non-empty")
+        if not (Decimal(self.size) > 0):
+            raise ValueError(f"PlannedOrder.size must be positive, got {self.size}")
+        if self.safe_prefix_index < 0:
+            raise ValueError(f"PlannedOrder.safe_prefix_index must be >= 0, got {self.safe_prefix_index}")
+
 
 @dataclass(frozen=True)
 class RepairCertificate:
@@ -346,15 +368,16 @@ class RepairCertificate:
     ``repaired_objective > 0``; the re-evaluation under ``worst_price_model`` IS the proof.
     """
 
-    continuous_objective: float
+    continuous_objective: float          # ΔU of the CHOSEN parent (joint/top1) before repair
     repaired_objective: float            # robust ΔU of the ROUNDED plan under worst prices
+    chosen_source: Literal["joint", "top1"]  # which continuous parent the repaired plan came from
     worst_price_model: str
     tick_size_deltas: Mapping[str, str]  # item_id -> "continuous_units->rounded_units"
     min_size_promoted: tuple[str, ...]   # item_ids promoted UP to their min_order_size
     dropped_items: tuple[tuple[str, str], ...]  # (item_id, reason) rounded/capped out
     batch_partition: tuple[tuple[str, ...], ...]  # ≤15-per-chunk order_id partition
-    safe_prefix_objective_bounds: tuple[float, ...]  # robust ΔU of each growing safe prefix
-    budget_after_repair_usd: float
+    safe_prefix_objective_bounds: tuple[float, ...]  # robust ΔU of each growing safe prefix (all > 0)
+    budget_after_repair_usd: float       # spendable cash - net buy outlay (must be >= 0)
 
 
 @dataclass(frozen=True)
@@ -391,6 +414,18 @@ class SolutionPlan:
                 raise ValueError(
                     "non-empty SolutionPlan requires a RepairCertificate with repaired_objective > 0 "
                     "(consult REV-2 blocker: repair must PROVE the rounded plan still improves)"
+                )
+            # executable-budget proof (consult REV-2 follow-up blocker): the plan must be
+            # affordable from spendable cash, and every safe prefix must itself improve.
+            if cert.budget_after_repair_usd < 0.0:
+                raise ValueError(
+                    f"non-empty SolutionPlan requires budget_after_repair_usd >= 0, got "
+                    f"{cert.budget_after_repair_usd} (upfront outlay exceeds spendable cash)"
+                )
+            if any(b <= 0.0 for b in cert.safe_prefix_objective_bounds):
+                raise ValueError(
+                    "every safe-prefix objective bound must be > 0 (a prefix that leaves worsening "
+                    "exposure is not a safe partition — consult REV-2 follow-up HIGH)"
                 )
         elif self.no_trade_reason is None:
             raise ValueError("a no-trade plan must carry a no_trade_reason")
