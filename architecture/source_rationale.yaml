@@ -2450,8 +2450,22 @@ files:
   src/state/order_state_predicates.py:
     zone: K2_runtime
     authority_role: derived_order_state_predicates
-    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions computing C3 q-staleness (is_stale_pending_cancel), submit-flight delay (is_delayed), and max-rest-age (rest_deadline_exceeded) from existing truth (venue_commands.q_version, CommandState dwell, rest age) instead of storing a recomputable classification. Closes the NULL-q rest-forever leak (critic ruling 2) — rest_deadline_exceeded applies to ALL open rests regardless of q_version. Nothing consumes these yet; W4 wires them to the cancel path and REST_ELIGIBLE surface, and may delete maker_rest_escalation only in the packet that lands that wiring.
-    downstream: []  # not yet wired; W4 consumes (cancel path + REST_ELIGIBLE surface)
+    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions computing C3 q-staleness (is_stale_pending_cancel), submit-flight delay (is_delayed), and max-rest-age (rest_deadline_exceeded) from existing truth (venue_commands.q_version, CommandState dwell, rest age) instead of storing a recomputable classification. Closes the NULL-q rest-forever leak (critic ruling 2) — rest_deadline_exceeded applies to ALL open rests regardless of q_version. First wired to the cancel path by W4.2 (src/execution/staleness_cancel.py), which licensed the same-packet deletion of maker_rest_escalation.py.
+    downstream:
+    - src/execution/staleness_cancel.py
+  src/execution/staleness_cancel.py:
+    zone: K2_runtime
+    authority_role: c3_staleness_cancel_path
+    why: W4.2 (docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md §"C3 mark orders stale"). Consumes SOURCE_RUN_ARRIVED to classify every open ENTRY rest via order_state_predicates (is_stale_pending_cancel + rest_deadline_exceeded), builds the cancel-set, and cancels it through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate budget at CANCEL priority). NO-WRITE staleness (Option B) — nothing here stores a classification. TTL/GTC-deadline successor to the deleted maker_rest_escalation.py; rest_deadline_exceeded is now the sole GTC TTL owner, behavior-continuous via bootstrap_rest_deadline_minutes().
+    downstream:
+    - src/main.py  # _c3_staleness_cancel_cycle scheduler job
+  src/execution/venue_cancel_journal.py:
+    zone: K2_runtime
+    authority_role: persisted_cancel_command_journal
+    why: W4.2 relocation (byte-identical body) of run_persisted_cancels_for_expired_rests out of the deleted maker_rest_escalation.py. Generic durable-journal cancel executor (CANCEL_REQUESTED -> venue cancel -> CANCEL_ACKED/CANCEL_REPLACE_BLOCKED), NOT staleness/TTL-specific — kept alive because three other callers depended on it before the deletion (boot-time invalid-entry-authority cancel, the §4.5 redecision-screen rest-pull cancel, and C3 staleness's own carried-over invalid-authority lane), none of which are in the W4.2 staleness scope themselves.
+    downstream:
+    - src/main.py
+    - src/execution/command_recovery.py
   src/state/canonical_write.py:
     zone: K0_frozen_kernel
     authority_role: canonical_write_guard

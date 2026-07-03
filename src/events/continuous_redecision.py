@@ -2337,8 +2337,10 @@ def screen_resting_orders(
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
     book has walked away from our limit by at least REST_BOOK_DRIFT_TICKS. Order age alone is not
     trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
-    owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the scheduler
-    job enqueues the redecision and performs cancellation through the existing cancel path.
+    owner is src.state.order_state_predicates.rest_deadline_exceeded, wired by
+    src.execution.staleness_cancel (W4.2; retired src.execution.maker_rest_escalation was the prior
+    owner). Pure read; returns decisions only — the scheduler job enqueues the redecision and
+    performs cancellation through the existing cancel path.
 
     Entry cheap-screen and submit-layer duplicate-suppression receipts are not
     cancellation authority. They can select families for a full reactor pass or

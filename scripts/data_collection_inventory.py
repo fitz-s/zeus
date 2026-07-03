@@ -93,7 +93,7 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "edli_event_reactor",         # EDLI event reactor (trading engine, not data collection)
     "edli_bankroll_warm",         # bankroll cache warm (trading prep, not collection)
     "edli_command_recovery",      # venue command recovery (execution layer)
-    "maker_rest_escalation",      # REST maker order escalation (execution layer)
+    "c3_staleness_cancel",         # C3 staleness/TTL cancel path, W4.2 (execution layer)
     "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
     "edli_continuous_redecision_screen",  # continuous redecision screen over held families
                                           # (trading control loop, reads already-collected data)

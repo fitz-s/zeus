@@ -489,8 +489,10 @@ test_trust_policy:
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: extended ghost-sell recovery test + added synthetic external-close test asserting q_version NULL BY RULE at both reconcile backfill INSERT sites, against a non-null entry q_version."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case)."}
+    tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}
+    tests/execution/test_staleness_cancel.py: {created: "2026-07-03", last_used: "2026-07-03", note: "W4.2 C3 staleness cancel path: classify_cancel_set (no-orphaned-GTC handover proof, INDETERMINATE no-cancel, Q_VERSION_STALE), find_open_entry_rests, resolve_order_families, read_current_family_q_versions, and run_c3_staleness_cancel_cycle end-to-end incl. rate-budget-denial defer (never drop) and affected-cities scoping."}
+    tests/execution/test_venue_cancel_journal.py: {created: "2026-07-03", last_used: "2026-07-03", note: "W4.2: relocated persisted-cancel command-journal executor (run_persisted_cancels_for_expired_rests) out of the deleted maker_rest_escalation.py — retains its terminal-state, lock-retry, and cancel-unknown journaling coverage for the module's other callers (boot authority cancel, redecision-screen rest-pull, C3 staleness invalid-authority lane)."}
     tests/test_self_trade_guard.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W2.2-SELF-TRADE: full truth table for check_self_trade (CLEAR/WOULD_SELF_CROSS/INDETERMINATE, both sides, exact-price-touch, multi-order, cross-token isolation, malformed-row skip) plus load_own_open_resting_orders DB loader tests (latest-row-per-command, cancelled exclusion, PARTIALLY_MATCHED inclusion, candidate exclusion, missing-table -> None)."}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-05-24"}
     tests/test_settlement_day_observation_authority.py: {created: "2026-05-23", last_used: "2026-05-23"}
@@ -924,6 +926,8 @@ categories:
     - tests/test_order_truth_reducer.py
     - tests/test_order_state_predicates.py
     - tests/test_ddl_copies_normalized_identical.py
+    - tests/execution/test_staleness_cancel.py
+    - tests/execution/test_venue_cancel_journal.py
     - tests/test_self_trade_guard.py
     - tests/test_settlement_commands.py
     - tests/test_settlement_semantics.py

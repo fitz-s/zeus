@@ -2695,7 +2695,7 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     full order-fact history.
     """
 
-    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+    from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     try:
         command_cols = {
@@ -5168,7 +5168,7 @@ def _edli_boot_invalid_pending_entry_authority_cancel_once() -> None:
         return
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
-    from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
     from src.state.db import (
         get_forecasts_connection_read_only,
         get_trade_connection,
@@ -5551,112 +5551,167 @@ def _emit_rest_pull_redecisions(
     )
 
 
-@_scheduler_job("maker_rest_escalation")
-def _maker_rest_escalation_cycle() -> None:
-    """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
+_C3_STALENESS_CANCEL_CONSUMER = "c3_staleness_cancel_v1"
+_c3_staleness_rate_budget = None
 
-    Cancels post_only GTC ENTRY rests older than the measured escalation
-    deadline (maker_rest_escalation_deadline, 20min derived from the measured
-    KM hazard curve on n=108 resting facts). GTC rests have NO other TTL owner. The job is
-    deliberately dumb: cancel only. The next reactor cycle re-certifies the
-    family through the FULL standard pipeline; _family_rest_state then sees the
-    cancelled-unfilled >= deadline rest in venue truth and licenses the
-    policy's TAKER_ESCALATED_AFTER_REST cross. Edge decayed -> no candidate ->
-    the standard regret receipt records the decay (free rest-cost measurement).
 
-    Read-only on the DB; venue cancels only; fail-soft per order.
+def _get_c3_staleness_rate_budget():
+    """Lazily-constructed, cycle-persistent VenueRateBudget (W2.3) singleton.
+
+    The token bucket must accumulate across ticks to mean anything, so this is
+    memoized at module scope rather than rebuilt per cycle (a fresh bucket every
+    5 minutes would always start full and the cancel-priority reserve floor would
+    never matter). First real production wiring of this module (W4.2) — see its
+    own docstring for why a single shared bucket, not per-class ones.
+    """
+    global _c3_staleness_rate_budget
+    if _c3_staleness_rate_budget is None:
+        from src.venue.rate_budget import VenueRateBudget
+
+        _c3_staleness_rate_budget = VenueRateBudget()
+    return _c3_staleness_rate_budget
+
+
+@_scheduler_job("c3_staleness_cancel")
+def _c3_staleness_cancel_cycle() -> None:
+    """W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring).
+
+    TTL/q-staleness successor to the retired ``maker_rest_escalation``: consumes
+    ``SOURCE_RUN_ARRIVED`` events (a q_version-advance signal) through their own
+    dedicated claim lane (``_C3_STALENESS_CANCEL_CONSUMER``, isolated from the main
+    reactor's ``edli_reactor_v1`` queue — this event type is a staleness signal
+    against resting orders, not a forecast-ready decision trigger). For each
+    event's affected cities: classify every open ENTRY rest via the W1.2 DERIVED
+    predicates (``is_stale_pending_cancel`` + ``rest_deadline_exceeded`` —
+    src.state.order_state_predicates), cancel the resulting set through the W2.1
+    batch cancel gateway (cutover_guard-gated; W2.3 rate budget consulted at CANCEL
+    priority), then emit a reconciled ``EDLI_REDECISION_PENDING`` for every family
+    whose cancel is DURABLY confirmed. ``rest_deadline_exceeded`` is now the sole
+    GTC TTL owner (no-orphaned-GTC handover: it fires regardless of q_version, the
+    same unconditional per-order age deadline the retired job used to own).
     """
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     if get_mode() != "live":
         return
-    if _defer_for_held_position_monitor("maker_rest_escalation"):
+    if _defer_for_held_position_monitor("c3_staleness_cancel"):
         return
-    from src.data.polymarket_client import PolymarketClient
+    from src.events.event_store import EventStore
+    from src.state.db import get_world_connection
+
+    now = datetime.now(timezone.utc)
+
+    # Recurring invalid-entry-authority cancel (carried over unchanged from the
+    # retired maker_rest_escalation cycle, which piggy-backed this same lane at
+    # its 5-min cadence). Unconditional — independent of whether any
+    # SOURCE_RUN_ARRIVED events are pending this tick, so this lane's cadence is
+    # unaffected by C3 staleness volume. Not itself part of the W4.2 staleness/TTL
+    # scope; only relocated so it keeps a recurring caller after the deletion.
+    from src.data.polymarket_client import PolymarketClient as _PolymarketClient
     from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
-    from src.execution.maker_rest_escalation import (
-        find_expired_resting_entries,
-        run_persisted_cancels_for_expired_rests,
-    )
-    from src.state.db import get_trade_connection, get_trade_connection_read_only
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    from src.state.db import get_trade_connection as _get_trade_rw, get_trade_connection_read_only as _get_trade_ro
 
-    # Clean shape (dependency_db_locked antibody, 2026-06-11): SNAPSHOT the
-    # expired-rest candidates on a short read-only connection and CLOSE it before
-    # any venue cancel. The read-only connection never takes a WAL write lock, so
-    # holding it across cancels could not have caused the incident — but
-    # close-before-network is the structural shape this lane should still follow,
-    # so a future edit cannot silently turn this into a write-conn-across-network
-    # regression. The cancel loop holds no connection.
-    conn = get_trade_connection_read_only()
+    authority_ro = _get_trade_ro()
     try:
-        expired = find_expired_resting_entries(conn, now=datetime.now(timezone.utc))
-        invalid_authority_pending = find_invalid_pending_entry_authority_cancels(conn)
+        invalid_authority_pending = find_invalid_pending_entry_authority_cancels(authority_ro)
     finally:
-        conn.close()
-
-    clob = PolymarketClient()
-    # ESCALATION RE-DECISION (redecide-block fix 2026-06-16): harvest the families
-    # whose rest was CONFIRMED-cancelled so we can emit a Tier-0 re-decision for
-    # each — the just-cancelled, ARMED family crosses as TAKER_ESCALATED_AFTER_REST
-    # on the NEXT cycle instead of waiting ~2-3h for the 49-deep per-city
-    # round-robin. The cancel path now journals CANCEL_REQUESTED/CANCEL_ACKED around
-    # the venue side effect so a successfully pulled rest cannot remain a local ACK ghost.
-    cancelled_entries: list[dict] = []
-    stats = run_persisted_cancels_for_expired_rests(
-        [*expired, *invalid_authority_pending],
-        clob,
-        conn_factory=lambda: get_trade_connection(write_class="live"),
-        collect_cancelled=cancelled_entries,
-    )
-    if stats["scanned"]:
-        logger.info(
-            "maker_rest_escalation: %s expired_rests=%d invalid_authority_pending=%d",
-            stats,
-            len(expired),
-            len(invalid_authority_pending),
+        authority_ro.close()
+    if invalid_authority_pending:
+        authority_stats = run_persisted_cancels_for_expired_rests(
+            invalid_authority_pending,
+            _PolymarketClient(),
+            conn_factory=lambda: _get_trade_rw(write_class="live"),
         )
+        logger.info(
+            "c3_staleness_cancel: invalid_authority_pending=%d %s",
+            len(invalid_authority_pending),
+            authority_stats,
+        )
+
+    world = get_world_connection()
+    try:
+        store = EventStore(world, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+        events = store.fetch_pending_by_event_type(
+            event_type="SOURCE_RUN_ARRIVED", decision_time=now.isoformat(), limit=25
+        )
+        claimed_ids: list[str] = []
+        affected_cities: set[str] = set()
+        for event in events:
+            if not store.claim(event.event_id):
+                continue
+            claimed_ids.append(event.event_id)
+            try:
+                payload = json.loads(event.payload_json or "{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            affected_cities.update(str(c) for c in payload.get("affected_cities") or [])
+        world.commit()
+    finally:
+        world.close()
+    if not claimed_ids:
+        return
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection, get_trade_connection_read_only
+
+    trade_ro = get_trade_connection_read_only()
+    trade_rw = get_trade_connection(write_class="live")
+    forecasts_ro = get_forecasts_connection_read_only()
+    try:
+        stats = run_c3_staleness_cancel_cycle(
+            trade_ro,
+            trade_rw,
+            forecasts_ro,
+            PolymarketClient(),
+            affected_cities=frozenset(affected_cities) if affected_cities else None,
+            now=now,
+            rate_budget=_get_c3_staleness_rate_budget(),
+        )
+    finally:
+        for c in (trade_ro, trade_rw, forecasts_ro):
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    world2 = get_world_connection()
+    try:
+        store2 = EventStore(world2, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+        for event_id in claimed_ids:
+            store2.mark_processed(event_id)
+        world2.commit()
+    finally:
+        world2.close()
+
+    logger.info(
+        "c3_staleness_cancel: events=%d scanned=%d cancel_set=%d confirmed_families=%d",
+        len(claimed_ids),
+        stats["scanned"],
+        stats["cancel_set_size"],
+        len(stats["confirmed_families"]),
+    )
 
     # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
     # job (the cancels already succeeded; the worst case without the re-decision is
-    # the pre-fix behavior — the family waits for the round-robin). Connection-free
-    # in the cancel phase is preserved: the family-recovery reads and the world-DB
-    # event-write both run HERE in the caller (which owns DB access), AFTER the
-    # venue cancels, never during them.
-    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+    # the family waits for the round-robin).
+    if stats["confirmed_families"] and edli_cfg.get("event_writer_enabled"):
         try:
-            from src.state.db import (
-                get_forecasts_connection_read_only,
-                get_trade_connection_read_only as _get_trade_ro,
-            )
-
-            now = datetime.now(timezone.utc)
-            trade_ro = _get_trade_ro()
-            forecasts_ro = get_forecasts_connection_read_only()
-            try:
-                families = _escalation_families_from_cancelled(
-                    cancelled_entries, trade_ro, forecasts_ro
-                )
-            finally:
-                try:
-                    trade_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    forecasts_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            emitted = _emit_rest_pull_redecisions(
-                families, decision_time=now, received_at=now.isoformat()
+            emitted = _emit_live_redecision_events_for_families(
+                stats["confirmed_families"],
+                decision_time=now,
+                received_at=now.isoformat(),
+                origin="c3_staleness_cancel",
             )
             logger.info(
-                "maker_rest_escalation: rest-pull re-decision emit "
-                "cancelled=%d families_resolved=%d events_emitted=%d",
-                len(cancelled_entries), len(families), emitted,
+                "c3_staleness_cancel: re-decision emit families=%d events_emitted=%d",
+                len(stats["confirmed_families"]), emitted,
             )
         except Exception as _redecide_exc:  # noqa: BLE001 — fail-closed: never crash the cancel job
             logger.warning(
-                "maker_rest_escalation: rest-pull re-decision emit failed "
+                "c3_staleness_cancel: re-decision emit failed "
                 "(non-fatal; family will wait for the round-robin): %r",
                 _redecide_exc,
             )
@@ -5674,7 +5729,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     the rest still gets the book/stale checks (which need no posterior)."""
     from datetime import datetime, timezone
     from src.events.continuous_redecision import OpenRest, _all_latest_beliefs
-    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+    from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     now = datetime.now(timezone.utc)
     try:
@@ -5855,7 +5910,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     flagged). ALSO screens OPEN maker rests (§4.5): a rest whose belief decayed on new evidence, or
     whose book moved/went stale, is pulled (re-decide at fresh price) — the fix for "submitted then
     abandoned" (Busan/Beijing). NO new HTTP: reads only what the warm/fast lanes already persisted;
-    the actual cancel reuses maker_rest_escalation's cancel path. Fail-soft: never crashes
+    the actual cancel reuses the shared venue-cancel-journal path. Fail-soft: never crashes
     the scheduler.
 
     Wave-1 2026-06-12: the redecision_screen_enabled gate is DELETED. The screen is the
@@ -5984,7 +6039,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
         # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
         # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
-        # runs through the maker_rest_escalation cancel path below.
+        # runs through the shared venue-cancel-journal path below.
         rest_pull_families: set = set()
         if rest_pulls:
             by_family = {
@@ -6393,12 +6448,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-        # 3) CANCEL the pulled rests via the EXISTING maker_rest_escalation cancel path (no new
+        # 3) CANCEL the pulled rests via the EXISTING shared venue-cancel-journal path (no new
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
         cancelled = 0
         if rest_pulls and get_mode() == "live":
             from src.data.polymarket_client import PolymarketClient
-            from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+            from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
             from src.state.db import get_trade_connection
 
             to_cancel = [
@@ -11108,15 +11163,20 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # K4.0 REST-THEN-CROSS deadline owner: cancels GTC maker entry rests older
-        # than the measured escalation deadline (20min). 5-min cadence is well inside
-        # the deadline's 60-min derivation slack (taker_immediate_event_end_floor
-        # relation in the time-semantics registry). Cancel-only; never submits.
+        # W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring): the TTL/
+        # q-staleness successor to the retired maker_rest_escalation. Cancels GTC
+        # maker entry rests whose q_version has gone stale (SOURCE_RUN_ARRIVED) OR
+        # that have aged past the deadline (rest_deadline_exceeded — the same
+        # unconditional per-order backstop maker_rest_escalation used to own,
+        # 20min). 5-min cadence is well inside the deadline's 60-min derivation
+        # slack (taker_immediate_event_end_floor relation in the time-semantics
+        # registry). Also carries the recurring invalid-entry-authority cancel
+        # lane forward unchanged.
         scheduler.add_job(
-            _maker_rest_escalation_cycle,
+            _c3_staleness_cancel_cycle,
             "interval",
             minutes=5,
-            id="maker_rest_escalation",
+            id="c3_staleness_cancel",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
             max_instances=1,
             coalesce=True,

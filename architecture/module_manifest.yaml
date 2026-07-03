@@ -400,6 +400,8 @@ modules:
       - src/execution/self_trade_guard.py
       - src/execution/ctf_conversion_commands.py
       - src/execution/batch_order_submission.py
+      - src/execution/staleness_cancel.py
+      - src/execution/venue_cancel_journal.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -420,6 +422,8 @@ modules:
       - tests/test_risk_allocator.py
       - tests/execution/test_ctf_conversion_commands.py
       - tests/execution/test_batch_order_submission.py
+      - tests/execution/test_staleness_cancel.py
+      - tests/execution/test_venue_cancel_journal.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   venue:

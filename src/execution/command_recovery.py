@@ -5072,7 +5072,7 @@ def reconcile_invalid_pending_entry_authority_cancels(
     }
     if not entries:
         return summary
-    from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
 
     cancelled_entries: list[dict[str, Any]] = []
     factory = conn_factory or (lambda: conn)
