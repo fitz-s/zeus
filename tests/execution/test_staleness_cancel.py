@@ -828,3 +828,103 @@ class TestMainC3StalenessCancelCycleGlue:
             assert conn_state(check_conn, "c1") == "CANCELLED"
         finally:
             check_conn.close()
+
+    def test_event_store_failure_still_runs_ttl_pass(self, monkeypatch, tmp_path):
+        """HIGH (consult round 2): the retired maker_rest_escalation TTL owner
+        never depended on the event lane at all -- a fault in the
+        SOURCE_RUN_ARRIVED claim lane (EventStore raising) must degrade to
+        "no source event this tick," never take down the unconditional TTL
+        pass. Without the fail-soft wrap, an EventStore exception propagates
+        out of _c3_staleness_cancel_cycle (caught only by @_scheduler_job,
+        which marks the WHOLE tick failed and skips the TTL scan too) -- an
+        availability regression versus the deleted job."""
+        import src.data.polymarket_client as polymarket_client_module
+        import src.events.event_store as event_store_module
+        import src.execution.command_recovery as command_recovery_module
+        import src.main as main_module
+        import src.state.db as state_db
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
+
+        trade_db_path = tmp_path / "trade.db"
+        forecasts_db_path = tmp_path / "forecasts.db"
+
+        seed_trade = sqlite3.connect(str(trade_db_path))
+        seed_trade.row_factory = sqlite3.Row
+        init_schema(seed_trade)
+        _seed_open_entry(
+            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None,
+            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        seed_trade.commit()
+        seed_trade.close()
+
+        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
+        seed_forecasts.row_factory = sqlite3.Row
+        apply_canonical_schema(seed_forecasts)
+        seed_forecasts.commit()
+        seed_forecasts.close()
+
+        def _open_trade():
+            conn = sqlite3.connect(str(trade_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        def _open_forecasts():
+            conn = sqlite3.connect(str(forecasts_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        class _RaisingEventStore:
+            def __init__(self, conn, *, consumer_name):
+                pass
+
+            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
+                raise sqlite3.OperationalError("simulated world DB fault")
+
+            def claim(self, event_id):
+                raise AssertionError("must not be reached: fetch already raised")
+
+            def mark_processed(self, event_id):
+                raise AssertionError("must not be reached: nothing was claimed")
+
+        class _FakeWorldConn:
+            def commit(self):
+                raise AssertionError("must not be reached: fetch raised before commit")
+
+            def close(self):
+                pass
+
+        cancel_calls: list[list[str]] = []
+
+        class _FakeGatewayClient:
+            def cancel_orders_batch(self, order_ids):
+                cancel_calls.append(list(order_ids))
+                return [{"canceled": True, "orderID": oid} for oid in order_ids]
+
+        monkeypatch.setattr(
+            main_module, "_settings_section",
+            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+        monkeypatch.setattr(
+            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
+        )
+        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
+        monkeypatch.setattr(event_store_module, "EventStore", _RaisingEventStore)
+        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
+        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
+        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
+
+        # Must not raise: the fault is caught and degraded, the TTL pass runs regardless.
+        main_module._c3_staleness_cancel_cycle()
+
+        assert cancel_calls == [["v1"]]
+        check_conn = _open_trade()
+        try:
+            assert conn_state(check_conn, "c1") == "CANCELLED"
+        finally:
+            check_conn.close()
