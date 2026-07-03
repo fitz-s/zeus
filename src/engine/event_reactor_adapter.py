@@ -2997,8 +2997,25 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     post-facto release recovery.
     """
 
+    def _pause_reason_from_state(state: Mapping[str, object]) -> str | None:
+        if state.get("status") != "ok":
+            return None
+        if bool(state.get("entries_paused", False)):
+            return str(state.get("entries_pause_reason") or "entries_paused")
+        return None
+
+    def _trusted_inline_control_pause_state(state: Mapping[str, object]) -> bool:
+        issued_by = str(state.get("entries_pause_issued_by") or "")
+        return issued_by in {"control_plane", "manual_command", "system_auto_pause"} or issued_by.startswith("auto:")
+
     try:
         from src.state.db import get_world_connection, query_control_override_state
+
+        if conn is not None:
+            inline_state = query_control_override_state(conn)
+            inline_reason = _pause_reason_from_state(inline_state)
+            if inline_reason is not None and _trusted_inline_control_pause_state(inline_state):
+                return inline_reason
 
         world_conn = get_world_connection()
         try:
@@ -3009,9 +3026,7 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
         return f"entries_pause_control_unreadable:{type(exc).__name__}"
     if state.get("status") != "ok":
         return f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
-    if bool(state.get("entries_paused", False)):
-        return str(state.get("entries_pause_reason") or "entries_paused")
-    return None
+    return _pause_reason_from_state(state)
 
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
