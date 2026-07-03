@@ -1219,6 +1219,26 @@ files:
     - tests/test_v2_adapter.py
     - tests/test_fake_polymarket_venue.py
     - tests/integration/test_p0_live_money_safety.py
+  src/venue/rate_budget.py:
+    zone: K2_runtime
+    authority_role: venue_call_rate_budget
+    why: >
+      W2.3 order-engine rebuild packet (architecture/order_engine_implementation_architecture_2026-07-02.md
+      §1 "rate-limit budget + cancel-priority", BUILD — only reactive 429 handling existed).
+      Shared, injectable-clock, thread-safe token-bucket budget for venue order-endpoint
+      calls with two priority classes (SUBMIT, CANCEL); CANCEL may drain past a reserved
+      floor SUBMIT may not, so cancels are never starved by submit traffic under pressure.
+      Also carries the 429/Retry-After response-and-exception adapter that PolymarketClient
+      does not have today. Defaults sourced from Polymarket's published CLOB rate limits
+      (docs.polymarket.com/api-reference/rate-limits, fetched 2026-07-02); operating point
+      is a documented conservative guess (10% of the venue's sustained per-second ceiling)
+      flagged for tightening once real submit/cancel volume exists.
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W2.1's batch wrapper and
+      W3/W4 consumers wire this module in a later packet.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - tests/venue/test_rate_budget.py
   src/ingest/AGENTS.md:
     zone: docs
     authority_role: registry
