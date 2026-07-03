@@ -29,6 +29,18 @@
    VenueOrderStatus gaps recorded below (out of scope); INV-28 cite = invariants.yaml:561;
    OPEN_ORDER_FACT_STATES = canonical_projections.py:40-44.
 
+## ERRATUM (2026-07-02, post-verification — premise correction)
+
+The "negative fingerprint check" acceptance criterion (pin must NOT move) rested on a FALSE
+premise: `venue_commands` has a WORLD-schema DDL copy inside `init_schema()` (db.py:~2594 region),
+which IS hashed by `scripts/check_schema_fingerprint.py`. Adding `q_version` to both DDL copies in
+lockstep (the correct implementation) therefore legitimately moves the pin. The delivered work
+(b845bd6c) repinned via `--write-pin`; verifier confirmed the pin move is exactly the q_version
+column and nothing else. The negative check is REPLACED by: "pin moves exactly once, attributable
+to the q_version column addition, verified by fingerprint-check exit 0 after repin." Same class of
+premise correction as W1.1's fourth-DDL-copy finding — the copy-proliferation disease strikes the
+packet authors too.
+
 ## ORCHESTRATOR DECISIONS — RESOLVED 2026-07-02
 
 1. **OPTION B DECIDED (derived predicate; architecture doc row AMENDED same day).** First
