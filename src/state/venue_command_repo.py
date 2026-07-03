@@ -1178,10 +1178,24 @@ def append_event(
         )
         from src.execution.command_bus import TERMINAL_STATES as _TERMINAL_COMMAND_STATES
         if state_after in {state.value for state in _TERMINAL_COMMAND_STATES}:
-            from src.state.collateral_ledger import release_reservation_for_command_state
+            from src.state.collateral_ledger import (
+                _CONVERT_STATES as _COLLATERAL_CONVERT_STATES,
+                convert_reservation_on_fill,
+                release_reservation_for_command_state,
+            )
             from src.execution.exit_safety import release_exit_mutex_for_command_state
 
-            release_reservation_for_command_state(conn, command_id, state_after)
+            # SCH-W1.1-CAS-LEDGER terminalization-centrality invariant: this is
+            # the SOLE seam where a reservation-bearing command reaches a
+            # terminal state and converts/releases collateral. Fill-class
+            # terminals (may carry a nonzero matched_size, per _CONVERT_STATES)
+            # convert the filled portion and release the remainder in one
+            # idempotent write; the remaining zero-fill terminals use the
+            # existing unconditional release.
+            if str(state_after).upper() in _COLLATERAL_CONVERT_STATES:
+                convert_reservation_on_fill(conn, command_id, state_after)
+            else:
+                release_reservation_for_command_state(conn, command_id, state_after)
             release_exit_mutex_for_command_state(conn, command_id, state_after)
         elif state_after == "REVIEW_REQUIRED":
             # REVIEW_REQUIRED remains a durable proof/recovery blocker for new

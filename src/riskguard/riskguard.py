@@ -86,6 +86,22 @@ _BANKROLL_TRUTH_SOURCES_OF_RECORD = frozenset({
 })
 
 
+def _collateral_identity_level(zeus_conn: sqlite3.Connection) -> RiskLevel:
+    """SCH-W1.1-CAS-LEDGER 7th risk component.
+
+    RED iff any unresolved collateral_identity_mismatch finding exists,
+    GREEN otherwise. Routes through the existing RED sweep (INV-05 — risk
+    must gate, not advise); no new kill-switch.
+    """
+    try:
+        from src.execution.exchange_reconcile import list_unresolved_findings
+
+        findings = list_unresolved_findings(zeus_conn, kind="collateral_identity_mismatch")
+    except sqlite3.OperationalError:
+        return RiskLevel.GREEN
+    return RiskLevel.RED if findings else RiskLevel.GREEN
+
+
 def _finite_float_or_none(value):
     if value is None:
         return None
@@ -803,6 +819,7 @@ RISK_COMPONENT_ORDER: tuple[str, ...] = (
     "strategy_signal",
     "daily_loss",
     "weekly_loss",
+    "collateral_identity",
 )
 
 
@@ -1950,6 +1967,7 @@ def _tick_once() -> RiskLevel:
         weekly_loss = weekly_loss_snapshot["loss"]
         daily_loss_level = daily_loss_snapshot["level"]
         weekly_loss_level = weekly_loss_snapshot["level"]
+        collateral_identity_level = _collateral_identity_level(zeus_conn)
 
         level = overall_level(
             brier_level,
@@ -1958,6 +1976,7 @@ def _tick_once() -> RiskLevel:
             strategy_signal_level,
             daily_loss_level,
             weekly_loss_level,
+            collateral_identity_level,
         )
 
         # B5: force_exit_review when daily loss reaches RED
@@ -2131,6 +2150,13 @@ def _tick_once() -> RiskLevel:
                             f"window_pnl={_wref.get('realized_pnl_window', 0.0)})"
                         ),
                     })
+                if collateral_identity_level == RiskLevel.RED:
+                    failed_rules.append({
+                        "name": "collateral_identity",
+                        "value": 1,
+                        "threshold": 0,
+                        "detail": "unresolved collateral_identity_mismatch finding(s)",
+                    })
                 alert_halt(failed_rules or [{
                     "name": "riskguard",
                     "value": 1,
@@ -2177,6 +2203,7 @@ def _tick_once() -> RiskLevel:
             "strategy_signal": strategy_signal_level,
             "daily_loss": daily_loss_level,
             "weekly_loss": weekly_loss_level,
+            "collateral_identity": collateral_identity_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -2206,6 +2233,7 @@ def _tick_once() -> RiskLevel:
                 f"threshold={round(current_bankroll_usd * float(thresholds['max_weekly_loss_pct']), 2)} "
                 f"status={weekly_loss_snapshot['status']}"
             ),
+            "collateral_identity": "unresolved_collateral_identity_mismatch_finding",
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)
         log_fn = logger.warning if level != RiskLevel.GREEN else logger.info
@@ -2370,6 +2398,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
 
         daily_loss_level = daily_loss_snapshot["level"]
         weekly_loss_level = weekly_loss_snapshot["level"]
+        collateral_identity_level = _collateral_identity_level(zeus_conn)
 
         level = overall_level(
             RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
@@ -2378,6 +2407,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             daily_loss_level,
             weekly_loss_level,
+            collateral_identity_level,
         )
 
         return level
