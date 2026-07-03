@@ -327,7 +327,13 @@ def run_c3_staleness_cancel_cycle(
     Returns ``confirmed_families``: families whose cancel-set command(s) are
     RE-READ (not assumed from the in-memory batch outcome) as CANCELLED via
     ``get_command`` before being included — the "poll the facts you journaled"
-    proof the reconciled re-solve gates on.
+    proof the reconciled re-solve gates on. FAMILY-LEVEL, conservative: a
+    family is confirmed only if EVERY one of its commands in this cycle's
+    outcomes durably cancelled — a family with even one non-acked/non-CANCELLED
+    outcome (REVIEW_REQUIRED, a rate-budget defer, an unmapped response, ...)
+    is entirely excluded, never partially confirmed, because that family still
+    carries a recovery-owned ambiguous venue exposure a redecision must not
+    submit against.
     """
     from src.execution.batch_order_submission import cancel_commands_batch
     from src.state.venue_command_repo import get_command
@@ -390,19 +396,34 @@ def run_c3_staleness_cancel_cycle(
     )
     result["outcomes"] = outcomes
 
+    # Family-level gating (conservative suppression): a family is confirmed
+    # ONLY if EVERY one of its commands in this cycle's outcomes durably
+    # cancelled. A family with even one non-acked/non-CANCELLED outcome
+    # (REVIEW_REQUIRED from an SDK exception, a rate-budget defer, an
+    # unmapped/unknown response, ...) is a family with a recovery-owned,
+    # ambiguous venue exposure still open -- emitting a redecision for it
+    # anyway risks a duplicate/overlapping submit against that ambiguity.
+    # blocked_families always wins over confirmed_families, regardless of
+    # dict/set iteration order over outcomes.
     confirmed_families: set[FamilyKey] = set()
+    blocked_families: set[FamilyKey] = set()
     for outcome in outcomes:
+        family = families_by_command.get(outcome.command_id)
         if outcome.status != "acked":
+            if family:
+                blocked_families.add(family)
             continue
         # Poll the journaled fact rather than trust the in-memory outcome: re-read
         # the command fresh so a redecision is gated on DURABLE cancel-confirmed
         # truth, not on what this call thinks it just wrote.
         command = get_command(trade_conn_rw, outcome.command_id)
         if command is None or str(command.get("state") or "").upper() != "CANCELLED":
+            if family:
+                blocked_families.add(family)
             continue
-        family = families_by_command.get(outcome.command_id)
         if family:
             confirmed_families.add(family)
+    confirmed_families -= blocked_families
     result["confirmed_families"] = confirmed_families
     logger.info(
         "c3_staleness_cancel: scanned=%d cancel_set=%d acked=%d confirmed_families=%d",

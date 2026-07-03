@@ -5637,26 +5637,40 @@ def _c3_staleness_cancel_cycle() -> None:
             authority_stats,
         )
 
-    world = get_world_connection()
+    claimed_ids: list[str] = []
+    affected_cities: set[str] = set()
     try:
-        store = EventStore(world, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
-        events = store.fetch_pending_by_event_type(
-            event_type="SOURCE_RUN_ARRIVED", decision_time=now.isoformat(), limit=25
+        world = get_world_connection()
+        try:
+            store = EventStore(world, consumer_name=_C3_STALENESS_CANCEL_CONSUMER)
+            events = store.fetch_pending_by_event_type(
+                event_type="SOURCE_RUN_ARRIVED", decision_time=now.isoformat(), limit=25
+            )
+            for event in events:
+                if not store.claim(event.event_id):
+                    continue
+                claimed_ids.append(event.event_id)
+                try:
+                    payload = json.loads(event.payload_json or "{}")
+                except Exception:  # noqa: BLE001
+                    payload = {}
+                affected_cities.update(str(c) for c in payload.get("affected_cities") or [])
+            world.commit()
+        finally:
+            world.close()
+    except Exception as _event_lane_exc:  # noqa: BLE001 — FAIL-SOFT: the retired
+        # maker_rest_escalation TTL owner never depended on the event lane at
+        # all; a fault here (connection, schema, EventStore) must degrade to
+        # "no source event claimed this tick," never take down the TTL pass
+        # below (that would be an availability regression versus the deleted
+        # job this one replaces).
+        logger.warning(
+            "c3_staleness_cancel: SOURCE_RUN_ARRIVED claim lane failed "
+            "(degrading to TTL-only this tick): %r",
+            _event_lane_exc,
         )
-        claimed_ids: list[str] = []
-        affected_cities: set[str] = set()
-        for event in events:
-            if not store.claim(event.event_id):
-                continue
-            claimed_ids.append(event.event_id)
-            try:
-                payload = json.loads(event.payload_json or "{}")
-            except Exception:  # noqa: BLE001
-                payload = {}
-            affected_cities.update(str(c) for c in payload.get("affected_cities") or [])
-        world.commit()
-    finally:
-        world.close()
+        claimed_ids = []
+        affected_cities = set()
 
     # UNCONDITIONAL: the TTL pass inside run_c3_staleness_cancel_cycle must run
     # every tick regardless of claimed_ids — an empty claim this tick means "no

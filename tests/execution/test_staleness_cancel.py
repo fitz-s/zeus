@@ -523,6 +523,80 @@ class TestRunC3StalenessCancelCycle:
         assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city, fresh q, not past TTL -> untouched
 
 
+class TestFamilyLevelRedecisionGating:
+    """Consult review round 2 BLOCKER: confirmed_families must be FAMILY-level
+    conservative, not per-command. A family with one durably-cancelled command
+    and one command stuck ambiguous (REVIEW_REQUIRED / not_canceled / unknown)
+    in the SAME cycle must be excluded ENTIRELY -- that family still carries a
+    recovery-owned ambiguous venue exposure; emitting a redecision for it
+    anyway risks a duplicate/overlapping submit against that exposure."""
+
+    def test_mixed_outcomes_in_same_family_suppress_the_whole_family(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(
+            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        # BOTH commands resolve to the SAME family.
+        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        # ONE batch call, per-order mixed outcome: c-good acks cleanly; c-bad
+        # comes back NOT_CANCELED (ambiguous -- venue truth still open).
+        client = _FakeGatewayClient(
+            cancel_responses=[[
+                {"canceled": True, "orderID": "v-good"},
+                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
+            ]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+
+        assert result["cancel_set_size"] == 2
+        assert conn_state(trade_conn, "c-good") == "CANCELLED"
+        assert conn_state(trade_conn, "c-bad") != "CANCELLED"
+        # The family is excluded ENTIRELY, not partially confirmed, because
+        # c-bad's ambiguous outcome makes the family's venue exposure unclear.
+        assert result["confirmed_families"] == set()
+
+    def test_ambiguous_family_does_not_block_an_unrelated_confirmed_family(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        other_family = ("Toronto", "2026-07-04", "high")
+        _seed_open_entry(
+            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_open_entry(
+            trade_conn, command_id="c-clean", token_id="tok-clean", venue_order_id="v-clean",
+            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        _seed_market_event(
+            forecasts_conn, token_id="tok-clean", city=other_family[0], target_date=other_family[1], metric=other_family[2]
+        )
+        client = _FakeGatewayClient(
+            cancel_responses=[[
+                {"canceled": True, "orderID": "v-good"},
+                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
+                {"canceled": True, "orderID": "v-clean"},
+            ]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+
+        assert result["confirmed_families"] == {other_family}  # FAMILY (ambiguous) excluded, other_family confirmed
+
+
 class TestTtlEventClockSplit:
     """The composition fix: TTL (rest_deadline_exceeded) is a GLOBAL,
     UNCONDITIONAL pass over every open rest on every call, independent of
@@ -746,6 +820,106 @@ class TestMainC3StalenessCancelCycleGlue:
         monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
         monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
 
+        main_module._c3_staleness_cancel_cycle()
+
+        assert cancel_calls == [["v1"]]
+        check_conn = _open_trade()
+        try:
+            assert conn_state(check_conn, "c1") == "CANCELLED"
+        finally:
+            check_conn.close()
+
+    def test_event_store_failure_still_runs_ttl_pass(self, monkeypatch, tmp_path):
+        """HIGH (consult round 2): the retired maker_rest_escalation TTL owner
+        never depended on the event lane at all -- a fault in the
+        SOURCE_RUN_ARRIVED claim lane (EventStore raising) must degrade to
+        "no source event this tick," never take down the unconditional TTL
+        pass. Without the fail-soft wrap, an EventStore exception propagates
+        out of _c3_staleness_cancel_cycle (caught only by @_scheduler_job,
+        which marks the WHOLE tick failed and skips the TTL scan too) -- an
+        availability regression versus the deleted job."""
+        import src.data.polymarket_client as polymarket_client_module
+        import src.events.event_store as event_store_module
+        import src.execution.command_recovery as command_recovery_module
+        import src.main as main_module
+        import src.state.db as state_db
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
+
+        trade_db_path = tmp_path / "trade.db"
+        forecasts_db_path = tmp_path / "forecasts.db"
+
+        seed_trade = sqlite3.connect(str(trade_db_path))
+        seed_trade.row_factory = sqlite3.Row
+        init_schema(seed_trade)
+        _seed_open_entry(
+            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
+            q_version=None,
+            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
+        )
+        seed_trade.commit()
+        seed_trade.close()
+
+        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
+        seed_forecasts.row_factory = sqlite3.Row
+        apply_canonical_schema(seed_forecasts)
+        seed_forecasts.commit()
+        seed_forecasts.close()
+
+        def _open_trade():
+            conn = sqlite3.connect(str(trade_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        def _open_forecasts():
+            conn = sqlite3.connect(str(forecasts_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        class _RaisingEventStore:
+            def __init__(self, conn, *, consumer_name):
+                pass
+
+            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
+                raise sqlite3.OperationalError("simulated world DB fault")
+
+            def claim(self, event_id):
+                raise AssertionError("must not be reached: fetch already raised")
+
+            def mark_processed(self, event_id):
+                raise AssertionError("must not be reached: nothing was claimed")
+
+        class _FakeWorldConn:
+            def commit(self):
+                raise AssertionError("must not be reached: fetch raised before commit")
+
+            def close(self):
+                pass
+
+        cancel_calls: list[list[str]] = []
+
+        class _FakeGatewayClient:
+            def cancel_orders_batch(self, order_ids):
+                cancel_calls.append(list(order_ids))
+                return [{"canceled": True, "orderID": oid} for oid in order_ids]
+
+        monkeypatch.setattr(
+            main_module, "_settings_section",
+            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+        monkeypatch.setattr(
+            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
+        )
+        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
+        monkeypatch.setattr(event_store_module, "EventStore", _RaisingEventStore)
+        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
+        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
+        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
+
+        # Must not raise: the fault is caught and degraded, the TTL pass runs regardless.
         main_module._c3_staleness_cancel_cycle()
 
         assert cancel_calls == [["v1"]]
