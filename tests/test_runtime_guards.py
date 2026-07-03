@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-07-03
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -14174,6 +14174,13 @@ def test_build_exit_intent_carries_boundary_fields():
     assert intent.shares == pytest.approx(pos.effective_shares)
     assert intent.current_market_price == pytest.approx(0.46)
     assert intent.best_bid == pytest.approx(0.45)
+    assert intent.best_ask == pytest.approx(0.49)
+    assert intent.fresh_prob == pytest.approx(0.41)
+    assert intent.fresh_prob_is_fresh is True
+    assert intent.market_vig is None
+    assert intent.hours_to_settlement == pytest.approx(2.0)
+    assert intent.position_state == "day0_window"
+    assert intent.day0_active is True
 
 
 def test_sell_result_without_order_id_is_rejected_not_trade_id_fallback():

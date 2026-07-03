@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-06-30
+# Last reused/audited: 2026-07-02
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -26,7 +26,9 @@ import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
+from src.events.reactor import EventSubmissionReceipt
 from src.state.schema.family_rebalance_intents_schema import ensure_table
+from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
 from src.strategy import shift_bin_wiring as sbw
 
@@ -40,12 +42,26 @@ CREATE TABLE position_current (
     shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
 )
 """
+_LIVE_CAP_DDL = """
+CREATE TABLE edli_live_cap_usage (
+    usage_id TEXT, event_id TEXT, final_intent_id TEXT,
+    execution_command_id TEXT, reserved_notional_usd REAL,
+    reservation_status TEXT
+)
+"""
+_LIVE_ORDER_EVENTS_DDL = """
+CREATE TABLE edli_live_order_events (
+    aggregate_id TEXT, event_type TEXT, payload_json TEXT
+)
+"""
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(_POSITION_CURRENT_DDL)
+    conn.execute(_LIVE_CAP_DDL)
+    conn.execute(_LIVE_ORDER_EVENTS_DDL)
     ensure_table(conn)
     return conn
 
@@ -109,6 +125,27 @@ def test_existing_and_new_shift_paths_share_old_leg_live_predicate():
     assert "_shift_bin_wiring.old_leg_is_live(" in src[existing:sibling]
     assert "_shift_bin_wiring.old_leg_is_live(" in src[sibling:]
     assert "> float(_dust_floor_usd)" not in src[existing:sibling]
+
+
+def test_existing_shift_continuation_rereads_family_pending_before_counter_entry():
+    src = inspect.getsource(era)
+    existing = src.index("if str(selected_token_id or \"\") == _existing_shift_lease.selected_token_id:")
+    record = src.index("_shift_bin_wiring.record_entry_submitted(", existing)
+
+    assert "_family_pending_entry_truth(" in src[existing:record]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_BLOCKED:" in src[existing:record]
+
+
+def test_shift_enter_new_bin_final_build_has_family_pending_reread():
+    src = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    phase_check = src.index("str(_shift_entry_lease.get(\"phase\") or \"\") == \"ENTER_NEW_BIN\"")
+    command_build = src.index("_build_live_execution_command_certificates(", phase_check)
+    pending_reason = src.index("SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:", phase_check)
+    pending_return = src.index("return dataclass_replace(", pending_reason)
+
+    assert "_family_pending_entry_truth(" in src[phase_check:command_build]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:" in src[phase_check:command_build]
+    assert "_abort_family_rebalance_entry_payloads_after_no_submit(" in src[phase_check:pending_return]
 
 
 def test_reactor_fails_closed_when_held_family_cannot_bind_sibling():
@@ -326,6 +363,273 @@ def test_blocking_unowned_exposure_aborts_no_exit_no_entry():
     )
     assert plan.kind == "ABORT"
     assert plan.allow_entry is False
+
+
+def test_shift_bin_family_pending_guard_counts_third_sibling():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(4.25)
+
+
+def test_shift_bin_family_pending_truth_blocks_cancel_pending_sibling():
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT, decision_id TEXT, intent_kind TEXT, token_id TEXT,
+            state TEXT, size REAL, price REAL, updated_at TEXT, created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-cancel-pending', 'dec-cancel-pending', 'ENTRY', 'tok-C',
+            'CANCEL_PENDING', 6.0, 0.50, '2026-07-03T00:00:00+00:00',
+            '2026-07-03T00:00:00+00:00'
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(3.0)
+    assert "family_pending_notional" in truth.sources
+    assert "venue_commands" in truth.sources
+
+    conn.execute("UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-cancel-pending'")
+    cleared = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert cleared.truth_available is True
+    assert cleared.has_pending_or_unknown is False
+    assert cleared.pending_usd == pytest.approx(0.0)
+
+
+def test_shift_bin_unknown_counter_entry_keeps_family_lease_active():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    sbw.record_entry_unknown(
+        conn,
+        lease,
+        now_iso="t1",
+        new_entry_command_id="cmd-entry",
+        reason="POST_SUBMIT_UNKNOWN",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-entry"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+
+    era._abort_family_rebalance_entry_payloads_after_no_submit(
+        conn,
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+        now_iso="t2",
+        reason="ACTUAL_SUBMIT_QUALITY_REJECTED",
+    )
+
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:ACTUAL_SUBMIT_QUALITY_REJECTED"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+
+def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch):
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+        shift_bin_lease_payload={
+            "intent_id": lease,
+            "phase": "ENTER_NEW_BIN",
+            "family_token_ids": ("tok-A", "tok-B", "tok-C"),
+        },
+    )
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
+    monkeypatch.setattr(era, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: receipt)
+
+    def _executor_submit(_final_intent, _command):
+        raise AssertionError("executor_submit must not run after final family pending reread")
+
+    submit = era.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=_executor_submit,
+        operator_arm=object(),
+    )
+
+    result = submit(
+        SimpleNamespace(
+            event_id="event-1",
+            causal_snapshot_id="snap-1",
+            event_type="FORECAST_SNAPSHOT_READY",
+        ),
+        datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+
+    assert result.submitted is False
+    assert result.proof_accepted is False
+    assert result.reason == "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["new_entry_command_id"] is None
+    assert row["abort_reason"] == (
+        "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:"
+        "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    )
+    stuck = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM family_rebalance_intents
+         WHERE status='ENTRY_SUBMITTED'
+           AND (new_entry_command_id IS NULL OR new_entry_command_id = '')
+        """
+    ).fetchone()[0]
+    assert stuck == 0
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+
+def test_shift_bin_submit_exception_unknown_advances_family_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    terminal_result = era._fallback_submit_result_after_live_command_failure(
+        RuntimeError("venue call interrupted"),
+        phase="calling_executor_submit",
+        decision_time=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+    )
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-shift-entry-unknown"})
+
+    era._advance_family_rebalance_lease_after_submit(
+        trade_conn=conn,
+        no_submit_receipt=receipt,
+        command=command,
+        submit_result=terminal_result,
+        now_iso="2026-07-02T00:00:01+00:00",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-shift-entry-unknown"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:POST_SUBMIT_UNKNOWN"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 
 def test_two_concurrent_shift_events_one_lease_one_exit():

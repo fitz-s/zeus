@@ -26,6 +26,9 @@ Production seam: day0_blended_highs() in forecast_uncertainty.py.
     Fed by observation_client.py high_so_far = max(temp for ...) — cumulative MAX.
     day0_observation_reader.py uses MAX(running_max) SQL aggregation (not LIMIT 1).
 """
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -196,3 +199,46 @@ def test_running_max_reader_uses_sql_max_not_last_row():
     assert true_high - last_row == pytest.approx(7.0, abs=0.1), (
         f"Post-peak underestimate via LIMIT 1: {true_high - last_row:.1f}°, expected 7.0°"
     )
+
+
+def test_day0_high_p_vector_respects_unseen_peak_probability():
+    """Wellington-class guard: 0.73 post-peak confidence cannot price a point bin at 99%."""
+
+    from src.signal.day0_router import Day0Router, Day0SignalInputs
+    from src.types import Bin
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    temporal_context = SimpleNamespace(
+        daypart="post_peak",
+        post_peak_confidence=0.7301587,
+        solar_day=None,
+        current_local_hour=None,
+        daylight_progress=None,
+        current_utc_timestamp=datetime(2026, 7, 2, 0, 48, tzinfo=timezone.utc),
+    )
+    signal = Day0Router.route(
+        Day0SignalInputs(
+            temperature_metric=HIGH_LOCALDAY_MAX,
+            current_temp=12.0,
+            hours_remaining=11.19,
+            observed_high_so_far=12.0,
+            observed_low_so_far=None,
+            member_maxes_remaining=np.array([11.6, 11.7, 12.0], dtype=np.float64),
+            member_mins_remaining=None,
+            unit="C",
+            temporal_context=temporal_context,
+        )
+    )
+    bins = [
+        Bin(low=None, high=11, label="11C or below", unit="C"),
+        Bin(low=12, high=12, label="12C", unit="C"),
+        Bin(low=13, high=None, label="13C or above", unit="C"),
+    ]
+
+    p = signal.p_vector(bins, n_mc=20_000, rng=np.random.default_rng(11))
+    context = signal.forecast_context()
+
+    assert context["unseen_peak_sigma"] > 0.0
+    assert p[1] < 0.86
+    assert p[2] > 0.12
+    assert p.sum() == pytest.approx(1.0)

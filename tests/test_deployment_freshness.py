@@ -45,6 +45,7 @@ def _run(
     boot_sha: str = BOOT_SHA,
     boot_ts_hours_ago: float = 0.0,
     current_sha: str = BOOT_SHA,
+    git_diff_paths: tuple[str, ...] = ("src/main.py",),
     accept_stale_env: bool = False,
     now_hours_after_boot: float | None = None,
     repo_root: Path | None = None,
@@ -66,6 +67,8 @@ def _run(
     def fake_check_output(cmd, **kw):
         if git_raises:
             raise git_raises
+        if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+            return ("\n".join(git_diff_paths) + "\n").encode()
         return current_sha.encode()
 
     # Build context manager stack.
@@ -175,6 +178,29 @@ class TestImmediatePause:
         pause_mock.assert_called_once()
         assert pause_mock.call_args[0][0] == "deployment_freshness_mismatch"
         assert df_path.exists()
+
+    def test_recent_non_runtime_divergence_does_not_pause_entries(self, caplog, tmp_path):
+        """Tests/docs-only HEAD drift is not stale executable live code."""
+        import logging
+        pause_mock = MagicMock()
+        df_path = tmp_path / "deployment_freshness.json"
+        with caplog.at_level(logging.INFO, logger="zeus"):
+            _run(
+                boot_sha=BOOT_SHA,
+                current_sha=DIFF_SHA,
+                git_diff_paths=("tests/test_only.py", "docs/readme.md"),
+                now_hours_after_boot=1.0,
+                boot_ts_hours_ago=0.0,
+                pause_entries_mock=pause_mock,
+                state_path_return=df_path,
+            )
+        pause_mock.assert_not_called()
+        flag = json.loads(df_path.read_text())
+        assert flag["status"] == "fresh"
+        assert flag["pause_reason"] is None
+        assert flag["code_plane_status"] == "non_runtime_diff"
+        assert flag["runtime_code_changed"] is False
+        assert flag["changed_paths_sample"] == ["tests/test_only.py", "docs/readme.md"]
 
     def test_recent_divergence_no_exit(self):
         """No SystemExit within the operator-restart window."""
@@ -570,8 +596,13 @@ class TestApschedulerSignal:
         job_done = threading.Event()
 
         def _fresh_job():
+            def _fake_git(cmd, **_kwargs):
+                if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                    return b"src/main.py\n"
+                return current_sha_val.encode()
+
             with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": ""}, clear=False):
-                with patch("subprocess.check_output", return_value=current_sha_val.encode()):
+                with patch("subprocess.check_output", side_effect=_fake_git):
                     with patch("os.kill", side_effect=_mock_kill):
                         try:
                             _check_deployment_freshness(

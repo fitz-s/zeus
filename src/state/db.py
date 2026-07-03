@@ -11548,7 +11548,8 @@ def query_control_override_state(
     else:
         rows = conn.execute(
             f"""
-            SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
+            SELECT override_id, target_type, target_key, action_type, value, issued_by,
+                   issued_at, effective_until, reason, precedence
             FROM {control_overrides_ref}
             WHERE target_type IN ('global', 'strategy')
               AND issued_at <= ?
@@ -11560,6 +11561,9 @@ def query_control_override_state(
     entries_paused = False
     entries_pause_source = None
     entries_pause_reason = None
+    entries_pause_issued_at = None
+    entries_pause_effective_until = None
+    entries_pause_issued_by = None
     edge_threshold_multiplier = 1.0
     # G6 BLOCKER #2 fix (2026-04-26, con-nyx review): emit GateDecision-shaped
     # dicts (not bare bool) so control_plane.strategy_gates() — which expects
@@ -11581,6 +11585,9 @@ def query_control_override_state(
             if entries_paused:
                 reason = str(row["reason"] or "")
                 issued_by = str(row["issued_by"] or "")
+                entries_pause_issued_at = str(row["issued_at"] or "")
+                entries_pause_effective_until = row["effective_until"]
+                entries_pause_issued_by = issued_by
                 if issued_by == "system_auto_pause" or issued_by.startswith("auto:"):
                     entries_pause_source = "auto_exception"
                     entries_pause_reason = reason if issued_by == "system_auto_pause" else issued_by.replace("auto:", "", 1)
@@ -11648,6 +11655,9 @@ def query_control_override_state(
         "entries_paused": entries_paused,
         "entries_pause_source": entries_pause_source,
         "entries_pause_reason": entries_pause_reason,
+        "entries_pause_issued_at": entries_pause_issued_at,
+        "entries_pause_effective_until": entries_pause_effective_until,
+        "entries_pause_issued_by": entries_pause_issued_by,
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }
@@ -12439,6 +12449,7 @@ def transition_phase(
     reason: str,
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
+    extra_payload: dict | None = None,
 ) -> bool:
     """Re-export shim — delegates to src.state.canonical_write.transition_phase.
 
@@ -12453,6 +12464,7 @@ def transition_phase(
         reason=reason,
         error=error,
         source_module=source_module,
+        extra_payload=extra_payload,
     )
 
 

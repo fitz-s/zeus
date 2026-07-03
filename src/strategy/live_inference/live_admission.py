@@ -26,7 +26,7 @@ from src.calibration.settlement_backward_coverage import (
 # instead of this binary replacement floor.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
-LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.15
+LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.25
 LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS = frozenset({
     "center_buy",
     "forecast_qkernel_entry",

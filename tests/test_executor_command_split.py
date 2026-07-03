@@ -2,7 +2,7 @@
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-01
+# Last reused/audited: 2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -68,6 +68,10 @@ def _cutover_guard_live_enabled(monkeypatch):
     )
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000abc",
+    )
 
     def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
         ctf_units = 1_000_000_000
@@ -318,6 +322,76 @@ def _submit_requested_payload(command_id: str) -> dict:
     }
 
 
+def test_existing_command_orderresult_carries_durable_command_id(mem_conn):
+    from src.execution.command_bus import CommandState, IdempotencyKey, IntentKind, VenueCommand
+    from src.execution.executor import _orderresult_from_existing
+
+    idem = IdempotencyKey.from_external("a" * 32)
+    existing = VenueCommand(
+        command_id="cmd-existing-123",
+        position_id="pos-existing",
+        decision_id="dec-existing",
+        idempotency_key=idem,
+        intent_kind=IntentKind.ENTRY,
+        market_id="mkt-test",
+        token_id="tok-existing",
+        side="BUY",
+        size=10.0,
+        price=0.42,
+        state=CommandState.ACKED,
+        venue_order_id="ord-existing",
+    )
+
+    result = _orderresult_from_existing(
+        mem_conn,
+        existing,
+        trade_id="trade-existing",
+        limit_price=0.42,
+        shares=10.0,
+        idem_value=idem.value,
+        intent_id="intent-existing",
+        order_role="entry",
+    )
+
+    assert result.command_id == "cmd-existing-123"
+    assert result.command_state == "ACKED"
+    assert result.idempotency_key == idem.value
+
+
+def test_economic_unknown_orderresult_carries_durable_command_id(mem_conn):
+    from src.execution.command_bus import CommandState, IdempotencyKey, IntentKind, VenueCommand
+    from src.execution.executor import _orderresult_from_economic_unknown
+
+    idem = IdempotencyKey.from_external("b" * 32)
+    existing = VenueCommand(
+        command_id="cmd-unknown-123",
+        position_id="pos-existing",
+        decision_id="dec-existing",
+        idempotency_key=idem,
+        intent_kind=IntentKind.ENTRY,
+        market_id="mkt-test",
+        token_id="tok-existing",
+        side="BUY",
+        size=10.0,
+        price=0.42,
+        state=CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT,
+    )
+
+    result = _orderresult_from_economic_unknown(
+        existing,
+        trade_id="trade-existing",
+        limit_price=0.42,
+        shares=10.0,
+        idem_value=idem.value,
+        intent_id="intent-existing",
+        order_role="entry",
+    )
+
+    assert result.status == "unknown_side_effect"
+    assert result.command_id == "cmd-unknown-123"
+    assert result.command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+
+
 _DEFAULT_CONTEXT = object()
 
 
@@ -562,6 +636,62 @@ def _final_submit_result(
         result["errorCode"] = error_code
         result["errorMessage"] = error_message or ""
     return result
+
+
+def _allow_entry_submit_until_client(monkeypatch):
+    import src.execution.executor as executor_module
+
+    monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+    monkeypatch.setattr(
+        executor_module,
+        "_assert_ws_gap_allows_submit",
+        lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: (
+            {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
+            {"actionable_certificate_hash": "hash-test"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_control_pause_component",
+        lambda *args, **kwargs: {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "not_paused",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_duplicate_same_token_component",
+        lambda *args, **kwargs: {
+            "component": "entry_duplicate_same_token",
+            "allowed": True,
+            "reason": "no_duplicate",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_same_token_cooldown_component",
+        lambda *args, **kwargs: {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "not_in_cooldown",
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_decision_source_component",
+        lambda *args, **kwargs: {
+            "component": "entry_decision_source",
+            "allowed": True,
+            "reason": "valid",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1760,9 +1890,11 @@ class TestLiveOrderCommandSplit:
         assert result.status == "unknown_side_effect"
         assert result.command_state == "REVIEW_REQUIRED"
         command = mem_conn.execute(
-            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
             ("trd-entry-no-final-envelope",),
         ).fetchone()
+        assert result.command_id == command["command_id"]
+        assert result.idempotency_key == command["idempotency_key"]
         assert command["state"] == "REVIEW_REQUIRED"
         events = list_events(mem_conn, command["command_id"])
         event_types = [event["event_type"] for event in events]
@@ -1862,6 +1994,8 @@ class TestLiveOrderCommandSplit:
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REVIEW_REQUIRED", (
             f"Expected state=REVIEW_REQUIRED after None return, got {cmd['state']!r}"
         )
@@ -1904,6 +2038,9 @@ class TestLiveOrderCommandSplit:
         assert result.reason == "missing_order_id"
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REJECTED"
         event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
         assert "SUBMIT_REJECTED" in event_types
@@ -1951,6 +2088,9 @@ class TestLiveOrderCommandSplit:
         assert result.reason == "INSUFFICIENT_BALANCE"
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REJECTED"
         event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
         assert "SUBMIT_REJECTED" in event_types
@@ -2480,6 +2620,61 @@ class TestLiveOrderCommandSplit:
         assert result.command_state == "REJECTED"
         assert result.idempotency_key == cmd["idempotency_key"]
 
+    def test_entry_client_init_failure_returns_durable_command_id(self, mem_conn, monkeypatch):
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command
+
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient", side_effect=RuntimeError("client down")):
+            result = _live_order(
+                trade_id="trd-entry-client-init-failed",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-client-init-failed",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_id
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key
+        cmd = get_command(mem_conn, result.command_id)
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+        assert cmd["idempotency_key"] == result.idempotency_key
+
+    def test_entry_generic_v2_preflight_exception_returns_durable_command_id(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command
+
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.side_effect = RuntimeError("generic preflight failure")
+            result = _live_order(
+                trade_id="trd-entry-generic-v2-failed",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-generic-v2-failed",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_id
+        assert result.command_state == "REJECTED"
+        cmd = get_command(mem_conn, result.command_id)
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+
     def test_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,
         mem_conn,
@@ -2733,6 +2928,36 @@ class TestExitOrderCommandSplit:
         assert call_log.index("insert_command") < call_log.index("place_limit_order"), (
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
+
+    def test_exit_client_init_failure_returns_durable_command_id(self, mem_conn, monkeypatch):
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import get_command
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-client-init-failed")
+
+        with patch("src.data.polymarket_client.PolymarketClient", side_effect=RuntimeError("client down")):
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-client-init-failed",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_id
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key
+        cmd = get_command(mem_conn, result.command_id)
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+        assert cmd["idempotency_key"] == result.idempotency_key
 
     def test_exit_caller_connection_commits_submit_boundaries(self, tmp_path, monkeypatch):
         """Caller-owned exit conn must not hold write locks across SDK contact."""
@@ -3169,10 +3394,13 @@ class TestExitOrderCommandSplit:
         assert result.status == "rejected"
         assert result.reason == "POST_ONLY_REJECTED"
         command = mem_conn.execute(
-            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
             ("trd-exit-final-rejected",),
         ).fetchone()
         assert command["state"] == "REJECTED"
+        assert result.command_id == command["command_id"]
+        assert result.command_state == "REJECTED"
+        assert result.idempotency_key == command["idempotency_key"]
         rejected = [
             event for event in list_events(mem_conn, command["command_id"])
             if event["event_type"] == "SUBMIT_REJECTED"
@@ -3184,6 +3412,58 @@ class TestExitOrderCommandSplit:
             (payload["final_submission_envelope_id"],),
         ).fetchone()
         assert row["error_code"] == "POST_ONLY_REJECTED"
+
+    def test_exit_final_submission_envelope_failure_returns_command_truth(self, mem_conn, monkeypatch):
+        """Exit final-envelope persistence failure is post-persist REVIEW_REQUIRED."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import (
+            FinalSubmissionEnvelopePersistenceError,
+            execute_exit_order,
+        )
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        def fail_final_envelope(*args, **kwargs):
+            raise FinalSubmissionEnvelopePersistenceError("simulated final envelope failure")
+
+        monkeypatch.setattr(
+            executor_module,
+            "_persist_final_submission_envelope_payload",
+            fail_final_envelope,
+        )
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-final-envelope-failed")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+                bound,
+                order_id="ord-final-envelope-failed",
+                status="LIVE",
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-final-envelope-failed",
+            )
+
+        command = mem_conn.execute(
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-final-envelope-failed",),
+        ).fetchone()
+        assert result.status == "unknown_side_effect"
+        assert result.command_id == command["command_id"]
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert result.idempotency_key == command["idempotency_key"]
+        assert command["state"] == "REVIEW_REQUIRED"
 
     def test_exit_submit_rejected_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
         """Exit success=false ACK returns the derived command idempotency key."""
@@ -3219,12 +3499,15 @@ class TestExitOrderCommandSplit:
             )
 
         command = mem_conn.execute(
-            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
             ("trd-exit-success-false-idem",),
         ).fetchone()
         assert result.status == "rejected"
+        assert result.command_id == command["command_id"]
+        assert result.command_state == "REJECTED"
         assert result.idempotency_key == command["idempotency_key"]
         assert result.idempotency_key != intent.idempotency_key
+        assert command["state"] == "REJECTED"
 
     def test_exit_missing_order_id_returns_canonical_idempotency_key(self, mem_conn, monkeypatch):
         """Exit missing-order-id ACK returns the derived command idempotency key."""
@@ -3256,13 +3539,16 @@ class TestExitOrderCommandSplit:
             )
 
         command = mem_conn.execute(
-            "SELECT idempotency_key FROM venue_commands WHERE position_id = ?",
+            "SELECT command_id, idempotency_key, state FROM venue_commands WHERE position_id = ?",
             ("trd-exit-missing-order-idem",),
         ).fetchone()
         assert result.status == "rejected"
         assert result.reason == "missing_order_id"
+        assert result.command_id == command["command_id"]
+        assert result.command_state == "REJECTED"
         assert result.idempotency_key == command["idempotency_key"]
         assert result.idempotency_key != intent.idempotency_key
+        assert command["state"] == "REJECTED"
 
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.
@@ -3334,6 +3620,8 @@ class TestExitOrderCommandSplit:
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
+        assert result.command_id == command_ids_seen[0]
+        assert result.idempotency_key == cmd["idempotency_key"]
         assert cmd["state"] == "REVIEW_REQUIRED"
 
     def test_exit_submit_acked_writes_event_with_state_acked(self, mem_conn):

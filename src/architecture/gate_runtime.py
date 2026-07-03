@@ -48,7 +48,6 @@ import hashlib
 import json
 import os
 import pathlib
-import subprocess
 from datetime import datetime, timezone
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -91,21 +90,31 @@ def _deployment_freshness_mismatch() -> tuple[bool, str]:
     if not boot_sha:
         return False, "ZEUS_PROCESS_BOOT_SHA='' (not a managed live daemon process)"
     try:
-        current_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(REPO_ROOT),
+        from src.control.runtime_code_plane import runtime_code_plane_diff
+
+        code_plane = runtime_code_plane_diff(
+            REPO_ROOT,
+            boot_sha=boot_sha,
             timeout=2,
-            stderr=subprocess.DEVNULL,
-        ).strip().decode()
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-        OSError,
-    ) as exc:
-        return True, f"current_git_head_unreadable:{type(exc).__name__}"
-    active = current_sha != boot_sha
-    return active, f"boot_sha={boot_sha[:8]} current_sha={current_sha[:8]}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return True, f"runtime_code_plane_unreadable:{type(exc).__name__}"
+    if code_plane.error:
+        return True, (
+            f"runtime_code_plane_{code_plane.status}:{code_plane.error}:"
+            f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"
+        )
+    if not code_plane.sha_changed:
+        return False, f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"
+    if not code_plane.runtime_code_changed:
+        return False, (
+            f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]} "
+            f"code_plane={code_plane.status} paths={list(code_plane.changed_paths[:5])}"
+        )
+    return True, (
+        f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]} "
+        f"code_plane={code_plane.status} paths={list(code_plane.changed_paths[:5])}"
+    )
 
 
 # Map from capabilities.yaml blocked_when condition name → evaluator function.

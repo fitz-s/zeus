@@ -3909,6 +3909,9 @@ class TestRecoveryResolutionTable:
         payload = json.loads(row["payload_json"])
         assert payload["redecision_origin"] == "terminal_no_fill"
         assert payload["terminal_no_fill_command_id"] == "cmd-001"
+        assert payload["rest_then_cross_policy"] == "TAKER_ESCALATED_AFTER_REST"
+        assert payload["rest_then_cross_escalated_after_rest"] is True
+        assert payload["rest_then_cross_escalation_source"] == "terminal_no_fill"
 
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,

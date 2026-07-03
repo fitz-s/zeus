@@ -94,25 +94,50 @@ def _runtime_code_surface(state_dir: Path) -> dict:
             "issue": f"LOADED_SHA_INVALID:loaded={loaded_sha}",
             "loaded_sha": loaded_sha,
         }
-    current_sha = _current_git_head()
+    from src.control.runtime_code_plane import runtime_code_plane_diff
+
+    code_plane = runtime_code_plane_diff(
+        _repo_root(),
+        boot_sha=loaded_sha,
+        timeout=2.0,
+    )
+    current_sha = code_plane.current_sha
     if not current_sha:
         return {
             "ok": False,
             "issue": "CURRENT_GIT_HEAD_UNAVAILABLE",
             "loaded_sha": loaded_sha,
         }
-    if loaded_sha != current_sha:
+    if code_plane.error:
         return {
             "ok": False,
-            "issue": f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}",
+            "issue": (
+                f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}:"
+                f"code_plane={code_plane.status}:{code_plane.error}"
+            ),
             "loaded_sha": loaded_sha,
             "current_sha": current_sha,
+            "code_plane_status": code_plane.status,
+        }
+    if loaded_sha != current_sha and code_plane.runtime_code_changed:
+        return {
+            "ok": False,
+            "issue": (
+                f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}:"
+                f"code_plane={code_plane.status}"
+            ),
+            "loaded_sha": loaded_sha,
+            "current_sha": current_sha,
+            "code_plane_status": code_plane.status,
+            "changed_paths_sample": list(code_plane.changed_paths[:20]),
         }
     return {
         "ok": True,
         "issue": None,
         "loaded_sha": loaded_sha,
         "current_sha": current_sha,
+        "code_plane_status": code_plane.status,
+        "changed_paths_sample": list(code_plane.changed_paths[:20]),
     }
 
 

@@ -94,6 +94,7 @@ def _run_auto_resume(
     *,
     boot_sha: str = BOOT_SHA,
     current_sha: str = BOOT_SHA,
+    git_diff_paths: tuple[str, ...] = ("src/main.py",),
     git_raises: Exception | None = None,
     state_dir: Path | None = None,
 ) -> None:
@@ -101,6 +102,8 @@ def _run_auto_resume(
     def _fake_git(cmd, **kw):
         if git_raises:
             raise git_raises
+        if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+            return ("\n".join(git_diff_paths) + "\n").encode()
         return current_sha.encode()
 
     with patch.object(main_module, "_BOOT_STATE", {"sha": boot_sha, "ts": datetime.now(_UTC)}):
@@ -245,6 +248,33 @@ class TestAutoResumeBlockedOnShaMMismatch:
         fresh_conn.close()
         assert state["entries_paused"] is True, "pause must remain when SHA still mismatched"
         assert "NOT auto-resuming" in caplog.text
+
+    def test_r2_non_runtime_sha_mismatch_clears_deployment_pause(self, tmp_path):
+        """Tests/docs-only drift is not a deployment freshness blocker."""
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(
+                    boot_sha=BOOT_SHA,
+                    current_sha=DIFF_SHA,
+                    git_diff_paths=("tests/test_only.py",),
+                    state_dir=tmp_path,
+                )
+
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is False
+        payload = json.loads((tmp_path / "deployment_freshness.json").read_text())
+        assert payload["status"] == "fresh"
+        assert payload["code_plane_status"] == "non_runtime_diff"
 
 
 # ---------------------------------------------------------------------------

@@ -496,6 +496,27 @@ def complete_fill_up_lease(
     )
 
 
+def record_fill_up_entry_unknown(
+    conn: sqlite3.Connection,
+    intent_id: Optional[str],
+    *,
+    now_iso: str,
+    new_entry_command_id: Optional[str] = None,
+    reason: str,
+) -> None:
+    """Keep the fill-up lease active while submit side effects reconcile."""
+    if not intent_id:
+        return
+    advance_rebalance_lease(
+        conn,
+        intent_id,
+        status="ENTRY_UNKNOWN",
+        now_iso=now_iso,
+        new_entry_command_id=new_entry_command_id,
+        abort_reason=reason,
+    )
+
+
 def abort_fill_up_lease(
     conn: sqlite3.Connection,
     intent_id: Optional[str],

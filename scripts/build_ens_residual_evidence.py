@@ -50,6 +50,7 @@ import logging
 import sqlite3
 import statistics
 import sys
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from src.contracts.ensemble_snapshot_provenance import MembersUnitInvalidError
@@ -108,6 +109,10 @@ def _is_fahrenheit(unit: str | None) -> bool:
 def _to_celsius(value: float, unit: str | None) -> float:
     """Convert a temperature VALUE (not a delta) to degC per the native unit."""
     return (value - 32.0) * 5.0 / 9.0 if _is_fahrenheit(unit) else value
+
+
+def _display_3(value: float) -> float:
+    return float(Decimal(str(float(value))).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
 
 
 def _ensemble_mean_c(members_json: str, members_unit: str | None) -> float | None:
@@ -176,10 +181,10 @@ def _strict_evidence_row(e: dict, *, metric: str, lat: dict) -> dict | None:
         "available_at": e["available_at"],
         "members_unit": e["members_unit"],
         "ensemble_mean_c": round(em, 3),
-        "settlement_value_c": round(
-            _to_celsius(e["settlement_value_c"], e["settlement_unit"]), 3
+        "settlement_value_c": _display_3(
+            _to_celsius(e["settlement_value_c"], e["settlement_unit"])
         ),
-        "settlement_value_native": round(e["settlement_value_c"], 3),
+        "settlement_value_native": _display_3(e["settlement_value_c"]),
         "settlement_unit": e["settlement_unit"],
         "residual_c": round(residual, 3),
         "selection_reason": f"cycle_strict_{_cycle_for_metric(metric)}_only",

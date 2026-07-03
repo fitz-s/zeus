@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from src.config import get_mode, state_path
 from src.control.control_plane import (
+    get_entries_pause_evidence,
     get_entries_pause_reason,
     get_entries_pause_source,
     get_edge_threshold_multiplier,
@@ -231,6 +232,7 @@ def _refresh_control_status_for_pulse(status: dict) -> None:
         control["entries_paused"] = is_entries_paused()
         control["entries_pause_source"] = get_entries_pause_source()
         control["entries_pause_reason"] = get_entries_pause_reason()
+        control["entries_pause_evidence"] = get_entries_pause_evidence()
         control["edge_threshold_multiplier"] = get_edge_threshold_multiplier()
         control["strategy_gates"] = {k: v.to_dict() for k, v in current_strategy_gates.items()}
     except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
@@ -1328,15 +1330,19 @@ def write_status(cycle_summary: dict = None) -> None:
         if isinstance(reasons, list)
     }
     current_entries_paused = is_entries_paused()
+    current_entries_pause_reason = get_entries_pause_reason()
+    current_entries_pause_evidence = get_entries_pause_evidence()
     if cycle_summary_from_prior:
         cycle_summary = dict(cycle_summary or {})
         if current_entries_paused:
             cycle_summary["entries_paused"] = True
-            cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary["entries_pause_reason"] = current_entries_pause_reason
+            cycle_summary["entries_pause_evidence"] = current_entries_pause_evidence
             cycle_summary["entries_blocked_reason"] = "entries_paused"
         else:
             cycle_summary.pop("entries_paused", None)
             cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary.pop("entries_pause_evidence", None)
             if cycle_summary.get("entries_blocked_reason") == "entries_paused":
                 cycle_summary.pop("entries_blocked_reason", None)
     current_strategy_gates = strategy_gates()
@@ -1462,7 +1468,8 @@ def write_status(cycle_summary: dict = None) -> None:
         "control": {
             "entries_paused": current_entries_paused,
             "entries_pause_source": get_entries_pause_source(),
-            "entries_pause_reason": get_entries_pause_reason(),
+            "entries_pause_reason": current_entries_pause_reason,
+            "entries_pause_evidence": current_entries_pause_evidence,
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": {k: v.to_dict() for k, v in current_strategy_gates.items()},
             "recommended_controls": recommended_controls,

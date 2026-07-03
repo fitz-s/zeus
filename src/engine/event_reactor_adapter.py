@@ -727,8 +727,11 @@ def _adapter_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return False
 
 
-_DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
-    {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
+_DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+)
+_DURABLE_LIVE_CAP_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
+    {"FILLED"}
 )
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
@@ -824,59 +827,82 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
     if trade_conn is None:
         return False
     try:
+        token = _durable_live_cap_final_intent_token(final_intent_id)
         if execution_command_id and _adapter_table_exists(trade_conn, "venue_commands"):
+            command_columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+            }
+            match_sql = "decision_id = ?"
+            params: tuple[str, ...] = (execution_command_id,)
+            if "command_id" in command_columns:
+                match_sql = "(command_id = ? OR decision_id = ?)"
+                params = (execution_command_id, execution_command_id)
             row = trade_conn.execute(
-                """
+                f"""
                 SELECT state
                   FROM venue_commands
-                 WHERE decision_id = ?
+                 WHERE {match_sql}
                    AND intent_kind = 'ENTRY'
                  ORDER BY updated_at DESC, created_at DESC
                  LIMIT 1
                 """,
-                (execution_command_id,),
+                params,
             ).fetchone()
             if row is not None:
                 state = str(row[0] if not isinstance(row, sqlite3.Row) else row["state"]).strip().upper()
-                if state in _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES:
+                if state in _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES:
+                    return True
+                if (
+                    state in _DURABLE_LIVE_CAP_EXPOSURE_TERMINAL_COMMAND_STATES
+                    and token
+                    and _durable_live_cap_token_has_materialized_position(trade_conn, token)
+                ):
                     return True
 
-        token = _durable_live_cap_final_intent_token(final_intent_id)
-        if token and _adapter_table_exists(trade_conn, "position_current"):
-            columns = _position_current_columns(trade_conn)
-            phase_sql, phase_params = _position_phase_or_positive_chain_clause(
-                columns,
-                _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
-            )
-            positive_terms = [
-                f"COALESCE({name}, 0) > 0"
-                for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd")
-                if name in columns
-            ]
-            if not positive_terms:
-                return False
-            token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
-            if not token_columns:
-                return False
-            token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
-            row = trade_conn.execute(
-                f"""
-                SELECT 1
-                  FROM position_current
-                 WHERE {phase_sql}
-                   AND ({token_sql})
-                   AND ({" OR ".join(positive_terms)})
-                 LIMIT 1
-                """,
-                (*phase_params, *(token for _ in token_columns)),
-            ).fetchone()
-            if row is not None:
-                return True
+        if token and _durable_live_cap_token_has_materialized_position(trade_conn, token):
+            return True
     except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
     return False
+
+
+def _durable_live_cap_token_has_materialized_position(
+    trade_conn: sqlite3.Connection,
+    token: str,
+) -> bool:
+    if not token or not _adapter_table_exists(trade_conn, "position_current"):
+        return False
+    columns = _position_current_columns(trade_conn)
+    phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+        columns,
+        _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
+    )
+    positive_terms = [
+        f"COALESCE({name}, 0) > 0"
+        for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd")
+        if name in columns
+    ]
+    if not positive_terms:
+        return False
+    token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
+    if not token_columns:
+        return False
+    token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
+    row = trade_conn.execute(
+        f"""
+        SELECT 1
+          FROM position_current
+         WHERE {phase_sql}
+           AND ({token_sql})
+           AND ({" OR ".join(positive_terms)})
+         LIMIT 1
+        """,
+        (*phase_params, *(token for _ in token_columns)),
+    ).fetchone()
+    return row is not None
 
 
 def _position_current_columns(conn: sqlite3.Connection) -> set[str]:
@@ -1396,7 +1422,7 @@ def _family_pending_entry_usd(
                AND token_id IN ({placeholders})
                AND state IN ('INTENT_CREATED', 'SUBMITTING', 'ACKED', 'POST_ACKED',
                              'UNKNOWN', 'REVIEW_REQUIRED', 'PARTIAL',
-                             'PARTIALLY_FILLED', 'FILLED')
+                             'PARTIALLY_FILLED', 'CANCEL_PENDING')
             """,
             tuple(sorted(tokens)),
         ).fetchall()
@@ -1409,6 +1435,123 @@ def _family_pending_entry_usd(
                 price = 0.0
             total += max(size * price, 1e-9)
     return total
+
+
+@dataclass(frozen=True)
+class _FamilyPendingEntryTruth:
+    has_pending_or_unknown: bool
+    pending_usd: float
+    truth_available: bool
+    sources: tuple[str, ...] = ()
+
+
+def _family_candidate_token_ids(family: object, selected_token_id: str | None = None) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for attr in ("yes_token_ids", "no_token_ids"):
+        values = getattr(family, attr, ()) or ()
+        for token in values:
+            text = str(token or "").strip()
+            if text:
+                tokens.append(text)
+    selected = str(selected_token_id or "").strip()
+    if selected:
+        tokens.append(selected)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _family_pending_entry_truth(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate_token_ids: Iterable[str],
+    trade_conn: sqlite3.Connection | None = None,
+) -> _FamilyPendingEntryTruth:
+    tokens = {str(token or "").strip() for token in candidate_token_ids}
+    tokens.discard("")
+    if conn is None or not tokens:
+        return _FamilyPendingEntryTruth(
+            has_pending_or_unknown=True,
+            pending_usd=0.0,
+            truth_available=False,
+            sources=("family_pending_truth_unavailable",),
+        )
+    sources: list[str] = []
+    try:
+        pending_usd = _family_pending_entry_usd(
+            conn,
+            candidate_token_ids=tokens,
+            trade_conn=trade_conn,
+        )
+        if pending_usd > 0.0:
+            sources.append("family_pending_notional")
+
+        command_conn = trade_conn or conn
+        if command_conn is not None and _adapter_table_exists(command_conn, "venue_commands"):
+            placeholders = ",".join("?" for _ in tokens)
+            row = command_conn.execute(
+                f"""
+                SELECT 1
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND token_id IN ({placeholders})
+                   AND state IN ('INTENT_CREATED', 'SNAPSHOT_BOUND', 'SIGNED_PERSISTED',
+                                 'SUBMITTING', 'POSTING', 'ACKED', 'POST_ACKED',
+                                 'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT',
+                                 'REVIEW_REQUIRED', 'PARTIAL', 'PARTIALLY_FILLED',
+                                 'CANCEL_PENDING')
+                 LIMIT 1
+                """,
+                tuple(sorted(tokens)),
+            ).fetchone()
+            if row is not None and "venue_commands" not in sources:
+                sources.append("venue_commands")
+            rows = command_conn.execute(
+                f"""
+                SELECT token_id
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND token_id IN ({placeholders})
+                   AND state IN ('FILLED')
+                """,
+                tuple(sorted(tokens)),
+            ).fetchall()
+            for row in rows:
+                token = str(row[0] if not isinstance(row, sqlite3.Row) else row["token_id"] or "")
+                if not _durable_live_cap_token_has_materialized_position(command_conn, token):
+                    sources.append("venue_commands_filled_unmaterialized")
+                    break
+
+        if _adapter_table_exists(conn, "edli_live_order_projection"):
+            rows = conn.execute(
+                """
+                SELECT final_intent_id, current_state, pending_reconcile
+                  FROM edli_live_order_projection
+                 WHERE current_state IN ('PENDING_RECONCILE', 'VENUE_SUBMIT_ATTEMPTED',
+                                         'VENUE_SUBMIT_ACKED', 'UNKNOWN',
+                                         'EXECUTION_COMMAND_CREATED')
+                    OR pending_reconcile = 1
+                """
+            ).fetchall()
+            for row in rows:
+                final_intent_id = str(
+                    row[0] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or ""
+                )
+                if _durable_live_cap_final_intent_token(final_intent_id) in tokens:
+                    sources.append("edli_live_order_projection")
+                    break
+    except sqlite3.Error:
+        return _FamilyPendingEntryTruth(
+            has_pending_or_unknown=True,
+            pending_usd=0.0,
+            truth_available=False,
+            sources=("family_pending_truth_query_failed",),
+        )
+
+    return _FamilyPendingEntryTruth(
+        has_pending_or_unknown=bool(sources),
+        pending_usd=float(pending_usd),
+        truth_available=True,
+        sources=tuple(dict.fromkeys(sources)),
+    )
 
 
 def _read_old_leg_exit_inputs(
@@ -2856,23 +2999,41 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     post-facto release recovery.
     """
 
+    def _pause_reason_from_state(state: Mapping[str, object]) -> str | None:
+        if state.get("status") != "ok":
+            return None
+        if bool(state.get("entries_paused", False)):
+            return str(state.get("entries_pause_reason") or "entries_paused")
+        return None
+
+    def _trusted_inline_control_pause_state(state: Mapping[str, object]) -> bool:
+        issued_by = str(state.get("entries_pause_issued_by") or "")
+        if issued_by:
+            return issued_by in {"control_plane", "manual_command", "system_auto_pause"} or issued_by.startswith("auto:")
+        reason = str(state.get("entries_pause_reason") or "")
+        if reason.startswith("external:"):
+            return reason == "external:manual_command"
+        return bool(reason)
+
     try:
         from src.state.db import get_world_connection, query_control_override_state
 
-        state = query_control_override_state(conn) if conn is not None else None
-        if state is None or state.get("status") == "missing_table":
-            world_conn = get_world_connection()
-            try:
-                state = query_control_override_state(world_conn)
-            finally:
-                world_conn.close()
+        if conn is not None:
+            inline_state = query_control_override_state(conn)
+            inline_reason = _pause_reason_from_state(inline_state)
+            if inline_reason is not None and _trusted_inline_control_pause_state(inline_state):
+                return inline_reason
+
+        world_conn = get_world_connection()
+        try:
+            state = query_control_override_state(world_conn)
+        finally:
+            world_conn.close()
     except Exception as exc:  # noqa: BLE001
         return f"entries_pause_control_unreadable:{type(exc).__name__}"
     if state.get("status") != "ok":
         return f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
-    if bool(state.get("entries_paused", False)):
-        return str(state.get("entries_pause_reason") or "entries_paused")
-    return None
+    return _pause_reason_from_state(state)
 
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
@@ -3330,6 +3491,40 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EVENT_TYPE_OUT_OF_LIVE_SCOPE",
                 proof_accepted=False,
             )
+        if real_order_submit_enabled and not durable_submit_outbox_enabled:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
+                proof_accepted=False,
+            )
+        if real_order_submit_enabled and executor_submit is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EXECUTOR_BOUNDARY_MISSING",
+                proof_accepted=False,
+            )
+        if real_order_submit_enabled and operator_arm is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="OPERATOR_ARM_REQUIRED",
+                proof_accepted=False,
+            )
+        if real_order_submit_enabled:
+            entries_pause_reason = _entry_pause_blocks_live_submit(live_cap_conn or trade_conn)
+            if entries_pause_reason is not None:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=f"entries_paused:{entries_pause_reason}",
+                    proof_accepted=False,
+                )
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -3377,6 +3572,13 @@ def event_bound_live_adapter_from_trade_conn(
         # gates remain the operator arm + real-submit flag + durable outbox +
         # executor boundary below. Live submit proceeds whenever those are present.
         if real_order_submit_enabled and not durable_submit_outbox_enabled:
+            _abort_family_rebalance_entry_payloads_after_no_submit(
+                trade_conn,
+                fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                now_iso=decision_time.astimezone(UTC).isoformat(),
+                reason="EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -3385,6 +3587,13 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         if real_order_submit_enabled and executor_submit is None:
+            _abort_family_rebalance_entry_payloads_after_no_submit(
+                trade_conn,
+                fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                now_iso=decision_time.astimezone(UTC).isoformat(),
+                reason="EXECUTOR_BOUNDARY_MISSING",
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -3401,6 +3610,13 @@ def event_bound_live_adapter_from_trade_conn(
         # mainline convergence node never constructs this adapter, so the 293-order
         # mainline is unaffected.
         if real_order_submit_enabled and operator_arm is None:
+            _abort_family_rebalance_entry_payloads_after_no_submit(
+                trade_conn,
+                fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                now_iso=decision_time.astimezone(UTC).isoformat(),
+                reason="OPERATOR_ARM_REQUIRED",
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -3432,6 +3648,13 @@ def event_bound_live_adapter_from_trade_conn(
                 build_conn = live_cap_conn or trade_conn
                 entries_pause_reason = _entry_pause_blocks_live_submit(build_conn)
                 if entries_pause_reason is not None:
+                    _abort_family_rebalance_entry_payloads_after_no_submit(
+                        trade_conn,
+                        fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                        shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                        now_iso=decision_time.astimezone(UTC).isoformat(),
+                        reason=f"entries_paused:{entries_pause_reason}",
+                    )
                     return dataclass_replace(
                         no_submit_receipt,
                         submitted=False,
@@ -3439,6 +3662,52 @@ def event_bound_live_adapter_from_trade_conn(
                         reason=f"entries_paused:{entries_pause_reason}",
                         proof_accepted=False,
                     )
+                _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
+                if (
+                    _shift_entry_lease is not None
+                    and str(_shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
+                ):
+                    _family_token_ids = tuple(
+                        str(token or "").strip()
+                        for token in (_shift_entry_lease.get("family_token_ids") or ())
+                        if str(token or "").strip()
+                    )
+                    if not _family_token_ids:
+                        _family_token_ids = tuple(
+                            token
+                            for token in (
+                                str(no_submit_receipt.token_id or "").strip(),
+                                str(_shift_entry_lease.get("old_token_id") or "").strip(),
+                                str(_shift_entry_lease.get("selected_token_id") or "").strip(),
+                            )
+                            if token
+                        )
+                    _family_pending_truth = _family_pending_entry_truth(
+                        build_conn,
+                        candidate_token_ids=_family_token_ids,
+                        trade_conn=trade_conn,
+                    )
+                    if (
+                        not _family_pending_truth.truth_available
+                        or _family_pending_truth.has_pending_or_unknown
+                    ):
+                        _shift_pending_reason = (
+                            "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:"
+                            f"{','.join(_family_pending_truth.sources) or 'unknown'}"
+                        )
+                        _abort_family_rebalance_entry_payloads_after_no_submit(
+                            trade_conn,
+                            shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                            now_iso=decision_time.astimezone(UTC).isoformat(),
+                            reason=_shift_pending_reason,
+                        )
+                        return dataclass_replace(
+                            no_submit_receipt,
+                            submitted=False,
+                            side_effect_status="NO_SUBMIT",
+                            reason=_shift_pending_reason,
+                            proof_accepted=False,
+                        )
                 # D1 FILL-UP PRE-SUBMIT REREAD (2026-06-22 lifecycle consult §"final
                 # gate"): for an APPROVED same-token fill-up, before any command build /
                 # venue call, re-read family exposure on fresh truth. If a NEW unowned /
@@ -3505,58 +3774,17 @@ def event_bound_live_adapter_from_trade_conn(
                     _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
-                # D1 FILL-UP lease terminal advance: COMPLETE on a venue ack, ABORTED
-                # otherwise (a non-ack submit result means no resting order materialized
-                # for this fill-up, so release the family for the next legitimate
-                # rebalance). No-op for non-fill-up receipts.
-                if _fill_up_lease is not None:
-                    _now_iso = certificate_decision_time.isoformat() if hasattr(
-                        certificate_decision_time, "isoformat"
-                    ) else decision_time.astimezone(UTC).isoformat()
-                    if submit_result.venue_ack_received:
-                        _fill_up_wiring.complete_fill_up_lease(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            new_entry_command_id=str(
-                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
-                            ),
-                        )
-                    else:
-                        _fill_up_wiring.abort_fill_up_lease(
-                            trade_conn,
-                            _fill_up_lease.get("intent_id"),
-                            now_iso=_now_iso,
-                            reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
-                        )
-                # D2 SHIFT-BIN ENTER_NEW_BIN lease terminal advance: this submit IS the
-                # counter-entry (old leg already proven closed). COMPLETE on a venue ack,
-                # ABORTED otherwise (no resting counter-entry materialized → release the
-                # family). No-op for every non-shift / EXIT_OLD_LEG receipt.
-                _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
-                if (
-                    _shift_entry_lease is not None
-                    and str(_shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
-                ):
-                    _now_iso_sb = certificate_decision_time.isoformat() if hasattr(
-                        certificate_decision_time, "isoformat"
-                    ) else decision_time.astimezone(UTC).isoformat()
-                    if submit_result.venue_ack_received:
-                        _shift_bin_wiring.complete_shift_bin_lease(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            new_entry_command_id=str(
-                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
-                            ),
-                        )
-                    else:
-                        _shift_bin_wiring.abort_shift_bin_lease(
-                            trade_conn,
-                            _shift_entry_lease.get("intent_id"),
-                            now_iso=_now_iso_sb,
-                            reason=f"SHIFT_BIN_ENTRY_SUBMIT_NO_ACK:{submit_result.status}",
-                        )
+                _advance_family_rebalance_lease_after_submit(
+                    trade_conn=trade_conn,
+                    no_submit_receipt=no_submit_receipt,
+                    command=command,
+                    submit_result=submit_result,
+                    now_iso=(
+                        certificate_decision_time.isoformat()
+                        if hasattr(certificate_decision_time, "isoformat")
+                        else decision_time.astimezone(UTC).isoformat()
+                    ),
+                )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=certificate_decision_time,
@@ -3698,6 +3926,17 @@ def event_bound_live_adapter_from_trade_conn(
                             command,
                             decision_time=certificate_decision_time,
                         )
+                    _advance_family_rebalance_lease_after_submit(
+                        trade_conn=trade_conn,
+                        no_submit_receipt=no_submit_receipt,
+                        command=command,
+                        submit_result=terminal_result,
+                        now_iso=(
+                            certificate_decision_time.isoformat()
+                            if hasattr(certificate_decision_time, "isoformat")
+                            else decision_time.astimezone(UTC).isoformat()
+                        ),
+                    )
                     receipt_cert = build_execution_receipt_certificate(
                         execution_command_cert=command,
                         decision_time=certificate_decision_time,
@@ -4670,6 +4909,8 @@ def _build_event_bound_no_submit_receipt_core(
     behavior). When either provider/ledger is None the sizing reduces EXACTLY to
     pre-#107 single-Kelly (no regression for unwired callers/tests)."""
 
+    if provenance_capture is None:
+        provenance_capture = {}
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     allow_same_family_monitor_owned = _event_allows_same_family_monitor_owned(
@@ -5930,6 +6171,45 @@ def _build_event_bound_no_submit_receipt_core(
                             },
                         ))
                     if str(selected_token_id or "") == _existing_shift_lease.selected_token_id:
+                        _family_pending_truth = _family_pending_entry_truth(
+                            locked_opportunity_conn,
+                            candidate_token_ids=_family_candidate_token_ids(
+                                family,
+                                selected_token_id=str(selected_token_id or ""),
+                            ),
+                            trade_conn=trade_conn,
+                        )
+                        if (
+                            not _family_pending_truth.truth_available
+                            or _family_pending_truth.has_pending_or_unknown
+                        ):
+                            return _with_shrink(EventSubmissionReceipt(
+                                False,
+                                event.event_id,
+                                event.causal_snapshot_id,
+                                reason=(
+                                    "SHIFT_BIN_ENTER_NEW_BIN_BLOCKED:"
+                                    f"{','.join(_family_pending_truth.sources) or 'unknown'}"
+                                ),
+                                city=family.city,
+                                target_date=family.target_date,
+                                metric=family.metric,
+                                condition_id=str(candidate.condition_id or ""),
+                                token_id=selected_token_id,
+                                executable_snapshot_id=proof.executable_snapshot_id,
+                                family_id=family.family_id,
+                                bin_label=candidate.bin.label,
+                                direction=direction,
+                                q_live=receipt_q_live,
+                                q_lcb_5pct=receipt_q_lcb,
+                                c_fee_adjusted=execution_price.value,
+                                c_cost_95pct=proof.c_cost_95pct,
+                                p_fill_lcb=proof.p_fill_lcb,
+                                trade_score=trade_score,
+                                native_quote_available=True,
+                                source_status="MATCH",
+                                family_complete=True,
+                            ))
                         _shift_bin_wiring.record_entry_submitted(
                             trade_conn,
                             _existing_shift_lease.intent_id,
@@ -5945,6 +6225,11 @@ def _build_event_bound_no_submit_receipt_core(
                                 "city": family.city,
                                 "target_date": family.target_date,
                                 "metric": family.metric,
+                                "selected_token_id": str(selected_token_id or ""),
+                                "family_token_ids": _family_candidate_token_ids(
+                                    family,
+                                    selected_token_id=str(selected_token_id or ""),
+                                ),
                             }
                     else:
                         _shift_bin_wiring.exit_only_complete(
@@ -6030,6 +6315,14 @@ def _build_event_bound_no_submit_receipt_core(
                     token_id=str(selected_token_id or ""),
                     trade_conn=trade_conn,
                 )
+                _family_pending_truth = _family_pending_entry_truth(
+                    locked_opportunity_conn,
+                    candidate_token_ids=_family_candidate_token_ids(
+                        family,
+                        selected_token_id=str(selected_token_id or ""),
+                    ),
+                    trade_conn=trade_conn,
+                )
                 _fill_up_plan = _fill_up_wiring.plan_fill_up(
                     trade_conn,
                     is_redecision_event=True,
@@ -6043,6 +6336,9 @@ def _build_event_bound_no_submit_receipt_core(
                     target_total_exposure_usd=float(_robust_stake_usd),
                     same_token_pending_entry_usd=float(_same_token_pending),
                     venue_min_increment_usd=float(_venue_min_usd),
+                    has_unowned_pending_or_unknown_entry=bool(
+                        _family_pending_truth.has_pending_or_unknown
+                    ),
                     now_iso=decision_time.isoformat(),
                 )
                 if _fill_up_plan.kind == "ABORT":
@@ -6166,11 +6462,11 @@ def _build_event_bound_no_submit_receipt_core(
                     # shift closed (reuse the SAME pending-entry truth D1 uses; >0 means
                     # an in-flight same-token-or-sibling entry that is not yet position
                     # truth — ambiguous family exposure).
-                    _family_pending_usd = _family_pending_entry_usd(
+                    _family_pending_truth = _family_pending_entry_truth(
                         locked_opportunity_conn,
-                        candidate_token_ids=(
-                            _held_sibling.token_id,
-                            str(selected_token_id or ""),
+                        candidate_token_ids=_family_candidate_token_ids(
+                            family,
+                            selected_token_id=str(selected_token_id or ""),
                         ),
                         trade_conn=trade_conn,
                     )
@@ -6224,7 +6520,9 @@ def _build_event_bound_no_submit_receipt_core(
                             if _old_leg_residual.usd is not None
                             else float(_dust_floor_usd if _old_leg_live else 0.0)
                         ),
-                        has_unowned_pending_or_unknown_entry=bool(_family_pending_usd > 0.0),
+                        has_unowned_pending_or_unknown_entry=bool(
+                            _family_pending_truth.has_pending_or_unknown
+                        ),
                         now_iso=decision_time.isoformat(),
                         old_leg_dust_floor_usd=float(_dust_floor_usd),
                     )
@@ -6269,6 +6567,11 @@ def _build_event_bound_no_submit_receipt_core(
                                 "city": family.city,
                                 "target_date": family.target_date,
                                 "metric": family.metric,
+                                "selected_token_id": str(selected_token_id or ""),
+                                "family_token_ids": _family_candidate_token_ids(
+                                    family,
+                                    selected_token_id=str(selected_token_id or ""),
+                                ),
                             }
                         return _with_shrink(EventSubmissionReceipt(
                             False,
@@ -6319,6 +6622,11 @@ def _build_event_bound_no_submit_receipt_core(
                                 "city": family.city,
                                 "target_date": family.target_date,
                                 "metric": family.metric,
+                                "selected_token_id": str(selected_token_id or ""),
+                                "family_token_ids": _family_candidate_token_ids(
+                                    family,
+                                    selected_token_id=str(selected_token_id or ""),
+                                ),
                             }
                     # NOOP (no sibling) falls through with _robust_stake_usd unchanged.
         kelly = dataclass_replace(
@@ -6423,6 +6731,13 @@ def _build_event_bound_no_submit_receipt_core(
         actual_cost=float(execution_price.value),
     )
     if actual_submit_quality_reason is not None:
+        _abort_family_rebalance_entry_payloads_after_no_submit(
+            trade_conn,
+            fill_up_lease_payload=provenance_capture.get("fill_up_lease"),
+            shift_bin_lease_payload=provenance_capture.get("shift_bin_lease"),
+            now_iso=decision_time.isoformat(),
+            reason=str(actual_submit_quality_reason),
+        )
         return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
@@ -6477,6 +6792,13 @@ def _build_event_bound_no_submit_receipt_core(
         level=get_current_level(),
     )
     if not risk.passed:
+        _abort_family_rebalance_entry_payloads_after_no_submit(
+            trade_conn,
+            fill_up_lease_payload=provenance_capture.get("fill_up_lease"),
+            shift_bin_lease_payload=provenance_capture.get("shift_bin_lease"),
+            now_iso=decision_time.isoformat(),
+            reason="RISK_GUARD_BLOCKED",
+        )
         return _with_shrink(
             EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
         )
@@ -7303,6 +7625,143 @@ def _normalize_event_bound_executor_submit_result(
         reconciliation_followup_required=reconciliation_followup_required,
         side_effect_known=side_effect_known,
     )
+
+
+def _submit_result_requires_reconcile(result: EventBoundExecutorSubmitResult) -> bool:
+    return bool(
+        result.venue_call_started
+        and (
+            result.reconciliation_followup_required
+            or not result.side_effect_known
+            or str(result.status or "").upper() in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}
+        )
+    )
+
+
+def _abort_family_rebalance_entry_payloads_after_no_submit(
+    trade_conn: sqlite3.Connection,
+    *,
+    fill_up_lease_payload: Mapping[str, object] | None = None,
+    shift_bin_lease_payload: Mapping[str, object] | None = None,
+    now_iso: str,
+    reason: str,
+) -> None:
+    """Terminalize entry-phase family leases when a later gate emits NO_SUBMIT."""
+
+    if fill_up_lease_payload is not None:
+        intent_id = fill_up_lease_payload.get("intent_id")
+        if intent_id:
+            _fill_up_wiring.abort_fill_up_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"FILL_UP_POST_PLAN_NO_SUBMIT:{reason}",
+            )
+    if (
+        shift_bin_lease_payload is not None
+        and str(shift_bin_lease_payload.get("phase") or "") == "ENTER_NEW_BIN"
+    ):
+        intent_id = shift_bin_lease_payload.get("intent_id")
+        if intent_id:
+            _shift_bin_wiring.abort_shift_bin_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:{reason}",
+            )
+
+
+def _advance_family_rebalance_lease_after_submit(
+    *,
+    trade_conn: sqlite3.Connection,
+    no_submit_receipt: EventSubmissionReceipt,
+    command: DecisionCertificate,
+    submit_result: EventBoundExecutorSubmitResult,
+    now_iso: str,
+) -> None:
+    """Advance fill-up/shift-bin family leases after an entry submit outcome."""
+
+    entry_command_id = _execution_command_id_from_command_certificate(command)
+    status = str(submit_result.status or "").strip().upper()
+    known_submitted = bool(submit_result.venue_ack_received and status == "SUBMITTED")
+
+    fill_up_lease = no_submit_receipt.fill_up_lease_payload
+    if fill_up_lease is not None:
+        intent_id = fill_up_lease.get("intent_id")
+        if known_submitted and entry_command_id:
+            _fill_up_wiring.complete_fill_up_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id,
+            )
+        elif known_submitted:
+            _fill_up_wiring.record_fill_up_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=None,
+                reason="fill_up_entry_ack_missing_durable_command_id",
+            )
+        elif _submit_result_requires_reconcile(submit_result):
+            _fill_up_wiring.record_fill_up_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id or None,
+                reason=f"FILL_UP_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
+            )
+        else:
+            _fill_up_wiring.abort_fill_up_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
+            )
+
+    shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
+    if (
+        shift_entry_lease is not None
+        and str(shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
+    ):
+        intent_id = shift_entry_lease.get("intent_id")
+        if known_submitted and entry_command_id:
+            _shift_bin_wiring.complete_shift_bin_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id,
+            )
+        elif known_submitted:
+            _shift_bin_wiring.record_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=None,
+                reason="shift_bin_entry_ack_missing_durable_command_id",
+            )
+        elif _submit_result_requires_reconcile(submit_result):
+            _shift_bin_wiring.record_entry_unknown(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                new_entry_command_id=entry_command_id or None,
+                reason=f"SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:{submit_result.status}",
+            )
+        else:
+            _shift_bin_wiring.abort_shift_bin_lease(
+                trade_conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"SHIFT_BIN_ENTRY_SUBMIT_NO_ACK:{submit_result.status}",
+            )
+
+
+def _execution_command_id_from_command_certificate(command: DecisionCertificate) -> str:
+    payload = getattr(command, "payload", {}) or {}
+    if isinstance(payload, Mapping):
+        return str(payload.get("execution_command_id") or "").strip()
+    return ""
 
 
 # Sentinel prefix the caller (process_pending submit body) recognizes to map a
@@ -13829,6 +14288,13 @@ def _proofs_with_qkernel_candidate_economics(
         proof: _CandidateProof,
         cert: Mapping[str, Any],
     ) -> str | None:
+        rest_policy = str(
+            getattr(proof, "rest_then_cross_policy", None)
+            or cert.get("rest_then_cross_policy")
+            or ""
+        ).strip().upper()
+        if rest_policy in {"MAKER_TAKER_FORBIDDEN", "HOLD_REST_IN_PROGRESS"}:
+            return f"QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy={rest_policy}"
         try:
             side = str(cert.get("side") or "").strip().upper()
             cost = float(cert.get("cost"))
@@ -13979,6 +14445,10 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     (
         "ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
         "qkernel_center_yes_quality_floor",
+    ),
+    (
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+        "rest_then_cross_not_actionable",
     ),
     (
         "ADMISSION_DAY0_FORECAST_ENTRY_REQUIRES_OBSERVATION_LANE",
@@ -14571,6 +15041,12 @@ def _generate_candidate_proofs(
     _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
         trade_conn, family=family, decision_time=decision_time
     )
+    payload_rest_policy = str(payload.get("rest_then_cross_policy") or "").strip().upper()
+    payload_escalated_after_rest = payload_rest_policy == "TAKER_ESCALATED_AFTER_REST" or str(
+        payload.get("rest_then_cross_escalated_after_rest") or ""
+    ).strip().lower() in {"1", "true", "yes"}
+    if payload_escalated_after_rest and not _rtc_unexpired_rest:
+        _rtc_escalated = True
     _day0_proof_maker_only = _is_day0_lane_event_type(getattr(event, "event_type", None))
     # Twin-authority reconciliation #7 (2026-06-11, selected-leg repair 2026-06-30):
     # replacement coverage verdicts are keyed by (condition_id, direction). The
@@ -19323,12 +19799,57 @@ def _day0_process_sigma_native(
         margin = stale_extreme_uncertainty_margin(
             unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
         )
-        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
+        unseen_peak_sigma = 0.0
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric == "high":
+            post_peak_confidence = _optional_float(payload.get("_edli_day0_post_peak_confidence"))
+            if post_peak_confidence is not None:
+                peak = min(1.0, max(0.0, float(post_peak_confidence)))
+                precision = _optional_float(payload.get("members_precision") or payload.get("precision"))
+                if precision is None or precision <= 0.0:
+                    precision = 1.0
+                unseen_peak_sigma = (1.0 - peak) * 3.0 * float(precision)
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2 + unseen_peak_sigma ** 2))
+        if unseen_peak_sigma > 0.0:
+            payload["_edli_day0_unseen_peak_sigma_native"] = float(unseen_peak_sigma)
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
     return sigma
+
+
+def _day0_extra_member_sigma_native(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+) -> float:
+    """Extra member-space sigma for Day0 point q integration.
+
+    ``p_raw_vector_from_maxes`` already adds instrument sigma.  The Day0 process
+    seam includes instrument + staleness + unseen-peak uncertainty because the
+    q_lcb bootstrap samples raw member values directly.  For point q, pass only
+    the extra part so instrument noise is not double-counted.
+    """
+
+    sigma = _day0_process_sigma_native(
+        payload=payload,
+        family=family,
+        unit=unit,
+        decision_time=decision_time,
+    )
+    if sigma is None:
+        return 0.0
+    try:
+        from src.signal.forecast_uncertainty import sigma_instrument
+
+        base_sigma = float(sigma_instrument(unit).value)
+        extra = float(np.sqrt(max(float(sigma) ** 2 - base_sigma ** 2, 0.0)))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 
 def _make_day0_bootstrap_sampler(
@@ -19647,9 +20168,20 @@ def _market_analysis_from_event_snapshot(
             if _bias_corrected
             else 0.0
         )
+        day0_extra_member_sigma = 0.0
+        if _day0_rd_members is not None:
+            day0_extra_member_sigma = _day0_extra_member_sigma_native(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+            )
+            if day0_extra_member_sigma > 0.0:
+                payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
         p_raw = _snapshot_p_raw(
             snapshot, family=family, bins=bins, members=members, payload=payload,
             members_already_corrected=True,
+            extra_member_sigma=day0_extra_member_sigma,
         )
         if _day0_rd_members is not None:
             # remaining-day mode: identity calibration (see block comment above)
@@ -20947,6 +21479,7 @@ def _snapshot_p_raw(
     members: np.ndarray,
     payload: dict[str, object],
     members_already_corrected: bool = False,
+    extra_member_sigma: float = 0.0,
 ) -> np.ndarray:
     city = runtime_cities_by_name().get(family.city)
     if city is None:
@@ -20965,7 +21498,13 @@ def _snapshot_p_raw(
         )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
-    arr = p_raw_vector_from_maxes(members, city, semantics, bins)
+    arr = p_raw_vector_from_maxes(
+        members,
+        city,
+        semantics,
+        bins,
+        extra_member_sigma=extra_member_sigma,
+    )
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
     total = float(arr.sum())

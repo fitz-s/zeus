@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-07-03
 # Authority basis: RESTART_READINESS_PLAN.md §3 PRECEDENCE-1; JOB fda4e853 audit_2026_05_17
 """Antibody tests for PRECEDENCE-1: pause_entries operator precedence guard.
 
@@ -207,6 +207,12 @@ def test_entries_pause_read_is_db_authoritative_when_memory_is_stale_false():
     assert cp.is_entries_paused() is True
     assert cp.get_entries_pause_source() == "manual_command"
     assert cp.get_entries_pause_reason() == "manual operator pause"
+    evidence = cp.get_entries_pause_evidence()
+    assert evidence["source"] == "manual_command"
+    assert evidence["reason"] == "manual operator pause"
+    assert evidence["issued_by"] == "control_plane"
+    assert evidence["issued_at"]
+    assert evidence["effective_until"] is None
 
 
 def test_entries_pause_read_clears_stale_memory_when_db_unpaused():
@@ -236,6 +242,14 @@ def test_entries_pause_read_clears_stale_memory_when_db_unpaused():
     assert cp.is_entries_paused() is False
     assert cp.get_entries_pause_source() is None
     assert cp.get_entries_pause_reason() is None
+    evidence = cp.get_entries_pause_evidence()
+    assert evidence == {
+        "issued_at": None,
+        "effective_until": None,
+        "issued_by": None,
+        "source": None,
+        "reason": None,
+    }
 
 
 def test_live_submit_pause_gates_ignore_trade_legacy_archived_control_override():

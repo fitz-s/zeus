@@ -4447,6 +4447,14 @@ def test_107_durable_live_cap_seed_excludes_trade_truth_materialized_exposure():
         INSERT INTO position_current (
             phase, token_id, no_token_id, cost_basis_usd, chain_cost_basis_usd, shares
         )
+        VALUES ('active', 'token-filled-command', '', 10.0, 0.0, 10.0)
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO position_current (
+            phase, token_id, no_token_id, cost_basis_usd, chain_cost_basis_usd, shares
+        )
         VALUES ('active', '', 'token-active-position', 4.0, 0.0, 5.0)
         """
     )

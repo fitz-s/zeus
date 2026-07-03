@@ -9,10 +9,13 @@
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1083,6 +1086,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("recovery", tuple(labels)))
         return True, "live restart recovery passed"
 
+    def _pause(labels):
+        calls.append(("pause_entries", tuple(labels)))
+        return True, "live restart entry pause guard armed"
+
     def _launch(label):
         calls.append(("launch", label))
         return True, f"bootstrapped {label}"
@@ -1100,6 +1107,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         return True, "post-start EDLI queue progress verified"
 
     monkeypatch.setattr(dl, "_stop_label", _stop)
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", _pause)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
@@ -1112,6 +1120,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert rc == 0
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
+        ("pause_entries", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),
@@ -1124,6 +1133,94 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
+def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_pause_guard_indefinite", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    class Result:
+        returncode = 0
+        stdout = "entries pause guard armed\n"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    ok, detail = dl._pause_entries_for_live_restart_if_needed([dl.LIVE_TRADING_LABEL])
+
+    assert ok is True
+    assert "entries pause guard armed" in detail
+    assert calls
+    code = calls[0][0][2]
+    assert "deploy_live_restart_guard" in code
+    assert "entries pause guard preserved" in code
+    assert "issued_by IN ('control_plane', 'operator')" in code
+    assert "issued_by='control_plane'" in code
+    assert "effective_until=None" in code
+    assert "system_auto_pause" not in code
+
+
+def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_pause_guard_preserve_operator", "deploy_live.py")
+    pause_calls = []
+    sql_calls = []
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    control_mod = types.ModuleType("src.control.control_plane")
+    state_db_mod = types.ModuleType("src.state.db")
+
+    def fake_pause_entries(*args, **kwargs):
+        pause_calls.append((args, kwargs))
+
+    class _Cursor:
+        def fetchone(self):
+            return ("operator_investigation", "control_plane", "2026-07-03T00:00:00+00:00")
+
+    class _Conn:
+        def execute(self, sql, params=()):
+            sql_calls.append((sql, params))
+            return _Cursor()
+
+        def close(self):
+            return None
+
+    control_mod.pause_entries = fake_pause_entries
+    state_db_mod.get_world_connection = lambda: _Conn()
+    monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
+    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(args[2], {})
+        return Result(out.getvalue())
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    ok, detail = dl._pause_entries_for_live_restart_if_needed([dl.LIVE_TRADING_LABEL])
+
+    assert ok is True
+    assert "entries pause guard preserved" in detail
+    assert "operator_investigation" in detail
+    assert pause_calls == []
+    assert sql_calls
+    assert "effective_until IS NULL" in sql_calls[0][0]
+
+
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     dl = _load("deploy_live_restart_order_all", "deploy_live.py")
     calls = []
@@ -1131,6 +1228,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+    )
     monkeypatch.setattr(
         dl,
         "_stop_label",
@@ -1170,7 +1272,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     rc = dl.main(["restart", "all"])
 
     assert rc == 0
-    assert calls[0][0] == "launch"
+    assert calls[0] == ("pause_entries", tuple(dl.DAEMONS.values()))
     stop_index = calls.index(("stop", dl.LIVE_TRADING_LABEL))
     recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
@@ -1198,6 +1300,11 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+    )
+    monkeypatch.setattr(
+        dl,
         "_stop_label",
         lambda label: (calls.append(("stop", label)) or (True, f"stopped {label}")),
     )
@@ -1222,6 +1329,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     assert rc == 1
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
+        ("pause_entries", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
         ("recovery", tuple(expanded_labels)),

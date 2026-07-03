@@ -682,6 +682,27 @@ def complete_shift_bin_lease(
     )
 
 
+def record_entry_unknown(
+    conn: sqlite3.Connection,
+    intent_id: Optional[str],
+    *,
+    now_iso: str,
+    new_entry_command_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """Keep the shift-bin counter-entry lease active while submit reconciles."""
+    if not intent_id:
+        return
+    advance_rebalance_lease(
+        conn,
+        intent_id,
+        status="ENTRY_UNKNOWN",
+        now_iso=now_iso,
+        new_entry_command_id=new_entry_command_id,
+        abort_reason=reason,
+    )
+
+
 def exit_only_complete(
     conn: sqlite3.Connection,
     intent_id: Optional[str],
