@@ -384,9 +384,219 @@ needs an explicit ruling; (c) _record_qkernel_selection_family_facts reads decis
 getattr-with-default — FIELD RENAMES FAIL SOFT (shim must assert field presence); (d) NO existing
 G3 byte-identical harness for this flag — newly authored per P2 gates table
 (docs/evidence/planning_2026-06-14/P2_sequence_and_critical_path.md:120-142).
-IN FLIGHT: fork drafting src/solve/ interface skeleton (types/scenario_service/menu_adapter/
-solver-shim/kappa/exits) + W3 design packet (uncommitted). THEN: main-thread review →
-chatgpt-consult on concrete interfaces → opus math core → G3 harness → seam swap.
+SKELETON LANDED — 14eda27bb (7 interface files import-clean + design packet with 5 orchestrator
+decisions RESOLVED: two-phase ON-mode confirmed; conversion routes in phase-2 behind the W2.4
+dry-run gate; κ=1.0 until W5 haircut deletion [single-owner, like-for-like promotion evidence];
+coherence lockstep [shim emits allows=True, guard retires at flag-ON]; legacy max_stake_usd NOT
+threaded [would break G3 OFF byte-identity; new solver budget-aware by construction + CAS rail]).
+REGISTRY DEBT: skeleton landed unregistered — assigned as first item of the math-core packet.
+BRANCH PUSHED to public origin (repo is PUBLIC — github.com/fitz-s/zeus) for consult link
+delivery. CHATGPT-CONSULT IN FLIGHT (REQ-20260702-212900-e935c9, Pro Extended, conversation
+6a471ed8…, answer → /tmp/cgc/answer_REQ-20260702-212900-e935c9.txt; detached waiter armed).
+Infra note for future consults: HTTP_PROXY=127.0.0.1:20128 intercepts loopback — ALWAYS export
+NO_PROXY=127.0.0.1,localhost before cdp_launch.sh/cdp_consult.py (launcher's liveness curl is
+fooled by the proxy's 404 page otherwise).
+CONSULT VERDICT (Pro Extended, deep review): NO-GO on current interfaces — six blockers, ALL
+ACCEPTED with rulings (answer: /tmp/cgc/answer_REQ-20260702-212900-e935c9.txt): ① JOINT ATOM
+AXIS — JointOutcomeScenarioSet(atoms, q_draws, weights, semantics enum) + WealthStateByAtom incl.
+reservations/resting/unsettled/ledger-snapshot-id (concatenated marginal bins cannot express a
+joint distribution; C4 swap would force solver rewrite); ② index-paired product measure invalid
+on sorted draws (comonotone!) + TIGHTENED RULING: transitional service = single-family degenerate
+case ONLY, multi-family fails closed until C4 (caps = loss limiter, never a sizing license —
+numeric proof: identical q=.60 f=.20 pair: independent +.039, comonotone −.0024 expected log);
+③ RepairCertificate typed artifact (repaired ΔU>0 required for non-empty plan); ④
+LegacyDecisionProjection — phase-1 evidence grades the STANDALONE post-haircut primary leg
+(standalone ΔU≤0 → no-trade; full-plan grading would bias the A/B toward W3); ⑤ exits stay
+interface-only until ledger-aligned wealth state exists; ⑥ ON-mode sentinel tests (getattr
+soft-fail) beyond G3 OFF byte-identity. Plus: CVaR/worst-case objective (quantile-of-concave is
+NOT unimodal — legacy payoff_vector assertion unsafe to inherit); same-feasible-set dominance
+baseline; per-leg quantization; kappa typed; max_stake_usd out of core solve.
+W3.2 DONE — 3 commits: 56c410b35 (registry debt) + 74377574f (interface revision, all 6 blockers
+addressed + REV-2 packet appendix) + db624ee96 (math core). Objective = lower-tail CVaR_alpha of
+per-draw expected Δlog-wealth over joint atoms — CVaR-of-concave IS concave → global optimum by
+construction, concavity TEST-GUARDED (random rays + 4000-pt brute-force match); deterministic
+coordinate ascent + explicit max(joint, top1) dominance floor. 57 tests: 71 dominance evals,
+identical-marginals/different-joint fixture (comonotone strictly worse — atom axis earns its
+cost), min-size sign-flip → NO_IMPROVING_DISCRETE_PLAN, VaR non-unimodality counterexample,
+sentinel facts-writer, zero-wealth typed errors. Multi-family FAILS CLOSED (stronger than
+consult's envelope alternative — implementer's call, ratified). Zero regressions (identical 4
+pre-existing). DECLARED DEFERRALS (sub-slice 3): SolveEngineShim.decide() body,
+build_wealth_by_atom ledger derivation, exits economic bodies, per-level worst-price model v2.
+VERIFIER: VERIFIED-WITH-FINDINGS — dominance HONEST (top-1 baseline through identical
+repair/worst-price pipeline, verified by code trace), certificate structurally inescapable,
+sentinel two-sided, import graph clean; 2 gaps (1-D-only brute force; row-sum only for
+POSTERIOR_Q_DRAWS). CONSULT FOLLOW-UP: interface foundation CLEARED, CVaR RATIFIED (correct
+interpretation: robustification over served posterior draws, not adversarial band set), GO for
+shim sub-slice, NO-GO for phase-1 evidence until fixes — 2 NEW BLOCKERS: ① no executable-budget
+constraint (W_end>0 does not imply affordability — mutually exclusive claims can all pay while
+upfront outlay exceeds cash) ② route-cost depth cap (avg_cost priced at route.shares, max_units
+was full ladder → stale cheap average beyond priced depth). FIX ROUND 2 CONSOLIDATED →
+w3-math-core (15 items: budget constraint in _feasible_hi/_repair/certificate; max_units=
+min(max_shares, route.shares); phase-1 menu = direct native ONLY [basket/pair payoff projection
+via single instrument was WRONG — riskfree basket is constant-across-atoms]; chosen_source
+certificate parent; prefix positivity; CVaR zero-weight NaN; multi-dim brute force + gap
+diagnostics; row-sum all semantics; projector full-coverage; MIN_TAIL_DRAWS stamp; NO-ladder
+quantization; price assignment stays with existing submit path in phase 1; PlannedOrder
+validation; real-consumer AST sentinel; packet rev-2 hygiene + coordinate-ascent-over-
+Rockafellar-Uryasev ruling recorded [RU = future hardening if gap diagnostics show stall]).
+RE-SCOPED: build_wealth_by_atom minimal entry-side body now IN sub-slice 3 (not deferrable —
+evidence on underivable wealth is not evidence). α-sensitivity replay (α∈{.01,.05,.10}
+decision-stability) recorded as promotion-evidence-gate item.
+FIX ROUND 2 LANDED — 2c6c70f46 (all 15 items; tests/solve 75 green; baseline unchanged).
+KEY EVENT: the multi-dim brute-force guard PAID IMMEDIATELY — pure coordinate ascent was NOT
+globally optimal once the budget constraint landed (stalls: budget face / origin under
+superadditive CVaR diversification directions / balanced-growth rays); implementer did NOT widen
+tolerances — closed with three deterministic moves (budget-neutral pairwise exchange, diversified
+multi-start, radial step) until grids match. Residual asymmetric-coupling stall risk ON RECORD as
+a phase-2 promotion-gate item (RU convex program = the recorded hardening path).
+SPOT-CHECK: MERGE-CLEARED (budget three-layer chain traced + fixture arithmetic independently
+verified [wealth bound 220 vs cash bound 20]; grid tolerances byte-identical across commits —
+the only test change was the NECESSARY budget filter on grid combos; AST sentinel parses the
+real event_reactor_adapter source with genuine positive-detection proof).
+W3.2 MERGED → 2188471b4 (zero conflicts, 75+191+68 sanity green, pin unmoved) and PUSHED to
+origin (wave branch public @ 2188471b4).
+IN FLIGHT: sub-slice 3 (w3-math-core, same branch): SolveEngineShim.decide() body with phase-1
+invariants (phase1_tradeable direct-executable primary; standalone post-haircut ΔU≤0 → no-trade;
+coherence lockstep; projection-graded evidence fields) + minimal entry-side build_wealth_by_atom
+(CAS spendable net of reservations + ledger_snapshot_id) + haircut re-scoring arithmetic
+(replicated, not wired). STOP conditions armed (kwargs insufficiency; ledger API gap).
+W3.3 DONE — c7880b68c (86 tests). Shim composes inner engine for scaffolding, REPLACES selection
+with the joint solver; projection ΔU/size stamped into selected.optimal_delta_u/optimal_stake_usd
+(overlay grades PROJECTION, never joint-plan ΔU); phase-1 gate two-layered (solver
+UNSAFE_PREFIX_DECOMPOSITION upstream + shim PHASE1_PRIMARY_LEG_NOT_TRADEABLE); wealth builder
+injected-inputs (no ledger reach; no-provider default floors spendable at min endowment — never
+fabricates unconfirmed cash). APPROVED judgment: haircut = config-factor at decide() + dual
+pre/post stamps; settlement receipts authoritative at grading (recorded as phase-1
+evidence-grading contract in packet appendix). Injection points ready for seam swap
+(engine=/spendable_cash_provider=/ledger_snapshot_id_provider=; self.last_projection audit hook).
+NOTED for seam-swap review: inner engine's q_lcb/calibrator guards (W5-deletion targets) still
+run in composition — like-for-like preserved in phase 1.
+W3.3 SPOT-CHECK: MERGE-CLEARED (verifier computed joint-vs-projection ΔU empirically: 26x apart
+under real kelly_multiplier=0.02 — distinction substantive; one test-completeness note fixed in
+25e858587 with < and != assertions + pinned 0.5 haircut). MERGED → 63ba4d283, pushed to origin.
+FINAL W3 PACKET IN FLIGHT (w3-math-core drafts, ORCHESTRATOR reviews the bridge diff line-by-line
+before merge): w3_solve_enabled flag (absent=OFF, registered + deletion deadline, read per-call);
+MINIMAL seam edit at bridge :1332 (ON→SolveEngineShim with real CAS-ledger injections or
+documented None-fallback; OFF→byte-identical, lazy import inside ON branch); G3 harness
+(absent-vs-OFF byte-identity over fixture corpus + single-consumer proof + ON-mode
+contract/sentinel integration); import-isolation extended to flag-OFF decide run. STOP conditions
+armed (unprovable byte-identity; threading beyond construction site → orchestrator hand-work).
+W3.4 DONE — f0ae4d4d1: bridge diff = 2 additive helpers (w3_solve_enabled per-call fail-closed
+accessor + _wrap_engine_with_solve_shim lazy-import wrapper) + 2-line guard before the UNCHANGED
+decide() call; ORCHESTRATOR LINE-BY-LINE REVIEW PASSED (verified against real commit, not the
+report) + personal G3 rerun (5 G3 + 6+1 routing green). G3 harness: absent-vs-OFF byte-identity,
+single-consumer AST proof, ON-mode contract-valid divergence, subprocess import isolation.
+LEDGER THREADING (STOP-reported, sanctioned fallback): shim runs with conservative endowment
+floor until the by-hand promotion-time threading (exact shape recorded: spendable_usd_provider
+kwarg through decide_family_via_spine + its one caller at event_reactor_adapter.py:5022).
+HYGIENE (non-blocking): numpy RuntimeWarning in G3 fixtures (−inf into percentile path) — silence
+or root-cause later.
+══ W3 WAVE CLOSED (code-complete, flag OFF) 2026-07-03 ══ — final merge cb641594d, pushed
+(97+191 sanity green, import isolation holds, pin unmoved). Wave branch = W0+W1+W2+W3 complete.
+W3 PROMOTION GATE (OPERATOR NODE, whenever ready — not blocking W4 build): deploy wave branch
+decision [2 standing deploy gates: opportunity_events rebuild window + neg-risk selector dry-run]
+→ ledger-provider hand-threading (exact shape in W3.4 report: spendable_usd_provider kwarg
+through decide_family_via_spine + caller :5022) → flag ON → settlement-graded projection evidence
+window → α-sensitivity replay → ARM flip → flag deletion.
+══ W4 WAVE OPEN ══ — locate briefs in flight (wf_3d744ffe-a9b): W4.BRIDGE (universalize book
+trigger beyond held families), W4.C3 (SOURCE_RUN_ARRIVED → derived stale set → batch cancel with
+rate-budget cancel-priority → reconciled re-solve; maker_rest_escalation deletion blast radius —
+same-packet law with rest_deadline wiring), W4.SCAN (demote 60s scan to liveness backstop;
+freshness-gate false-alarm audit), W4.MFILL (maker_fill_calibration deletion blast radius).
+BRIEFS 4/4 (MFILL via cached resume after API error). KEY FINDING: WS subscription ALREADY
+universal (all active weather tokens, limit 2000) — no subscription seam; the gap is only the
+eligibility predicate. RULINGS: resting-capital families BYPASS the entry screen (managing
+existing exposure ≠ proposing entries); NO new caps (entity-key debounce already bounds the lane
+at one pending per family by construction — first-principles answer to the flood risk).
+DISPATCHED (file-ownership partition): W4.1 bridge third-bucket (price_channel_ingest owner) ·
+W4.2 C3 staleness cancel path + maker_rest_escalation deletion same-series (new trigger module +
+main.py owner; first real wiring of W2.3 budget at CANCEL priority + W2.1 batch cancel;
+INDETERMINATE→no-cancel; no-orphaned-GTC handover proof required) · W4.4 maker_fill_calibration
+deletion (event_reactor_adapter owner; per-call-site disposition table; STOP on any site needing
+a value the predicates don't provide). W4.3 scan demotion DEFERRED until W4.2 lands (main.py
+one-owner). - W4.4 DONE + MERGED → 46211c52e, pushed. Disposition table clean (5 died-with, 1 replaced by
+  the PRE-EXISTING deterministic static prior — the module's own documented degrade path); brief's
+  blast-radius false-positives corrected by symbol-grep; module was NEVER registered (registry
+  disease exhibit). RISK ON RECORD: spread-blind prior returns until a deterministic p_fill
+  replacement lands — era.py:15361 is the rewire seam if W4.2 lands a relevant predicate.
+  NEW PRE-EXISTING FAILURE LEDGERED (merger found, verified on pre-merge tip):
+  test_rest_then_cross_policy.py::TestTakerQualityLiveGate::test_negative_surplus_still_fails_closed
+  (assert 0.0 < 0.0 on taker_fee_adjusted_edge) — predates W4.4, independent look needed.
+- W4.1 DONE + MERGED → b5cc8d384, pushed. Third bucket (resting-capital families, screen-bypassed
+  per ruling) reuses existing join chain; negative case (CANCEL_CONFIRMED latest fact must not
+  resolve) + debounce round-trip proven; bucket-size log line = the measurability answer to the
+  flood risk (no cap, entity-key debounce bounds by construction). Fixture note: Berlin not a
+  registered runtime city (market_phase fails closed) — Denver used for positive-path proofs.
+- W4.2 DONE — beca6282a (C3 path: staleness_cancel module + EventStore SOURCE_RUN_ARRIVED claim
+  lane) + 82cf9b0a8 (maker_rest_escalation deleted; venue_cancel_journal relocation for 3
+  unrelated callers; authority-invalidation lane carried forward — retired job owned it, wholesale
+  delete would have silently dropped its only recurring trigger). Proofs: 5-way parametrized
+  no-orphaned-GTC handover (all q_version combos), INDETERMINATE fail-closed e2e, budget-denial
+  defer chain (W2.3 first real wiring at CANCEL priority), confirmed-families via FRESH
+  get_command re-reads. Honest disclosure: no main.py scheduler-glue integration test (matches
+  codebase boundary; predecessor had none). DEEP VERIFIER IN FLIGHT (items 5/6b gate: fresh-re-read
+  gating + relocation byte-identity).
+  ⚠ PRE-EXISTING FAILURE CLUSTER LEDGERED (w42 flagged, predates packet): ~94 tests across
+  tests/state/ + test_venue_command_repo + test_command_bus_types fail because
+  _validate_entry_submit_payload now requires full execution_capability payload on ENTRY
+  SUBMIT_REQUESTED and older fixtures don't supply it — likely fallout from a W1-era packet on
+  this base; needs a standalone fixture-hygiene packet (verifier will ledger representative names).
+THEN: W4.2 verify → merge → W4.3 scan demotion (main.py freed; its final main.py state noted by
+verifier item 7) → W4 CLOSED → ENDGAME below.
+
+## ══ ENDGAME — operator-directed closing sequence (recorded 2026-07-03) ══
+"按照计划全部执行完毕后进行 consult full deep branch review → 合并 → deploy → 监控真实战况对比理想设计"
+
+E1. FULL DEEP BRANCH REVIEW (consult, after W4 closes):
+   - Push final wave branch; deliver `main...rebuild/w0-instrumentation` as a compare link
+     (consult.py deliver --compare) — the ENTIRE rebuild diff (W0→W4), not per-packet.
+   - deep-review-output scaffold, --output-replace; role: principal reviewer of a live-money
+     trading-engine rebuild; task bars: cross-packet seam coherence (things per-packet review
+     cannot see: W1 ledger ↔ W2.1 batch journaling ↔ W4.2 cancel path interplay; W3 shim ↔ W4.1
+     event lane), deletion completeness, OFF-path byte-identity survivability across ALL merges,
+     the pre-existing-failure ledger triage, deploy-readiness verdict.
+   - NB proxy fix: export NO_PROXY=127.0.0.1,localhost before cdp scripts.
+   - Findings → fix round (same discipline as W3: rulings, implementer, verifier) → follow-up
+     consult round until clean or explicitly-accepted residuals.
+E2. MERGE TO MAIN:
+   - Precondition: E1 clean/accepted + full-suite baseline on the wave branch documented (known
+     pre-existing failure ledger frozen as the accepted set).
+   - git checkout main (main worktree /Users/leofitz/zeus — FIRST resolve the parked dirty
+     hotfix tree there: P0.1 attribution debt, commit or stash-record it) → merge wave branch
+     (--no-ff, milestone message) → full sanity → push origin main.
+E3. DEPLOY (operator-gated, quiet window):
+   - Deploy gates on record: (a) opportunity_events full-table rebuild fires on first boot
+     (W0.3 CHECK migration) — pick a no-cycle-advance window; (b) NEGRISK_SPLIT selector dry-run
+     required before any first live neg-risk split (phase-2 concern, recorded not blocking);
+     (c) scripts/migrations/202607_cas_reservation_ledger.py runs via the migration runner.
+   - Mechanism: launchd zeus-live-main (memory: live-daemon-deploy; LIVE_REPO footgun — verify
+     the deployed path is the one the daemon actually runs).
+   - FLAG STATE AT DEPLOY: w3_solve_enabled ABSENT (=OFF) — deploy is byte-identical legacy
+     behavior by G3 proof; the deploy itself must show ZERO decision-behavior change.
+E4. REAL-COMBAT MONITORING vs IDEAL DESIGN (the operator axiom made measurable — run a
+   comparison dashboard/report over the first N settlement cycles):
+   - SPEED (the axiom): latency_from_issue + latency_from_arrival distributions (W0.2) vs the
+     design's A2 SLA intent; blind-window totals (restart churn cost, W0.2) — quantify the
+     ~20-min auto-restart tax; event-path detection latency vs the old 60-90s scan floor (W4.1
+     bucket-size logs + redecision lane timing).
+   - MONEY SAFETY: A4 identity findings count (expect zero mismatch findings; any
+     collateral_identity_mismatch → root-cause before promotion); CAS CollateralInsufficient
+     rejections (expect loud-and-rare, never silent over-reserve); reservation convert-vs-release
+     ratios sane vs fill rates.
+   - TRUTH: q_version stamp coverage % on new ENTRY commands (expect 100% on decision path,
+     NULL only on reconcile backfills); C3 cancel-set sizes + INDETERMINATE rates (blind-family
+     fail-closed working, no cancel churn); no-orphaned-GTC: zero rests older than deadline.
+   - IDEAL-VS-ACTUAL REPORT: after the window, write docs/rebuild/real_combat_vs_ideal_
+     <date>.md — per design-doc §axis (speed/safety/truth), measured vs intended, gaps ranked;
+     this report IS the input to the W3 promotion decision and the W5 go-ahead.
+E5. W3 PROMOTION (operator gate, evidence from E4): ledger-provider hand-threading (shape in
+   W3.4 report) → flag ON → settlement-graded PROJECTION evidence window (actual-submitted-size
+   grading per the recorded contract) → α-sensitivity replay {.01,.05,.10} decision-stability →
+   ARM flip → DELETE w3_solve_enabled (no-permanent-flags).
+E6. W5 DELETIONS (only after promotion): ARM-rewire FIRST (coverage-verdict decoupling) → then
+   coverage lanes, selection machinery, kelly haircut stack → κ ownership transfer (single
+   commit), monitor_refresh dissolution, strategy dispatch, regret-ledger inputs, Day0 mask
+   consolidation — each with tests + registry rows same commit, per §2 blast-radius order.
 THEN: verify W1 packets (fresh verifier incl. ≥20-thread stress rerun) → merge W1.1 → W1.2 →
 W1 wave CLOSED → W2 venue capabilities dispatch (batch wrapper, self-trade guard, rate budget,
 CTF convert/split/merge — CTF first, it is the long pole).
