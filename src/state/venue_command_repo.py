@@ -825,6 +825,7 @@ def insert_command(
     price: float,
     created_at: str,
     snapshot_id: str | None = None,
+    q_version: str | None = None,
     snapshot_checked_at: str | datetime.datetime | None = None,
     expected_min_tick_size=None,
     expected_min_order_size=None,
@@ -842,6 +843,12 @@ def insert_command(
     grammar (post-critic MAJOR-1: pre-fix the repo persisted any string;
     now it rejects "GIBBERISH" / "LONG" / etc. before INSERT). Defers the
     full enum object to command_bus to avoid a circular import.
+
+    q_version (SCH-W1.2-ORDER-STATE): the forecast_posteriors.posterior_identity_hash
+    of the q this command's decision was made against, write-once at creation.
+    Nullable — NULL BY RULE for commands with no fresh decision-basis q (e.g.
+    reconciliation backfills, which write venue_commands directly and never call
+    this function). Never re-stamped after insert.
     """
     # MAJOR-1: enum-grammar validation at the repo seam. Imported lazily so
     # this module stays import-light and the type module doesn't have to
@@ -858,6 +865,7 @@ def insert_command(
         )
 
     snapshot_id_value = snapshot_id.strip() if isinstance(snapshot_id, str) else snapshot_id
+    q_version_value = q_version.strip() or None if isinstance(q_version, str) else q_version
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,
@@ -889,12 +897,12 @@ def insert_command(
                 command_id, snapshot_id, envelope_id, position_id, decision_id, idempotency_key,
                 intent_kind, market_id, token_id, side, size, price,
                 venue_order_id, state, last_event_id, created_at, updated_at,
-                review_required_reason
+                review_required_reason, q_version
             ) VALUES (
                 :command_id, :snapshot_id, :envelope_id, :position_id, :decision_id, :idempotency_key,
                 :intent_kind, :market_id, :token_id, :side, :size, :price,
                 :venue_order_id, 'INTENT_CREATED', NULL, :created_at, :created_at,
-                NULL
+                NULL, :q_version
             )
             """,
             {
@@ -912,6 +920,7 @@ def insert_command(
                 "price": price,
                 "created_at": created_at,
                 "venue_order_id": venue_order_id,
+                "q_version": q_version_value,
             },
         )
         conn.execute(

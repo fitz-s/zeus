@@ -2620,7 +2620,12 @@ def init_schema(
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             -- Optional review
-            review_required_reason TEXT
+            review_required_reason TEXT,
+            -- SCH-W1.2-ORDER-STATE: decision-basis stamp. Nullable, write-once at
+            -- insert_command. = forecast_posteriors.posterior_identity_hash at
+            -- decision time; NULL BY RULE for non-decision-basis commands
+            -- (exchange_reconcile backfills) and legacy rows.
+            q_version TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_venue_commands_position ON venue_commands(position_id);
@@ -5426,7 +5431,9 @@ CREATE TABLE IF NOT EXISTS venue_commands (
     last_event_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    review_required_reason TEXT
+    review_required_reason TEXT,
+    -- SCH-W1.2-ORDER-STATE: decision-basis stamp; see world-copy comment above.
+    q_version TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_venue_commands_position ON venue_commands(position_id);
 CREATE INDEX IF NOT EXISTS idx_venue_commands_state ON venue_commands(state);

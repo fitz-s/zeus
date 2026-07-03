@@ -2286,12 +2286,17 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events.
+    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once, nullable) beside snapshot_id.
     write_routes:
     - venue_command_write
     downstream:
     - src/execution/executor.py
     - src/state/collateral_ledger.py
+  src/state/order_state_predicates.py:
+    zone: K2_runtime
+    authority_role: derived_order_state_predicates
+    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions computing C3 q-staleness (is_stale_pending_cancel), submit-flight delay (is_delayed), and max-rest-age (rest_deadline_exceeded) from existing truth (venue_commands.q_version, CommandState dwell, rest age) instead of storing a recomputable classification. Closes the NULL-q rest-forever leak (critic ruling 2) — rest_deadline_exceeded applies to ALL open rests regardless of q_version. Nothing consumes these yet; W4 wires them to the cancel path and REST_ELIGIBLE surface, and may delete maker_rest_escalation only in the packet that lands that wiring.
+    downstream: []  # not yet wired; W4 consumes (cancel path + REST_ELIGIBLE surface)
   src/state/canonical_write.py:
     zone: K0_frozen_kernel
     authority_role: canonical_write_guard

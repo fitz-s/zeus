@@ -5684,6 +5684,22 @@ def _live_order(
                 pre_submit_envelope,
                 command_id=command_id,
             )
+            # SCH-W1.2-ORDER-STATE: stamp the decision-basis q_version from the
+            # already-verified actionable certificate's forecast section. NULL
+            # when the certificate's forecast authority is not posterior-provenance
+            # (ensemble-sourced entries carry no posterior_identity_hash) — a
+            # defined semantic ("no posterior identity for this decision"), not
+            # missing data.
+            entry_forecast_section = (
+                actionable_payload.get("forecast")
+                if isinstance(actionable_payload, dict)
+                else None
+            )
+            entry_q_version = (
+                entry_forecast_section.get("posterior_identity_hash")
+                if isinstance(entry_forecast_section, dict)
+                else None
+            )
             insert_command(
                 conn,
                 command_id=command_id,
@@ -5699,6 +5715,7 @@ def _live_order(
                 size=shares,
                 price=intent.limit_price,
                 created_at=now_str,
+                q_version=entry_q_version,
                 snapshot_checked_at=now_str,
                 expected_min_tick_size=intent.executable_snapshot_min_tick_size,
                 expected_min_order_size=intent.executable_snapshot_min_order_size,

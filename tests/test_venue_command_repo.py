@@ -40,7 +40,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             decision_id="dec-001", idempotency_key="idem-001",
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
             side="BUY", size=10.0, price=0.5,
-            created_at="2026-04-26T00:00:00Z"):
+            created_at="2026-04-26T00:00:00Z", q_version=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
     insert_command(
@@ -64,6 +64,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
         size=size,
         price=price,
         created_at=created_at,
+        q_version=q_version,
     )
 
 
@@ -359,6 +360,79 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
             "SELECT command_id FROM venue_commands WHERE command_id = 'cmd-fail'"
         ).fetchone()
         assert row is None, "command row should have been rolled back"
+
+
+class TestInsertCommandQVersionStamp:
+    """SCH-W1.2-ORDER-STATE: q_version is write-once at insert_command, nullable,
+    stamped beside snapshot_id. Never re-stamped by append_event (no UPDATE path
+    touches the column)."""
+
+    def test_q_version_stamped_when_passed(self, conn):
+        _insert(conn, command_id="cmd-qv", q_version="posterior-hash-abc123")
+
+        row = conn.execute(
+            "SELECT q_version FROM venue_commands WHERE command_id = 'cmd-qv'"
+        ).fetchone()
+        assert row["q_version"] == "posterior-hash-abc123"
+
+    def test_q_version_null_by_default_when_omitted(self, conn):
+        _insert(conn, command_id="cmd-no-qv")
+
+        row = conn.execute(
+            "SELECT q_version FROM venue_commands WHERE command_id = 'cmd-no-qv'"
+        ).fetchone()
+        assert row["q_version"] is None
+
+    def test_q_version_whitespace_only_normalizes_to_null(self, conn):
+        _insert(conn, command_id="cmd-blank-qv", q_version="   ")
+
+        row = conn.execute(
+            "SELECT q_version FROM venue_commands WHERE command_id = 'cmd-blank-qv'"
+        ).fetchone()
+        assert row["q_version"] is None
+
+    def test_q_version_survives_state_transitions_unchanged(self, conn):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-qv-transition", q_version="posterior-hash-xyz789")
+        append_event(
+            conn,
+            command_id="cmd-qv-transition",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={
+                "execution_capability": {
+                    "allowed": True,
+                    "components": [
+                        {
+                            "component": "entry_economics",
+                            "allowed": True,
+                            "details": {
+                                "q_live": 0.7,
+                                "q_lcb_5pct": 0.6,
+                                "expected_edge": 0.1,
+                                "min_entry_price": 0.01,
+                                "limit_price": 0.5,
+                                "submit_edge": 0.1,
+                                "expected_profit_usd": 1.0,
+                                "min_expected_profit_usd": 0.01,
+                                "submit_edge_density": 0.1,
+                                "min_submit_edge_density": 0.01,
+                                "shares": 10.0,
+                                "qkernel_side": "buy_yes",
+                            },
+                        },
+                        {"component": "entry_actionable_certificate", "allowed": True},
+                    ],
+                },
+            },
+        )
+
+        row = conn.execute(
+            "SELECT state, q_version FROM venue_commands WHERE command_id = 'cmd-qv-transition'"
+        ).fetchone()
+        assert row["state"] == "SUBMITTING"
+        assert row["q_version"] == "posterior-hash-xyz789"
 
 
 # ---------------------------------------------------------------------------
