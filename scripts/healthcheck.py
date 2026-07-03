@@ -25,7 +25,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import get_mode, state_path
-from src.state.db import get_connection, get_forecasts_connection, ZEUS_FORECASTS_DB_PATH
+from src.ops.edli_queue import EDLI_REACTOR_CONSUMER, collect_edli_queue_evidence
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.state.db import (
+    ZEUS_FORECASTS_DB_PATH,
+    ZEUS_WORLD_DB_PATH,
+    get_connection,
+    get_forecasts_connection,
+)
 from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
@@ -34,6 +41,9 @@ SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
+MONITOR_CADENCE_STALE_SECONDS = int(
+    os.environ.get("ZEUS_MONITOR_CADENCE_STALE_SECONDS", str(5 * 60))
+)
 POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
     {
         "last_monitor_prob_is_fresh",
@@ -67,11 +77,6 @@ PROCESS_CODE_SURFACES = {
         "src/execution/harvester_pnl_resolver.py",
         "src/strategy/selection_family.py",
         "src/strategy/family_exclusive_dedup.py",
-        "src/strategy/candidates/__init__.py",
-        "src/strategy/candidates/liquidity_provision_with_heartbeat.py",
-        "src/strategy/candidates/resolution_window_maker.py",
-        "src/strategy/candidates/stale_quote_detector.py",
-        "src/strategy/candidates/weather_event_arbitrage.py",
     ),
     "data_ingest": (
         "src/ingest_main.py",
@@ -147,17 +152,22 @@ def _world_db_path() -> Path:
     return ZEUS_FORECASTS_DB_PATH
 
 
+def _edli_world_db_path() -> Path:
+    return ZEUS_WORLD_DB_PATH
+
+
 def _forecast_db_path() -> Path:
     return ZEUS_FORECASTS_DB_PATH
 
 
 def _scheduler_business_liveness_status() -> dict:
-    """Expose per-mode money-path progress from scheduler health.
+    """Expose money-path progress from current scheduler health.
 
-    ``status_summary.json`` can be a pulse-only artifact between trading cycles.
-    The per-mode scheduler surface is the durable place where run-mode
-    liveness records candidates, final intents, submit attempts, and terminal
-    frontier class for each mode.
+    Legacy ``run_mode:*`` rows are still useful for pre-EDLI daemons, but the
+    current live money path is ``edli_event_reactor``. Treating stale
+    ``run_mode:day0_capture`` as the Day0 authority in EDLI mode is misleading:
+    Day0 now enters through the shared EDLI reactor and the composite
+    ``day0_decision_trace`` surface.
     """
 
     path = _scheduler_health_path()
@@ -186,7 +196,23 @@ def _scheduler_business_liveness_status() -> dict:
             "modes": {},
         }
     modes: dict[str, dict] = {}
+    edli_reactor: dict[str, object] | None = None
     for key, entry in payload.items():
+        if key == "edli_event_reactor" and isinstance(entry, dict):
+            liveness = entry.get("business_liveness")
+            if not isinstance(liveness, dict):
+                liveness = {}
+            edli_reactor = {
+                "status": entry.get("status"),
+                "last_run_at": entry.get("last_run_at"),
+                "last_started_at": entry.get("last_started_at"),
+                "last_success_at": entry.get("last_success_at"),
+                "last_skip_at": entry.get("last_skip_at"),
+                "last_skip_reason": entry.get("last_skip_reason"),
+                "consecutive_skips": int(entry.get("consecutive_skips") or 0),
+                "business_liveness": dict(liveness),
+            }
+            continue
         if not isinstance(key, str) or not key.startswith("run_mode:"):
             continue
         if not isinstance(entry, dict):
@@ -205,14 +231,52 @@ def _scheduler_business_liveness_status() -> dict:
             "consecutive_skips": int(entry.get("consecutive_skips") or 0),
             "business_liveness": dict(liveness),
         }
-    if not modes:
+    if not modes and edli_reactor is None:
         return {
             "ok": False,
             "path": str(path),
-            "issue": "RUN_MODE_BUSINESS_LIVENESS_MISSING",
+            "issue": "SCHEDULER_BUSINESS_LIVENESS_MISSING",
             "modes": {},
+            "legacy_run_modes": {},
+            "edli_event_reactor": None,
+            "day0_decision_trace": _day0_decision_trace_status(),
         }
-    return {"ok": True, "path": str(path), "issue": None, "modes": modes}
+    return {
+        "ok": True,
+        "path": str(path),
+        "issue": None,
+        "modes": modes,
+        "legacy_run_modes": modes,
+        "edli_event_reactor": edli_reactor,
+        "day0_decision_trace": _day0_decision_trace_status(),
+    }
+
+
+def _day0_decision_trace_status() -> dict:
+    path = _live_health_composite_path()
+    if not path.exists():
+        return {"status": "missing_composite", "path": str(path)}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        return {"status": "composite_unparseable", "path": str(path), "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"status": "composite_not_object", "path": str(path)}
+    surfaces = payload.get("surfaces")
+    surface = surfaces.get("day0_decision_trace") if isinstance(surfaces, dict) else None
+    if not isinstance(surface, dict):
+        return {"status": "missing_surface", "path": str(path)}
+    return {
+        "status": "ok" if surface.get("ok") is not False else "degraded",
+        "ok": surface.get("ok"),
+        "issue": surface.get("issue"),
+        "recent_event_count": surface.get("recent_event_count"),
+        "processed_event_count": surface.get("processed_event_count"),
+        "traced_processed_event_count": surface.get("traced_processed_event_count"),
+        "missing_trace_count": surface.get("missing_trace_count"),
+        "lookback_seconds": surface.get("lookback_seconds"),
+        "path": str(path),
+    }
 
 
 def _riskguard_label() -> str:
@@ -623,6 +687,127 @@ def _position_current_schema_status() -> dict:
             pass
 
 
+def _monitor_cadence_status() -> dict:
+    """Prove held-position monitoring is actually cycling.
+
+    ``position_current.updated_at`` can change from chain reconciliation, so it
+    is not monitor/redecision cadence evidence.  The runtime proof is the latest
+    canonical ``position_events.MONITOR_REFRESHED`` timestamp while open
+    positions exist.
+    """
+
+    db_path = _trade_db_path()
+    evidence = {
+        "ok": False,
+        "path": str(db_path),
+        "issue": None,
+        "max_age_seconds": MONITOR_CADENCE_STALE_SECONDS,
+        "source": "position_events.MONITOR_REFRESHED",
+        "position_current_updated_at_is_not_monitor_cadence": True,
+        "open_position_count": 0,
+    }
+    if not db_path.exists():
+        evidence["issue"] = "MONITOR_CADENCE_DB_MISSING"
+        return evidence
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "position_current" not in tables:
+            evidence["issue"] = "MONITOR_CADENCE_POSITION_CURRENT_MISSING"
+            return evidence
+        if "position_events" not in tables:
+            evidence["issue"] = "MONITOR_CADENCE_POSITION_EVENTS_MISSING"
+            return evidence
+        cadence = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=MONITOR_CADENCE_STALE_SECONDS,
+        )
+        evidence.update(cadence)
+        open_count = int(cadence["open_position_count"])
+        if open_count == 0:
+            evidence["ok"] = True
+            return evidence
+        stale_or_missing = cadence["stale_or_missing_positions"]
+        if cadence["future_monitor_event_count"]:
+            evidence["issue"] = "MONITOR_CADENCE_FUTURE_TIMESTAMP"
+            return evidence
+        if stale_or_missing:
+            if len(stale_or_missing) == open_count and all(
+                item.get("last_monitor_refreshed_at") is None
+                for item in stale_or_missing
+            ):
+                evidence["issue"] = "MONITOR_CADENCE_NO_REFRESH_EVENT"
+                return evidence
+            evidence["issue"] = "MONITOR_CADENCE_STALE"
+            return evidence
+        evidence["ok"] = True
+        return evidence
+    except Exception as exc:
+        evidence["issue"] = f"MONITOR_CADENCE_UNAVAILABLE:{type(exc).__name__}"
+        evidence["error"] = str(exc)
+        return evidence
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _edli_queue_status() -> dict:
+    """Prove the EDLI reactor queue has no stale in-flight claim."""
+
+    db_path = _edli_world_db_path()
+    evidence: dict = {
+        "ok": False,
+        "path": str(db_path),
+        "issue": None,
+        "source": "opportunity_event_processing",
+        "consumer_name": EDLI_REACTOR_CONSUMER,
+    }
+    if not db_path.exists():
+        evidence["issue"] = "EDLI_QUEUE_DB_MISSING"
+        return evidence
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "opportunity_event_processing" not in tables:
+            evidence["issue"] = "EDLI_QUEUE_TABLE_MISSING"
+            return evidence
+        queue = collect_edli_queue_evidence(conn, now=datetime.now(timezone.utc))
+        evidence.update(queue)
+        if int(queue["stale_processing_count"]) > 0:
+            evidence["issue"] = "EDLI_QUEUE_STALE_PROCESSING"
+            return evidence
+        evidence["ok"] = True
+        return evidence
+    except Exception as exc:
+        evidence["issue"] = f"EDLI_QUEUE_UNAVAILABLE:{type(exc).__name__}"
+        evidence["error"] = str(exc)
+        return evidence
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def _forecast_posteriors_runtime_layer_schema_status() -> dict:
     """Ensure replacement forecast live rows can be represented in forecasts DB."""
 
@@ -828,10 +1013,10 @@ def _launchctl_loaded_contract(
     if environment.get("PYTHONPATH") != str(root_path):
         item["issues"].append("loaded_pythonpath_mismatch")
     if label == _launchd_label():
-        forbidden_shadow_env = _forbidden_live_shadow_env(environment)
-        if forbidden_shadow_env:
+        forbidden_non_submit_env = _forbidden_live_non_submit_env(environment)
+        if forbidden_non_submit_env:
             item["issues"].append(
-                "loaded_live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                "loaded_live_trading_non_submit_env_present:" + ",".join(forbidden_non_submit_env)
             )
     if module != expected_module:
         item["issues"].append("loaded_program_module_mismatch")
@@ -846,13 +1031,13 @@ def _launchctl_loaded_contract(
     return item
 
 
-def _forbidden_live_shadow_env(environment: dict) -> list[str]:
+def _forbidden_live_non_submit_env(environment: dict) -> list[str]:
     """Return env keys that contradict the live-trading launchd contract."""
     forbidden: list[str] = []
     for key, value in environment.items():
         key_text = str(key)
         value_text = str(value)
-        if "SHADOW" in key_text.upper() or value_text.lower() == "edli_shadow_no_submit":
+        if "SHADOW" in key_text.upper():
             forbidden.append(key_text)
     return sorted(forbidden)
 
@@ -931,10 +1116,10 @@ def _launchd_contracts(
         if env.get("PYTHONPATH") != str(root_path):
             item["issues"].append("pythonpath_mismatch")
         if label == _launchd_label():
-            forbidden_shadow_env = _forbidden_live_shadow_env(env)
-            if forbidden_shadow_env:
+            forbidden_non_submit_env = _forbidden_live_non_submit_env(env)
+            if forbidden_non_submit_env:
                 item["issues"].append(
-                    "live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                    "live_trading_non_submit_env_present:" + ",".join(forbidden_non_submit_env)
                 )
         if module != expected_module:
             item["issues"].append("program_module_mismatch")
@@ -1114,7 +1299,7 @@ def _heartbeat_freshness_status() -> dict:
     file is reported as a writer-specific issue but is GATED on the env
     flag `ZEUS_HEARTBEAT_FRESHNESS_PAGES=1` before participating in
     the top-level `healthy` predicate (default OFF preserves
-    shadow-run safety per the existing
+    no-submit-run safety per the existing
     `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` convention).
     """
     state_root = _status_path().parent
@@ -1341,34 +1526,34 @@ def _composite_current_fact_contradictions(payload: dict) -> list[dict]:
         status = None
     execution_capability = status.get("execution_capability") if isinstance(status, dict) else None
     if isinstance(execution_capability, dict):
-        blocked_actions: list[dict] = []
+        unavailable_actions: list[dict] = []
         for action_name in ("entry", "exit"):
             action = execution_capability.get(action_name)
             if not isinstance(action, dict):
                 continue
             status_value = str(action.get("status") or "").lower()
-            blocked_components = action.get("blocked_components")
-            if not isinstance(blocked_components, list):
-                blocked_components = []
+            unavailable_components = action.get("unavailable_components")
+            if not isinstance(unavailable_components, list):
+                unavailable_components = []
             global_allow_submit = action.get("global_allow_submit")
             if (
-                status_value in {"blocked", "failed", "error"}
+                status_value in {"unavailable", "failed", "error"}
                 or global_allow_submit is False
-                or bool(blocked_components)
+                or bool(unavailable_components)
             ):
-                blocked_actions.append(
+                unavailable_actions.append(
                     {
                         "action": action_name,
                         "status": action.get("status"),
                         "global_allow_submit": global_allow_submit,
-                        "blocked_components": blocked_components,
+                        "unavailable_components": unavailable_components,
                     }
                 )
-        if blocked_actions:
+        if unavailable_actions:
             contradictions.append(
                 {
                     "surface": "execution_capability",
-                    "blocked_actions": blocked_actions,
+                    "unavailable_actions": unavailable_actions,
                     "status_timestamp": status.get("timestamp") if isinstance(status, dict) else None,
                 }
             )
@@ -1541,7 +1726,7 @@ def check() -> dict:
     # WAVE-4 F91+F99+F100 — fold HB-1/HB-2/HB-3 staleness into healthcheck.
     # Always EVALUATED (so operators see the per-writer detail in the JSON
     # output) but only PAGES (participates in the `healthy` predicate) when
-    # ZEUS_HEARTBEAT_FRESHNESS_PAGES=1. Default OFF preserves shadow-run
+    # ZEUS_HEARTBEAT_FRESHNESS_PAGES=1. Default OFF preserves no-submit-run
     # safety; flip ON after the cron path is observed clean for at least
     # one Karachi window.
     result["heartbeat_freshness"] = _heartbeat_freshness_status()
@@ -1562,6 +1747,20 @@ def check() -> dict:
         result["position_current_schema_issue"] = (
             result["position_current_schema"].get("issue")
             or "POSITION_CURRENT_SCHEMA_DRIFT"
+        )
+    result["monitor_cadence"] = _monitor_cadence_status()
+    result["monitor_cadence_ok"] = bool(result["monitor_cadence"].get("ok", True))
+    if not result["monitor_cadence_ok"]:
+        result["monitor_cadence_issue"] = (
+            result["monitor_cadence"].get("issue")
+            or "MONITOR_CADENCE_UNHEALTHY"
+        )
+    result["edli_queue"] = _edli_queue_status()
+    result["edli_queue_ok"] = bool(result["edli_queue"].get("ok", True))
+    if not result["edli_queue_ok"]:
+        result["edli_queue_issue"] = (
+            result["edli_queue"].get("issue")
+            or "EDLI_QUEUE_UNHEALTHY"
         )
     result["forecast_posteriors_schema"] = _forecast_posteriors_runtime_layer_schema_status()
     result["forecast_posteriors_schema_ok"] = bool(
@@ -1678,12 +1877,12 @@ def check() -> dict:
                     entry_status = entry_capability.get("status")
                     result["entry_execution_capability_status"] = entry_status
                     result["entry_execution_capability_ok"] = entry_status not in {
-                        "blocked",
-                        "UNKNOWN_BLOCKED",
-                        "unknown_blocked",
+                        "unavailable",
+                        "UNKNOWN_UNAVAILABLE",
+                        "unknown_unavailable",
                     }
                     if not result["entry_execution_capability_ok"]:
-                        result["entry_execution_capability_issue"] = "LIVE_ENTRY_EXECUTION_BLOCKED"
+                        result["entry_execution_capability_issue"] = "LIVE_ENTRY_EXECUTION_UNAVAILABLE"
             strategy = status.get("strategy", {}) or {}
             if isinstance(strategy, dict):
                 result["strategy_summary"] = strategy
@@ -1856,6 +2055,8 @@ def check() -> dict:
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
+        and bool(result.get("monitor_cadence_ok", True))
+        and bool(result.get("edli_queue_ok", True))
         and bool(result.get("forecast_posteriors_schema_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"

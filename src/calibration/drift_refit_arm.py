@@ -33,11 +33,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_active_city_season_pairs(world_conn) -> list[tuple[str, str]]:
+def _get_active_city_season_pairs(
+    world_conn,
+    *,
+    metric_identity: MetricIdentity = HIGH_LOCALDAY_MAX,
+) -> list[tuple[str, str]]:
     """Return distinct (city, season) pairs from calibration_pairs."""
     try:
         cur = world_conn.execute(
-            "SELECT DISTINCT city, season FROM calibration_pairs ORDER BY city, season"
+            """
+            SELECT DISTINCT city, season
+              FROM calibration_pairs
+             WHERE temperature_metric = ?
+             ORDER BY city, season
+            """,
+            (metric_identity.temperature_metric,),
         )
         rows = cur.fetchall()
         if rows:
@@ -69,7 +79,7 @@ def check_and_arm_refit(
 
     Returns summary dict with counts and bucket list.
     """
-    pairs = _get_active_city_season_pairs(world_conn)
+    pairs = _get_active_city_season_pairs(world_conn, metric_identity=metric_identity)
     logger.info("Drift check: %d city/season pairs to evaluate", len(pairs))
 
     buckets_refit_now: list[dict] = []

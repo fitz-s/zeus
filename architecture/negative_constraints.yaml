@@ -130,13 +130,15 @@ constraints:
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
   - id: NC-16
-    statement: No direct place_limit_order call outside the gateway boundary (allowed callers — src/execution/executor.py as the executor seam, src/data/polymarket_client.py as the SDK wrapper, scripts/live_smoke_test.py as the operator-only path that calls v2_preflight() itself).
+    statement: No direct place_limit_order call outside the gateway boundary (allowed callers — src/execution/executor.py as the executor seam, src/data/polymarket_client.py as the SDK wrapper, scripts/live_smoke_test.py as the operator-only path that calls v2_preflight() itself). W2.1 (2026-07-02) extends this to the sibling batch gateway place_limit_orders_batch, with the same allowed callers plus src/execution/batch_order_submission.py (the batch orchestrator; lands inert, no production call site yet).
     invariants: [INV-24]
     enforced_by:
       semgrep_rule_ids:
         - zeus-place-limit-order-gateway-only
+        - zeus-place-limit-orders-batch-gateway-only
       tests:
         - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
+        - tests/execution/test_batch_order_submission.py::test_inv24_allowlist_includes_batch_orchestrator
   - id: NC-17
     statement: ExecutionIntent must not carry decorative capability labels (slice_policy, reprice_policy, liquidity_guard, or any future label) without an enforcing executor branch that exhibits real capability behavior. Logging-only branches do not count.
     # ultrareview-25 F12: INV-23 was previously listed under invariants but the
@@ -171,13 +173,11 @@ constraints:
         - tests/test_discovery_idempotency.py::test_idempotency_key_skips_duplicate_submit
         - tests/test_discovery_idempotency.py::test_retry_after_unknown_does_not_double_place
   - id: NC-20
-    statement: No raw executable quote, VWMP vector, or sparse held-token quote vector may enter corrected posterior modes; corrected prior modes require MarketPriorDistribution.
+    statement: No raw executable quote, VWMP vector, or sparse held-token quote vector may enter corrected posterior modes.
     invariants: [INV-33]
     enforced_by:
       tests:
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
   - id: NC-21
     statement: No implied_probability ExecutionPrice, fee-adjusted or otherwise, may satisfy corrected Kelly/executable-cost authority.
     invariants: [INV-34]

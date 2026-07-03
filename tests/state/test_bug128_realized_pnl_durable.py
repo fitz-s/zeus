@@ -266,3 +266,52 @@ def test_economic_close_persists_realized_pnl_durable() -> None:
     assert row["exit_reason"] == "shoulder_sell"
 
     conn.close()
+
+
+def test_economic_close_clears_exit_retry_projection() -> None:
+    """Filled exits must not leave economically_closed rows advertising retry state."""
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import PortfolioState, compute_economic_close
+
+    conn = _setup_world_db()
+    pos = _make_filled_position(
+        trade_id="bug128-econ-retry-clear",
+        city="TYO",
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.00,
+    )
+    pos.exit_state = "retry_pending"
+    pos.next_exit_retry_at = "2026-06-25T21:00:00+00:00"
+    pos.exit_retry_count = 4
+    pos.last_exit_error = "ctf_tokens_insufficient"
+    portfolio = PortfolioState(positions=[pos])
+
+    closed = compute_economic_close(portfolio, pos.trade_id, 0.70, "sell_filled")
+    assert closed is not None
+    assert closed.exit_state == "sell_filled"
+    assert closed.next_exit_retry_at == ""
+    assert closed.exit_retry_count == 0
+
+    events, projection = build_economic_close_canonical_write(
+        closed, sequence_no=1, phase_before="pending_exit"
+    )
+    append_many_and_project(conn, events, projection)
+
+    row = conn.execute(
+        """
+        SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        ("bug128-econ-retry-clear",),
+    ).fetchone()
+    assert row is not None
+    assert row["phase"] == "economically_closed"
+    assert row["order_status"] == "filled"
+    assert row["exit_retry_count"] == 0
+    assert row["next_exit_retry_at"] in ("", None)
+
+    conn.close()

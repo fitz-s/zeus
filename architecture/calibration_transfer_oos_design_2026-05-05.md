@@ -1,5 +1,7 @@
 # Calibration transfer OOS evidence — design 2026-05-05
 
+Status: ACTIVE
+
 **Authority basis**: critic-opus 2026-05-05 verdict on user Issue 2.2 + sonnet scoping report. PR #55 had OOS infrastructure; PR #56 merge removed it under assumption `oracle_evidence_status` would replace — wiring never completed. Legacy `evaluate_calibration_transfer_policy` (string-mapping) is currently load-bearing on `evaluator.py:900`.
 
 ## Required evidence (the math)
@@ -118,15 +120,14 @@ def evaluate_calibration_transfer_policy_with_evidence(
 | X.1 ✅ DONE 2026-05-05 | post Phase 0a | scaffold `validated_calibration_transfers` schema in `v2_schema.py` + `evaluate_calibration_transfer_policy_with_evidence` stub + same-domain fast-path + `_TRANSFER_SOURCE_BY_OPENDATA_VERSION` NameError fix | landed |
 | X.2 ✅ DONE 2026-05-05 | parallel | OOS evaluator script `scripts/evaluate_calibration_transfer_oos.py` + 7 tests (today writes 0 rows; ready for Phase 1 12z ingest) | landed |
 | Phase β ✅ DONE 2026-05-05 | parallel | `evaluator.py:900` switched to `_with_evidence`; `evaluator.py:2736` reads `validated_calibration_transfers` row → computes σ → passes to `MarketAnalysis(transfer_logit_sigma=σ)`. legacy `evaluate_calibration_transfer_policy` emits `DeprecationWarning` when flag-on | landed |
-| X.3 ⚠️ REVERSED 2026-05-10 | operator decision post-supersession | Earlier flag-flip (`launchctl setenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true`) is now KNOWN-HARMFUL pre-launch — evidence-gated path has 0 ECMWF rows, so daemon would silently SHADOW_ONLY all entries. Per `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` `flag_state_at_launch` (post-erratum supersession 2026-05-10), legacy static mapping IS the operator-accepted live authority at-launch. Pre-launch operator MUST `launchctl unsetenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` (see `docs/operations/PLIST_UPDATE_FOR_RELOCK.md` §6) | reversed |
+| X.3 ⚠️ REVERSED 2026-05-10 | operator decision post-supersession | Earlier flag-flip (`launchctl setenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true`) is now KNOWN-HARMFUL pre-launch — evidence-gated path has 0 ECMWF rows, so daemon would silently SHADOW_ONLY all entries. Per `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` `flag_state_at_launch` (post-erratum supersession 2026-05-10), legacy static mapping IS the operator-accepted live authority at-launch. Pre-launch operator MUST `launchctl unsetenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` (see `docs/archive/2026-Q2/operations_historical/PLIST_UPDATE_FOR_RELOCK.md` §6) | reversed |
 | **PENDING — daemon plist update** OBSOLETE 2026-05-10 | (would have set the env in plist) | DO NOT add `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` to plist. The flag stays OFF at launch and through Phase B accumulation (~2-4 weeks post-launch); flip to true is deferred to Phase B trigger conditions per `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §5. | obsolete |
 | X.4 (deferred) | post Phase B + ≥1000 ECMWF pairs + ≥4 weeks ingest | remove legacy `evaluate_calibration_transfer_policy` + drop `live_promotion_approved` arg from all callsites | deferred |
 
 ## Known follow-ups (post-activation)
 
-1. **None-arg same-domain false-positive at `_write_entry_readiness_for_candidate`**: Phase β report noted the callsite passes `None` for `source_cycle`/`target_cycle`/etc. since readiness is written pre-forecast. With `None == None` the same-domain fast-path may fire spuriously → LIVE_ELIGIBLE on non-same-domain routes. Daemon-locked = 0 trade impact today. Fix: thread the actual forecast route metadata through to readiness writer, OR have the function reject `None` source_cycle as `INSUFFICIENT_INFO → SHADOW_ONLY`.
-2. **`entry_forecast_shadow.py:179` callsite still uses legacy**: when flag-on, will emit DeprecationWarning. Migration is mechanical but distinct from this activation.
-3. **`config/settings.json::transfer_logit_sigma_scale`**: default 4.0 ships; tune post-Phase-1 if OOS empirics warrant.
+1. **Retired evaluator-side entry-readiness hook**: the old callsite passed incomplete route metadata because readiness was written pre-forecast. That hook has been removed from the evaluator; readiness is produced outside the live evaluator path.
+2. **`config/settings.json::transfer_logit_sigma_scale`**: default 4.0 ships; tune post-Phase-1 if OOS empirics warrant.
 
 ## Open delta for operator (single item, post-hoc)
 

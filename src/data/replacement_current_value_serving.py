@@ -63,6 +63,16 @@ PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS = 24.0
 SERVED_VIA_SINGLE_RUNS = "single_runs"
 SERVED_VIA_PREVIOUS_RUNS = "previous_runs"
 
+# 删了0.25 (2026-07-01): a model whose previous_runs product is a DIFFERENT (coarser) physical product
+# than its live single_runs — NOT just an older run of the same product. ECMWF's OM previous-runs feed
+# serves ecmwf_ifs025 (0.25° grid) while single_runs serves ecmwf_ifs (9km). The substitution law
+# (没有新的就用老的) is correct for same-product models (an older run of the SAME product) but WRONG here:
+# substituting ifs025 injects a coarse-grid representativeness artifact into the served center (measured
+# ifs025↔ifs9 per-city gap sd 1.52C, e.g. Jeddah +2.2C; Jeddah's whole apparent −1.44 bias was this
+# artifact — +0.08 on ifs9). So when the fresh 9km value is missing, DROP the model (the scheme
+# renormalizes over present sources) rather than serve the 0.25° coarse product.
+_PRODUCT_MISMATCHED_PREVIOUS_RUNS = frozenset({"ecmwf_ifs"})
+
 
 @dataclass(frozen=True)
 class ServedInstrumentValue:
@@ -116,6 +126,7 @@ def read_current_instrument_values(
     target_date: str,
     source_cycle_time_iso: str,
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    include_station_sources: bool = False,
 ) -> dict[str, ServedInstrumentValue]:
     """THE single authority: per-model served CURRENT value for one (scope, cycle).
 
@@ -190,6 +201,10 @@ def read_current_instrument_values(
             age = _age_hours_or_none(captured, served_cycle)
             if endpoint == SERVED_VIA_PREVIOUS_RUNS and age is not None and age > float(max_substitution_age_hours):
                 continue
+            # 删了0.25: never substitute a product-mismatched previous_runs (ECMWF ifs025 0.25° coarse)
+            # for the live 9km center — drop it, let the scheme renormalize over the present sources.
+            if endpoint == SERVED_VIA_PREVIOUS_RUNS and model in _PRODUCT_MISMATCHED_PREVIOUS_RUNS:
+                continue
             out[model] = ServedInstrumentValue(
                 value_c=value, raw_model_forecast_id=rid, served_via=endpoint,
                 served_cycle=served_cycle, captured_at=captured,
@@ -202,4 +217,49 @@ def read_current_instrument_values(
     _serve(SERVED_VIA_PREVIOUS_RUNS, exact_cycle=True)
     _serve(SERVED_VIA_SINGLE_RUNS, exact_cycle=False)
     _serve(SERVED_VIA_PREVIOUS_RUNS, exact_cycle=False)
+
+    # Station-calibrated sources (cwa_*/hko_*) carry their OWN provider cycle clock, independent of
+    # the gridded freshness ceiling: their latest captured single_runs row IS the current value and
+    # must not be excluded just because its cycle is newer/older than the selected gridded cycle (the
+    # gridded passes above serve source_cycle_time <= ceiling, which drops a station row issued after
+    # the gridded cycle). OPT-IN: the gridded passes are the unchanged default contract for every
+    # existing consumer (seed_discovery, completeness, upgrade-trigger); only the materializer center
+    # path opts in, so a station source enters the precision fusion at its initial-precision weight
+    # (raw_second_moment_weights) — DATA PRECISION, never a frozen-scheme hard weight.
+    if include_station_sources:
+        try:
+            station_rows = conn.execute(
+                f"""
+                SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
+                       source_cycle_time{captured_select}
+                FROM raw_model_forecasts
+                WHERE city = ? AND metric = ? AND target_date = ? AND endpoint = ?
+                  AND (model LIKE 'cwa%' OR model LIKE 'hko%')
+                ORDER BY model, source_cycle_time DESC, {order_clause}
+                """,
+                (city, metric, target_date, SERVED_VIA_SINGLE_RUNS),
+            ).fetchall()
+        except Exception:
+            station_rows = []
+        for row in station_rows:
+            try:
+                rid = int(row[0])
+                model = str(row[1])
+                value = float(row[2])
+                lead = None if row[3] is None else int(row[3])
+                served_cycle = str(row[4])
+                captured = str(row[5]) if has_captured_at and row[5] is not None else None
+            except Exception:
+                continue
+            # Match the materializer's station-family convention exactly (cwa_/hko_ prefixes); the
+            # broad SQL LIKE is narrowed here so a hypothetical non-station "cwa…"/"hko…" name cannot
+            # leak in.
+            if not model.startswith(("cwa_", "hko_")) or model in out:
+                continue
+            _age = _age_hours_or_none(captured, served_cycle)
+            out[model] = ServedInstrumentValue(
+                value_c=value, raw_model_forecast_id=rid, served_via=SERVED_VIA_SINGLE_RUNS,
+                served_cycle=served_cycle, captured_at=captured,
+                age_hours=0.0 if _age is None else _age, lead_days=lead,
+            )
     return out

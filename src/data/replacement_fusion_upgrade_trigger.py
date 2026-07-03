@@ -442,7 +442,7 @@ def enqueue_fusion_upgrade_reseeds(
         enqueued = 0
         # NEAREST-TARGET-FIRST (mirrors the seed-budget K-decision, registry member #6): the
         # plan's native order is target_date DESC, which would spend the per-tick enqueue budget
-        # on far-date shadow scopes while the tradeable day0/day1 money scopes starve.
+        # on far-date non-tradeable scopes while the tradeable day0/day1 money scopes starve.
         for row in sorted(
             plan.rows,
             key=lambda r: (str(r.target_date), str(r.city), str(r.temperature_metric)),

@@ -1,213 +1,172 @@
 # Zeus
 
-**Quantitative trading engine for weather-settlement prediction markets on Polymarket.**
+Weather-derivatives trading engine for Polymarket daily-temperature markets, across 54
+cities. It ingests weather forecasts, calibrates them into a settlement probability for every
+bin of every market, trades the bins it prices differently from the book, manages the orders
+through to settlement, and feeds graded outcomes back into calibration.
 
-Zeus converts atmospheric ensemble forecasts into calibrated probabilities, identifies edges against market prices, sizes positions via fractional Kelly, and executes through the Polymarket CLOB — all while enforcing strict contract semantics, source provenance, and dual-track temperature identity end-to-end.
+## Operation
 
----
+The engine runs a repeating cycle. Each cycle it reconciles its positions against the chain,
+refreshes forecasts, observations, and prices, re-evaluates every held position and resting
+order against the new data, and scans for new entries. A resting order whose edge has faded or
+whose limit the market has moved away from is pulled and decided again; a fresh forecast cycle
+on a market already held is itself new information. Held positions are re-evaluated each cycle
+and exited when their edge reverses, a profit is takeable, or settlement is near. The sections
+below detail one pass of that cycle.
 
-## How it works
+## Markets
 
-Zeus trades **discrete settlement contracts** on daily high/low temperatures.
+A market is a set of yes/no bins over a city's daily high or low (`50–51°F`, `75°F or higher`,
+`49°F or below`). One bin resolves YES, on the integer temperature an official provider
+publishes for the local date. That integer is a rounded value — a sensor reading encoded in a
+METAR report and rounded to a whole degree — so the rounding rule is part of each market:
+most cities round half-up (the integer is `floor(x + 0.5)`), Hong Kong truncates (`floor(x)`).
+Bins are exact (a value or closed range), open-ceiling, or open-floor; a city's bins form a
+complete partition, Fahrenheit bins span two integers and Celsius one, and a city's high and
+low markets are separate objects with separate calibration.
 
-### Strategy of record (2026-06-09)
+## Data
 
-The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`):
+Forecasts come from ECMWF's global ensemble (the anchor) plus decorrelated regional model
+families — ICON (DWD), NOAA, UKMO, and GEM (CMC) — each used where it covers a city, sourced
+through ECMWF OpenData and Open-Meteo. For cities that settle on a known station, that nation's
+official station forecast is ingested as well (Hong Kong Observatory, Taiwan CWA). Models
+refresh two to four times a day on their issue cycles.
+Observations come from Weather Underground (daily settlement values), METAR (15-minute), and
+the HKO and CWA feeds. Market data — market topology, the order book, and the engine's own
+fills — streams from Polymarket over WebSocket. Every record is stamped with when the source
+issued it, when Zeus fetched it, and when Zeus wrote it; freshness gates use those stamps to
+drop stale forecasts, unsettled observations, and old quotes. Ingestion is split across
+separate daemons per feed.
+
+## Forecast to probability
+
+1. **De-bias.** Each model is corrected against its own settled residuals with an
+   empirical-Bayes shrinkage, `b̂ = λ·r̄ + (1 − λ)·prior` with `λ = n/(n + 8)`: thin history
+   stays near a structural prior, long history trusts the model's own mean. The fit uses only
+   residuals that had settled before the forecast date.
+
+2. **Fuse.** The de-biased model values `z` are combined into one posterior mean and variance by
+   inverse-variance (precision) weighting against an ECMWF prior `(μ₀, τ₀²)`:
+   `V* = (τ₀⁻² + 1ᵀΣ⁻¹1)⁻¹`, `μ* = V*(τ₀⁻²μ₀ + 1ᵀΣ⁻¹z)`. The residual covariance `Σ` is shrunk
+   toward its diagonal (Ledoit–Wolf) so noisy cross-correlations do not dominate at small sample
+   sizes, and models that are the same forecast at two resolutions are collapsed into one
+   provider family so none is counted twice.
+
+3. **Localize.** A grid value is read at the settlement station's exact coordinates by
+   interpolation rather than nearest-cell. The altitude difference between grid and station is
+   corrected by a lapse rate fitted per city and season; the remaining distance and elevation
+   mismatch is added to that source's variance, `σ_repr² = a₀ + a_d·d² + a_z·Δz²`.
+
+4. **Spread.** The predictive spread is the fused variance plus the walk-forward residual error
+   of the fused centre, floored to the cell's realized settlement error.
+
+5. **Integrate.** The distribution is integrated onto each bin over the preimage of the
+   rounding rule, not the bin's face value — under half-up, bin `X` is
+   `Φ((X+0.5−μ)/σ) − Φ((X−0.5−μ)/σ)`; under truncation, `Φ((X+1−μ)/σ) − Φ((X−μ)/σ)`. Open
+   shoulders integrate as a single tail.
+
+6. **Condition on the day.** Once part of the day's extreme is already observed, the settled
+   value is `max(observed, remaining)`; the distribution is conditioned on the running extreme,
+   placing remaining mass on the hours still to come.
+
+## Probability to edge
+
+1. **Lower bound.** The bin probability is bootstrapped over the parameter posterior and a low
+   quantile is taken; each draw is renormalized to a distribution before the quantile.
+
+2. **Selection calibrator.** Each candidate is keyed by `(side, lead, bin class, probability
+   bucket)` and its admission probability is replaced by a Wilson lower bound on how often that
+   cell has settled in its favour, over at least 30 settled samples.
+
+3. **Edge.** `edge = q − price − cost`, where cost is the all-in entry cost including the
+   Polymarket taker fee `rate·p·(1−p)`.
+
+4. **False-discovery control.** Benjamini–Hochberg is applied across every bin tested in the
+   cycle, not only those that passed earlier filters.
+
+## Sizing
+
+Surviving bins are ranked by return per dollar at risk, ties broken on lower-quantile
+log-growth. The selected bin is sized by fractional Kelly, `f* = (q − price)/(1 − price)`,
+reduced by a multiplicative cascade — strategy multiplier, observation coverage, confidence
+width, lead time, portfolio heat, and a two-rail data-density discount (a hard stop below 0.35
+coverage past the window mid-point, a continuous discount otherwise). A NaN or missing input
+sizes to zero.
+
+## Execution
+
+Orders are limit orders. Entries rest as a maker (good-till-cancel, post-only) and escalate to
+a taker cross (fill-or-kill or fill-and-kill) only if the edge holds past a deadline. Each
+order carries an idempotency key and its intent is written before the venue is contacted. Fills
+are verified against the venue each cycle; an order is entered only on a confirmed trade fact,
+and partial fills track their remainder. Exits run a separate state machine, and an exit's
+fill-or-kill is coerced to fill-and-kill so a thin book does not reject it whole. An hourly
+sweep reconciles local intent against venue and chain facts. Settlement is read from the market
+feed; redemption of winning tokens is recorded for accounting.
+
+## Worked example
+
+One market through the loop, with illustrative numbers — Tokyo daily high, the `50–51°F` bin,
+two days out (Tokyo rounds half-up):
+
+```
+Models (de-biased, °F)   ECMWF 50.4 · global ICON 51.0 · UKMO 50.1 · …
+Fuse                     precision-weighted → μ* = 50.3 °F, fused sd 0.9 °F
+Localize                 station 8 km / +5 m from the grid cell → +representativeness variance
+Spread                   √(V* + resid²) = 1.3 °F, floored to realized settlement error → σ = 1.4 °F
+Integrate (half-up)      P(50–51) = Φ((51.5−50.3)/1.4) − Φ((49.5−50.3)/1.4) = 0.804 − 0.284 = 0.52
+Lower bound              5th-percentile bootstrap → 0.46
+Calibrator               cell settled in favour 57% over 60 samples → Wilson lower bound 0.46
+Edge                     market YES at 0.40, cost 0.01 → 0.46 − 0.40 − 0.01 = 0.05  (> 0, passes FDR)
+Size                     f* = (0.46 − 0.40)/(1 − 0.40) = 0.10, reduced by the cascade
+Order                    rest as maker buying YES at 0.40; escalate to a taker cross if the edge holds
+```
+
+The same numbers drive an exit: if a later forecast cycle moves `μ*` away and the lower-bound
+probability falls below the price plus cost, the position's edge has reversed and it is closed.
+
+## State and learning
+
+What the engine believes it holds is a projection over immutable venue facts (orders, trades,
+balances) and local intent. Chain reconciliation distinguishes a complete-empty snapshot from
+a missing or stale one, and surfaces on-chain inventory with no matching intent as a reviewable
+item. State is held in three SQLite databases — world facts, forecasts, trades — with
+cross-database writes done in one transaction via `ATTACH` and a savepoint.
+
+When a market resolves, the position is graded into one of six outcomes — forecast-earned win,
+lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattributable — and
+only the skill outcomes feed calibration. The probability a position was sized on is frozen at
+decision time, and calibration consumes only outcomes that have already settled.
+
+## Strategies
+
+| Strategy | Edge source | Fades |
+|----------|-------------|:-----:|
+| Settlement Capture | the daily extreme is observed once the peak has passed | slowest |
+| Center Bin Buy | the model prices the most-likely bin against the market | fast |
+| Imminent Open Capture | re-opened or next-day markets within hours of settlement | fast |
+| Opening Inertia | first-liquidity anchoring on a freshly opened market | fastest |
+
+Each is tracked on its own settled record. Further strategies (shoulder-bin sell, center-bin
+sell, tail-capture) are registered but not live.
+
+## Repository
 
 ```text
-contract semantics
-  → source truth (settlement provider, station, observation field)
-  → per-model walk-forward empirical-Bayes de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8))
-  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior)
-  → σ_pred = max(1.0°C, √(fused.sd²+σ_resid²))
-  → settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct)
-  → q_lcb floor (Wilson z=1.645) → edge → BH FDR (per tested-family)
-  → fractional Kelly sizing (dynamic cascade multiplier × DDD coverage discount)
-  → execution via Polymarket CLOB → monitoring / exit → settlement reconciliation
-  → learning (without hindsight leakage)
+src/             Engine: forecasting, calibration, decision, execution, state, risk
+tests/           Test suite
+scripts/         Tooling and integrity checks
+architecture/    Machine-readable manifests and invariants
+config/          Configuration and source registries
+docs/            Reference and operational documentation
+state/           Runtime databases (local, not committed)
 ```
 
-Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q built and persisted by `src/data/replacement_forecast_materializer.py` `_insert_posterior`; the single settlement integrator is `src/calibration/emos.py` `bin_probability_settlement`.
+Deeper detail is under [`docs/reference/`](docs/reference/) — [`theory_map.md`](docs/reference/theory_map.md)
+indexes the derivations and [`glossary.md`](docs/reference/glossary.md) defines the terms.
 
-### Baseline (legacy chain — diagnostics only since 2026-06-12)
+## License
 
-The legacy 51-ENS chain still runs as an **independent baseline for diagnostics and for strategies genuinely on baseline q**. It no longer caps or vetoes the live replacement q (Wave-2 single-q-authority cut, commit 479cb34446): the former `min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)` join is deleted; the baseline value is carried as `baseline_q_lcb_reference` receipt provenance. Regime law: `docs/authority/regime_unification_2026-06-12.md` (U1):
-
-```text
-51 ENS members → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture;
-  10k-MC p_raw_vector_from_maxes retired) → Extended Platt → P_cal →
-  market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live) → bootstrap q_lcb
-```
-
-ENS bias correction (`src/calibration/ens_bias_model.py`; flag `settings.bias_correction_enabled`, default `false`) and the Data Density Discount remain baseline-path features. The α-weighted `P_posterior = α·P_cal + (1−α)·P_market` is **spec-only**; the live `model_only_v1` posterior takes no market input.
-
-Everything starts with the **venue contract** — city, local date, temperature metric, unit, bin topology, settlement source, and provider-specific settlement transform. Forecast probability is economically meaningful only after these semantic obligations are pinned.
-
-### Why settlement is discrete
-
-Polymarket weather markets settle on integer temperatures reported by the settlement provider (typically Weather Underground). A real temperature of 74.45°F → sensor reads 74.2°F → METAR rounds → WU displays 74°F. Zeus models this full chain explicitly via Monte Carlo rather than assuming continuous distributions.
-
-Three bin types exist:
-
-| Type | Example | Resolution |
-|------|---------|------------|
-| `point` | 10°C | Resolves on exactly {10} |
-| `finite_range` | 50-51°F | Resolves on {50, 51} |
-| `open_shoulder` | 75°F+ | Unbounded — not a symmetric range |
-
-### Calibration (baseline path)
-
-Extended Platt below is the **legacy baseline / LCB-cap** calibration; the live q is built by `emos.bin_probability_settlement` (see Strategy of record above). Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
-
-```text
-P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
-```
-
-The `B·lead_days` term triples effective training data per bucket vs. simple lead-time bucketing and prevents overtrade of stale forecasts.
-
-Before calibration, raw ensemble member extrema are bias-corrected: an **empirical-Bayes ENS bias model** shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated, so a noisy/uncertain bias is not applied), with a predictive-error layer that also widens the Monte-Carlo draw and transports the 0.5°→0.25° grid-resolution variance. See `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py` (PRs #334/#336). **This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending.**
-
-### Edge detection and sizing
-
-- **Model-market fusion** (baseline path; spec-only — live runs `model_only_v1` with NO market blend, `src/strategy/market_fusion.py` `compute_posterior`): `P_posterior = α × P_cal + (1 - α) × P_market`, where α is dynamically computed from calibration maturity, ensemble spread, and lead time (clamped to [0.20, 0.85])
-- **Uncertainty**: double-bootstrap propagates ensemble sampling noise, instrument noise (σ ≈ 0.2–0.5°F), and calibration parameter uncertainty
-- **Selection**: Benjamini-Hochberg FDR controls false discovery within each tested family
-- **Sizing**: fractional Kelly reduced multiplicatively through CI width, lead time, win rate, portfolio heat, and drawdown cascades (fail-closed on NaN)
-- **Data Density Discount (DDD)**: when a city's observation coverage is thin or its oracle mismatch rate is high, a two-rail trigger applies a continuous Kelly discount (and hard-halts below an absolute coverage floor); spec `docs/reference/zeus_oracle_density_discount_reference.md`, code `src/oracle/data_density_discount.py`
-
----
-
-## Trading strategies
-
-Four independent strategy families with distinct alpha profiles:
-
-| Strategy | Edge source | Alpha decay |
-|----------|------------|-------------|
-| **Settlement Capture** | Observed fact post-peak temperature | Very slow |
-| **Shoulder Bin Sell** | Retail cognitive bias (prospect theory → shoulder overpricing) | Moderate |
-| **Center Bin Buy** | Model accuracy vs. market at estimating most likely bin | Fast |
-| **Opening Inertia** | New market mispricing (first LP anchoring) | Fastest |
-
-Per-strategy tracking is required because portfolio-level P&L masks which edges are being competed away.
-
----
-
-## Risk management
-
-Risk levels change runtime behavior — advisory-only risk is forbidden:
-
-| Level | Behavior |
-|-------|----------|
-| GREEN | Normal operation |
-| YELLOW | No new entries, continue monitoring |
-| ORANGE | No new entries, exit at favorable prices |
-| RED | Cancel all pending, sweep all active positions |
-
-Overall risk = max of all individual risk signals. Computation error or broken truth input → RED. Fail-closed.
-
----
-
-## Position lifecycle
-
-```text
-pending_entry → active → day0_window → pending_exit → economically_closed → settled
-```
-
-Terminal states: `voided`, `quarantined`, `admin_closed`.
-
-Every cycle reconciles local state against on-chain truth:
-
-| Condition | Action |
-|-----------|--------|
-| Local + chain match | SYNCED |
-| Local exists, chain snapshot CHAIN_EMPTY (fresh, complete) | VOID |
-| Local exists, chain snapshot CHAIN_UNKNOWN (stale / missing API response) | NO-OP — never void on a degraded snapshot |
-| Chain exists, NOT local | Emit `ChainOnlyFact` (typed review entry); entry stays blocked, `review_state` escalates UNRESOLVED→EXPIRED at 48h (operator-resolved) |
-
-`CHAIN_EMPTY` vs `CHAIN_UNKNOWN` is the snapshot completeness classifier
-(`src/state/chain_state.py.ChainSnapshotCompleteness`). Treating a missing
-API response as `CHAIN_EMPTY` would void real live positions on degraded
-infra; the void rule applies ONLY to authoritatively empty snapshots.
-See `docs/plans/2026-05-27-chain-local-position-model-refactor.md` (PR C0,
-Finding 1) for the timestamp-split that keeps the classifier honest.
-
----
-
-## Data model
-
-All persistent data falls into three layers:
-
-| Layer | What | Isolation |
-|-------|------|-----------|
-| **World data** | External facts (forecasts, observations) | Shared, no mode tag |
-| **Decision data** | Trading choices and outcomes | Shared + `env` discriminator |
-| **Process state** | Mutable runtime state | Physically isolated per instance |
-
-High and low temperature markets share city/date geometry but are **separate semantic families** — they do not share physical quantity, observation field, Day0 causality, calibration parameters, or replay identity.
-
----
-
-### Runtime entry points
-
-| Entry point | Purpose |
-|-------------|--------|
-| `src/main.py` | Live daemon |
-| `src/engine/cycle_runner.py` | Cycle orchestration |
-| `src/engine/evaluator.py` | Candidate → decision pipeline |
-| `src/execution/executor.py` | Live order placement |
-| `src/engine/monitor_refresh.py` | Position monitoring |
-| `src/execution/exit_safety.py` | Exit logic |
-| `src/execution/harvester.py` | Settlement and learning |
-
-### Integrity checks
-
-```bash
-python3 scripts/topology_doctor.py --strict          # Registry parity and zone coverage
-python3 scripts/topology_doctor.py --source           # Source rationale checks
-python3 scripts/topology_doctor.py --tests            # Test topology audit
-python3 scripts/topology_doctor.py --fatal-misreads   # Forbidden semantic shortcut checks
-```
-
----
-
-## Repository structure
-
-```text
-src/                  Runtime source (signal, contracts, execution, state, risk, engine)
-tests/                Executable correctness and regression guards
-scripts/              Topology doctor, replay parity, maintenance tools
-architecture/         Machine-readable manifests, invariants, zones, task profiles
-docs/authority/       Durable architecture and delivery law
-docs/reference/       Domain model, math spec, module references
-docs/operations/      Current-fact surfaces and active work packets
-docs/to-do-list/      Known gaps, active checklists, and audit queues
-config/               Runtime configuration and source/provenance registries
-migrations/           SQL migrations defining canonical DB schema
-state/                Runtime databases and projections (local, not committed)
-```
-
----
-
-## For agents
-
-This repository is maintained by AI coding agents with a structured change-control layer. 
-
-MUST READ `AGENTS.md` and `workspace_map.md` 
-Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
-
-You may need to install new environment in your virtual machine or test may fail.
-
-### Packet Runtime (`zpkt`)
-
-A unified CLI collapses packet lifecycle, scope tracking, soft-warn enforcement, and closeout into a single surface. One-time setup (`zpkt setup`) installs the in-repo githook path. Daily use:
-
-```bash
-python3 scripts/zpkt.py setup                    # one-time per clone
-python3 scripts/zpkt.py start <slug>             # new packet + isolated worktree
-python3 scripts/zpkt.py status                   # one-call digest (5-min cached)
-python3 scripts/zpkt.py scope add <files>        # widen in_scope as you discover
-python3 scripts/zpkt.py commit -m "..." [files]  # commit with soft-warn
-python3 scripts/zpkt.py close                    # closeout: receipt + status flip
-```
-
-Full protocol: [`docs/operations/packet_scope_protocol.md`](docs/operations/packet_scope_protocol.md).
+Proprietary, all rights reserved. See [LICENSE](LICENSE).

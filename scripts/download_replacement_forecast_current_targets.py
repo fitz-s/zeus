@@ -73,6 +73,40 @@ def _source_available_at(cycle: datetime, *, release_lag_hours: float) -> dateti
     return cycle.astimezone(UTC) + timedelta(hours=release_lag_hours)
 
 
+def _single_runs_public_for_request(request) -> bool:
+    """Best-effort source-clock precheck before rung-1 single-runs.
+
+    The availability resolver may admit a cycle because the S3 bucket declares it
+    before Open-Meteo's single-runs API serves it. In that state, trying rung 1
+    for every city only produces repeated 400s. The source-clock probe refreshes
+    cached Open-Meteo model metadata before this downloader runs; when that cache
+    says ECMWF single-runs has not publicly exposed ``request.run`` yet, skip rung
+    1 and proceed to the existing meta/bucket ladder.
+    """
+    try:
+        from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            source_publicly_usable_at,
+        )
+
+        updates = read_model_updates_jsonl(DEFAULT_MODEL_UPDATES_JSONL)
+    except Exception:
+        return True
+    for update in updates:
+        if str(update.model) != "ecmwf_ifs":
+            continue
+        try:
+            run_clock = update.to_source_run_clock()
+            return (
+                update.last_run_initialisation_time.astimezone(UTC) == request.run.astimezone(UTC)
+                and datetime.now(tz=UTC) >= source_publicly_usable_at(run_clock)
+            )
+        except Exception:
+            return True
+    return True
+
+
 def _local_day_window(city_timezone: str, target_date: str) -> tuple[datetime, datetime]:
     local_date = date.fromisoformat(target_date)
     zone = ZoneInfo(city_timezone)
@@ -287,22 +321,27 @@ def _resolve_anchor_payload(
 
     # Rung 1: run-pinned single-runs (strongest provenance).
     single_runs_exc: Exception
-    try:
-        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, fast_fail_429=True)
-        return payload, {
-            "openmeteo_endpoint": "single_runs_api",
-            "run_authority": "run_pinned_single_runs",
-        }
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-        if status_code != 400 and status_code != 429 and status_code < 500:
-            raise
-        # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
-        single_runs_exc = exc
-    except RuntimeError as exc:
-        if not _is_transient_provider_failure(exc):
-            raise
-        single_runs_exc = exc
+    if _single_runs_public_for_request(request):
+        try:
+            payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, fast_fail_429=True)
+            return payload, {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            }
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code != 400 and status_code != 429 and status_code < 500:
+                raise
+            # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
+            single_runs_exc = exc
+        except RuntimeError as exc:
+            if not _is_transient_provider_failure(exc):
+                raise
+            single_runs_exc = exc
+    else:
+        single_runs_exc = RuntimeError(
+            "single-runs rung skipped: source-clock metadata says requested run is not public yet"
+        )
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
     try:
@@ -364,7 +403,10 @@ def download_current_target_raw_inputs(
     # ``include_covered=True`` (passed by the production wrapper when the available cycle is
     # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
     # downloads raw inputs for ALL current targets at the requested cycle.
-    plan = build_replacement_forecast_current_target_plan(forecast_db)
+    plan = build_replacement_forecast_current_target_plan(
+        forecast_db,
+        required_openmeteo_source_cycle_time=cycle,
+    )
     _rows = list(plan.rows) if include_covered else [row for row in plan.rows if not row.covered]
     targets = _rows[:limit] if limit else _rows
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -49,12 +49,10 @@ WHY THIS OBJECT EXISTS (spec §10 redecision/reversal gap, Hidden #7):
       a no-churn window beyond T_no_churn (§7 hysteresis), preventing flip-flop
       on small price/forecast noise.
 
-DEFAULT-OFF / SHADOW (operator directive 2026-06-08):
-  This is a PURE state machine plus pure transition functions. No DB, no live
-  wiring, no import side effects. Importing it changes NO live trading behavior;
-  the live decision path is not routed through it here (that is a later
-  integration phase, §11 Phase 5 rollback: "keep current submit recapture
-  fail-closed behavior"). No existing gate is weakened by its presence.
+Runtime boundary:
+  This is a pure state machine plus pure transition functions. It has no DB
+  writes and no import side effects. Live submission authority remains with the
+  caller that applies these transitions to a current execution intent.
 
 The engine reads only structural facts off the peer contracts
 (:class:`NativeSideCandidate`, :class:`ExecutableCostCurve`): it asks a

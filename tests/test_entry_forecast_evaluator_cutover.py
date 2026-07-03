@@ -116,269 +116,38 @@ def test_live_mode_blocked_rollout_no_longer_short_circuits_with_rollout_blocker
     assert decision.rejection_reasons != ["ENTRY_FORECAST_ROLLOUT_BLOCKED"]
 
 
-def test_phase_c1_kill_switch_zero_preserves_legacy_rollout_blocker(monkeypatch) -> None:
-    """Phase C-1 post-2026-05-04 default-ON activation: setting
-    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=0`` is the operator's emergency
-    kill-switch — it restores the legacy rollout-mode-only check
-    (byte-equal to pre-Phase-C behavior). Used during incident
-    recovery only.
-    """
+def test_rollout_promotion_gate_is_not_in_live_evaluator_execution_path() -> None:
+    """The canary/live promotion gate is control-plane tooling, not live evaluator authority."""
 
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
-    blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
-    live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-
-    assert evaluator_module._live_entry_forecast_rollout_blocker(blocked_cfg) is None
-    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
+    assert not hasattr(evaluator_module, "_live_entry_forecast_rollout_blocker")
+    assert not hasattr(evaluator_module, "_entry_forecast_rollout_gate_flag_on")
 
 
-def test_phase_c1_flag_on_blocks_when_evidence_missing(monkeypatch, tmp_path) -> None:
-    """Phase C-1: with the flag ON and no evidence file, the gate
-    surfaces ``ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING`` rather than
-    falling back to the rollout-mode-only check. This is the safety
-    upgrade the gate is intended to provide.
-    """
+def test_live_mode_invalid_entry_forecast_config_has_own_rejection(monkeypatch) -> None:
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
 
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
+    def broken_config():
+        raise ValueError("bad entry forecast config")
 
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
-    monkeypatch.setattr(
-        evidence_io,
-        "DEFAULT_PROMOTION_EVIDENCE_PATH",
-        tmp_path / "absent.json",
+    monkeypatch.setattr(evaluator_module, "entry_forecast_config", broken_config)
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate_with_outcomes(),
+        conn=None,
+        portfolio=object(),
+        clob=object(),
+        limits=object(),
+        decision_time=datetime(2026, 5, 3, tzinfo=UTC),
     )
 
-    live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
-
-
-def test_phase_c1_flag_on_surfaces_corruption_as_explicit_blocker(monkeypatch, tmp_path) -> None:
-    """Phase C-1: corrupt evidence file ⇒ explicit corruption blocker
-    rather than uncaught exception that would crash the cycle.
-    """
-
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
-
-    target = tmp_path / "corrupt.json"
-    target.write_text("not valid json {{{")
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
-    monkeypatch.setattr(evidence_io, "DEFAULT_PROMOTION_EVIDENCE_PATH", target)
-
-    live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    blocker = evaluator_module._live_entry_forecast_rollout_blocker(live_cfg)
-    assert blocker is None
-
-
-def test_phase_c1_flag_on_passes_with_complete_evidence(monkeypatch, tmp_path) -> None:
-    """Phase C-1: complete promotion evidence with all approvals ⇒ the
-    gate returns ``None`` (no blocker) for live rollout."""
-
-    from src.control.entry_forecast_promotion_evidence_io import (
-        DEFAULT_PROMOTION_EVIDENCE_PATH,
-        write_promotion_evidence,
-    )
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
-    from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
-    from src.data.live_entry_status import LiveEntryForecastStatus
-
-    target = tmp_path / "evidence.json"
-    monkeypatch.setattr(evidence_io, "DEFAULT_PROMOTION_EVIDENCE_PATH", target)
-
-    evidence = EntryForecastPromotionEvidence(
-        operator_approval_id="op-2026-05-03",
-        g1_evidence_id="g1-2026-05-03",
-        status_snapshot=LiveEntryForecastStatus(
-            status="LIVE_ELIGIBLE",
-            blockers=(),
-            executable_row_count=4,
-            producer_readiness_count=4,
-            producer_live_eligible_count=4,
-        ),
-        calibration_promotion_approved=True,
-        canary_success_evidence_id="canary-1",
-    )
-    write_promotion_evidence(evidence, path=target)
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
-    live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
-
-
-def test_phase_c1_flag_on_blocks_when_evidence_lacks_canary_success(monkeypatch, tmp_path) -> None:
-    """Phase C-1: live rollout requires canary_success_evidence_id; a
-    payload with operator + G1 + calibration approval but no canary
-    success ⇒ gate emits ``ENTRY_FORECAST_CANARY_SUCCESS_MISSING``.
-    """
-
-    from src.control.entry_forecast_promotion_evidence_io import write_promotion_evidence
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
-    from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
-    from src.data.live_entry_status import LiveEntryForecastStatus
-
-    target = tmp_path / "evidence.json"
-    monkeypatch.setattr(evidence_io, "DEFAULT_PROMOTION_EVIDENCE_PATH", target)
-
-    evidence = EntryForecastPromotionEvidence(
-        operator_approval_id="op-1",
-        g1_evidence_id="g1-1",
-        status_snapshot=LiveEntryForecastStatus(
-            status="LIVE_ELIGIBLE",
-            blockers=(),
-            executable_row_count=4,
-            producer_readiness_count=4,
-            producer_live_eligible_count=4,
-        ),
-        calibration_promotion_approved=True,
-        canary_success_evidence_id=None,
-    )
-    write_promotion_evidence(evidence, path=target)
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
-    live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
-
-
-def test_phase_c3_kill_switch_zero_disables_writer(monkeypatch, tmp_path) -> None:
-    """Phase C-3 post-2026-05-04 default-ON activation: setting
-    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=0`` is the operator's
-    emergency kill-switch — predicate returns False so the call site
-    at ``evaluator.py:1639`` skips the writer invocation and no
-    ``readiness_state`` row with ``strategy_key='entry_forecast'``
-    lands. Used during incident recovery only.
-    """
-
-    from src.engine.evaluator import _entry_forecast_readiness_writer_flag_on
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "0")
-    assert _entry_forecast_readiness_writer_flag_on() is False
-
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
-    assert _entry_forecast_readiness_writer_flag_on() is False  # default-OFF
-
-
-def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkeypatch, tmp_path) -> None:
-    """Phase C-3: with the flag ON and no evidence file, the helper
-    writes a BLOCKED entry_readiness row whose reason includes
-    ``ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING``. The reader will
-    consume this row and emit a typed blocker rather than silently
-    finding no row at all.
-    """
-
-    import sqlite3
-    from datetime import date, datetime, timezone
-    from src.config import EntryForecastRolloutMode, entry_forecast_config
-    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
-    from src.data.entry_readiness_writer import ENTRY_FORECAST_STRATEGY_KEY
-    from src.engine import evaluator as evaluator_module
-    from src.engine.evaluator import _write_entry_readiness_for_candidate
-    from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_canonical_schema
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "1")
-    monkeypatch.setattr(
-        evidence_io,
-        "DEFAULT_PROMOTION_EVIDENCE_PATH",
-        tmp_path / "absent.json",
-    )
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    apply_canonical_schema(conn)
-
-    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-
-    _write_entry_readiness_for_candidate(
-        conn,
-        cfg=cfg,
-        city=_city(),
-        target_local_date=date(2026, 5, 8),
-        temperature_metric=HIGH_LOCALDAY_MAX,
-        market_family="POLY_TEMP_LONDON",
-        condition_id="condition-123",
-        decision_time=datetime(2026, 5, 3, 12, tzinfo=UTC),
-    )
-
-    row = conn.execute(
-        "SELECT status, reason_codes_json, market_family, condition_id "
-        "FROM readiness_state WHERE strategy_key = ?",
-        (ENTRY_FORECAST_STRATEGY_KEY,),
-    ).fetchone()
-    assert row is not None
-    assert row["status"] == "BLOCKED"
-    assert row["market_family"] == "POLY_TEMP_LONDON"
-    assert row["condition_id"] == "condition-123"
-    assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in row["reason_codes_json"]
-
-
-def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monkeypatch, tmp_path) -> None:
-    """Phase C-3: complete promotion evidence + LIVE rollout + approved
-    calibration ⇒ helper writes a LIVE_ELIGIBLE entry_readiness row.
-    """
-
-    import sqlite3
-    from datetime import date, datetime, timezone
-    from src.config import EntryForecastRolloutMode, entry_forecast_config
-    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
-    from src.control import entry_forecast_promotion_evidence_io as evidence_io
-    from src.control.entry_forecast_promotion_evidence_io import write_promotion_evidence
-    from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
-    from src.data.entry_readiness_writer import ENTRY_FORECAST_STRATEGY_KEY
-    from src.data.live_entry_status import LiveEntryForecastStatus
-    from src.engine.evaluator import _write_entry_readiness_for_candidate
-    from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_canonical_schema
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX
-
-    target = tmp_path / "evidence.json"
-    monkeypatch.setattr(evidence_io, "DEFAULT_PROMOTION_EVIDENCE_PATH", target)
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "1")
-
-    write_promotion_evidence(
-        EntryForecastPromotionEvidence(
-            operator_approval_id="op-1",
-            g1_evidence_id="g1-1",
-            status_snapshot=LiveEntryForecastStatus(
-                status="LIVE_ELIGIBLE",
-                blockers=(),
-                executable_row_count=4,
-                producer_readiness_count=4,
-                producer_live_eligible_count=4,
-            ),
-            calibration_promotion_approved=True,
-            canary_success_evidence_id="canary-1",
-        ),
-        path=target,
-    )
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    apply_canonical_schema(conn)
-
-    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-
-    _write_entry_readiness_for_candidate(
-        conn,
-        cfg=cfg,
-        city=_city(),
-        target_local_date=date(2026, 5, 8),
-        temperature_metric=HIGH_LOCALDAY_MAX,
-        market_family="POLY_TEMP_LONDON",
-        condition_id="condition-123",
-        decision_time=datetime(2026, 5, 3, 12, tzinfo=UTC),
-    )
-
-    row = conn.execute(
-        "SELECT status, expires_at FROM readiness_state WHERE strategy_key = ?",
-        (ENTRY_FORECAST_STRATEGY_KEY,),
-    ).fetchone()
-    assert row is not None
-    assert row["status"] == "LIVE_ELIGIBLE"
-    assert row["expires_at"] is not None
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision.rejection_reasons == ["entry_forecast_reader_rejected"]
+    assert decision.rejection_reason_detail.startswith("ENTRY_FORECAST_CONFIG_INVALID:")
+    assert decision.applied_validations == [
+        "entry_forecast_config",
+        "legacy_entry_primary_fetch_blocked",
+    ]
 
 
 def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
@@ -392,14 +161,9 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
     fix relies on the cutover-guard expression
     ``entry_forecast_cfg is not None and not is_day0_mode``.
 
-    Post-2026-05-04 default-ON activation: the rollout gate fires
-    BEFORE the Day0 cutover guard at evaluator.py:1467, so reaching
-    the Day0 fall-through requires either populated promotion
-    evidence or the gate kill-switch. This test uses the kill-switch
-    to isolate the §Phase-C-6 behavior under test.
+    The retired rollout promotion gate is not part of this execution path; this
+    test isolates the Day0 cutover behavior directly.
     """
-
-    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
 
     cfg_live = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
@@ -460,15 +224,7 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
 
 
 def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monkeypatch) -> None:
-    """Post-2026-05-04 default-ON gate: rollout-blocker fires BEFORE
-    the executable-reader path. With no on-disk evidence, the gate
-    short-circuits with EVIDENCE_MISSING; legacy fetch is never
-    consulted (which is the property this test originally asserted).
-
-    Kill-switch=0 here would expose the legacy path's
-    ``ENTRY_FORECAST_READER_DB_UNAVAILABLE``; we keep the gate
-    default-ON to pin the new dominant path.
-    """
+    """Live non-Day0 candidates use executable forecast rows before legacy fetch."""
 
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
@@ -491,7 +247,7 @@ def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monke
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision.should_trade is False
-    assert decision.rejection_reasons == ["ENTRY_FORECAST_READER_DB_UNAVAILABLE"]
+    assert decision.rejection_reasons == ["entry_forecast_reader_db_unavailable"]
     assert decision.applied_validations == [
         "entry_forecast_reader",
         "legacy_entry_primary_fetch_blocked",
@@ -510,9 +266,6 @@ def test_live_mode_reader_cutover_does_not_write_entry_readiness_in_evaluator(mo
     def forbidden_fetch(*args, **kwargs):
         raise AssertionError("legacy fetch_ensemble should not be called")
 
-    def forbidden_writer(*args, **kwargs):
-        raise AssertionError("evaluator hot path must not write entry_readiness")
-
     reader_calls: list[dict] = []
 
     def stub_reader(*args, **kwargs):
@@ -524,7 +277,6 @@ def test_live_mode_reader_cutover_does_not_write_entry_readiness_in_evaluator(mo
             raise AssertionError("stub reader should avoid DB access")
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", forbidden_fetch)
-    monkeypatch.setattr(evaluator_module, "_write_entry_readiness_for_candidate", forbidden_writer)
     monkeypatch.setattr(evaluator_module, "read_executable_forecast", stub_reader)
 
     decisions = evaluator_module.evaluate_candidate(
@@ -539,7 +291,8 @@ def test_live_mode_reader_cutover_does_not_write_entry_readiness_in_evaluator(mo
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision.should_trade is False
-    assert decision.rejection_reasons == ["PRODUCER_READINESS_MISSING"]
+    assert decision.rejection_reasons == ["entry_forecast_reader_rejected"]
+    assert decision.rejection_reason_detail == "PRODUCER_READINESS_MISSING"
     assert reader_calls
     assert reader_calls[0]["require_entry_readiness"] is False
 
@@ -568,12 +321,8 @@ def test_live_mode_actual_reader_consumes_daemon_readiness_before_signal(monkeyp
     def forbidden_fetch(*args, **kwargs):
         raise AssertionError("legacy fetch_ensemble should not be called")
 
-    def forbidden_writer(*args, **kwargs):
-        raise AssertionError("evaluator hot path must not write entry_readiness")
-
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", forbidden_fetch)
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", forbidden_p_raw_writer)
-    monkeypatch.setattr(evaluator_module, "_write_entry_readiness_for_candidate", forbidden_writer)
 
     decisions = evaluator_module.evaluate_candidate(
         _candidate_with_outcomes(),

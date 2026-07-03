@@ -23,7 +23,9 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -37,7 +39,24 @@ CREATE TABLE position_current (
     bin_label TEXT, direction TEXT, condition_id TEXT, city TEXT,
     target_date TEXT, temperature_metric TEXT, p_posterior REAL,
     entry_ci_width REAL, cost_basis_usd REAL, chain_cost_basis_usd REAL,
-    shares REAL, size_usd REAL, updated_at TEXT
+    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT,
+    chain_state TEXT
+)
+"""
+
+_COLLATERAL_LEDGER_DDL = """
+CREATE TABLE collateral_ledger_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pusd_balance_micro INTEGER NOT NULL,
+  pusd_allowance_micro INTEGER NOT NULL,
+  usdc_e_legacy_balance_micro INTEGER NOT NULL,
+  ctf_token_balances_json TEXT NOT NULL,
+  ctf_token_allowances_json TEXT NOT NULL,
+  reserved_pusd_for_buys_micro INTEGER NOT NULL DEFAULT 0,
+  reserved_tokens_for_sells_json TEXT NOT NULL DEFAULT '{}',
+  captured_at TEXT NOT NULL,
+  authority_tier TEXT NOT NULL,
+  raw_balance_payload_hash TEXT
 )
 """
 
@@ -48,6 +67,21 @@ def _conn() -> sqlite3.Connection:
     conn.execute(_POSITION_CURRENT_DDL)
     ensure_table(conn)
     return conn
+
+
+def _insert_chain_collateral(conn, balances: dict[str, int]) -> None:
+    conn.execute(_COLLATERAL_LEDGER_DDL)
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro, pusd_allowance_micro, usdc_e_legacy_balance_micro,
+            ctf_token_balances_json, ctf_token_allowances_json,
+            reserved_pusd_for_buys_micro, reserved_tokens_for_sells_json,
+            captured_at, authority_tier, raw_balance_payload_hash
+        ) VALUES (0, 0, 0, ?, '{}', 0, '{}', ?, 'CHAIN', 'hash')
+        """,
+        (json.dumps(balances), datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def _insert_held(
@@ -61,6 +95,8 @@ def _insert_held(
     direction="buy_yes",
     cost_basis_usd=4.0,
     chain_cost_basis_usd=None,
+    chain_shares=10.0,
+    chain_state="synced",
     city="Tokyo",
     target_date="2026-06-23",
     metric="high",
@@ -70,12 +106,14 @@ def _insert_held(
         INSERT INTO position_current (
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
-            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, size_usd, updated_at
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
         ) VALUES (?, ?, ?, ?, ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
-                  '2026-06-22T06:00:00')
+                  ?, '2026-06-22T06:00:00', ?)
         """,
         (position_id, phase, token_id, no_token_id, bin_label, direction, city, target_date,
-         metric, cost_basis_usd, chain_cost_basis_usd, cost_basis_usd),
+         metric, cost_basis_usd, chain_cost_basis_usd, chain_shares, cost_basis_usd,
+         chain_state),
     )
 
 
@@ -106,6 +144,136 @@ def test_sibling_different_bin_is_returned():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_sibling_different_bin_reads_tuple_rows_without_row_factory():
+    """Bare sqlite3 tuple rows must not make held sibling exposure disappear."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_POSITION_CURRENT_DDL)
+    ensure_table(conn)
+    _insert_held(conn, token_id="tok-A", bin_label="60-61F", cost_basis_usd=4.0)
+
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Tokyo", target_date="2026-06-23", temperature_metric="high",
+        selected_token_id="tok-B", selected_bin_label="62-63F",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-old"
+    assert held.token_id == "tok-A"
+    assert held.bin_label == "60-61F"
+    assert held.current_live_usd == pytest.approx(4.0)
+
+
+def test_sibling_different_bin_reads_attached_position_current_schema():
+    """Attached trade/world position_current must not disappear at column discovery."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares, size_usd, updated_at
+        ) VALUES (
+            'p-attached', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 21.27, 29.14, 29.14, 0.0, '2026-06-30T05:00:00'
+        )
+        """
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn,
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        selected_token_id="no-29",
+        selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-attached"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(21.27)
+
+
+def test_sibling_reads_attached_chain_backed_zero_cost_quarantine():
+    """Chain-backed quarantine is old-leg exposure even before fill economics bind."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
+        ) VALUES (
+            'p-chain-risk', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 0.0, 0.0, 29.14, 0.0, '2026-06-30T05:00:00',
+            'entry_authority_quarantined'
+        )
+        """
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn,
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        selected_token_id="no-29",
+        selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-chain-risk"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(29.14)
+
+
+def test_active_shift_lease_for_family_reads_existing_shift_before_fill_up():
+    """A multi-cycle SHIFT_BIN lease must be visible to the reactor before D1 fill-up."""
+    conn = _conn()
+    plan = sbw.plan_shift_bin(
+        conn,
+        is_redecision_event=True,
+        family_key="live|Tokyo|2026-06-23|high",
+        event_id="evt-1",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        selected_direction="buy_yes",
+        held=sbw.HeldSiblingExposure(
+            position_id="p-old",
+            token_id="tok-A",
+            bin_label="60-61F",
+            direction="buy_yes",
+            current_live_usd=4.0,
+        ),
+        old_leg_residual_usd=4.0,
+        has_unowned_pending_or_unknown_entry=False,
+        now_iso="2026-06-22T06:00:00+00:00",
+        old_leg_dust_floor_usd=1.0,
+    )
+    assert plan.kind == "EXIT_OLD_LEG"
+
+    lease = sbw.active_shift_lease_for_family(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+    )
+
+    assert lease is not None
+    assert lease.intent_id == plan.lease_intent_id
+    assert lease.status == "EXIT_SUBMITTED"
+    assert lease.held_token_id == "tok-A"
+    assert lease.selected_token_id == "tok-B"
+
+
 def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
     """SHIFT_BIN must sell the held-side NO token, not the row's YES/condition token."""
     conn = _conn()
@@ -125,6 +293,36 @@ def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
     assert held.token_id == "no-tok-A"
     assert held.direction == "buy_no"
     assert held.current_live_usd == pytest.approx(4.0)
+
+
+def test_quarantined_chain_backed_buy_no_sibling_is_returned():
+    """A quarantine label is not closure when chain shares are still positive."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        position_id="munich-30-no",
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        bin_label="30C",
+        direction="buy_no",
+        cost_basis_usd=21.27,
+        chain_cost_basis_usd=21.27,
+        chain_shares=29.14,
+        city="Munich",
+        target_date="2026-06-30",
+        metric="high",
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Munich", target_date="2026-06-30", temperature_metric="high",
+        selected_token_id="no-29", selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "munich-30-no"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(21.27)
 
 
 def test_same_token_held_is_not_a_sibling():
@@ -157,10 +355,35 @@ def test_old_leg_residual_reads_live_usd():
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(4.0)
 
 
+def test_old_leg_residual_reads_tuple_rows_without_row_factory():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_POSITION_CURRENT_DDL)
+    ensure_table(conn)
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0)
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(4.0)
+
+
 def test_old_leg_residual_prefers_chain_cost_basis():
     conn = _conn()
     _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
+
+
+def test_old_leg_residual_reads_quarantined_chain_backed_row():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        direction="buy_no",
+        cost_basis_usd=21.27,
+        chain_cost_basis_usd=21.27,
+        chain_shares=29.14,
+    )
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="no-30") == pytest.approx(21.27)
 
 
 def test_old_leg_residual_reads_buy_no_no_token():
@@ -181,6 +404,160 @@ def test_old_leg_residual_zero_when_not_held():
     closed)."""
     conn = _conn()
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-GONE") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_zero_when_chain_collateral_has_no_token():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=0.0,
+    )
+    _insert_chain_collateral(conn, {})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_chain_zero_overrides_stale_local_projection():
+    """Fresh CHAIN zero is closure truth even when local position_current is stale.
+
+    This is the live redecision bug: after a sell/zero-collateral proof, the local
+    projection can still carry cost. Close-before-open must not keep emitting
+    EXIT_OLD_LEG from a row whose chain_state has already been marked zero; otherwise
+    the selected new YES/NO leg never reaches final intent. A positive synced
+    chain_shares row is different: it is current chain evidence and must stay live.
+    """
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=10.0,
+        chain_state="chain_confirmed_zero",
+    )
+    _insert_chain_collateral(conn, {})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_keeps_synced_chain_position_over_collateral_zero():
+    """Regression for Kuala Lumpur 2026-07-02.
+
+    A fresh collateral snapshot that lacks the token is not allowed to erase an
+    active/synced position_current row with positive chain_shares. That false
+    zero made shift-bin think the 33C NO old leg was closed and admitted a new
+    34C YES entry in the same family.
+    """
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-33",
+        no_token_id="no-33",
+        bin_label="33C",
+        direction="buy_no",
+        cost_basis_usd=15.9313,
+        chain_cost_basis_usd=15.9313,
+        chain_shares=20.69,
+        chain_state="synced",
+        city="Kuala Lumpur",
+        target_date="2026-07-02",
+        metric="high",
+    )
+    _insert_chain_collateral(conn, {})
+
+    residual = sbw.read_old_leg_residual_usd(conn, token_id="no-33")
+
+    assert residual == pytest.approx(15.9313)
+
+
+def test_old_leg_residual_keeps_zero_cost_current_risk_chain_position():
+    """Current chain risk keeps share sellability without fabricating USD residual."""
+
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        direction="buy_no",
+        cost_basis_usd=0.0,
+        chain_cost_basis_usd=0.0,
+        chain_shares=29.14,
+        chain_state="entry_authority_quarantined",
+    )
+    _insert_chain_collateral(conn, {})
+
+    residual = sbw.read_old_leg_residual(conn, token_id="no-30")
+
+    assert residual.shares == pytest.approx(29.14)
+    assert residual.usd is None
+    assert sbw.read_old_leg_residual_usd(conn, token_id="no-30") == pytest.approx(0.0)
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is True
+
+
+def test_old_leg_residual_does_not_treat_sub_min_shares_as_usd():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=0.0,
+        chain_cost_basis_usd=0.0,
+        chain_shares=0.9,
+        chain_state="synced",
+    )
+
+    residual = sbw.read_old_leg_residual(conn, token_id="tok-A")
+
+    assert residual.shares == pytest.approx(0.9)
+    assert residual.usd is None
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is False
+
+
+def test_old_leg_live_predicate_treats_equal_dust_floor_as_live():
+    residual = sbw.OldLegResidual(shares=0.5, usd=0.20, source="position_current_usd")
+
+    assert sbw.old_leg_is_live(residual, min_order_shares=1.0, dust_floor_usd=0.20) is True
+
+
+def test_chain_zero_old_leg_admits_new_bin_under_shift_lease():
+    """Once chain collateral and chain_state prove the old leg is zero, shift-bin admits new entry."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        position_id="p-old",
+        token_id="tok-A",
+        bin_label="60-61F",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=10.0,
+        chain_state="chain_confirmed_zero",
+    )
+    _insert_chain_collateral(conn, {})
+    held = _old_leg(conn)
+    residual = sbw.read_old_leg_residual_usd(conn, token_id="tok-A")
+
+    plan = _plan(conn, held=held, old_leg_residual_usd=residual)
+
+    assert residual == pytest.approx(0.0)
+    assert plan.kind == "ENTER_NEW_BIN"
+    assert plan.allow_entry is True
+    row = conn.execute(
+        "SELECT status FROM family_rebalance_intents WHERE intent_id=?",
+        (plan.lease_intent_id,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_SUBMITTED"
+
+
+def test_old_leg_residual_keeps_local_value_when_chain_collateral_has_token():
+    conn = _conn()
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
+    _insert_chain_collateral(conn, {"tok-A": 10_000_000})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
 
 
 # ---------------------------------------------------------------------------

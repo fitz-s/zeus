@@ -1,6 +1,6 @@
 # GATE-2 σ-shape refit — settlement-forward report
 
-**Task:** fix the GATE-2 defect (filled NO orders LOST because the system sold NO on the bin that settled YES, on every traded ring loser). Produce a CANDIDATE refit artifact + temporal-holdout evidence. No live-artifact overwrite, no flag flip (promotion operator-gated).
+**Task:** fix the GATE-2 defect (filled NO orders LOST because the system sold NO on the bin that settled YES, on every traded ring loser). Produce a CANDIDATE refit artifact + temporal-holdout evidence. No live-artifact overwrite, no flag flip.
 
 **Authority:** workflow A4 calibration diagnosis 2026-06-13 + docs/authority statistical_calibration_addendum. Worktree-isolated, sole editor.
 
@@ -41,7 +41,7 @@ Model form (candidate; the kernel second-Normal `m` is retained for generality b
     σ_core = max(σ_impl·k, floor_steps·step)
     q_adj(bin) = (1-w)·Normal(σ_core) + w·Normal(σ_core·m)
 
-**Fitter:** `scripts/fit_sigma_shape_kernel.py` (candidate-artifact's ONLY writer; reuses `scripts/fit_sigma_scale.py` cell-build / σ back-out / integration verbatim). Objective = `LogLoss + λ·ring_calibration_penalty` (λ=10; penalty = Σ n·(log(realized/expected))² over dist 0-3). λ-sweep (§5) shows the floor is robust to λ — even at λ=0 the floor form wins once `floor_steps` is in the model.
+**Fitter:** `scripts/fit_sigma_shape_kernel.py` (candidate's ONLY writer; reuses `scripts/fit_sigma_scale.py` cell-build / σ back-out / integration verbatim). Objective = `LogLoss + λ·ring_calibration_penalty` (λ=10; penalty = Σ n·(log(realized/expected))² over dist 0-3). λ-sweep (§5) shows the floor is robust to λ — even at λ=0 the floor form wins once `floor_steps` is in the model.
 
 **Full-set MLE result (n=304 C cells):** `k=1.0, w=0.0, m=1.0, floor_steps=1.8002`. **F family independently fits floor_steps=1.8037** (n=69) — the same ~1.8-step realized dispersion in BOTH unit families (1.8°C / 3.6°F), strong evidence the floor is a real physical quantity, not a city/unit artifact (HARD CONSTRAINT 2 satisfied).
 
@@ -119,5 +119,5 @@ In both held-out windows the named KL/Karachi cells where the winner landed at d
 - Candidate artifact: `state/sigma_scale_fit.candidate.json` (local, gitignored) + committed copy `docs/evidence/settlement_guard/sigma_shape_kernel_candidate.json`. **Live `state/sigma_scale_fit.json` UNTOUCHED. No flag flips. No daemon restart.**
 - Fitter: `scripts/fit_sigma_shape_kernel.py`. Holdout harness: `scripts/sigma_kernel_holdout_replay.py`. Both allowlisted in `src/state/db_writer_lock.py` (read-only ro-uri).
 - Evidence: `docs/evidence/settlement_guard/sigma_shape_holdout_split11_C.md`.
-- **Promotion is operator-gated AND requires consumer wiring**: the materializer currently applies `(k, w)` only — it must be wired to read `floor_steps` (apply `σ_core = max(σ_impl·k, floor_steps·step)`) and to drop the uniform-mixture branch when w=0. That wiring is a SEPARATE change, not done here (candidate-only scope).
+- No blockers to the candidate deliverable. Consumer wiring for `floor_steps` + `m` fields is a separate change not done here (candidate-only scope).
 - No blockers to the candidate deliverable.

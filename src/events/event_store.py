@@ -11,17 +11,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 
-from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.opportunity_event import OpportunityEvent
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
 # (mirrors src.events.continuous_redecision.REDECISION_EVENT_TYPE) to avoid an import cycle.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
+_DECISION_TRIGGER_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
+    {"DAY0_EXTREME_UPDATED"}
+)
 _NO_VALUE_REFUTATION_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
     {"DAY0_EXTREME_UPDATED"}
 )
@@ -52,6 +56,16 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
     )
 """
 _FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
+_RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
+_FamilyNormalizer = Callable[[object, object, object], tuple[str, str, str]]
+
+
+def _recapture_edge_backoff_seconds() -> int:
+    try:
+        value = int(os.environ.get("ZEUS_RECAPTURE_EDGE_BACKOFF_SECONDS", "600"))
+    except (TypeError, ValueError):
+        value = 600
+    return max(0, min(value, 3600))
 
 
 def _no_value_refutation_event_types_compatible(
@@ -76,6 +90,20 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value or default)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_bool_int(value: object) -> int:
+    return 1 if _safe_int(value, 0) > 0 else 0
+
+
+def _default_family_normalizer(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
+    city_text = " ".join(str(city or "").strip().lower().replace("-", " ").replace("_", " ").split())
+    metric_text = " ".join(str(metric or "").strip().lower().replace("-", " ").replace("_", " ").split())
+    if metric_text in {"lowest", "min", "minimum", "tmin"} or metric_text.startswith("lowest "):
+        metric_text = "low"
+    elif metric_text in {"highest", "max", "maximum", "tmax"} or metric_text.startswith("highest "):
+        metric_text = "high"
+    return (city_text, str(target_date or "").strip(), metric_text)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -142,33 +170,178 @@ class EventStore:
             raise
 
         inserted = cur.rowcount == 1
-        if inserted:
+        now = _utc_now()
+        if event.event_type in self._CHANNEL_EVENT_TYPES:
+            processing_status = "ignored"
+            processed_at = now
+            last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+        else:
+            processing_status = "pending"
+            processed_at = None
+            last_error = None
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count,
+                processed_at, last_error, updated_at
+            ) VALUES (?, ?, ?, 0, ?, ?, ?)
+            """,
+            (
+                self.consumer_name,
+                event.event_id,
+                processing_status,
+                processed_at,
+                last_error,
+                now,
+            ),
+        )
+        return inserted
+
+    def repair_missing_processing_rows(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 1_000,
+    ) -> int:
+        """Backfill missing mutable processing rows for immutable decision events.
+
+        Older writer bugs could leave an ``opportunity_events`` row without the
+        matching ``opportunity_event_processing`` row. Such events are invisible
+        to ``fetch_pending`` forever because processing rows are the mutable
+        claim/retry surface. Repair only decision-trigger event types; market
+        channel cache events are intentionally ignored work and must not be
+        resurrected as reactor candidates.
+        """
+
+        self._require_world_event_tables()
+        parsed_decision_time = _parse_utc(decision_time).isoformat()
+        limit = max(1, int(batch_limit))
+        placeholders = ",".join("?" for _ in _DECISION_TRIGGER_EVENT_TYPES)
+        rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+              FROM opportunity_events e INDEXED BY idx_opportunity_events_type_available
+              LEFT JOIN opportunity_event_processing p
+                ON p.consumer_name = ?
+               AND p.event_id = e.event_id
+             WHERE p.event_id IS NULL
+               AND e.event_type IN ({placeholders})
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+               AND (e.expires_at IS NULL OR e.expires_at > ?)
+             ORDER BY e.available_at DESC
+             LIMIT ?
+            """,
+            (
+                self.consumer_name,
+                *sorted(_DECISION_TRIGGER_EVENT_TYPES),
+                parsed_decision_time,
+                parsed_decision_time,
+                parsed_decision_time,
+                limit,
+            ),
+        ).fetchall()
+        event_ids = [str(row[0] or "") for row in rows if str(row[0] or "")]
+        if not event_ids:
+            return 0
+        now = _utc_now()
+        before = self.conn.total_changes
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count,
+                processed_at, last_error, updated_at
+            ) VALUES (?, ?, 'pending', 0, NULL, NULL, ?)
+            """,
+            ((self.consumer_name, event_id, now) for event_id in event_ids),
+        )
+        return int(self.conn.total_changes - before)
+
+    def fetch_pending_by_event_type(
+        self, *, event_type: str, decision_time: str, limit: int = 100
+    ) -> list[OpportunityEvent]:
+        """Fetch pending events of exactly ``event_type`` for THIS consumer, oldest
+        ``available_at`` first.
+
+        A standalone, event-type-scoped sibling of :meth:`fetch_pending` for
+        consumers outside the main forecast/day0 decision lane (W4.2:
+        ``SOURCE_RUN_ARRIVED`` staleness consumption). It does NOT touch
+        ``_DECISION_TRIGGER_EVENT_TYPES``/``_FORECAST_DECISION_EVENT_TYPES`` or the
+        city-fairness/tier ranking those event types share — a caller here should
+        use its own ``consumer_name`` (never ``edli_reactor_v1``) so this claim
+        lane cannot starve or reorder the main reactor's queue.
+
+        Self-backfilling: a processing row for THIS consumer is created lazily
+        (mirrors :meth:`repair_missing_processing_rows`) rather than requiring the
+        writer to have known about this consumer at insert time.
+        """
+
+        self._require_world_event_tables()
+        parsed_decision_time = _parse_utc(decision_time)
+        stale_processing_before = (
+            parsed_decision_time - timedelta(seconds=self.processing_lease_seconds)
+        ).isoformat()
+
+        backfill_rows = self.conn.execute(
+            """
+            SELECT e.event_id
+              FROM opportunity_events e
+              LEFT JOIN opportunity_event_processing p
+                ON p.consumer_name = ?
+               AND p.event_id = e.event_id
+             WHERE p.event_id IS NULL
+               AND e.event_type = ?
+               AND e.available_at <= ?
+             LIMIT ?
+            """,
+            (self.consumer_name, event_type, parsed_decision_time.isoformat(), max(1, limit) * 4),
+        ).fetchall()
+        backfill_ids = [str(row[0] or "") for row in backfill_rows if str(row[0] or "")]
+        if backfill_ids:
             now = _utc_now()
-            if event.event_type in self._CHANNEL_EVENT_TYPES:
-                processing_status = "ignored"
-                processed_at = now
-                last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
-            else:
-                processing_status = "pending"
-                processed_at = None
-                last_error = None
-            self.conn.execute(
+            self.conn.executemany(
                 """
                 INSERT OR IGNORE INTO opportunity_event_processing (
                     consumer_name, event_id, processing_status, attempt_count,
                     processed_at, last_error, updated_at
-                ) VALUES (?, ?, ?, 0, ?, ?, ?)
+                ) VALUES (?, ?, 'pending', 0, NULL, NULL, ?)
                 """,
-                (
-                    self.consumer_name,
-                    event.event_id,
-                    processing_status,
-                    processed_at,
-                    last_error,
-                    now,
-                ),
+                ((self.consumer_name, event_id, now) for event_id in backfill_ids),
             )
-        return inserted
+
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        rows = self.conn.execute(
+            f"""
+            SELECT {event_cols}
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND e.event_type = ?
+               AND (
+                    p.processing_status = 'pending'
+                 OR (
+                        p.processing_status = 'processing'
+                    AND p.claimed_at IS NOT NULL
+                    AND p.claimed_at <= ?
+                 )
+               )
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+               AND (e.expires_at IS NULL OR e.expires_at > ?)
+             ORDER BY e.available_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (
+                self.consumer_name,
+                event_type,
+                stale_processing_before,
+                parsed_decision_time.isoformat(),
+                parsed_decision_time.isoformat(),
+                parsed_decision_time.isoformat(),
+                limit,
+            ),
+        ).fetchall()
+        return [_event_from_row(row) for row in rows]
 
     def fetch_pending(
         self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True
@@ -210,7 +383,7 @@ class EventStore:
         ).isoformat()
         # Scope-aware claim tier (ONE ordering authority, shared with the emit
         # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
-        # clause so shadow-only day0 events fall to Tier 2 — strictly below the
+        # clause so non-tradeable day0 events fall to Tier 2 — strictly below the
         # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
         # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
         #
@@ -246,12 +419,12 @@ class EventStore:
         # plan under redecision/day0 predicates. Keep SQL to active processing rows
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
-        active_rows: list[tuple[str, int]] = []
+        active_rows: list[tuple[str, int, str, int]] = []
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
             for row in self.conn.execute(
                 """
-                SELECT p.event_id, p.attempt_count
+                SELECT p.event_id, p.attempt_count, p.last_error
                   FROM opportunity_event_processing p
                        INDEXED BY idx_opportunity_event_processing_pending_retry_floor
                  WHERE p.consumer_name = ?
@@ -264,10 +437,10 @@ class EventStore:
             ).fetchall()
         )
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 1)
             for row in self.conn.execute(
                 """
-                SELECT p.event_id, p.attempt_count
+                SELECT p.event_id, p.attempt_count, p.last_error
                   FROM opportunity_event_processing p
                        INDEXED BY idx_opportunity_event_processing_stale_claim
                  WHERE p.consumer_name = ?
@@ -283,11 +456,15 @@ class EventStore:
         if not active_rows:
             return []
         attempt_by_event: dict[str, int] = {}
+        last_error_by_event: dict[str, str] = {}
+        stale_reclaim_by_event: dict[str, int] = {}
         event_ids: list[str] = []
-        for event_id, attempt_count in active_rows:
+        for event_id, attempt_count, last_error, stale_reclaim in active_rows:
             if not event_id or event_id in attempt_by_event:
                 continue
             attempt_by_event[event_id] = attempt_count
+            last_error_by_event[event_id] = last_error
+            stale_reclaim_by_event[event_id] = stale_reclaim
             event_ids.append(event_id)
 
         rows: list[tuple[object, ...]] = []
@@ -323,9 +500,52 @@ class EventStore:
                 else:
                     event_id = str(row[0] or "")
                     event_tuple = tuple(row[: len(_EVENT_ROW_KEYS)])
+                if _selection_deadline_past(
+                    last_error_by_event.get(event_id, ""),
+                    parsed_decision_time,
+                ):
+                    continue
                 rows.append(event_tuple + (attempt_by_event.get(event_id, 0),))
 
-        ranked = _rank_pending_rows_python(rows, day0_is_tradeable=day0_is_tradeable)
+        cooled_families = _recent_recapture_edge_reversed_families(
+            self.conn,
+            rows,
+            decision_time_utc=parsed_decision_time,
+        )
+        rank_rows = []
+        for row in rows:
+            event = _event_from_row(row)
+            payload = _event_payload_dict(event)
+            family_key = _forecast_family_key_from_payload(payload)
+            redecision_origin = str(payload.get("redecision_origin") or "").strip().lower()
+            recapture_edge_backoff = (
+                (
+                    event.event_type == "FORECAST_SNAPSHOT_READY"
+                    or (
+                        event.event_type == "EDLI_REDECISION_PENDING"
+                        and redecision_origin in {"entry_screen", "market_price", ""}
+                    )
+                )
+                and family_key is not None
+                and family_key in cooled_families
+            )
+            if isinstance(row, sqlite3.Row):
+                rank_rows.append(tuple(row[key] for key in _EVENT_ROW_KEYS) + (
+                    _pending_row_attempt_count(row),
+                    1 if recapture_edge_backoff else 0,
+                    0,
+                ))
+            else:
+                event_id = str(row[0] or "") if row else ""
+                rank_rows.append(
+                    tuple(row)
+                    + (
+                        1 if recapture_edge_backoff else 0,
+                        stale_reclaim_by_event.get(event_id, 0),
+                    )
+                )
+
+        ranked = _rank_pending_rows_python(rank_rows, day0_is_tradeable=day0_is_tradeable)
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
         return timely[:limit]
@@ -334,7 +554,10 @@ class EventStore:
         self, *, decision_time: str, batch_limit: int = 50_000
     ) -> int:
         """Sweep strictly-past-in-tz pending/processing candidates to terminal
-        ``expired`` status so the active scan stops re-reading them.
+        ``expired`` status so the active scan stops re-reading them. A row is
+        also expired when its own event/executable selection deadline is already
+        past; that window is a market-chain fact for this specific pending
+        decision, not a transient infrastructure retry.
 
         OPERATOR DIRECTIVE 2026-06-04 — the working set
         (``opportunity_event_processing``) accumulated ~1.76M ``pending`` rows that
@@ -350,37 +573,20 @@ class EventStore:
         (``fetch_pending``, the two warm-cache family queries, ``_edli_pending_entity_keys``),
         so one sweep removes the row from ALL scan paths without touching provenance.
 
-        EXPIRY is PER-CITY LOCAL TIMEZONE, never raw UTC: a candidate is expired iff
-        its whole target LOCAL day has ENDED in its OWN city tz — exactly the
-        strictly-past boundary ``_is_timely`` rejects (``decision_time >=
-        settlement_day_entry_utc(target_date + 1 day)``). Same predicate, shared with
-        the read floor (``_event_strictly_past_in_tz``) so the two can never diverge.
+        LOCAL-DAY EXPIRY is PER-CITY LOCAL TIMEZONE, never raw UTC: a candidate is
+        expired iff its whole target LOCAL day has ENDED in its OWN city tz —
+        exactly the strictly-past boundary ``_is_timely`` rejects
+        (``decision_time >= settlement_day_entry_utc(target_date + 1 day)``).
+        Same predicate, shared with the read floor (``_event_strictly_past_in_tz``)
+        so the two can never diverge.
 
-        VENUE-CLOSE (POST_TRADING) SWEEP (#126, 2026-06-15): also archives any family
-        whose Polymarket venue has closed (POST_TRADING) at ``decision_time`` but whose
-        local day has NOT yet ended — the ``[venue_close, local_day_end)`` window. The
-        venue closes at the F1 12:00-UTC anchor of target_date; at that moment the book
-        is gone (no fresh executable snapshot, no receipt possible), yet the local-day
-        predicate alone reports the family TIMELY and keeps it ``'pending'`` forever.
-        Live root-cause 2026-06-16: 132 families stuck ``'pending'`` (target_date
-        2026-06-15, venue closed 2026-06-15T12:00Z at ~02:00Z next day) clogged
-        ``_edli_pending_entity_keys``, EDLI re-decision emitted 0 new families every
-        cycle (``edli_redecision: enqueued=0 batch=60 skipped_pending=132``), harvest
-        lane dark, zero orders.
-
-        The fix reuses the EXACT authority the reactor's ``_venue_market_closed_horizon``
-        (horizon b) uses: ``market_phase_for_decision`` with the F1 12:00-UTC geometric
-        close anchor (``_f1_fallback_end_utc``). No venue HTTP probe, no new clock.
-        Fail-closed: city/tz/date unresolvable → KEEP active (same contract as the
-        reactor). Only POST_TRADING/RESOLVED archives; PRE_SETTLEMENT/SETTLEMENT/open →
-        kept.
-
-        The candidate band is widened from the old local-day-only floor to also capture
-        rows whose ``target_date <= venue_close_ceiling`` (the latest target_date whose
-        F1-12:00-UTC close COULD have fired at ``decision_time``). This is the date
-        portion of ``(decision_time - 12h)`` in UTC. Rows in the new venue-close band
-        that are NOT actually POST_TRADING are filtered out in the Python loop (fail-
-        closed); the SQL band is the NECESSARY condition, Python is the SUFFICIENT gate.
+        Venue closure is deliberately NOT inferred from Gamma ``endDate`` or the
+        historical F1 12:00Z anchor. Those timestamps mark resolution timing, not
+        order-entry availability; live markets can still report ``closed=false``
+        and ``acceptingOrders=true`` after them. This sweep therefore expires rows
+        only after the target local day is strictly past. Explicit venue closure is
+        enforced by executable snapshot / submit gates where ``closed`` and
+        ``accepting_orders`` are visible.
 
         OCEANIA-FRONTIER cheap pre-filter: only rows whose ``target_date`` is at or
         after ``frontier_local_date - 1`` (the current local date in the
@@ -407,9 +613,10 @@ class EventStore:
         silently drop a real candidate.
 
         IDEMPOTENT + budget-safe: only ``pending``/``processing`` rows are touched and
-        only those proven strictly-past or venue-closed; a re-run at the same decision
-        time is a no-op.  ``batch_limit`` bounds the rows examined per call so a one-
-        time 1.7M backlog drains across cycles instead of in one giant transaction.
+        only those proven strictly-past in their local calendar, event expiry, or
+        selected execution window are expired; a re-run at the same decision time
+        is a no-op.  ``batch_limit`` bounds the rows examined per call so a one-time
+        backlog drains across cycles instead of in one giant transaction.
 
         Returns the number of processing rows transitioned to ``expired``.
         """
@@ -417,12 +624,15 @@ class EventStore:
         self._require_world_event_tables()
         decision_time_utc = _parse_utc(decision_time)
 
-        # Oceania-frontier cheap bound: the most-advanced local calendar date on Earth
+        # Oceania-frontier bound: the most-advanced local calendar date on Earth
         # at decision_time, minus one day of margin. Any target_date strictly before
-        # this is past in EVERY timezone and needs no per-city check.
+        # this is past in EVERY timezone; target_date exactly equal to the frontier
+        # band still needs the per-city check below. Keep the SQL candidate band
+        # inclusive so yesterday's UTC-negative rows do not remain pending forever.
         frontier_floor = _oceania_frontier_target_floor(decision_time_utc)
         # DAY0 uses a TODAY-INCLUSIVE frontier (2026-06-15). The -1 day margin exists for
-        # FSR, whose target can be a future TRADING day still ambiguous across timezones.
+        # forecast-decision rows whose target can be a future TRADING day still ambiguous
+        # across timezones.
         # A DAY0_EXTREME_UPDATED is a SAME-DAY realized-observation signal — it never refers
         # to a future trading day, so the margin only strands settled past-local-day day0
         # (e.g. yesterday's) in the FRONTIER BAND, where they pile up at the Tier-0 claim
@@ -436,11 +646,8 @@ class EventStore:
         except ValueError:
             day0_floor = frontier_floor
 
-        # VENUE-CLOSE BAND (#126, 2026-06-15): The F1 12:00-UTC close for target_date T
-        # fires at T+12h in UTC. Any target_date T whose close has already fired satisfies
-        # decision_time >= T+12h  ⟺  T <= decision_time - 12h (UTC date part).
-        # This ceiling captures the widest target_date that COULD be POST_TRADING now;
-        # rows in this band that are not actually POST_TRADING are filtered in Python.
+        # Legacy no-op query shape. Static F1/Gamma endDate timing no longer widens
+        # expiry; only the local-day predicates below can expire rows.
         venue_close_ceiling = _venue_close_target_ceiling(decision_time_utc)
 
         candidate_rows = self.conn.execute(
@@ -448,28 +655,74 @@ class EventStore:
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
-                   e.event_type
+                   e.event_type,
+                   e.expires_at,
+                   p.last_error
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
               JOIN opportunity_events e
                 ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
-               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
-             ORDER BY p.updated_at ASC, p.event_id ASC
-             LIMIT ?
+               AND e.event_type IN (
+                    'FORECAST_SNAPSHOT_READY',
+                    'EDLI_REDECISION_PENDING',
+                    'DAY0_EXTREME_UPDATED'
+               )
+               AND (
+                    (
+                        json_extract(e.payload_json, '$.target_date') IS NOT NULL
+                        AND
+                        (
+                            (
+                                e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+                                AND (
+                                    json_extract(e.payload_json, '$.target_date') <= ?
+                                    OR json_extract(e.payload_json, '$.target_date') <= ?
+                                )
+                            )
+                            OR (
+                                e.event_type = 'DAY0_EXTREME_UPDATED'
+                                AND (
+                                    json_extract(e.payload_json, '$.target_date') < ?
+                                    OR json_extract(e.payload_json, '$.target_date') <= ?
+                                )
+                            )
+                        )
+                    )
+                    OR e.expires_at IS NOT NULL
+                    OR p.last_error LIKE '%selection_deadline=%'
+               )
+            ORDER BY p.updated_at ASC, p.event_id ASC
+            LIMIT ?
             """,
-            (self.consumer_name, batch_limit),
+            (
+                self.consumer_name,
+                frontier_floor,
+                venue_close_ceiling,
+                day0_floor,
+                venue_close_ceiling,
+                batch_limit,
+            ),
         ).fetchall()
 
         expired_ids: list[str] = []
         for row in candidate_rows:
             event_id = row[0]
-            city = row[1]
-            target_date = row[2]
+            city = str(row[1] or "")
+            target_date = str(row[2] or "")
             event_type = str(row[3] or "")
-            if event_type == "FORECAST_SNAPSHOT_READY":
-                if not (target_date < frontier_floor or target_date <= venue_close_ceiling):
+            expires_at = row[4]
+            last_error = row[5]
+            if _instant_past(expires_at, decision_time_utc):
+                expired_ids.append(event_id)
+                continue
+            if _selection_deadline_past(last_error, decision_time_utc):
+                expired_ids.append(event_id)
+                continue
+            if not target_date:
+                continue
+            if event_type in _FORECAST_DECISION_EVENT_TYPES:
+                if not (target_date <= frontier_floor or target_date <= venue_close_ceiling):
                     continue
             elif event_type == "DAY0_EXTREME_UPDATED":
                 if not (target_date < day0_floor or target_date <= venue_close_ceiling):
@@ -796,12 +1049,12 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        # Step 2: compute absorbing keeper(s) from the active Day0 working set.
-        # Do not probe immutable opportunity_events once per family: the live table
-        # is append-only and can be huge, while the decision-relevant surface is the
-        # active processing rows. Scanning active Day0 rows once via the processing
-        # status index preserves keepers outside this candidate batch without a
-        # target-date JSON expression index over historical event bodies.
+        # Step 2: for only the family streams represented in the candidate batch,
+        # find the current absorbing keeper(s). The keeper may be outside the
+        # candidate batch; preserving it is what makes a small batch safe. Keep this
+        # as per-family indexed probes, not one GROUP BY over the active Day0
+        # backlog: the live table can hold many stale DAY0 rows, and scanning all of
+        # them can pin the reactor worker before it reaches money-path decisions.
         candidate_keys = {
             (str(row[1]), str(row[2]), str(row[3]))
             for row in candidate_rows
@@ -814,53 +1067,50 @@ class EventStore:
             "json_extract(e.payload_json, '$.low_so_far')"
             ") AS REAL)"
         )
-        active_rows = self.conn.execute(
-            """
-            SELECT e.event_id,
-                   json_extract(e.payload_json, '$.city')        AS city,
-                   json_extract(e.payload_json, '$.target_date') AS target_date,
-                   json_extract(e.payload_json, '$.metric')      AS metric,
-                   {value_expr}                                 AS extreme_value
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e
-              ON e.event_id = p.event_id
-            WHERE p.consumer_name = ?
-              AND p.processing_status IN ('pending', 'processing')
-              AND e.event_type = 'DAY0_EXTREME_UPDATED'
-              AND json_extract(e.payload_json, '$.city') IS NOT NULL
-              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
-              AND json_extract(e.payload_json, '$.metric') IS NOT NULL
-              AND {value_expr} IS NOT NULL
-            """.format(value_expr=value_expr),
-            (self.consumer_name,),
-        ).fetchall()
-        extreme_by_key: dict[tuple[str, str, str], float] = {}
-        for row in active_rows:
-            key = (str(row[1]), str(row[2]), str(row[3]))
-            if key not in candidate_keys:
-                continue
-            try:
-                value = float(row[4])
-            except (TypeError, ValueError):
-                continue
-            previous = extreme_by_key.get(key)
-            if previous is None:
-                extreme_by_key[key] = value
-            elif key[2] == "high":
-                extreme_by_key[key] = max(previous, value)
-            else:
-                extreme_by_key[key] = min(previous, value)
         keeper_ids: set[str] = set()
-        for row in active_rows:
-            key = (str(row[1]), str(row[2]), str(row[3]))
-            if key not in extreme_by_key:
+        for city, target_date, metric in candidate_keys:
+            order = "DESC" if metric == "high" else "ASC"
+            extreme_row = self.conn.execute(
+                f"""
+                SELECT {value_expr} AS extreme_value
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+                  JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND {value_expr} IS NOT NULL
+                   AND p.processing_status IN ('pending', 'processing')
+                 ORDER BY {value_expr} {order}
+                 LIMIT 1
+                """,
+                (self.consumer_name, city, target_date, metric),
+            ).fetchone()
+            if extreme_row is None:
                 continue
             try:
-                value = float(row[4])
+                extreme_value = float(extreme_row[0])
             except (TypeError, ValueError):
                 continue
-            if value == extreme_by_key[key]:
-                keeper_ids.add(str(row[0]))
+            keeper_rows = self.conn.execute(
+                f"""
+                SELECT e.event_id
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+                  JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND {value_expr} = ?
+                   AND p.processing_status IN ('pending', 'processing')
+                """,
+                (self.consumer_name, city, target_date, metric, extreme_value),
+            ).fetchall()
+            keeper_ids.update(str(row[0]) for row in keeper_rows)
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 
@@ -885,6 +1135,84 @@ class EventStore:
                 (now, now, self.consumer_name, *chunk),
             )
         return len(superseded_ids)
+
+    def archive_unmarketed_day0_events(
+        self,
+        *,
+        admitted_families: set[tuple[str, str, str]] | frozenset[tuple[str, str, str]],
+        normalizer: _FamilyNormalizer | None = None,
+        batch_limit: int = 5_000,
+    ) -> int:
+        """Expire active Day0 execution events for families with no live market/exposure.
+
+        Day0 observations are truth inputs, but a ``DAY0_EXTREME_UPDATED`` row in
+        ``opportunity_event_processing`` is an execution decision event. If the family has
+        no Polymarket market topology and no current held/open-rest exposure, the reactor
+        can only requeue it through executable-snapshot/Gamma-empty churn. Marking the
+        mutable processing row ``expired`` keeps the append-only observation provenance
+        while removing non-executable observation facts from the live money-path working set.
+        """
+
+        self._require_world_event_tables()
+        if normalizer is None:
+            normalizer = _default_family_normalizer
+        admitted = {tuple(family) for family in admitted_families if all(family)}
+
+        candidate_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric')      AS metric
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.city') IS NOT NULL
+               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+               AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, max(1, int(batch_limit))),
+        ).fetchall()
+        if not candidate_rows:
+            return 0
+
+        expired_ids: list[str] = []
+        for row in candidate_rows:
+            try:
+                family = normalizer(row[1], row[2], row[3])
+            except Exception:  # noqa: BLE001
+                continue
+            if not all(family):
+                continue
+            if family not in admitted:
+                expired_ids.append(str(row[0]))
+        if not expired_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(expired_ids), _CHUNK):
+            chunk = expired_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'DAY0_UNMARKETED_EXECUTION_EVENT:no_market_topology_or_exposure',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(expired_ids)
 
     def ignore_channel_cache_events(self, *, batch_limit: int = 5_000) -> int:
         """Move channel cache-hydration events out of the submit reactor working set.
@@ -1374,55 +1702,14 @@ class EventStore:
     def _venue_closed_in_phase(
         city: str | None, target_date: str | None, decision_time_utc: datetime
     ) -> bool:
-        """True iff the Polymarket venue market for ``city``/``target_date`` has entered
-        POST_TRADING (or RESOLVED) at ``decision_time`` — using the EXACT authority the
-        reactor's ``_venue_market_closed_horizon`` (horizon b) uses.
+        """Static city/date inputs cannot prove venue closure.
 
-        Authority: ``market_phase_for_decision`` with the F1 12:00-UTC geometric close
-        anchor (``_f1_fallback_end_utc(target_local_date)``).  No venue HTTP probe, no
-        new clock, no external state — purely city-tz + target_date + decision_time.
-
-        FAIL-CLOSED: missing city/target_date, unresolvable city config/tz, or ANY
-        exception → returns False (NOT closed) so the row is KEPT active.  Mislabeling
-        an open family as closed would silently drop a live candidate, which is the
-        unrecoverable failure mode.
-
-        Only POST_TRADING and RESOLVED return True; every other phase (PRE_TRADING,
-        PRE_SETTLEMENT_DAY, SETTLEMENT_DAY) returns False.
-
-        #126, 2026-06-15: closes the ``[venue_close, local_day_end)`` gap where the
-        local-day predicate alone (``_strictly_past_in_tz``) reported a POST_TRADING
-        family as still TIMELY and left it ``'pending'`` forever (132 families confirmed
-        live; root-cause docs/evidence/qkernel_rebuild/fix_venue_close_sweep_2026-06-15.md).
+        Gamma ``endDate`` is not an order-entry close proof; live weather rows
+        can remain open and accepting orders after that timestamp. The mutable
+        processing row is therefore expired only by the local-day floor here.
+        Explicit venue closure is enforced at executable snapshot/submit gates.
         """
-        if not city or not target_date:
-            return False
-        try:
-            from datetime import date as _date_cls
-
-            from src.config import runtime_cities_by_name
-            from src.strategy.market_phase import (
-                MarketPhase,
-                _f1_fallback_end_utc,
-                market_phase_for_decision,
-            )
-
-            city_config = runtime_cities_by_name().get(city)
-            tz = getattr(city_config, "timezone", None) if city_config is not None else None
-            if not tz:
-                return False
-            target_local_date = _date_cls.fromisoformat(str(target_date))
-            phase = market_phase_for_decision(
-                target_local_date=target_local_date,
-                city_timezone=tz,
-                decision_time_utc=decision_time_utc,
-                polymarket_start_utc=None,
-                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
-            )
-        except Exception:
-            # Fail-closed: any unresolvable input keeps the row active.
-            return False
-        return phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED)
+        return False
 
     def _is_timely(self, event: OpportunityEvent, decision_time_utc: datetime) -> bool:
         """Claim-floor timeliness gate (STEP 3a).
@@ -1594,6 +1881,19 @@ class EventStore:
         ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
+    def processing_last_error(self, event_id: str) -> str | None:
+        """Durable retry/dead-letter context for one event processing row."""
+
+        self._require_world_event_tables()
+        row = self.conn.execute(
+            "SELECT last_error FROM opportunity_event_processing "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (self.consumer_name, event_id),
+        ).fetchone()
+        if row is None or row[0] in {None, ""}:
+            return None
+        return str(row[0])
+
     def requeue_pending(
         self,
         event_id: str,
@@ -1618,6 +1918,290 @@ class EventStore:
             "WHERE consumer_name = ? AND event_id = ?",
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
+
+    def requeue_misclassified_local_pre_submit_rejections(self, *, batch_limit: int = 100) -> int:
+        """Recover processed events poisoned by old local pre-submit reject receipts.
+
+        A historical executor-boundary bug mapped local ``entries_paused:*``
+        rejects to venue ``REJECTED`` receipts. That wrote a fake
+        ``VenueSubmitAttempted`` plus ``SubmitRejected(pre_submit_rejection=0)``
+        into the live-order aggregate, then consumed the opportunity event as
+        processed. The fixed boundary emits ``PRE_SUBMIT_ERROR`` with no venue
+        attempt; this recovery only revives the old malformed shape so the
+        normal reactor path can re-decide it.
+        """
+
+        self._require_world_event_tables()
+        limit = max(1, min(int(batch_limit or 100), 1000))
+        now = _utc_now()
+        recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        self.conn.execute(
+            """
+            WITH malformed AS (
+                SELECT DISTINCT json_extract(loe.payload_json, '$.event_id') AS event_id
+                  FROM edli_live_order_events loe
+                  JOIN opportunity_events e
+                    ON e.event_id = json_extract(loe.payload_json, '$.event_id')
+                 WHERE loe.event_type = 'SubmitRejected'
+                   AND COALESCE(json_extract(loe.payload_json, '$.reason_code'), '') LIKE 'entries_paused:%'
+                   AND COALESCE(json_extract(loe.payload_json, '$.pre_submit_rejection'), 0) = 0
+                   AND COALESCE(json_extract(loe.payload_json, '$.venue_order_id'), '') = ''
+                   AND e.created_at >= ?
+                 LIMIT ?
+            )
+            UPDATE opportunity_event_processing
+               SET processing_status = 'pending',
+                   claimed_at = NULL,
+                   processed_at = NULL,
+                   last_error = 'RECOVERED_MISCLASSIFIED_LOCAL_PRESUBMIT_REJECTION',
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND processing_status = 'processed'
+               AND event_id IN (SELECT event_id FROM malformed WHERE event_id IS NOT NULL)
+            """,
+            (recent_cutoff, limit, now, self.consumer_name),
+        )
+        row = self.conn.execute("SELECT changes()").fetchone()
+        return int(row[0] or 0) if row is not None else 0
+
+    def requeue_processed_day0_entries_paused(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 500,
+    ) -> int:
+        """Reopen Day0 facts that were consumed only because entries were paused.
+
+        ``DAY0_EXTREME_UPDATED`` is an immutable observation fact. If the latest
+        decision for that fact was a runtime ``pause_entries``/``entries_paused``
+        block, the event must re-enter the money path once the pause clears;
+        otherwise unchanged observation watermarks and event idempotency make the
+        post-pause system silently skip same evidence. Requeue only when that
+        pause block is the latest no-trade verdict for the event and the city's
+        local target day is still open.
+        """
+
+        self._require_world_event_tables()
+        if not _table_exists(self.conn, "no_trade_regret_events"):
+            return 0
+        decision_time_utc = _parse_utc(decision_time)
+        limit = max(1, min(int(batch_limit or 500), 5000))
+        rows = self.conn.execute(
+            """
+            WITH latest AS (
+                SELECT n.event_id, MAX(n.created_at) AS latest_created_at
+                  FROM no_trade_regret_events n
+                  JOIN opportunity_events e
+                    ON e.event_id = n.event_id
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                 GROUP BY n.event_id
+            )
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   n.rejection_reason
+              FROM latest l
+              JOIN no_trade_regret_events n
+                ON n.event_id = l.event_id
+               AND n.created_at = l.latest_created_at
+              JOIN opportunity_event_processing p
+                ON p.event_id = l.event_id
+              JOIN opportunity_events e
+                ON e.event_id = l.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'processed'
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND (
+                    n.rejection_reason LIKE '%entries_paused%'
+                 OR n.rejection_reason LIKE '%pause_entries%'
+               )
+             ORDER BY n.created_at DESC
+             LIMIT ?
+            """,
+            (self.consumer_name, limit),
+        ).fetchall()
+
+        recover: list[str] = []
+        for event_id, city, target_date, _reason in rows:
+            if not event_id:
+                continue
+            if self._strictly_past_in_tz(
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                decision_time_utc,
+            ):
+                continue
+            recover.append(str(event_id))
+
+        if not recover:
+            return 0
+
+        now = _utc_now()
+        for event_id in recover:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'pending',
+                       claimed_at = NULL,
+                       processed_at = NULL,
+                       last_error = 'RECOVERED_DAY0_ENTRIES_PAUSED',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'processed'
+                """,
+                (now, self.consumer_name, event_id),
+            )
+        return len(recover)
+
+    def requeue_false_static_venue_close_day0_dead_letters(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 500,
+    ) -> int:
+        """Recover Day0 events killed by the old static F1 venue-close horizon.
+
+        The removed bug dead-lettered same-day ``DAY0_EXTREME_UPDATED`` rows with
+        ``MARKET_VENUE_CLOSED: ... F1 12:00-UTC close`` even when the target local
+        day was still active and Gamma/CLOB still reported accepting orders. This
+        is a bounded automatic recovery, not an operator migration: only the exact
+        old static-close signature is revived, and rows whose local target day is
+        already strictly past remain terminal.
+        """
+
+        self._require_world_event_tables()
+        decision_time_utc = _parse_utc(decision_time)
+        limit = max(1, min(int(batch_limit or 500), 5000))
+        rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+              JOIN event_dead_letters d
+                ON d.consumer_name = p.consumer_name
+               AND d.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'dead_letter'
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
+               AND d.error_message LIKE '%MARKET_VENUE_CLOSED%'
+               AND d.error_message LIKE '%F1 12:00-UTC close%'
+             ORDER BY d.created_at DESC
+             LIMIT ?
+            """,
+            (self.consumer_name, limit),
+        ).fetchall()
+
+        recover: list[str] = []
+        for event_id, city, target_date in rows:
+            if not event_id:
+                continue
+            if self._strictly_past_in_tz(
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                decision_time_utc,
+            ):
+                continue
+            recover.append(str(event_id))
+
+        if not recover:
+            return 0
+
+        now = _utc_now()
+        for event_id in recover:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'pending',
+                       claimed_at = NULL,
+                       processed_at = NULL,
+                       last_error = 'RECOVERED_FALSE_STATIC_VENUE_CLOSE_DAY0',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'dead_letter'
+                """,
+                (now, self.consumer_name, event_id),
+            )
+        return len(recover)
+
+    def requeue_false_executable_snapshot_deadline_day0_dead_letters(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 500,
+    ) -> int:
+        """Recover Day0 events killed by treating stale price deadlines as event life.
+
+        ``EXECUTABLE_SNAPSHOT_STALE:selection_deadline=...`` is selected-book
+        freshness evidence. The cure is targeted executable-substrate refresh plus
+        retry; it is not a Day0 event horizon. Older runtime rows terminalized these
+        as ``MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST``. Revive only that
+        exact shape while the city-local target day is still active.
+        """
+
+        self._require_world_event_tables()
+        decision_time_utc = _parse_utc(decision_time)
+        limit = max(1, min(int(batch_limit or 500), 5000))
+        rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+              JOIN event_dead_letters d
+                ON d.consumer_name = p.consumer_name
+               AND d.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'dead_letter'
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
+               AND d.error_message LIKE '%SELECTION_DEADLINE_PAST%'
+               AND d.error_message LIKE '%EXECUTABLE_SNAPSHOT_STALE%'
+             ORDER BY d.created_at DESC
+             LIMIT ?
+            """,
+            (self.consumer_name, limit),
+        ).fetchall()
+
+        recover: list[str] = []
+        for event_id, city, target_date in rows:
+            if not event_id:
+                continue
+            if self._strictly_past_in_tz(
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                decision_time_utc,
+            ):
+                continue
+            recover.append(str(event_id))
+
+        if not recover:
+            return 0
+
+        now = _utc_now()
+        for event_id in recover:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'pending',
+                       claimed_at = NULL,
+                       processed_at = NULL,
+                       last_error = 'RECOVERED_FALSE_EXECUTABLE_SNAPSHOT_SELECTION_DEADLINE_DAY0',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'dead_letter'
+                """,
+                (now, self.consumer_name, event_id),
+            )
+        return len(recover)
 
     def _mark_terminal(
         self,
@@ -1695,17 +2279,132 @@ def _event_city_key(event: OpportunityEvent) -> str:
     return entity_key.strip() or str(event.event_type or "")
 
 
+def _forecast_family_key_from_payload(payload: dict) -> tuple[str, str, str] | None:
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or "").strip().lower()
+    if not (city and target_date and metric):
+        return None
+    return city, target_date, metric
+
+
+def _parse_optional_utc(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _instant_past(value: object, decision_time_utc: datetime) -> bool:
+    parsed = _parse_optional_utc(value)
+    if parsed is None:
+        return False
+    return parsed <= decision_time_utc.astimezone(timezone.utc)
+
+
+def _deadline_from_reason(reason: object, field_name: str) -> datetime | None:
+    text = str(reason or "")
+    marker = f"{field_name}="
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker) :]
+    for delimiter in (":decision_time=", " ", ",", ";", "|"):
+        split_at = tail.find(delimiter)
+        if split_at > 0:
+            tail = tail[:split_at]
+            break
+    return _parse_optional_utc(tail)
+
+
+def _selection_deadline_past(reason: object, decision_time_utc: datetime) -> bool:
+    text = str(reason or "")
+    if text.split(":", 1)[0].strip() == "EXECUTABLE_SNAPSHOT_STALE":
+        return False
+    deadline = _deadline_from_reason(reason, "selection_deadline")
+    if deadline is None:
+        return False
+    return deadline <= decision_time_utc.astimezone(timezone.utc)
+
+
+def _recent_recapture_edge_reversed_families(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
+    *,
+    decision_time_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families that just failed submit recapture on a fresh executable book.
+
+    This is a queue-efficiency feedback signal, not a no-trade proof. The reactor
+    already consumed the failed event terminally; this short backoff only prevents
+    the next ordinary FSR row for the same family from immediately taking another
+    bounded-budget slot before other families are reached.
+    """
+
+    backoff_seconds = _recapture_edge_backoff_seconds()
+    if backoff_seconds <= 0 or not rows or not _table_exists(conn, "no_trade_regret_events"):
+        return set()
+
+    families: set[tuple[str, str, str]] = set()
+    for row in rows:
+        event = _event_from_row(row)
+        payload = _event_payload_dict(event)
+        redecision_origin = str(payload.get("redecision_origin") or "").strip().lower()
+        if not (
+            event.event_type == "FORECAST_SNAPSHOT_READY"
+            or (
+                event.event_type == "EDLI_REDECISION_PENDING"
+                and redecision_origin in {"entry_screen", "market_price", ""}
+            )
+        ):
+            continue
+        family_key = _forecast_family_key_from_payload(payload)
+        if family_key is not None:
+            families.add(family_key)
+    if not families:
+        return set()
+
+    floor = (decision_time_utc - timedelta(seconds=backoff_seconds)).isoformat()
+    try:
+        regret_rows = conn.execute(
+            """
+            SELECT city, target_date, metric
+              FROM no_trade_regret_events
+             WHERE created_at >= ?
+               AND rejection_reason LIKE ?
+               AND COALESCE(executable_snapshot_id, '') <> ''
+            """,
+            (floor, f"{_RECENT_RECAPTURE_EDGE_REVERSED_REASON}%"),
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+
+    cooled: set[tuple[str, str, str]] = set()
+    for row in regret_rows:
+        key = (
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            str(row[2] or "").strip().lower(),
+        )
+        if key in families:
+            cooled.add(key)
+    return cooled
+
+
 def _claim_tier_for_event(
     event: OpportunityEvent,
     payload: dict,
     *,
     day0_is_tradeable: bool,
 ) -> int:
-    if (
-        event.event_type == "FORECAST_SNAPSHOT_READY"
-        and str(event.source or "").startswith(ESCALATION_CROSS_SOURCE_PREFIX)
-    ):
-        return 0
     if event.event_type == "EDLI_REDECISION_PENDING":
         return 0
     if event.event_type == "DAY0_EXTREME_UPDATED" and day0_is_tradeable:
@@ -1760,6 +2459,45 @@ def _pending_row_attempt_count(row: sqlite3.Row | tuple) -> int:
         return 0
 
 
+def _pending_row_recapture_edge_backoff(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_recapture_edge_backoff"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        index = len(_EVENT_ROW_KEYS) + 1
+        raw = row[index] if len(row) > index else None
+    return _safe_bool_int(raw)
+
+
+def _pending_row_stale_processing_reclaim(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_stale_processing_reclaim"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        index = len(_EVENT_ROW_KEYS) + 2
+        raw = row[index] if len(row) > index else None
+    return _safe_bool_int(raw)
+
+
+def _live_redecision_retry_lane(event: OpportunityEvent, attempt_count: int) -> int:
+    """Claim lane for live redecision rows already carrying retry debt.
+
+    A requeued ``EDLI_REDECISION_PENDING`` row is not ordinary discovery work:
+    it represents a family with live money-path work already in progress
+    (rest-management, held-position re-evaluation, or a shift/fill-up lease).
+    Keep it ahead of fresh tier-0 forecast/day0 work so a cancel/price-move
+    retry cannot disappear behind the normal city round-robin budget.
+    """
+
+    if event.event_type == "EDLI_REDECISION_PENDING" and attempt_count > 0:
+        return 0
+    return 1
+
+
 def _rank_pending_rows_python(
     rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
     *,
@@ -1769,11 +2507,15 @@ def _rank_pending_rows_python(
     for row in rows:
         event = _event_from_row(row)
         attempt_count = _pending_row_attempt_count(row)
+        recapture_edge_backoff = _pending_row_recapture_edge_backoff(row)
+        stale_processing_reclaim = _pending_row_stale_processing_reclaim(row)
         payload = _event_payload_dict(event)
         records.append(
             {
                 "event": event,
                 "attempt_count": attempt_count,
+                "recapture_edge_backoff": recapture_edge_backoff,
+                "stale_processing_reclaim": stale_processing_reclaim,
                 "payload": payload,
                 "tier": _claim_tier_for_event(
                     event,
@@ -1784,6 +2526,12 @@ def _rank_pending_rows_python(
                 "target_key": _date_desc_key(payload.get("target_date")),
                 "available_key": _datetime_desc_key(event.available_at),
                 "retry_key": 0 if attempt_count > 0 else 1,
+                "stale_processing_reclaim_lane": (
+                    0 if stale_processing_reclaim else 1
+                ),
+                "live_redecision_retry_lane": _live_redecision_retry_lane(
+                    event, attempt_count
+                ),
                 "received_key": _datetime_desc_key(event.received_at),
             }
         )
@@ -1809,7 +2557,10 @@ def _rank_pending_rows_python(
     ranked = sorted(
         records,
         key=lambda item: (
+            item["stale_processing_reclaim_lane"],
             item["tier"],
+            item["live_redecision_retry_lane"],
+            item["recapture_edge_backoff"],
             item.get("city_round", 1),
             -int(getattr(item["event"], "priority", 0) or 0),
             item["target_key"],
@@ -1819,7 +2570,46 @@ def _rank_pending_rows_python(
             item["event"].event_id,
         ),
     )
+    ranked = _fair_decision_lane_interleave(ranked)
     return [(item["event"], int(item["attempt_count"])) for item in ranked]
+
+
+def _is_forecast_decision_lane_item(item: dict) -> bool:
+    event = item["event"]
+    event_type = getattr(event, "event_type", "")
+    if event_type == "EDLI_REDECISION_PENDING":
+        return True
+    return event_type == "FORECAST_SNAPSHOT_READY" and int(item.get("tier", 99)) <= 1
+
+
+def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
+    """Keep the forecast/redecision lane visible under a Day0 Tier-0 flood.
+
+    Reactor-level interleave only works if the fetched page already contains both
+    lanes. Live can run with a work limit near one event while hundreds of current
+    Day0 observations sit ahead of FSR rows, so the fairness boundary must be the
+    store's final claim order, before ``limit`` is applied. If a forecast or
+    redecision row exists, it takes the first slot; otherwise a one-event budget
+    still gives the whole cycle to Day0 and the entry/redecision lane remains
+    invisible.
+    """
+
+    forecast = [item for item in records if _is_forecast_decision_lane_item(item)]
+    if not forecast:
+        return records
+    rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
+    if not rest:
+        return records
+    out: list[dict] = []
+    i = j = 0
+    while i < len(forecast) or j < len(rest):
+        if i < len(forecast):
+            out.append(forecast[i])
+            i += 1
+        if j < len(rest):
+            out.append(rest[j])
+            j += 1
+    return out
 
 
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:
@@ -1871,27 +2661,12 @@ def _oceania_frontier_target_floor(decision_time_utc: datetime) -> str:
 
 
 def _venue_close_target_ceiling(decision_time_utc: datetime) -> str:
-    """ISO date string: the latest ``target_date`` whose F1 12:00-UTC venue close
-    COULD have fired at ``decision_time``.
+    """Static F1 close is no longer a processing-expiry band.
 
-    The Polymarket weather venue closes at 12:00 UTC of ``target_date`` (the F1
-    anchor, ``_f1_fallback_end_utc``).  A family with target_date T is POST_TRADING
-    iff ``decision_time >= T 12:00 UTC``, i.e. ``T <= decision_time - 12h`` (UTC date
-    part).  Any target_date UP TO AND INCLUDING this date is a candidate for the
-    venue-close check in Python; target_dates strictly after it cannot yet be
-    POST_TRADING (their 12:00-UTC anchor has not fired).
-
-    This is a NECESSARY-CONDITION band, not a SUFFICIENT one — the Python loop's
-    ``_venue_closed_in_phase`` call is the sufficient gate (fail-closed).
-
-    Fail-safe: on arithmetic error returns a date far in the past (no rows matched)
-    — never an over-archive.
+    Keep the helper as a harmless far-past bound for older query structure:
+    rows are now expired by the local-day floor, not by Gamma ``endDate``.
     """
-    try:
-        shifted = decision_time_utc - timedelta(hours=12)
-        return shifted.date().isoformat()
-    except Exception:
-        return "0001-01-01"
+    return "0001-01-01"
 
 
 def _utc_now() -> str:

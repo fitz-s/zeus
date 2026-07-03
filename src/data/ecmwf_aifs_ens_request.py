@@ -1,4 +1,4 @@
-"""AIFS ENS OpenData request contract for sampled-2t shadow extraction."""
+"""AIFS ENS OpenData request contract for sampled-2t blocked candidate extraction."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ class AifsEnsOpenDataRequest:
     product_id: str = PRODUCT_ID
     high_data_version: str = HIGH_DATA_VERSION
     low_data_version: str = LOW_DATA_VERSION
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -102,8 +102,8 @@ class AifsEnsOpenDataRequest:
             _reject_transcript_alias(value, field_name=field_name)
         if "mx2t" in self.high_data_version or "mn2t" in self.low_data_version:
             raise ValueError("AIFS ENS sampled-2t request cannot use period-extrema data_versions")
-        if self.trade_authority_status != "SHADOW_ONLY" or self.training_allowed:
-            raise ValueError("AIFS ENS request is shadow-only until promoted by evidence")
+        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
+            raise ValueError("AIFS ENS request is blocked until promoted by evidence")
 
     @property
     def source_cycle_time(self) -> datetime:

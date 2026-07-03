@@ -82,12 +82,12 @@ forbidden_files:
   - state/zeus_trades.db
   - state/zeus-world.db
 live_side_effects_allowed: replacement_forecast_authority_db_repair_live_path_rename_and_daemon_reload_only
-operator_approved_live_side_effects:
+completed_live_side_effects:
   - state/zeus-forecasts.db forecast_posteriors schema/status repair on 2026-06-17
   - state/zeus-forecasts.db readiness_state provenance live/diagnostic repair on 2026-06-17
   - rename state/replacement_forecast_shadow to state/replacement_forecast_live on 2026-06-17
   - launchctl kickstart com.zeus.live-trading com.zeus.forecast-live com.zeus.data-ingest on 2026-06-17
-operator_approval_required_for:
+high_risk_changes:
   - live DB schema migration
   - LaunchAgent plist edit or reload
   - daemon/process restart

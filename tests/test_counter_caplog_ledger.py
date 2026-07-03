@@ -398,7 +398,7 @@ class TestPositionProjectionFieldDroppedTotal:
 
 @pytest.mark.xfail(
     reason=(
-        "F1 (docs/findings_2026_05_28.md §F1): balance-only rescue no longer "
+        "F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1): balance-only rescue no longer "
         "mutates D6 fields, so cost_basis_chain_mutation_blocked_total does not "
         "fire on the balance-only path. Counter remains live on trade-verified "
         "rescue path (see test_inv_f1_chain_economics_split.py). "

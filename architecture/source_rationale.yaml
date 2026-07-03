@@ -48,7 +48,7 @@ write_routes:
   backtest_diagnostic_write:
     owner: src/engine/replay.py
     db: state/zeus_backtest.db
-    authority_scope: diagnostic_non_promotion
+    authority_scope: offline_no_promotion
   calibration_persistence_write:
     owner: src/calibration/store.py
     tables:
@@ -60,7 +60,7 @@ write_routes:
     tables:
     - calibration_decision_group
     - calibration_pairs
-    guardrail: Additive/shadow accounting only until promoted by a governance packet.
+    guardrail: Additive/blocked accounting only until promoted by a governance packet.
   decision_artifact_write:
     owner: src/state/decision_chain.py
     tables:
@@ -160,6 +160,15 @@ providers:
       endpoint only, target_date < decision_date, VERIFIED settlement). Intra-DB JOIN
       on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes). Not an
       external network source; reads Zeus's own persisted forecast history.
+  station_forecast:
+    role: forecast_skill_live_station
+    client: src/data/station_forecast_adapter.py
+    why: >
+      Config-routed official station forecast ingest for CWA/HKO station values,
+      called from replacement_forecast_production. These rows are forecast-skill
+      inputs to source-clock precision fusion only; they are not settlement,
+      Day0 observation, hourly-history, or venue truth. Per-source failures are
+      fail-soft and must not silently substitute settlement/source authority.
   polymarket_gamma:
     role: internal_probe
     client: src/data/station_migration_probe.py
@@ -222,6 +231,19 @@ package_defaults:
     authority_role: external_data_boundary
     gates:
     - pytest -q tests/test_ensemble_client.py tests/test_observation_contract.py
+  src/decision:
+    zone: K2_K3_coordination
+    authority_role: decision_logic
+    gates:
+    - pytest -q tests/decision/test_family_decision_engine.py tests/decision/test_qlcb_reliability_guard.py
+    note: |
+      Mixed package: family_decision_engine.py/decision_receipt.py/market_coherence.py/
+      payoff_vector.py/city_skill_gate.py are K2_runtime (live admission/sizing chain);
+      qlcb_reliability_guard.py/selection_calibrator.py/selection_curse_bound.py/
+      selection_curse_bound_loader.py are K3_extension (probability-shading math). Sat
+      unregistered until W0.4 backfill (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      §3: "do not repeat"). family_decision_engine.py is a W3 BUILD-swap target
+      (qkernel_spine_bridge.py:1332); the selection machinery is a W5 deletion target.
   src/ingest:
     zone: K2_runtime
     authority_role: external_event_ingest_boundary
@@ -295,7 +317,7 @@ files:
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point.
+    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
@@ -311,7 +333,7 @@ files:
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue
-    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired src/data/replacement_forecast_shadow_materialization_queue.py so live production no longer imports a shadow-labeled implementation.
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -319,6 +341,32 @@ files:
     - src/data/replacement_forecast_production.py
     - scripts/materialize_replacement_forecast_live.py
     - tests/data/test_replacement_cycle_availability.py
+  src/data/replacement_forecast_materializer.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_posterior_writer
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_bundle_reader.py
+    - src/data/replacement_input_hwm.py
+  src/data/replacement_forecast_bundle_reader.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_posterior_reader
+    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers) that fails the read closed when a raw model/artifact input newer than the served posterior's source_cycle_time already exists.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/replacement_forecast_hook_factory.py
+    - src/data/replacement_input_hwm.py
+  src/data/replacement_input_hwm.py:
+    zone: K2_runtime
+    authority_role: replacement_raw_input_hwm_check
+    why: W0.1 (2026-07-02) shared read-time raw-input high-water-mark (HWM) check, moved out of event_reactor_adapter.py so read paths other than the no-submit-cert path (replacement_forecast_bundle_reader's enforce_raw_input_hwm opt-in) can enforce the same fail-closed tripwire without a private cross-module import. Compares the latest raw_model_forecasts/raw_forecast_artifacts source_cycle_time available by decision_time against a served posterior's source_cycle_time.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/data/replacement_forecast_bundle_reader.py
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
@@ -708,6 +756,16 @@ files:
     - VENUS_CONTROL_ONLY
     downstream:
     - src/engine/cycle_runner.py
+  src/control/runtime_code_plane.py:
+    zone: K1_governance
+    authority_role: deployment_runtime_code_guard
+    why: Shared runtime-code-plane diff classifier for deployment freshness, submit gate, and live-health surfaces so test/docs-only commits do not auto-pause live money while executable runtime changes still fail closed.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/main.py
+    - src/architecture/gate_runtime.py
+    - src/control/live_health.py
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard
@@ -742,8 +800,8 @@ files:
     - src/observability/status_summary.py
   src/control/entry_forecast_rollout.py:
     zone: K1_governance
-    authority_role: entry_forecast_promotion_gate
-    why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. PHASE C-1 wired into src/engine/evaluator.py behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF — daemon behavior at flag-default is byte-equal to pre-Phase-C). Operator flips the flag per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
+    authority_role: entry_forecast_promotion_cli_validator
+    why: Control-plane validator for operator promotion evidence used by src/control/cli/promote_entry_forecast.py. It is not live evaluator authority and is not imported by src/engine/evaluator.py; executable entry forecast reader/config checks own the live path.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -752,12 +810,11 @@ files:
   src/control/entry_forecast_promotion_evidence_io.py:
     zone: K1_governance
     authority_role: entry_forecast_promotion_evidence_persistence
-    why: Phase B1 atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json. Strict schema, treats corruption as PromotionEvidenceCorruption. Phase C-flock adds fcntl.flock around writes to prevent concurrent-writer races. PHASE C-1 wired into src/engine/evaluator.py (read-side) behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF). Write-side remains operator-script-only.
+    why: Atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json for operator promotion CLI workflows. Strict schema, treats corruption as PromotionEvidenceCorruption, and uses fcntl.flock around writes. No live evaluator path reads this file.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_entry_forecast_promotion_evidence_io.py
-    - tests/test_entry_forecast_chain_relationship.py
   src/riskguard/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1004,7 +1061,7 @@ files:
     why: >
       PR7 of data_temporal_kernel program. Declares REQUIRED_LIVE_PROVENANCE (source_id,
       source_run_id, source_issue_time, target_local_date, data_version, captured_at) + validator;
-      and can_authorize_live_readiness() (reconstructed/archive/shadow/backfill tiers can NEVER
+      and can_authorize_live_readiness() (reconstructed/archive/blocked/backfill tiers can NEVER
       authorize live). live_reader_requires_provenance() gated behind ZEUS_FRONTIER_READINESS_GATE
       (default off). Schema migration adding missing columns is operator-gated (forecast-class
       SCHEMA_FORECASTS_VERSION bump). NOT_DAEMON_WIRED.
@@ -1085,7 +1142,9 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease.
+    write_routes:
+    - runtime_trade_write_coordinator
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/monitor_refresh.py
@@ -1108,6 +1167,20 @@ files:
     - src/data/forecasts_append.py
     - src/data/hourly_instants_append.py
     - src/data/solar_append.py
+  src/data/latency_metrics.py:
+    zone: K2_runtime
+    authority_role: input_to_posterior_latency_metric
+    why: "W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only input->q_version wall-clock latency, TWO variants. No new table: computes/reads both from columns forecast_posteriors already persists (source_cycle_time, source_available_at, computed_at, family_id). latency_from_issue_seconds = computed_at - source_cycle_time (provider-issued run clock). latency_from_arrival_seconds = computed_at - source_available_at (Zeus's own proof-of-possession clock from the C1-AVAIL-CLOCK mechanism, materializer.py:172-228 — the A2 SLA target, excludes provider publication delay). emit_materialization_latency() is called from replacement_forecast_materializer.py's _insert_posterior on the fresh-INSERT success path only (not the IntegrityError dedup branch) to log both per materialization event; LATENCY_QUERY/fetch_recent_latencies are the read side for a dashboard. No gate, no enforcement — measurement only."
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+  src/data/openmeteo_model_updates.py:
+    zone: K2_runtime
+    authority_role: forecast_source_clock_metadata
+    why: Parses and fetches Open-Meteo model update metadata so replacement forecast production can bind source-clock reactions to last_run_availability_time plus the documented consistency wait. No settlement truth or venue authority.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/source_clock_update_probe.py
   src/data/openmeteo_quota.py:
     zone: K2_runtime
     authority_role: quota_guard
@@ -1116,6 +1189,17 @@ files:
     - src/data/ensemble_client.py
     - src/data/observation_client.py
     - src/data/openmeteo_client.py
+  src/data/source_clock_update_probe.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_source_clock_trigger
+    why: Production fail-soft probe for Open-Meteo model update clocks. Records cached metadata and advances the source-update cursor only after a changed run is publicly usable, then reports affected cities for replacement materialization/download work. It never places orders. Order-engine rebuild W0.3 (2026-07-02) added an optional event_writer kwarg (default None, no behavior change for existing callers) that emits SOURCE_RUN_ARRIVED opportunity events per newly-usable run; emit-only, no consumer reads the event yet (W4 wires the staleness path).
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_production.py
+    - scripts/source_clock_live_replacement_cycle.py
+    - src/events/event_writer.py
+    - src/events/opportunity_event.py
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
@@ -1145,6 +1229,48 @@ files:
     - tests/test_v2_adapter.py
     - tests/test_fake_polymarket_venue.py
     - tests/integration/test_p0_live_money_safety.py
+  src/venue/rate_budget.py:
+    zone: K2_runtime
+    authority_role: venue_call_rate_budget
+    why: >
+      W2.3 order-engine rebuild packet (architecture/order_engine_implementation_architecture_2026-07-02.md
+      §1 "rate-limit budget + cancel-priority", BUILD — only reactive 429 handling existed).
+      Shared, injectable-clock, thread-safe token-bucket budget for venue order-endpoint
+      calls with two priority classes (SUBMIT, CANCEL); CANCEL may drain past a reserved
+      floor SUBMIT may not, so cancels are never starved by submit traffic under pressure.
+      Also carries the 429/Retry-After response-and-exception adapter that PolymarketClient
+      does not have today. Defaults sourced from Polymarket's published CLOB rate limits
+      (docs.polymarket.com/api-reference/rate-limits, fetched 2026-07-02); operating point
+      is a documented conservative guess (10% of the venue's sustained per-second ceiling)
+      flagged for tightening once real submit/cancel volume exists.
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W2.1's batch wrapper and
+      W3/W4 consumers wire this module in a later packet.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - tests/venue/test_rate_budget.py
+  src/venue/batch_submit.py:
+    zone: K2_runtime
+    authority_role: batch_submit_pure_primitives
+    why: >
+      W2.1 order-engine rebuild packet (architecture/order_engine_implementation_architecture_2026-07-02.md
+      §1 "batch submit + safe prefixes", BUILD (thin) — SDK post_orders/cancel_orders exist,
+      zero call sites). Pure, side-effect-free primitives shared by the adapter's
+      submit_batch/cancel_batch and the execution-side orchestrator: MAX_ORDERS_PER_BATCH
+      (self-imposed ≤15, not an SDK constraint), chunk_orders, compute_safe_prefixes (the
+      design doc's "every prefix leaves an acceptable exposure if later batches fail" cut,
+      docs/rebuild/order_engine_first_principles_design_2026-07-02.md:118-121), and
+      map_batch_items (fail-closed echo-id/index/unmapped response->request mapping —
+      the post_orders/cancel_orders response shape is UNVERIFIED against the live API,
+      see module docstring TODO).
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W3's solve is the intended
+      future consumer.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - src/venue/polymarket_v2_adapter.py
+    - src/execution/batch_order_submission.py
+    - tests/venue/test_batch_submit.py
   src/ingest/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1241,7 +1367,6 @@ files:
     downstream:
     - src/data/forecast_fetch_plan.py
     - src/data/executable_forecast_reader.py
-    - src/data/entry_forecast_shadow.py
     - tests/test_opendata_future_target_contract.py
   src/data/forecast_fetch_plan.py:
     zone: K2_runtime
@@ -1287,32 +1412,211 @@ files:
   src/data/calibration_transfer_policy.py:
     zone: K2_runtime
     authority_role: calibration_transfer_gate
-    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF).
+    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to BLOCKED; live promotion requires explicit live_calibration_promotion_approved evidence.
     hazards:
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
     downstream:
-    - src/data/entry_forecast_shadow.py
     - tests/test_calibration_transfer_policy.py
-  src/data/entry_forecast_shadow.py:
+  src/decision/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Decision package rules and registry; see docs/rebuild/order_engine_implementation_architecture_2026-07-02.md for the W3/W5 disposition of individual files.
+  src/decision/__init__.py:
     zone: K2_runtime
-    authority_role: entry_forecast_shadow_evaluator
-    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
-    hazards:
-    - SOURCE_TRUTH_PLANE_COLLAPSE
-    - CALIBRATION_FAMILY_MIXING
-    - VENUS_CONTROL_ONLY
-    downstream:
-    - tests/test_entry_forecast_shadow.py
-  src/data/entry_readiness_writer.py:
+    authority_role: package_marker
+    why: Marks decision namespace.
+  src/decision/family_decision_engine.py:
     zone: K2_runtime
-    authority_role: entry_forecast_readiness_writer
-    why: Phase B3 pure writer that turns rollout + calibration + promotion-evidence verdicts into readiness_state rows with strategy_key='entry_forecast'. Refuses to land LIVE_ELIGIBLE unless every gate is aligned at write time. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF). Operator activates by setting the env var.
-    hazards:
-    - VENUS_CONTROL_ONLY
+    authority_role: decision_runtime_engine
+    why: >
+      Live filter-then-rank top-1 decision engine (decide()/_select()): candidate filter
+      chain direction_law_ok -> coherence_allows -> (edge_lcb>0 & optimal_delta_u>0) ->
+      selected = max total robust utility, with no_trade_reason + receipt_hash on every
+      exit. Per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §1: this
+      is NOT a solver and is a BUILD-swap target at W3 — a new src/solve/ module replaces it
+      at the qkernel_spine_bridge.py:1332 seam. Reusable pieces (payoff_vector's ΔU shape)
+      survive the swap; the engine itself does not.
     downstream:
-    - tests/test_entry_readiness_writer.py
-    - tests/test_entry_forecast_chain_relationship.py
+    - src/engine/event_reactor_adapter.py
+    - src/engine/qkernel_spine_bridge.py
+    - src/execution/executor.py
+    - src/events/live_order_aggregate.py
+    - src/decision_kernel/verifier.py
+  src/decision/decision_receipt.py:
+    zone: K2_runtime
+    authority_role: typed_decision_carrier
+    why: >
+      Carrier type for decision results with provenance and settlement guidance; reconstructs
+      forecast -> q -> route -> size for every live candidate (the one rebuild invariant).
+      Not named individually in the W3/W5 disposition tables, but receipts remain a required
+      W3 solve output (receipts stamp correlation_rail=caps per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §3 point 4) — the
+      concept survives the family_decision_engine.py swap even if this file is touched.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+  src/decision/market_coherence.py:
+    zone: K2_runtime
+    authority_role: market_validator
+    why: >
+      Model-vs-market coherence veto: de-frictioned implied-q + simplex projection +
+      depth/spread gating, 3 call sites in decide(). Per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §4 decision 1
+      (RESOLVED 2026-07-02): the veto is DELETED and INVERTED into a re-decision router —
+      dies with W3, not W5. assess_market_coherence/MarketCoherenceReport survive REUSED as
+      (a) a typed divergence event into opportunity_events and (b) the re-decision priority
+      key (divergence x staleness ranks which family gets re-solved first).
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/decision/payoff_vector.py:
+    zone: K2_runtime
+    authority_role: payoff_calculator
+    why: >
+      Computes payoff vectors for entry/exit decisions: edge = q @ payoff - route.avg_cost,
+      sizing via robust_delta_u argmax over the FamilyPayoffMatrix. Anchors all decision edge
+      calculations. Per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      §1: REUSE-grade — optimize_vector_stake's log-utility ΔU shape (right shape, 1-D) is
+      generalized into the W3 solve's joint multi-asset math; this file's math survives the
+      family_decision_engine.py swap even though the engine does not.
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/solve/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: >
+      W3 SOLVE package export surface (order-engine rebuild). Re-exports the typed I/O
+      (MenuItem/PlannedOrder/ScenarioSet/SolutionPlan/SolveMenu/WealthByOutcome). Inert
+      until the qkernel_spine_bridge.py:1332 seam swap (sub-slice 3, w3_solve_enabled flag).
+  src/solve/types.py:
+    zone: K2_runtime
+    authority_role: decision_contract
+    why: >
+      Typed inputs/outputs of the W3 SOLVE. Encodes non-weakenable law: PlannedOrder.q_version
+      is mandatory (W1.2 stamp law), every SolutionPlan stamps correlation_rail (arch §4
+      decision 2), WealthByOutcome is derived-not-stored endowment (log-growth baseline).
+  src/solve/scenario_service.py:
+    zone: K2_runtime
+    authority_role: scenario_provider
+    why: >
+      The ONE seam through which outcome scenarios reach the solver. TransitionalIndependentProduct
+      is the W3 rail (single-family = served band samples verbatim, one-belief law; multi-family =
+      index-paired independent product). C4 replaces the provider, not the solver.
+  src/solve/menu_adapter.py:
+    zone: K2_runtime
+    authority_role: menu_reshaper
+    why: >
+      Pure reshaping of the size-aware priced NegRiskRouteSet (+ holdings/cash lanes) into
+      SolveMenu. Never re-prices, never drops non-executable items (audit trail), never
+      synthesizes conversion routes (conversion_routes stays () until the builder + dry-run
+      gate land, packet §5).
+    downstream:
+    - src/solve/solver.py
+  src/solve/solver.py:
+    zone: K2_runtime
+    authority_role: decision_logic
+    why: >
+      The joint SOLVE: solve() maximizes robust (band-α-quantile) expected Δlog-wealth of the
+      whole stake vector over a ScenarioSet against WealthByOutcome as endowment — generalizing
+      payoff_vector's 1-D robust ΔU to a plan over the route menu — then κ-scales and discretely
+      repairs (re-evaluating the rounded plan; submit-worthy only if ΔU still > 0). Deterministic
+      coordinate ascent, seeded at the best single item so it provably dominates the top-1 picker.
+      W3.3: SolveEngineShim.decide() implemented — composes an inner FamilyDecisionEngine for the
+      scaffolding, replaces selection with the joint solver, re-scores the primary leg standalone at
+      its post-haircut size (LegacyDecisionProjection stamped into selected so evidence grades the
+      projection, not the joint plan), emits coherence_allows=True. Swaps in at
+      qkernel_spine_bridge.py:1332 behind w3_solve_enabled (seam swap = next packet); nothing imports it yet.
+    downstream:
+    - src/engine/qkernel_spine_bridge.py
+  src/solve/kappa.py:
+    zone: K2_runtime
+    authority_role: sizing_shading_policy
+    why: >
+      κ — the solver's single fractional-shading policy. κ=1.0 while the downstream
+      kelly_multiplier haircut still executes (single-owner law); a κ<1 with the haircut alive
+      is unconstructable by __post_init__. Ownership transfers to κ in the same W5 commit that
+      deletes the haircut stack — never overlaps, never gaps.
+    downstream:
+    - src/solve/solver.py
+  src/solve/exits.py:
+    zone: K2_runtime
+    authority_role: exit_marginal_rule
+    why: >
+      Exits-as-same-solve: a held position is an endowment the solver re-evaluates; the C5
+      marginal rule (b·Σq_j/W_j > q_i/W_i) is the mathematical form of "move wealth out of
+      outcome i". Reuses ExitContext/precedence tripwires; replaces the economic rule body.
+      W3.3: build_wealth_by_atom is implemented (entry-side, pure core, INJECTED spendable cash
+      net of reservations + per-atom holdings payout, ZeroWealthOutcomeError on non-positive);
+      marginal_exit_condition + the full C5 ledger builder remain a later sub-slice.
+  src/solve/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Scoped router for the SOLVE zone (one-belief law, joint objective, κ single-owner, discrete-repair proof).
+  src/decision/qlcb_reliability_guard.py:
+    zone: K3_extension
+    authority_role: confidence_bound_validator
+    why: >
+      Price-blind OOF empirical reliability guard: serves q_safe = min(band.q_lcb, L_g) on
+      known deep OOF cells, abstains (q_safe=0) on thin/missing cells. Predecessor to
+      selection_calibrator.py (which is price/selection-aware; this guard cannot see
+      price-conditioned adverse selection). Part of the "selection machinery" W5 deletion
+      target per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3
+      (contained, 1 main call site in family_decision_engine.py; dies with the engine swap).
+    downstream:
+    - src/decision/family_decision_engine.py
+  src/decision/selection_calibrator.py:
+    zone: K3_extension
+    authority_role: calibration_adapter
+    why: >
+      Selection-aware settlement q_lcb calibrator: maps pre-trade features (side, lead
+      bucket, bin class, raw side prob, admission margin) to a monotone conservative lower
+      bound on realized settlement hit-rate, fit walk-forward on settled rows only. Successor
+      to qlcb_reliability_guard.py (price/selection-aware vs price-blind). Part of the
+      "selection machinery" W5 deletion target per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    downstream:
+    - src/decision/family_decision_engine.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/selection_curse_bound.py:
+    zone: K3_extension
+    authority_role: decision_curse_bound
+    why: >
+      Estimator for selection-curse adjustment on realized market rates: deflates mid-price
+      buy_no toward its settlement-evidenced realized rate (monotone-in-price isotonic LCB);
+      identity when absent/unarmed/out-of-support, only ever tightens. Per
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2: "selection_curse_bound
+      + calibrator + loaders" — contained, 1 main call site in family_decision_engine.py —
+      dies with the engine swap; also enumerated under the §3 W5 selection-machinery deletion
+      order.
+    downstream:
+    - src/decision/selection_curse_bound_loader.py
+    - src/engine/event_reactor_adapter.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/selection_curse_bound_loader.py:
+    zone: K3_extension
+    authority_role: artifact_loader
+    why: >
+      Fail-soft loader for selection_curse_bound.py artifacts; returns None on
+      missing/malformed/inconsistent input to preserve live gate identity. Same disposition
+      as selection_curse_bound.py: dies with the W3 engine swap / W5 selection-machinery
+      deletion per docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/strategy/live_inference/live_admission.py
+  src/decision/city_skill_gate.py:
+    zone: K2_runtime
+    authority_role: skill_validator
+    why: >
+      Per-city historical settlement-skill gate: admits a city only when its prior
+      Brier-vs-market settlement skill is reliably positive (learned threshold + minimum
+      track-record length), fails closed on missing/inconsistent skill data. Pairs with
+      selection_calibrator.py (skill gate decides WHICH cities trade; the calibrator blocks
+      the adversely-selected toxic tail within them). Not named individually in
+      docs/rebuild/order_engine_implementation_architecture_2026-07-02.md's component map or
+      deletion list (created 2026-06-22, same consult batch as selection_calibrator.py) —
+      shares the calibrator's admission-gate role but its W3/W5 disposition is not confirmed
+      in that doc; do not assume it survives the engine swap without re-checking.
+    downstream:
+    - src/strategy/live_inference/live_admission.py
   src/engine/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1410,6 +1714,21 @@ files:
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
+  src/engine/replacement_forecast_hook_factory.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_live_decision_hook
+    why: DB-backed hook factory for replacement forecast pre-intent admission; build_replacement_forecast_event_hook is the LIVE decision path wired at event_reactor_adapter.py's _resolve_replacement_forecast_adapter_hook, feeding effective_q_posterior/effective_q_lcb/effective_kelly_fraction to real order sizing. W0.1 (2026-07-02) its read_replacement_forecast_bundle call opts in with enforce_raw_input_hwm=True so this path can no longer serve a posterior once a newer raw input cycle has already arrived (previously the only q-serving read path with no raw-input HWM tripwire).
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_bundle_reader.py
+    - src/engine/replacement_forecast_reactor_hook.py
+  src/engine/position_belief.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_monitor_exit_belief
+    why: Read-only freshness annotation for held positions during monitor/exit; independently re-derives the latest raw-input cycle (_latest_live_input_cycle, separate implementation from src/data/replacement_input_hwm.py) and sets a fresh=False flag when the served posterior is behind newer raw input. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. Not touched by W0.1; consolidating its duplicate raw-HWM query onto src/data/replacement_input_hwm.py is deferred to a later wave.
+    downstream:
+    - src/engine/monitor_refresh.py
   src/engine/time_context.py:
     zone: K2_runtime
     authority_role: time_semantics
@@ -1531,6 +1850,13 @@ files:
     - src/execution/harvester.py
     - src/state/db.py
     - future T1 fake venue parity
+  src/execution/ctf_conversion_commands.py:
+    zone: K2_runtime
+    authority_role: ctf_conversion_command_model
+    why: W2.4 durable command ledger for CTF split/merge/convert; models the conversion lifecycle (INTENT_CREATED -> TX_HASHED -> CONFIRMED/FAILED, fail-closed UNKNOWN on ambiguity) without wiring live callers. Own dedicated table/state enum instead of extending venue_commands.intent_kind — mirrors settlement_commands.py's redemption-journaling precedent (trade DB, condition_id/market_id-scoped), not wrap_unwrap_commands.py's world DB. ctf_conversion_commands/ctf_conversion_command_events are registered in src/state/domains.py CANONICAL_OWNER as Domain.TRADE (verifier finding 2026-07-02), matching how settlement_commands/settlement_command_events are registered there — so owner_routed_write.py's cross-DB write-domain guards apply to these tables the moment a real writer lands, instead of silently no-op'ing on an unregistered table. INERT this packet — no production caller.
+    downstream:
+    - src/state/db.py
+    - src/venue/polymarket_v2_adapter.py
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime
@@ -1578,6 +1904,41 @@ files:
     downstream:
     - src/main.py
     - src/execution/harvester.py
+  src/execution/self_trade_guard.py:
+    zone: K2_runtime
+    authority_role: self_trade_guard_predicate
+    why: "SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family, to avoid double-blocking legitimate opposite-token hedges already governed by src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively by src/state/venue_command_repo.py insert_command), so the operator's independently-placed orders are invisible to this query and can never be blocked. No venue-side self-trade prevention exists in the installed Polymarket SDK, so this is the primary defense, not defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build."
+    downstream: []  # not yet wired; W3 consumes (envelope build)
+  src/execution/batch_order_submission.py:
+    zone: K2_runtime
+    authority_role: batch_command_journal_orchestrator
+    why: >
+      W2.1 order-engine rebuild packet. Extends the single-order INV-28
+      persist-before-side-effect sequence (executor.py:4394-4476) to N
+      orders sharing ONE SDK call per chunk: submit_orders_batch persists
+      insert_command(INTENT_CREATED)+append_event(SUBMIT_REQUESTED) for
+      every order in a chunk, COMMITS, THEN calls the INV-24 gateway
+      place_limit_orders_batch ONCE, THEN maps the one response back onto
+      N SUBMIT_ACKED/SUBMIT_REJECTED/SUBMIT_UNKNOWN events via
+      src.venue.batch_submit.map_batch_items's fail-closed precedence.
+      cancel_commands_batch is the CANCEL_REQUESTED/CANCEL_ACKED/
+      CANCEL_FAILED analog, reusing src.execution.exit_safety's existing
+      cancel machinery rather than inventing new journaling. Accepts
+      optional rate_budget (src.venue.rate_budget) and self_trade_verdicts
+      (src.execution.self_trade_guard) as injected, None-default hooks --
+      honored when supplied, no production wiring. On the INV-24/NC-16
+      gateway allowlist (polymarket_client.py) precisely because it calls
+      place_limit_orders_batch.
+      NOT_DAEMON_WIRED: lands INERT, no production call site — W3's solve
+      is the intended future consumer.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - src/data/polymarket_client.py
+    - src/venue/batch_submit.py
+    - src/execution/self_trade_guard.py
+    - src/venue/rate_budget.py
+    - tests/execution/test_batch_order_submission.py
   src/signal/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1679,6 +2040,10 @@ files:
     zone: K3_extension
     authority_role: calibration_offset_loader
     why: Read-only fail-soft loader for the fitted per-city anchor representativeness de-bias δ_city (state/anchor_representativeness_debias.json, produced by scripts/fit_anchor_representativeness_debias.py). get_city_debias_c returns δ_city ONLY for an activated, do-no-harm-gated HIGH cell (else None → family-level fallback). Consumed at src/data/replacement_forecast_materializer.py:1455 as bias_shift_c (law-8 foundation fix, cold_bias_metadata_root.md). No DB writes; no live I/O at call time (module-cached artifact read).
+  src/calibration/emos_center_calibration.py:
+    zone: K3_extension
+    authority_role: calibration_center_affine_loader
+    why: Read-only affine EMOS center calibration loader and estimator for state/emos_center_calibration.json, produced by scripts/fit_emos_center_calibration.py. The served correction is mu'=a+b*mu for city/metric entries with serve=true; absent/unserved entries are identity (0,1), so the single replacement posterior remains the only live probability authority and provenance records any applied shift.
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
@@ -1694,8 +2059,8 @@ files:
     - CALIBRATION_FAMILY_MIXING
   src/calibration/blocked_oos.py:
     zone: K3_extension
-    authority_role: shadow_calibration_eval
-    why: Blocked out-of-sample evaluation facts; shadow only.
+    authority_role: blocked_calibration_eval
+    why: Blocked out-of-sample evaluation facts; blocked only.
     hazards:
     - DERIVED_ONLY
   src/calibration/drift.py:
@@ -1827,11 +2192,28 @@ files:
   src/strategy/horse_race_kelly.py:
     zone: K3_extension
     authority_role: portfolio_sizing_law
-    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). SHADOW-ONLY wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
+    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). Blocked wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
     hazards:
     - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
     downstream:
     - src/engine/event_reactor_adapter.py
+  src/strategy/live_inference/source_clock_vnext.py:
+    zone: K3_extension
+    authority_role: source_clock_settlement_admission_law
+    why: Pure source-clock vNext primitives for availability+10m source gating, provider-family deduped settlement-weight selection, market-reaction q_exec_lcb tightening, NO-side lower bounds from YES UCB, and binary log-utility executable admission. No venue side effects or DB writes.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/replay/executable_q_lcb_replay.py
+  src/strategy/live_inference/source_clock_city_weights.py:
+    zone: K3_extension
+    authority_role: source_clock_city_profile_selection
+    why: Pure file-backed loader for the 2026-06-25 one-final-scheme-per-city artifact. Supplies fixed source weights to the live replacement materializer and source-update affected-city routing without creating a second strategy registry or DB write path.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+    - src/data/source_clock_update_probe.py
   src/strategy/kelly.py:
     zone: K3_extension
     authority_role: sizing_law
@@ -2010,113 +2392,16 @@ files:
     downstream:
     - src/strategy/benchmark_suite.py
     - tests/test_strategy_benchmark.py
-  src/strategy/candidates/__init__.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_registry_stub
-    why: R3 A1 strategy candidate stub registry; advertises identities for benchmarking without executable alpha or live promotion authority.
-    downstream:
-    - tests/test_strategy_benchmark.py
-  src/strategy/candidates/weather_event_arbitrage.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/stale_quote_detector.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/resolution_window_maker.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/neg_risk_basket.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/cross_market_correlation_hedge.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/liquidity_provision_with_heartbeat.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_buy_calibrated_shadow.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-buy calibrated posterior shadow.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_sell_model_no.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-sell model-NO signal.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_sell_parity.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-sell parity.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/imminent_open_capture_posterior_collapse.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — imminent open posterior collapse.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/opening_inertia_relaxation.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — opening inertia relaxation signal.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/settlement_capture_shadow.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — settlement capture physical-interval shadow.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/shoulder_buy_evt.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — shoulder-buy EVT/conformal tail-underpricing.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/shoulder_impossible_tail_capture.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — shoulder impossible-tail capture.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/engine/shadow_candidate_dispatch.py:
-    zone: K2_runtime
-    authority_role: shadow_pipeline_orchestrator
-    why: Wave stochastic-datagated capture pipeline — dispatches shadow candidates to world DB.
-    downstream:
-    - src/engine/cycle_runtime.py
-    - tests/test_l1_shadow_capture_hook.py
   src/analysis/promotion_proof_router.py:
     zone: K3_extension
-    authority_role: shadow_pipeline_router
-    why: Wave CI evidence routing — routes shadow strategy_keys to pipeline A/B for promotion proof.
+    authority_role: promotion_proof_router
+    why: Routes strategy keys to pipeline A/B for promotion proof.
     downstream:
     - tests/test_promotion_proof_router_wave.py
   src/cron/settlement_attribution.py:
     zone: K3_extension
-    authority_role: shadow_attribution_cron
-    why: Wave shadow PnL attribution cron — computes realized shadow PnL from WORLD.decision_events.
+    authority_role: receipt_attribution_cron
+    why: Receipt-driven settlement attribution cron over edli_no_submit_receipts.
     downstream:
     - tests/test_p1_findings_evidence_risk.py
   src/state/AGENTS.md:
@@ -2159,19 +2444,38 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer snapshot evidence exists.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events.
+    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once, nullable) beside snapshot_id.
     write_routes:
     - venue_command_write
     downstream:
     - src/execution/executor.py
     - src/state/collateral_ledger.py
+  src/state/order_state_predicates.py:
+    zone: K2_runtime
+    authority_role: derived_order_state_predicates
+    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions computing C3 q-staleness (is_stale_pending_cancel), submit-flight delay (is_delayed), and max-rest-age (rest_deadline_exceeded) from existing truth (venue_commands.q_version, CommandState dwell, rest age) instead of storing a recomputable classification. Closes the NULL-q rest-forever leak (critic ruling 2) — rest_deadline_exceeded applies to ALL open rests regardless of q_version. First wired to the cancel path by W4.2 (src/execution/staleness_cancel.py), which licensed the same-packet deletion of maker_rest_escalation.py.
+    downstream:
+    - src/execution/staleness_cancel.py
+  src/execution/staleness_cancel.py:
+    zone: K2_runtime
+    authority_role: c3_staleness_cancel_path
+    why: W4.2 (docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md §"C3 mark orders stale"). Consumes SOURCE_RUN_ARRIVED to classify every open ENTRY rest via order_state_predicates (is_stale_pending_cancel + rest_deadline_exceeded), builds the cancel-set, and cancels it through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate budget at CANCEL priority). NO-WRITE staleness (Option B) — nothing here stores a classification. TTL/GTC-deadline successor to the deleted maker_rest_escalation.py; rest_deadline_exceeded is now the sole GTC TTL owner, behavior-continuous via bootstrap_rest_deadline_minutes().
+    downstream:
+    - src/main.py  # _c3_staleness_cancel_cycle scheduler job
+  src/execution/venue_cancel_journal.py:
+    zone: K2_runtime
+    authority_role: persisted_cancel_command_journal
+    why: W4.2 relocation (byte-identical body) of run_persisted_cancels_for_expired_rests out of the deleted maker_rest_escalation.py. Generic durable-journal cancel executor (CANCEL_REQUESTED -> venue cancel -> CANCEL_ACKED/CANCEL_REPLACE_BLOCKED), NOT staleness/TTL-specific — kept alive because three other callers depended on it before the deletion (boot-time invalid-entry-authority cancel, the §4.5 redecision-screen rest-pull cancel, and C3 staleness's own carried-over invalid-authority lane), none of which are in the W4.2 staleness scope themselves.
+    downstream:
+    - src/main.py
+    - src/execution/command_recovery.py
   src/state/canonical_write.py:
     zone: K0_frozen_kernel
     authority_role: canonical_write_guard
@@ -2266,6 +2570,18 @@ files:
     - src/state/decision_chain.py
     - src/state/portfolio.py
     - src/state/strategy_tracker.py
+  src/state/write_coordinator.py:
+    zone: K2_runtime
+    authority_role: db_write_coordination_contract
+    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. Price-channel world+trade write units are migrated; remaining production writers still need coverage.
+    write_routes:
+    - canonical_db_write_coordination
+    downstream:
+    - src/state/db.py
+    - src/ingest/price_channel_ingest.py
+    - src/events/triggers/market_channel_ingestor.py
+    - src/data/substrate_observer.py
+    - src/riskguard/riskguard.py
   src/state/decision_chain.py:
     zone: K2_runtime
     authority_role: decision_fact_logging
@@ -2299,32 +2615,27 @@ files:
     downstream:
     - src/state/db.py
     - src/state/book_hash_transitions.py
+  src/state/schema/execution_feasibility_evidence_schema.py:
+    zone: K2_runtime
+    authority_role: execution_feasibility_schema_owner
+    why: "Trade DB DDL owner for execution_feasibility_evidence append evidence and execution_feasibility_latest compact latest-state mirror. Latest table keeps hot quote freshness reads in bounded indexed state instead of scanning the high-frequency append log."
+    downstream:
+    - src/state/db.py
+    - src/events/triggers/market_channel_ingestor.py
+    - src/ingest/price_channel_ingest.py
+  src/state/schema/market_channel_connectivity_schema.py:
+    zone: K2_runtime
+    authority_role: market_channel_connectivity_schema_owner
+    why: "W0.2 (2026-07-02) trade DB DDL owner for market_channel_connectivity_events — the durable WS connect/disconnect/reconnect transition log that replaces MarketChannelOnlineService's in-memory-only connected/gap_start fields, which reset on every daemon restart. BLIND_WINDOW_QUERY derives closed blind-window intervals via LEAD() over consecutive disconnected->connected pairs. ensure_table wired into db.py init_schema_trade_only; producers wired at market_channel_ingestor.py on_connect/on_disconnect/on_reconnect."
+    downstream:
+    - src/state/db.py
+    - src/events/triggers/market_channel_ingestor.py
   src/state/schema/no_trade_events_schema.py:
     zone: K2_runtime
     authority_role: no_trade_events_schema_owner
     why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB). SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members + schema_version IN (14,15,16,17,18)."
     downstream:
     - src/state/db.py
-  src/state/schema/tail_stress_scenarios_schema.py:
-    zone: K2_runtime
-    authority_role: tail_stress_scenarios_schema_owner
-    why: "Phase 3 T2 SCAFFOLD (2026-05-21): DDL owner for tail_stress_scenarios table (world DB). SCHEMA_VERSION 18. PK=(market_slug, temperature_metric, target_date, observation_time, decision_seq) FK-like with decision_events. columns: scenarios JSON, max_loss_pct REAL, tail_probability_stressed REAL. Production wiring via db.py init_schema; T2 production pass owns first execution."
-    downstream:
-    - src/state/db.py
-  src/contracts/shoulder_strategy_vnext.py:
-    zone: K1_contracts
-    authority_role: shoulder_strategy_vnext_dataclass
-    why: "Phase 3 T2 SCAFFOLD (2026-05-21): 21-field frozen dataclass for shoulder strategy candidates per 04_PHASE_3_SHOULDER.md §'Required object model'. classify_shoulder_candidate() is SCAFFOLD stub raising NotImplementedError. T2 production pass owns implementation."
-    write_routes: []
-    downstream:
-    - src/strategy/stress_scenarios.py
-  src/strategy/stress_scenarios.py:
-    zone: K2_runtime
-    authority_role: tail_stress_scenario_kernel
-    why: "Phase 3 T2 SCAFFOLD (2026-05-21): TailStressScenario dataclass + 6 module-level scenario instances + ALL_SCENARIOS tuple per 04_PHASE_3_SHOULDER.md §'Stress scenarios'. run_stress_tests() SCAFFOLD stub raising NotImplementedError. T2 production pass owns implementation."
-    write_routes: []
-    downstream:
-    - src/state/schema/tail_stress_scenarios_schema.py
   src/state/schema/shoulder_exposure_ledger_schema.py:
     zone: K2_runtime
     authority_role: shoulder_exposure_ledger_schema_owner
@@ -2340,7 +2651,6 @@ files:
     - shoulder_exposure_ledger
     downstream:
     - src/strategy/shoulder_cluster_cap.py
-    - scripts/shoulder_shadow_readiness_report.py
   src/strategy/shoulder_cluster_cap.py:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
@@ -2450,8 +2760,6 @@ files:
     downstream:
     - src/strategy/oracle_penalty.py
     - src/strategy/strategy_profile.py
-    - scripts/bridge_oracle_to_calibration.py
-    - scripts/oracle_snapshot_listener.py
   src/state/uma_resolution_listener.py:
     zone: K2_runtime
     authority_role: uma_onchain_resolution_listener
@@ -2587,7 +2895,7 @@ files:
       every live runtime city x metric, asserts the current-season VERIFIED
       edli_per_city_v1 bias row AND a non-borrowed/non-identity Platt exist;
       enumerates any city that would silently fall to RAW bias / borrow a foreign
-      cluster's Platt / fall to identity. SHADOW (real_order_submit_enabled=False)
+      cluster's Platt / fall to identity. UNARMED (real_order_submit_enabled=False)
       = WARN-only, never blocks boot or starves the reactor; ARMED
       (real_order_submit_enabled=True) = HARD fail-closed RuntimeError. Read-only
       (SELECT on world + ATTACHed forecasts); never writes, never alters trade flow.
@@ -2613,6 +2921,37 @@ files:
     - src/control/control_plane.py
     - src/engine/cycle_runner.py
     - src/main.py
+  src/ops/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks ops namespace for read-only operator/runtime proof helpers.
+  src/ops/edli_queue.py:
+    zone: K2_runtime
+    authority_role: edli_queue_proof_helper
+    why: >
+      Shared read-only EDLI reactor queue evidence for post-start deploy
+      verification and operator healthcheck. Proves stale in-flight claims and
+      post-launch queue progress without mutating canonical event rows.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/deploy_live.py
+    - scripts/healthcheck.py
+  src/ops/monitor_cadence.py:
+    zone: K2_runtime
+    authority_role: monitor_cadence_proof_helper
+    why: >
+      Shared read-only per-position monitor cadence evidence for restart
+      preflight, post-start deploy verification, and operator healthcheck.
+      Uses canonical position_events.MONITOR_REFRESHED per current-money-risk
+      position; never treats position_current.updated_at as monitor/redecision
+      proof.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/check_live_restart_preflight.py
+    - scripts/deploy_live.py
+    - scripts/healthcheck.py
   src/supervisor_api/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -2667,10 +3006,17 @@ files:
     why: Shared row helpers for market topology consumers after substrate observer decomposition; keeps topology row shape out of the order daemon.
     downstream:
     - src/data/substrate_observer.py
+  src/data/market_absence_evidence.py:
+    zone: K2_runtime
+    authority_role: cross_process_market_unavailable_evidence
+    why: Small expiring state-file contract from substrate observer to reactor; carries concrete market-unavailable evidence such as Gamma-empty or market-end elapsed so stale/blocked events terminalize only from sidecar-produced facts.
+    downstream:
+    - src/data/substrate_observer.py
+    - src/main.py
   src/data/substrate_observer.py:
     zone: K2_runtime
     authority_role: executable_substrate_producer_lane
-    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production.
+    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production. Snapshot writes are routed through per-row trade write coordinator leases.
     downstream:
     - src/ingest/substrate_observer_daemon.py
     - src/engine/event_reactor_adapter.py
@@ -2683,7 +3029,7 @@ files:
   src/ingest/price_channel_ingest.py:
     zone: K2_runtime
     authority_role: price_channel_fact_producer_lane
-    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon.
+    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon. Market-channel snapshot invalidation/refresh now uses the unified trade write coordinator.
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/main.py

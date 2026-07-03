@@ -7,7 +7,7 @@
 
 A live-consuming row must carry enough temporal provenance to PROVE it is the right datum on the
 right clock for the right local day. This module declares that required-field set and validates a
-table's columns against it. It also provides the authority rule that backfill/shadow data can
+table's columns against it. It also provides the authority rule that backfill data can
 never authorize live readiness.
 
 PR7's SCHEMA MIGRATION (adding any missing columns to the live forecasts DB) is operator-gated

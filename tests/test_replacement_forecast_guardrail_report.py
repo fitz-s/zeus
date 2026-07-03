@@ -2,8 +2,8 @@
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement forecast guardrail bucket reporting from hiding regression clusters.
-# Reuse: Run before using replacement guardrail reports for promotion or shadow daily summaries.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Reuse: Run before using replacement guardrail reports for promotion or blocked-candidate daily summaries.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked integration.
 """Replacement forecast guardrail bucket report tests."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def test_guardrail_report_blocks_promotion_when_regression_cluster_exists_despit
 
     report = build_replacement_forecast_guardrail_report(rows, min_scored_rows_per_bucket=2)
 
-    assert report.status == "SHADOW_ONLY"
+    assert report.status == "BLOCKED"
     assert report.net_delta_after_cost_pnl == 26.0
     assert report.veto_avoided_loss_pnl == 35.0
     assert report.veto_regret_pnl == 9.0
@@ -74,7 +74,7 @@ def test_guardrail_report_passes_when_every_bucket_has_positive_scored_delta() -
     assert all(bucket.status == "PASS" for bucket in report.buckets)
 
 
-def test_guardrail_report_preserves_blocked_replay_rows_as_shadow_only() -> None:
+def test_guardrail_report_preserves_blocked_replay_rows_as_blocked_only() -> None:
     report = build_replacement_forecast_guardrail_report(
         [
             _row(city="Shanghai", bucket="standard", delta=3.0),
@@ -85,12 +85,12 @@ def test_guardrail_report_preserves_blocked_replay_rows_as_shadow_only() -> None
         min_scored_rows_per_bucket=1,
     )
 
-    assert report.status == "SHADOW_ONLY"
+    assert report.status == "BLOCKED"
     assert report.blocked_rows == 1
     assert "REPLACEMENT_GUARDRAIL_REPORT_HAS_BLOCKED_ROWS" in report.reason_codes
     coastal = next(bucket for bucket in report.buckets if bucket.value == "coastal")
     assert coastal.blocked_rows == 1
-    assert coastal.status == "SHADOW_ONLY"
+    assert coastal.status == "BLOCKED"
 
 
 def test_guardrail_report_blocks_when_no_scored_rows_exist() -> None:

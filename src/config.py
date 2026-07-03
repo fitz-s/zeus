@@ -26,10 +26,6 @@ RUNTIME_ROOT = Path(os.environ.get("ZEUS_PRIMARY_ROOT") or PROJECT_ROOT).expandu
 STATE_DIR = RUNTIME_ROOT / "state"
 
 
-def legacy_state_path(filename: str) -> Path:
-    return STATE_DIR / filename
-
-
 def runtime_state_path(filename: str) -> Path:
     """State path for the live runtime.
 
@@ -126,7 +122,6 @@ class Settings:
             "exit",
             "riskguard",
             "execution",
-            "baseline_bias_correction_enabled",
             "feature_flags",
         ]
         for key in required:
@@ -145,23 +140,6 @@ class Settings:
     # src.runtime.bankroll_provider.current().
 
     @property
-    def baseline_bias_correction_enabled(self) -> bool:
-        """Whether LEGACY BASELINE/diagnostics-chain bias correction is enabled.
-
-        Strict — missing key = startup KeyError (B001).
-
-        NAME-COLLISION FIX (T0-3, 2026-06-13): renamed from the bare
-        ``bias_correction_enabled`` to disambiguate from the LIVE EDLI-chain flag
-        ``edli.edli_bias_correction_enabled`` (settings.json ``edli`` block). The
-        two flags are distinct: this top-level one gates the legacy baseline /
-        diagnostics chain (main.py, harvester.py settlement attribution,
-        ensemble_signal.py) and is OFF; the edli one gates the live forecast
-        chain and is ON. The near-identical names previously read as a
-        twin-authority false positive. Value/semantics unchanged.
-        """
-        return bool(self._data["baseline_bias_correction_enabled"])
-
-    @property
     def feature_flags(self) -> dict:
         """Feature flags dict. Strict — missing key = startup KeyError (B001)."""
         return dict(self._data["feature_flags"])
@@ -169,7 +147,6 @@ class Settings:
 
 class EntryForecastRolloutMode(StrEnum):
     BLOCKED = "blocked"
-    SHADOW = "shadow"
     CANARY = "canary"
     LIVE = "live"
 
@@ -733,7 +710,7 @@ def exit_correlation_crowding_rate() -> float:
 def hold_value_exit_costs_enabled() -> bool:
     """T6.4 feature flag: when False (default), _buy_yes_exit /
     _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4
-    behavior preserved during shadow validation). When True, exit
+    behavior preserved until activation). When True, exit
     decisions include fee + time opportunity cost via
     HoldValue.compute_with_exit_costs. See config/settings.json
     feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""

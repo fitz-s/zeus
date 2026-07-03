@@ -1,6 +1,6 @@
 # Created: 2026-06-04
 # Last reused/audited: 2026-06-04
-# Authority basis: docs/operations/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md
 #                  R4 (#174) — swallowed DB faults must not become per-candidate
 #                  trade rejections. Two-part category kill:
 #                    (1) store-level: a re-fit of the same Platt bucket is

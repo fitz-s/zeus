@@ -293,7 +293,7 @@ _BASE_KWARGS = dict(
 
 def test_feature_flag_off_falls_back_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
     """When ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED is unset, the legacy
-    function is called and returns SHADOW_ONLY (legacy default)."""
+    function is called and returns BLOCKED (legacy default)."""
     monkeypatch.delenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", raising=False)
     cfg = entry_forecast_config()
     conn = _make_conn()
@@ -306,8 +306,8 @@ def test_feature_flag_off_falls_back_to_legacy(monkeypatch: pytest.MonkeyPatch) 
 
     # Legacy path: source_id="tigge_mars" != config.source_id="ecmwf_open_data"
     # so legacy returns BLOCKED with SOURCE_MISMATCH — that is the legacy
-    # behaviour, confirming delegation occurred (not the new SHADOW_ONLY path).
-    assert decision.status in ("BLOCKED", "SHADOW_ONLY", "LIVE_ELIGIBLE")
+    # behaviour, confirming delegation occurred (not the new BLOCKED path).
+    assert decision.status in ("BLOCKED", "BLOCKED", "LIVE_ELIGIBLE")
     # Key invariant: the new function did NOT query the DB; any result is
     # the legacy function's output.
 
@@ -342,8 +342,8 @@ def test_same_domain_fast_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert decision.note == "same_domain_no_transfer"
 
 
-def test_no_evidence_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty validated_calibration_transfers → SHADOW_ONLY."""
+def test_no_evidence_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty validated_calibration_transfers → BLOCKED."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
     conn = _make_conn()
@@ -354,11 +354,11 @@ def test_no_evidence_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) ->
         **_BASE_KWARGS,
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert "no_evidence_row" in decision.note
 
 
-def test_wrong_policy_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wrong_policy_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rows for another transfer policy cannot authorize the active policy."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
@@ -377,11 +377,11 @@ def test_wrong_policy_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.note == "no_evidence_row"
 
 
-def test_wrong_source_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wrong_source_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rows for another calibration source/cycle cannot authorize this transfer."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
@@ -401,7 +401,7 @@ def test_wrong_source_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.note == "no_evidence_row"
 
 
@@ -446,13 +446,13 @@ def test_live_eligible_row_requires_complete_target_rebuild_sentinel(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_target_cohort_evidence"
 
 
-def test_stale_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Row with evaluated_at 100 days ago → SHADOW_ONLY (stale)."""
+def test_stale_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Row with evaluated_at 100 days ago → BLOCKED (stale)."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
     conn = _make_conn()
@@ -465,7 +465,7 @@ def test_stale_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert "stale" in decision.note.lower()
 
 
@@ -480,7 +480,7 @@ def test_stale_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
         {"brier_source": 0.20, "brier_target": 0.21, "brier_diff": 0.50},
     ],
 )
-def test_invalid_economics_row_returns_shadow_only(
+def test_invalid_economics_row_returns_blocked(
     monkeypatch: pytest.MonkeyPatch,
     overrides: dict,
 ) -> None:
@@ -502,7 +502,7 @@ def test_invalid_economics_row_returns_shadow_only(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_evidence_row"
 
@@ -522,7 +522,7 @@ def test_invalid_economics_row_returns_shadow_only(
         {"source_model_param_C": float("inf")},
     ],
 )
-def test_invalid_source_platt_model_returns_shadow_only(
+def test_invalid_source_platt_model_returns_blocked(
     monkeypatch: pytest.MonkeyPatch,
     overrides: dict,
 ) -> None:
@@ -544,12 +544,12 @@ def test_invalid_source_platt_model_returns_shadow_only(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_source_platt_evidence"
 
 
-def test_missing_target_cohort_returns_shadow_only(
+def test_missing_target_cohort_returns_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Aggregate transfer evidence is not authority without its eligible held-out cohort."""
@@ -570,12 +570,12 @@ def test_missing_target_cohort_returns_shadow_only(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_target_cohort_evidence"
 
 
-def test_post_evidence_target_cohort_returns_shadow_only(
+def test_post_evidence_target_cohort_returns_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Target rows recorded after transfer evaluation cannot retroactively validate it."""
@@ -596,12 +596,12 @@ def test_post_evidence_target_cohort_returns_shadow_only(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_target_cohort_evidence"
 
 
-def test_malformed_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_malformed_evaluated_at_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Malformed evidence timestamps cannot crash or authorize live transfer."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
@@ -619,12 +619,12 @@ def test_malformed_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPa
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_evidence_time"
 
 
-def test_future_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_future_evaluated_at_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Evidence not available at decision time cannot authorize transfer."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
@@ -642,7 +642,7 @@ def test_future_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "future_evidence_time"
 
@@ -674,7 +674,7 @@ def test_pseudo_oos_target_evidence_fails_closed_against_time_blocked_cohort(
         **{**_BASE_KWARGS, "now": now},
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert decision.note == "invalid_target_cohort_evidence"
 
@@ -758,14 +758,14 @@ def test_policy_filter_ignores_wrong_policy_live_row(monkeypatch: pytest.MonkeyP
 # PR #61 review-remediation antibody tests
 # ---------------------------------------------------------------------------
 
-def test_none_route_keys_return_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_none_route_keys_return_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """None source_cycle/target_cycle must NOT trigger the same-domain fast-path.
 
     Regression guard for PR #61 review comment (Codex/Copilot): the readiness
     write callsite passes None for route keys before the forecast is resolved.
     None==None was silently firing the same-domain LIVE_ELIGIBLE path, which
     would mark unresolved routes live-eligible without DB evidence.
-    Fix: guard at top of function returns SHADOW_ONLY/INSUFFICIENT_INFO.
+    Fix: guard at top of function returns BLOCKED/INSUFFICIENT_INFO.
     """
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
     cfg = entry_forecast_config()
@@ -786,8 +786,8 @@ def test_none_route_keys_return_shadow_only(monkeypatch: pytest.MonkeyPatch) -> 
         now=datetime(2026, 5, 5, 12, 0, 0),
     )
 
-    assert decision.status == "SHADOW_ONLY", (
-        f"Expected SHADOW_ONLY for None route keys, got {decision.status!r}"
+    assert decision.status == "BLOCKED", (
+        f"Expected BLOCKED for None route keys, got {decision.status!r}"
     )
     assert "insufficient" in decision.note.lower() or "none" in decision.note.lower(), (
         f"Expected 'insufficient' or 'none' in note, got {decision.note!r}"
@@ -815,7 +815,7 @@ def test_empty_same_domain_identity_does_not_fast_path(monkeypatch: pytest.Monke
         now=datetime(2026, 5, 5, 12, 0, 0),
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert "insufficient" in decision.note.lower() or "none" in decision.note.lower()
 
@@ -864,7 +864,7 @@ def test_empty_cross_domain_identity_cannot_match_live_row(
         **kwargs,
     )
 
-    assert decision.status == "SHADOW_ONLY"
+    assert decision.status == "BLOCKED"
     assert decision.live_promotion_approved is False
     assert "insufficient" in decision.note.lower() or "none" in decision.note.lower()
 

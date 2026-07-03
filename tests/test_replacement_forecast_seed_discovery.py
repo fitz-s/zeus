@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07
+# Last reused/audited: 2026-07-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-01
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -175,6 +175,46 @@ def _write_raw_inputs(raw_dir: Path) -> None:
             "target_date": "2026-06-08",
         },
     )
+
+
+def _write_world_day0_observation(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT,
+                target_date TEXT,
+                local_timestamp TEXT,
+                utc_timestamp TEXT,
+                causality_status TEXT,
+                authority TEXT,
+                source_role TEXT,
+                training_allowed INTEGER,
+                source TEXT,
+                running_max REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observation_instants VALUES (
+                'NYC',
+                '2026-06-08',
+                '2026-06-08T01:00:00-04:00',
+                '2026-06-08T05:00:00+00:00',
+                'OK',
+                'VERIFIED',
+                'historical_hourly',
+                1,
+                'wu_hourly',
+                77.0
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_seed_discovery_writes_seed_from_db_target_and_raw_manifests(tmp_path: Path) -> None:
@@ -376,6 +416,21 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
     try:
         conn.execute(
             """
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-06T12:00:00+00:00',
+                source_available_at = '2026-06-06T12:30:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE source_run_coverage
+            SET computed_at = '2026-06-06T12:35:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE raw_model_forecasts (
                 raw_model_forecast_id INTEGER PRIMARY KEY,
                 model TEXT NOT NULL,
@@ -420,6 +475,63 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
         "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
         in report.reason_codes
     )
+
+
+def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_file(raw_dir / "precision_metadata.json", {"city": "NYC"})
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-06z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T06:00:00+00:00",
+        source_available_at="2026-06-06T08:30:00+00:00",
+        captured_at="2026-06-06T09:00:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-06z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE source_run
+            SET source_cycle_time = '2026-06-06T12:00:00+00:00',
+                source_available_at = '2026-06-06T12:30:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE source_run_coverage
+            SET computed_at = '2026-06-06T12:35:00+00:00'
+            WHERE source_run_id = 'baseline-run'
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T13:00:00+00:00",
+    )
+
+    assert report.status == "NO_ELIGIBLE_TARGETS"
+    assert report.discovered_count == 0
+    assert report.failed_count == 1
+    assert report.written_seed_files == ()
+    assert "REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE" in report.reason_codes
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:
@@ -586,7 +698,9 @@ def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_tar
     assert seed["city"] == "Tokyo"
 
 
-def test_seed_discovery_does_not_seed_after_local_target_day_starts(tmp_path: Path) -> None:
+def test_seed_discovery_does_not_seed_after_local_target_day_starts_without_observed_extreme(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
     seed_dir = tmp_path / "seeds"
@@ -601,8 +715,42 @@ def test_seed_discovery_does_not_seed_after_local_target_day_starts(tmp_path: Pa
     )
 
     assert report.status == "NO_ELIGIBLE_TARGETS"
-    assert report.reason_codes == ("REPLACEMENT_SEED_DISCOVERY_DB_TARGETS_MISSING",)
+    assert report.reason_codes == ("REPLACEMENT_SEED_DISCOVERY_DAY0_OBSERVED_EXTREME_MISSING",)
     assert not list(seed_dir.glob("*.json"))
+
+
+def test_seed_discovery_seeds_day0_when_canonical_observed_extreme_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    world_path = tmp_path / "world.db"
+    _init_db(db_path)
+    _write_raw_inputs(raw_dir)
+    _write_world_day0_observation(world_path)
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.get_world_connection_read_only",
+        lambda: sqlite3.connect(world_path),
+    )
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-08T05:30:00+00:00",
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["city"] == "NYC"
+    assert seed["day0_observed_extreme_c"] == (77.0 - 32.0) * 5.0 / 9.0
+    assert seed["day0_observed_extreme_source"] == "durable_observation_instants"
+    assert seed["day0_observed_extreme_observation_time"] == "2026-06-08T05:00:00+00:00"
+    assert seed["day0_observed_extreme_sample_count"] == 1
+    assert seed["day0_observed_extreme_unit"] == "F"
 
 
 def test_seed_discovery_reports_noop_when_required_manifests_are_absent(tmp_path: Path) -> None:

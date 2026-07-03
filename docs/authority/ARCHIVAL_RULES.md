@@ -41,9 +41,8 @@ left in place.
 For each candidate packet `P = docs/operations/task_<date>_<slug>`:
 
 0. **Authority Status Registry check (priority — runs FIRST).** Look up
-   the packet's canonical path in the active `artifact_authority_status`
-   registry introduced by `01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md`
-   §13 and populated by `01_topology_v_next/ZEUS_BINDING_LAYER.md` §8.
+   the packet's canonical path in the active
+   `architecture/artifact_authority_status.yaml` registry.
    If the path appears in the registry AND the status is NOT one of
    `{ARCHIVED, CURRENT_HISTORICAL}` (or `CURRENT_HISTORICAL` only when the
    row also carries an explicit `archival_ok: true` flag), classify the

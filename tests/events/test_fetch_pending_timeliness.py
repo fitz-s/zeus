@@ -15,7 +15,6 @@ import sqlite3
 
 import pytest
 
-from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.state.db import init_schema
@@ -61,16 +60,18 @@ def _event(
     available_at: str,
     received_at: str,
     source: str = "forecast",
+    event_type: str = "FORECAST_SNAPSHOT_READY",
+    payload: object | None = None,
 ):
     return make_opportunity_event(
-        event_type="FORECAST_SNAPSHOT_READY",
+        event_type=event_type,
         entity_key=f"Chicago|{target_date}|high|{snapshot_id}",
         source=source,
         observed_at="2026-06-03T04:10:00+00:00",
         available_at=available_at,
         received_at=received_at,
         causal_snapshot_id=snapshot_id,
-        payload=_payload(target_date, snapshot_id),
+        payload=payload if payload is not None else _payload(target_date, snapshot_id),
         priority=0,
     )
 
@@ -206,11 +207,12 @@ def test_pending_retry_floor_hides_until_not_before_then_reclaims():
     assert cooling.event_id in [e.event_id for e in after]
 
 
-def test_tier0_escalation_not_hidden_behind_bounded_lower_tier_prefix():
+def test_tier0_redecision_not_hidden_behind_bounded_lower_tier_prefix():
     """Regression for the Python-ranking rewrite: SQL LIMIT must not truncate before tiering.
 
-    A Tier-0 escalation inserted after >2,000 ordinary rows must still be returned for
-    ``limit=1``. Otherwise redecision/Day0 money-path work can sit behind stale discovery backlog.
+    A Tier-0 redecision inserted after >2,000 ordinary rows must still be returned
+    for ``limit=1``. Otherwise order-management/Day0 money-path work can sit
+    behind stale discovery backlog.
     """
     conn = _world_conn()
     store = EventStore(conn)
@@ -223,14 +225,18 @@ def test_tier0_escalation_not_hidden_behind_bounded_lower_tier_prefix():
                 received_at=f"2026-06-05T00:{idx % 60:02d}:00+00:00",
             )
         )
-    escalation = _event(
+    redecision_payload = _payload("2026-06-06", "snap-redecision").__dict__.copy()
+    redecision_payload["redecision_origin"] = "rest_pull"
+    redecision = _event(
         "2026-06-06",
-        "snap-escalation",
+        "snap-redecision",
         available_at="2026-06-05T00:00:00+00:00",
         received_at="2026-06-05T01:00:00+00:00",
-        source=f"{ESCALATION_CROSS_SOURCE_PREFIX}test",
+        source="cycle-rest-pull-test",
+        event_type="EDLI_REDECISION_PENDING",
+        payload=redecision_payload,
     )
-    store.insert_or_ignore(escalation)
+    store.insert_or_ignore(redecision)
 
     returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
-    assert [e.event_id for e in returned] == [escalation.event_id]
+    assert [e.event_id for e in returned] == [redecision.event_id]

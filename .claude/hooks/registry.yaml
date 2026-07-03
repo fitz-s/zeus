@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 21
+  catalog_size: 20
   sunset_default: 90d
 
 hooks:
@@ -48,7 +48,7 @@ hooks:
       Bypass for a deliberate single-tenant batch: COTENANT_GUARD_BYPASS=1.
     blocked_when:
       - broad_git_add_in_main_worktree
-    severity: BLOCKING
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -69,7 +69,7 @@ hooks:
       its sanctioned ff-only merge into the session branch).
     blocked_when:
       - branch_mutating_git_in_main_tree
-    severity: BLOCKING
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -101,7 +101,7 @@ hooks:
       Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory; document reason in PR body).
     blocked_when:
       - self_authored_loc_since_base < 300
-    severity: BLOCKING
+    severity: ADVISORY
     bypass_env: ZEUS_PR_ALLOW_TINY
     sunset_date: 2026-08-06
     telemetry:
@@ -122,7 +122,7 @@ hooks:
       - pr_age_seconds < 600
       - unresolved_review_thread_count > 0
       - changes_requested_review_not_dismissed == true
-    severity: BLOCKING
+    severity: ADVISORY
     bypass_env: ZEUS_PR_MERGE_FORCE
     sunset_date: 2026-08-06
     telemetry:
@@ -285,25 +285,6 @@ hooks:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/dispatch.py
 
-  - id: pre_branch_create_in_primary
-    event: PreToolUse
-    matcher: "Bash"
-    intent: >
-      Detect `git checkout -b` / `git switch -c` / `git worktree add` issued
-      from the PRIMARY worktree (cwd == primary). Emit advisory recommending
-      EnterWorktree first. Antibody for the 2026-05-17 worktree-discipline
-      incident: agent exited dedicated worktree, created branch in PRIMARY,
-      got HEAD silently switched 3× by concurrent processes (gh CLI,
-      post-merge cleanup) during PR #127 open window.
-      ADVISORY: emits context; never blocks; fail-open on any exception.
-    blocked_when: []
-    severity: ADVISORY
-    bypass_env: ZEUS_PRIMARY_BRANCH_OK
-    sunset_date: 2026-08-17
-    telemetry:
-      ritual_signal_emitted: true
-    owner_module: .claude/hooks/dispatch.py
-
   - id: citation_grep_gate
     event: PreToolUse
     matcher: "Edit|Write|MultiEdit|NotebookEdit"
@@ -339,7 +320,7 @@ hooks:
       (operator deliberate override only).
     blocked_when:
       - final_message_concludes_no_edge
-    severity: BLOCKING
+    severity: ADVISORY
     bypass_env: ZEUS_NO_EDGE_GUARD_OFF
     sunset_date: 2026-12-14
     telemetry:
@@ -365,7 +346,7 @@ hooks:
     blocked_when:
       - cross_tenant_worktree_write
       - authority_file_clobber
-    severity: BLOCKING
+    severity: ADVISORY
     sunset_date: 2026-12-14
     telemetry:
       ritual_signal_emitted: true

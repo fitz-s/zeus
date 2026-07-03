@@ -106,7 +106,7 @@ def test_runtime_serves_persisted_q_safe_lb_when_present():
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     art = {
         "_meta": {"posterior_version": sc.DEFAULT_POSTERIOR_VERSION, "min_n": 30,
-                  "schema": "eb_v2"},
+                  "schema": "eb_v2", "armed_sides": ["NO"]},
         "cells": {key: {"n": 104, "n_selected": 104, "wins_selected": 71,
                         "p0_corpus": 0.85, "tau": 10.0, "q_safe_lb": 0.60}},
     }

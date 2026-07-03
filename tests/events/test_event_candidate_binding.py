@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-29
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 
 import pytest
@@ -398,3 +398,40 @@ def test_family_binding_hash_deterministic():
     assert first.binding_hash == second.binding_hash
     assert first.family_id == second.family_id
     assert first.condition_ids == ("condition-1", "condition-2", "condition-high", "condition-low")
+
+
+def test_live_family_id_stable_across_forecast_refreshes():
+    """Live mutex/redecision identity is city/date/metric, not trigger snapshot."""
+
+    candidates = [
+        _candidate(
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
+    ]
+    first_event = _forecast_event(
+        payload=_forecast_payload(snapshot_id="snapshot-1"),
+        causal_snapshot_id="snapshot-1",
+    )
+    second_event = _forecast_event(
+        payload=_forecast_payload(snapshot_id="snapshot-2"),
+        causal_snapshot_id="snapshot-2",
+    )
+
+    first = bind_event_to_candidate_family(first_event, candidates, decision_time=DECISION_TIME)
+    second = bind_event_to_candidate_family(second_event, candidates, decision_time=DECISION_TIME)
+
+    assert first.family_id == second.family_id
+    assert first.binding_hash != second.binding_hash

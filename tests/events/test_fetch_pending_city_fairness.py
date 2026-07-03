@@ -102,6 +102,22 @@ def _tradeable_fsr(
     )
 
 
+def _market_price_redecision(event):
+    payload = json.loads(event.payload_json)
+    payload["redecision_origin"] = "market_price"
+    return make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key=event.entity_key,
+        source="market_channel_price:fixture",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=event.received_at,
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=payload,
+        priority=event.priority,
+    )
+
+
 def _bulk_tier2_fsr(city: str, snapshot_id: str, *, available_at: str, received_at: str):
     """A NOT-COMPLETE / NOT-LIVE_ELIGIBLE FSR — falls to the claim tier ELSE
     branch (Tier 2), strictly below a tradeable Tier-1 FSR. Stands in for the
@@ -145,6 +161,33 @@ def _bulk_tier2_fsr(city: str, snapshot_id: str, *, available_at: str, received_
     )
 
 
+def _day0_event(city: str, suffix: str, *, available_at: str):
+    payload = {
+        "city": city,
+        "target_date": _TARGET_DATE,
+        "metric": "high",
+        "rounded_value": 70,
+        "high_so_far": 70,
+        "live_authority_status": "live",
+        "source_authorized_status": "AUTHORIZED",
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+    }
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"day0|{city}|{_TARGET_DATE}|high|{suffix}",
+        source="day0_authority",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        payload=payload,
+        priority=60,
+    )
+
+
 def _city_of(event) -> str:
     return event.entity_key.split("|", 1)[0]
 
@@ -161,6 +204,44 @@ def _run_one_cycle(store: EventStore, *, budget_k: int, claim_clock: str) -> lis
         store.mark_processed(event.event_id, processed_at=claim_clock)
         reached.append(_city_of(event))
     return reached
+
+
+def _insert_recapture_edge_reversed_regret(
+    conn: sqlite3.Connection,
+    event,
+    *,
+    created_at: str,
+) -> None:
+    payload = json.loads(event.payload_json)
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            executable_snapshot_id, created_at, schema_version
+        ) VALUES (?, ?, 'EXECUTION_RECEIPT', ?, 'SUBMIT_RECAPTURE',
+                  ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "recapture-edge-" + event.event_id,
+            event.event_id,
+            "SUBMIT_ABORTED_EDGE_REVERSED:recaptured robust marginal utility nonpositive",
+            created_at,
+            str(payload.get("city") or ""),
+            str(payload.get("target_date") or ""),
+            str(payload.get("metric") or ""),
+            "|".join(
+                (
+                    str(payload.get("city") or ""),
+                    str(payload.get("target_date") or ""),
+                    str(payload.get("metric") or ""),
+                )
+            ),
+            event.causal_snapshot_id,
+            "ems2-fresh-book",
+            created_at,
+        ),
+    )
 
 
 def test_every_city_reached_within_ceil_n_over_k_cycles():
@@ -266,6 +347,100 @@ def test_freshness_skew_does_not_let_newest_cities_monopolise_the_budget():
     )
 
 
+def test_recent_recapture_edge_reversed_family_backoff_reaches_other_entry_family():
+    """A just-failed submit recapture is terminal for that event, but the next
+    ordinary FSR for the same family should not immediately consume the next
+    bounded entry slot before other families are reached.
+
+    This is queue feedback only: candidate math is unchanged, and only ordinary
+    fresh-entry FSR rows are delayed for the short live backoff window.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cooled_city, open_city = _REAL_CITIES[:2]
+    cooled = _tradeable_fsr(
+        cooled_city,
+        "snap-cooled",
+        available_at="2026-06-11T06:00:00+00:00",
+        received_at="2026-06-11T06:00:30+00:00",
+    )
+    open_event = _tradeable_fsr(
+        open_city,
+        "snap-open",
+        available_at="2026-06-11T06:00:00+00:00",
+        received_at="2026-06-11T06:00:30+00:00",
+    )
+    store.insert_or_ignore(cooled)
+    store.insert_or_ignore(open_event)
+    _insert_recapture_edge_reversed_regret(
+        conn,
+        cooled,
+        created_at="2026-06-11T11:57:00+00:00",
+    )
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+
+    assert [event.event_id for event in returned] == [open_event.event_id]
+
+
+def test_recapture_edge_backoff_expires_without_permanent_family_suppression():
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cooled_city = _REAL_CITIES[0]
+    cooled = _tradeable_fsr(
+        cooled_city,
+        "snap-cooled",
+        available_at="2026-06-11T06:00:00+00:00",
+        received_at="2026-06-11T06:00:30+00:00",
+    )
+    store.insert_or_ignore(cooled)
+    _insert_recapture_edge_reversed_regret(
+        conn,
+        cooled,
+        created_at="2026-06-11T11:30:00+00:00",
+    )
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+
+    assert [event.event_id for event in returned] == [cooled.event_id]
+
+
+def test_recent_recapture_edge_reversed_redecision_backoff_reaches_other_redecision_family():
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cooled_city, open_city = _REAL_CITIES[:2]
+    cooled = _market_price_redecision(
+        _tradeable_fsr(
+            cooled_city,
+            "snap-cooled-rd",
+            available_at="2026-06-11T06:00:00+00:00",
+            received_at="2026-06-11T06:00:30+00:00",
+        )
+    )
+    open_event = _market_price_redecision(
+        _tradeable_fsr(
+            open_city,
+            "snap-open-rd",
+            available_at="2026-06-11T06:00:00+00:00",
+            received_at="2026-06-11T06:00:30+00:00",
+        )
+    )
+    store.insert_or_ignore(cooled)
+    store.insert_or_ignore(open_event)
+    _insert_recapture_edge_reversed_regret(
+        conn,
+        cooled,
+        created_at="2026-06-11T11:57:00+00:00",
+    )
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+
+    assert [event.event_id for event in returned] == [open_event.event_id]
+
+
 def test_bulk_lane_never_starves_a_tradeable_decision():
     """RELATIONSHIP: a FLOOD of Tier-2 bulk events (incomplete FSR) — even with the
     NEWEST available_at and far more of them than the budget — must NEVER be claimed
@@ -323,6 +498,38 @@ def test_bulk_lane_never_starves_a_tradeable_decision():
     assert tiers_complete.count("COMPLETE") == 1
 
 
+def test_day0_flood_cannot_occupy_the_whole_fetch_window_before_fsr():
+    """A Tier-0 Day0 flood must not hide FSR before the caller's limit is applied."""
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    day0_cities = _REAL_CITIES[:30]
+    fsr_cities = _REAL_CITIES[30:34]
+    for idx, city in enumerate(day0_cities):
+        store.insert_or_ignore(
+            _day0_event(
+                city,
+                f"d{idx}",
+                available_at=f"2026-06-11T11:{idx % 60:02d}:00+00:00",
+            )
+        )
+    for idx, city in enumerate(fsr_cities):
+        store.insert_or_ignore(
+            _tradeable_fsr(
+                city,
+                f"fsr-lane-{idx}",
+                available_at=f"2026-06-11T06:{idx:02d}:00+00:00",
+                received_at=f"2026-06-11T06:{idx:02d}:30+00:00",
+            )
+        )
+
+    claimed = store.fetch_pending(decision_time=_DECISION_TIME, limit=8)
+    claimed_types = [event.event_type for event in claimed]
+    assert claimed_types[0] == "FORECAST_SNAPSHOT_READY"
+    assert claimed_types.count("FORECAST_SNAPSHOT_READY") == 4
+    assert claimed_types.count("DAY0_EXTREME_UPDATED") == 4
+
+
 def test_within_city_freshness_order_is_preserved():
     """SEMANTICS-UNCHANGED pin: the round-robin reorders ACROSS cities but the
     WITHIN-city order is still freshest-first. For a single city's events, the
@@ -362,7 +569,7 @@ def test_within_city_freshness_order_is_preserved():
 
 def test_day_ahead_target_precedes_fresher_same_day_within_city():
     """ANTIBODY: a city holding a FRESH same-day-target FSR (decisions are
-    day0-scope => deterministic DAY0_SCOPE_SHADOW_ONLY under day0_shadow) and an
+    day0-scope => deterministic no-submit under unsupported scopes) and an
     OLDER day-ahead FSR must yield the day-ahead FIRST. target_date DESC dominates
     available_at DESC within (tier, city) — the same-day refresh churn cannot
     starve the live-eligible day-ahead candidate."""
@@ -401,7 +608,7 @@ def test_day_ahead_target_precedes_fresher_same_day_within_city():
 
 def test_fresh_day0_event_does_not_precede_older_day_ahead_fsr():
     """ANTIBODY (operator-specified shape): a city holding a FRESH day0 event and
-    an OLDER day-ahead FSR yields the day-ahead first under day0_shadow
+    an OLDER day-ahead FSR yields the day-ahead first under unsupported scopes
     (day0_is_tradeable=False => day0 is Tier 2, below the tradeable FSR Tier 1).
     Day0 events still process AFTER the live ones — never dropped (the shadow
     evaluation needs the receipts)."""

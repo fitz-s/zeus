@@ -54,12 +54,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'quarantined',
         'admin_closed'
     )),
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     decision_id TEXT,
     snapshot_id TEXT,
     order_id TEXT,
@@ -68,7 +63,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     idempotency_key TEXT UNIQUE,
     venue_status TEXT,
     source_module TEXT NOT NULL,
-    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest','shadow')),
+    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest')),
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
@@ -123,14 +118,12 @@ CREATE TABLE IF NOT EXISTS position_current (
     last_monitor_edge REAL,
     last_monitor_market_price REAL,
     last_monitor_market_price_is_fresh INTEGER,
+    last_monitor_best_bid REAL,
+    last_monitor_best_ask REAL,
+    last_monitor_market_vig REAL,
     decision_snapshot_id TEXT,
     entry_method TEXT,
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     edge_source TEXT,
     discovery_mode TEXT,
     chain_state TEXT,
@@ -149,7 +142,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
-    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     -- economics columns. Balance-only rescue writes the chain aggregate
     -- here instead of mutating entry_price / cost_basis_usd / size_usd /
     -- shares. Additive on legacy DBs via
@@ -182,12 +175,7 @@ CREATE TABLE IF NOT EXISTS position_current (
 );
 
 CREATE TABLE IF NOT EXISTS strategy_health (
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     as_of TEXT NOT NULL,
     open_exposure_usd REAL NOT NULL DEFAULT 0,
     settled_trades_30d INTEGER NOT NULL DEFAULT 0,
@@ -205,12 +193,7 @@ CREATE TABLE IF NOT EXISTS strategy_health (
 
 CREATE TABLE IF NOT EXISTS risk_actions (
     action_id TEXT PRIMARY KEY,
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     action_type TEXT NOT NULL CHECK (action_type IN (
         'gate',
         'allocation_multiplier',
@@ -411,12 +394,7 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     position_id TEXT,
     decision_id TEXT,
     order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
-    strategy_key TEXT CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT,
     posted_at TEXT,
     filled_at TEXT,
     voided_at TEXT,
@@ -433,12 +411,7 @@ CREATE TABLE IF NOT EXISTS execution_fact (
 
 CREATE TABLE IF NOT EXISTS outcome_fact (
     position_id TEXT PRIMARY KEY,
-    strategy_key TEXT CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT,
     entered_at TEXT,
     exited_at TEXT,
     settled_at TEXT,

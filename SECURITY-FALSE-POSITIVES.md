@@ -103,7 +103,7 @@
 `selected=281357327553801178=yes_token_id, outcome_label=YES`
 ```
 
-**Location**: `docs/operations/POLARITY_TOKEN_2026-06-01.md` lines 71-72 (commit `1a25993e0f`). May recur in other `docs/operations/*.md` investigation files containing similar code examples.
+**Location**: `docs/archive/2026-Q2/operations_historical/POLARITY_TOKEN_2026-06-01.md` lines 71-72 (commit `1a25993e0f`). May recur in other `docs/operations/*.md` investigation files containing similar code examples.
 
 **Why scanners flag them**: gitleaks `generic-api-key` rule matches short `key=VALUE` constructs where the value has entropy ≥ 3.5. `outcome_label=NO` / `outcome_label=YES` both satisfy this heuristic.
 
@@ -116,6 +116,24 @@
 
 **Durable references**:
 - `.gitleaks.toml` allowlist entry (path-scoped to `docs/operations/.*\.md`, regex `outcome_label=NO|outcome_label=YES`).
+
+---
+
+## [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] — CandidateDecision guard cell identifiers
+
+**Pattern**: `q_lcb_guard_cell_key="..."` and `selection_guard_cell_key="..."` in `src/decision/family_decision_engine.py`.
+
+**Why scanners flag them**: gitleaks `generic-api-key` matches assignments where the field name contains `key` and the value has enough entropy.
+
+**Why they are cleared**:
+1. **Domain provenance**: these are settlement-bin / guard-cell identifiers used to explain which reliability cell authorized or rejected a decision.
+2. **No auth surface**: the values are not used for authentication, API access, signing, or external service calls.
+3. **Diagnostic-only semantics**: the fields travel with decision provenance and can safely appear in logs or receipts.
+
+**Operator ruling 2026-07-02**: guard cell keys are domain provenance identifiers, not secrets; allowlist them path-scoped to `src/decision/family_decision_engine.py`.
+
+**Durable references**:
+- `.gitleaks.toml` allowlist entry (path + exact assignment regexes).
 
 ---
 

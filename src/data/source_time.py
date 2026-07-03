@@ -8,7 +8,7 @@
 
 This module is the missing *center* the refactor spec names (§7 "Temporal Kernel"):
 it formalises TIME as first-class source state. The catastrophic live-money failure it
-guards is "data present but temporally wrong" — early, late, stale, shadow, backfilled,
+guards is "data present but temporally wrong" — early, late, stale, blocked, backfilled,
 from the wrong cycle, or from the wrong local day. A row can carry the right VALUE on the
 wrong CLOCK.
 
@@ -19,7 +19,7 @@ Three type layers:
                               event-time (EVENT) is NOT issue/release time. Conflating them
                               is how a backfill written today masquerades as fresh live data.
   * ``PartialPolicy``       — what an INCOMPLETE partition may authorize (calendar axis:
-                              BLOCK_LIVE / SHADOW_ONLY / ALLOW).
+                              BLOCK_LIVE / BLOCK_LIVE / ALLOW).
   * ``LateArrivalPolicy``   — what to DO with a row that arrives later than expected
                               (replace / append-revision / quarantine / ignore-if-closed /
                               backfill-only). Orthogonal to PartialPolicy — the draft this
@@ -101,7 +101,6 @@ class PartialPolicy(str, Enum):
     """
 
     BLOCK_LIVE = "BLOCK_LIVE"      # incomplete partition must not authorize live trading
-    SHADOW_ONLY = "SHADOW_ONLY"    # may exist for diagnostics/shadow only, never live
     ALLOW = "ALLOW"               # partial is acceptable for live (rare)
 
 
@@ -132,9 +131,9 @@ def default_late_arrival_for(
     ``load_temporal_policy`` leaves ``TemporalPolicy.late_arrival_policy`` as ``None``.
     The SourceContract layer / a calendar extension owns the real per-source value later.
 
-    Fail-safe: backfill-only or shadow sources never replace a live row.
+    Fail-safe: backfill-only sources never replace a live row.
     """
-    if backfill_only or partial_policy is PartialPolicy.SHADOW_ONLY:
+    if backfill_only:
         return LateArrivalPolicy.BACKFILL_ONLY
     return LateArrivalPolicy.REPLACE_SAME_IDEMPOTENCY_KEY
 

@@ -555,6 +555,11 @@ def build_replacement_forecast_event_hook(
                 decision_time=decision_time,
                 current_bin_topology_hash=_current_bin_topology_hash(proof, event),
                 require_baseline_bundle=not policy.can_initiate_trade,
+                # W0.1 (2026-07-02): this is the LIVE decision path (feeds
+                # effective_q_posterior/effective_q_lcb/effective_kelly_fraction) — the
+                # only q-serving read path with no raw-input HWM tripwire. Opt in so a
+                # posterior cannot be served after a newer raw input has already arrived.
+                enforce_raw_input_hwm=True,
             )
         if bundle_result is None or not bundle_result.ok:
             reason_code = bundle_result.reason_code if bundle_result is not None else "REPLACEMENT_HOOK_READINESS_MISSING"

@@ -14,6 +14,7 @@ journal → `VenueSubmissionEnvelope` provenance → SDK/API side effect.
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `polymarket_v2_adapter.py` | Polymarket CLOB V2 adapter, shared adapter protocol, and SDK boundary | CRITICAL — live-money external side effects |
+| `batch_submit.py` | Pure batch primitives: chunking, safe-prefix decomposition, response->request mapping. No I/O, no SDK, no DB. | LOW (pure) |
 | `__init__.py` | Package marker | LOW |
 
 ## Domain rules
@@ -29,6 +30,15 @@ journal → `VenueSubmissionEnvelope` provenance → SDK/API side effect.
   daemon-machine evidence is absent.
 - Do not implement pUSD collateral accounting, heartbeat policy, or cutover-wipe
   reconciliation here; Z4, Z3, and M5 own those surfaces.
+- Batch discipline (W2.1): `polymarket_v2_adapter.py`'s `submit_batch`/
+  `cancel_batch` refuse any call over `batch_submit.MAX_ORDERS_PER_BATCH` --
+  they do NOT self-chunk. The N-commands-persisted-then-ONE-SDK-call
+  INV-28 sequence lives in `src/execution/batch_order_submission.py`
+  (execution zone, not here) precisely so this package never touches
+  `venue_commands`, even at batch shape. `batch_submit.py`'s chunking/
+  safe-prefix/mapping helpers are pure and side-effect-free by
+  construction -- keep them that way; any DB or SDK call belongs in the
+  adapter class methods, not the pure module.
 
 ## Common mistakes
 

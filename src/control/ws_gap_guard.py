@@ -199,21 +199,15 @@ def _durable_sidecar_status(*, now: datetime) -> WSGapStatus | None:
         now=now,
         max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
     )
-    market_at = _scheduler_job_fresh(
-        health,
-        "edli_market_channel_ingestor",
-        now=now,
-        max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
-    )
     reconcile_at = _scheduler_job_fresh(
         health,
         "edli_user_channel_reconcile",
         now=now,
         max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
     )
-    if heartbeat_at is None or market_at is None or reconcile_at is None:
+    if heartbeat_at is None or reconcile_at is None:
         return None
-    observed_at = max(heartbeat_at, market_at, reconcile_at)
+    observed_at = max(heartbeat_at, reconcile_at)
     return WSGapStatus(
         connected=True,
         last_message_at=observed_at,

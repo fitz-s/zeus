@@ -189,12 +189,12 @@ def test_partial_coverage_overwrites_producer_readiness_to_blocked() -> None:
     assert json.loads(row["reason_codes_json"]) == ["MISSING_REQUIRED_STEPS"]
 
 
-def test_shadow_only_coverage_is_not_live_eligible() -> None:
+def test_blocked_coverage_is_not_live_eligible() -> None:
     conn = _conn()
     _write_coverage(
         conn,
-        readiness_status="SHADOW_ONLY",
-        reason_code="CALIBRATION_TRANSFER_SHADOW_ONLY",
+        readiness_status="BLOCKED",
+        reason_code="CALIBRATION_TRANSFER_BLOCKED",
         coverage_id="coverage-shadow-1",
         expires_at=None,
     )
@@ -208,8 +208,8 @@ def test_shadow_only_coverage_is_not_live_eligible() -> None:
         computed_at=_utc(2026, 5, 3, 10),
     )
 
-    assert decision.status == "SHADOW_ONLY"
-    assert decision.reason_codes == ("CALIBRATION_TRANSFER_SHADOW_ONLY",)
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == ("CALIBRATION_TRANSFER_BLOCKED",)
     row = get_readiness_state(conn, decision.readiness_id)
     assert row is not None
-    assert row["status"] == "SHADOW_ONLY"
+    assert row["status"] == "BLOCKED"

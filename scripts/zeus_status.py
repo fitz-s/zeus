@@ -40,6 +40,7 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # --------------------------------------------------------------------------
 # Live DB paths (absolute; read-only). These are the K1-split canonical DBs.
@@ -48,6 +49,42 @@ STATE = "/Users/leofitz/zeus/state"
 WORLD_DB = f"{STATE}/zeus-world.db"
 TRADES_DB = f"{STATE}/zeus_trades.db"
 FORECASTS_DB = f"{STATE}/zeus-forecasts.db"
+EVENT_REACTOR_CONSUMER = "edli_reactor_v1"
+EVENT_PROCESSING_STATUSES = (
+    "processed",
+    "ignored",
+    "expired",
+    "dead_letter",
+    "pending",
+    "processing",
+)
+EXPECTED_DAEMONS = (
+    "live-trading",
+    "data-ingest",
+    "forecast-live",
+    "substrate-observer",
+    "price-channel-ingest",
+    "post-trade-capital",
+    "riskguard-live",
+    "venue-heartbeat",
+)
+LOAD_BEARING_DAEMONS = {
+    "live-trading",
+    "data-ingest",
+    "forecast-live",
+    "substrate-observer",
+    "price-channel-ingest",
+    "post-trade-capital",
+}
+DAEMON_HEARTBEATS = {
+    "live-trading": "daemon-heartbeat.json",
+    "data-ingest": "daemon-heartbeat-ingest.json",
+    "forecast-live": "forecast-live-heartbeat.json",
+    "substrate-observer": "daemon-heartbeat-substrate-observer.json",
+    "price-channel-ingest": "daemon-heartbeat-price-channel-ingest.json",
+    "post-trade-capital": "daemon-heartbeat-post-trade-capital.json",
+}
+DAEMON_HEARTBEAT_STALE_SECONDS = 300.0
 
 # Substrate-transient vs honest-economics classification for BLOCKS.
 # Substring sets (case-insensitive) — display-only, not authority.
@@ -57,14 +94,14 @@ FORECASTS_DB = f"{STATE}/zeus-forecasts.db"
 # (e.g. LIVE_INFERENCE_INPUTS_MISSING = a missing q_ucb input, which is a
 # data-availability problem, NOT honest "no edge"). The reason text is the
 # decisive signal; transient patterns are checked first because a missing
-# input / blocked snapshot / shadow-scope gate means we never even got to
+# input / blocked snapshot / non-submit scope gate means we never even got to
 # weigh the economics.
 _TRANSIENT_TOKENS = (
     "TRANSIENT", "STALE", "LOCK", "NOT_COMPLETE", "NOT_LIVE_ELIGIBLE",
     "SNAPSHOT_BLOCKED", "EXHAUSTED", "SOURCE_RUN", "FSR_",
     "NATIVE_ASK_MISSING", "INPUTS_MISSING", "MISSING", "BUSY", "TIMEOUT",
     "RETRY", "DEGRADED", "REVIEW_REQUIRED", "AVAILABILITY", "FRESH",
-    "SHADOW_ONLY", "SCOPE", "UNAVAILABLE", "RISK_GUARD",  # riskguard storms = substrate (memory 2026-06-12)
+    "SCOPE", "UNAVAILABLE", "RISK_GUARD",
 )
 _ECONOMIC_TOKENS = (
     "NON_POSITIVE", "NEGATIVE", "EDGE", "NO_EDGE", "Q_LCB",
@@ -131,7 +168,7 @@ def classify_block(stage: str | None, reason: str | None) -> str:
     """transient | economic | unknown — reason-led substring heuristic, display only.
 
     The REASON dominates the stage name: a substrate cause (missing input,
-    blocked snapshot, shadow-scope gate, riskguard storm) means the trade
+    blocked snapshot, non-submit scope gate, riskguard storm) means the trade
     never reached an honest economic verdict, so transient is checked first
     and against the reason text. The stage name is only a weak tiebreaker.
     """
@@ -163,6 +200,7 @@ def section_daemons() -> dict:
         if res.returncode != 0:
             out["error"] = f"launchctl rc={res.returncode}"
             return out
+        observed: dict[str, dict] = {}
         for line in res.stdout.splitlines():
             if "com.zeus" not in line:
                 continue
@@ -170,12 +208,145 @@ def section_daemons() -> dict:
             if len(parts) < 3:
                 continue
             pid, status, label = parts[0], parts[1], parts[-1]
-            out["rows"].append(
-                {"label": label.replace("com.zeus.", ""), "pid": pid, "status": status}
+            short_label = label.replace("com.zeus.", "")
+            observed[short_label] = {
+                "label": short_label,
+                "pid": pid,
+                "status": status,
+                "present": True,
+            }
+        ordered = list(EXPECTED_DAEMONS)
+        ordered.extend(label for label in sorted(observed) if label not in EXPECTED_DAEMONS)
+        rows: list[dict] = []
+        for label in ordered:
+            row = dict(
+                observed.get(
+                    label,
+                    {
+                        "label": label,
+                        "pid": "-",
+                        "status": "missing",
+                        "present": False,
+                    },
+                )
             )
+            pid_text = str(row.get("pid") or "-")
+            row["critical"] = label in LOAD_BEARING_DAEMONS
+            row["alive"] = _pid_is_alive(pid_text)
+            issues: list[str] = []
+            if not row.get("present"):
+                issues.append("missing_from_launchctl")
+            if pid_text in {"-", "", "0"}:
+                issues.append("pid_missing")
+            elif not row["alive"]:
+                issues.append("pid_not_running")
+            heartbeat = _daemon_heartbeat_status(label)
+            if heartbeat is not None:
+                row["heartbeat"] = heartbeat
+                if not heartbeat.get("ok", False):
+                    issues.append(str(heartbeat.get("issue") or "heartbeat_unhealthy"))
+            row["ok"] = bool(row["alive"]) and not any(
+                issue.startswith("heartbeat_") for issue in issues
+            )
+            row["issues"] = issues
+            rows.append(row)
+        out["rows"] = rows
     except (subprocess.SubprocessError, OSError) as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out
+
+
+def _pid_is_alive(pid_text: str) -> bool:
+    if pid_text in {"-", "", "0"}:
+        return False
+    try:
+        int(pid_text)
+    except ValueError:
+        return False
+    try:
+        res = subprocess.run(
+            ["ps", "-p", pid_text],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return res.returncode == 0
+
+
+def _current_git_head() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _daemon_heartbeat_status(label: str) -> dict | None:
+    filename = DAEMON_HEARTBEATS.get(label)
+    if not filename:
+        return None
+    path = Path(STATE) / filename
+    if not path.exists():
+        return {"ok": False, "issue": "heartbeat_missing", "path": str(path)}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        return {
+            "ok": False,
+            "issue": "heartbeat_unreadable",
+            "path": str(path),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    raw_ts = (
+        payload.get("timestamp")
+        or payload.get("alive_at")
+        or payload.get("written_at")
+        or payload.get("generated_at")
+    )
+    try:
+        parsed = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "issue": "heartbeat_timestamp_invalid",
+            "path": str(path),
+            "timestamp": raw_ts,
+        }
+    age_seconds = (_now() - parsed).total_seconds()
+    heartbeat_git_head = str(payload.get("git_head") or "").strip()
+    current_git_head = _current_git_head()
+    git_head_matches = True
+    if heartbeat_git_head and current_git_head:
+        git_head_matches = (
+            current_git_head.startswith(heartbeat_git_head)
+            or heartbeat_git_head.startswith(current_git_head)
+        )
+    fresh = 0.0 <= age_seconds <= DAEMON_HEARTBEAT_STALE_SECONDS
+    ok = fresh and git_head_matches
+    issue = None
+    if not fresh:
+        issue = "heartbeat_stale"
+    elif not git_head_matches:
+        issue = "heartbeat_git_head_mismatch"
+    return {
+        "ok": ok,
+        "issue": issue,
+        "path": str(path),
+        "timestamp": parsed.isoformat(),
+        "age_seconds": round(age_seconds, 1),
+        "git_head": heartbeat_git_head or None,
+        "current_git_head": current_git_head or None,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -188,22 +359,29 @@ def section_events() -> dict:
         try:
             c1 = iso_cutoff(hours=1)
             c24 = iso_cutoff(hours=24)
-            # Pending = events with no terminal processing row.
+            # Current backlog = reactor-owned rows currently marked pending.
+            #
+            # Do not scan opportunity_events with a NOT EXISTS over the full
+            # processing history here. That answers a historical data-shape
+            # question, not the operator's current runtime question, and it
+            # hangs on live DBs with millions of ignored cache events.
             out["pending"] = conn.execute(
-                "SELECT count(*) FROM opportunity_events e "
-                "WHERE NOT EXISTS (SELECT 1 FROM opportunity_event_processing p "
-                "  WHERE p.event_id = e.event_id "
-                "    AND p.processing_status IN "
-                "        ('processed','dead_letter','ignored','expired'))"
+                "SELECT count(*) FROM opportunity_event_processing "
+                "WHERE consumer_name=? AND processing_status='pending'",
+                (EVENT_REACTOR_CONSUMER,),
             ).fetchone()[0]
 
             def _proc_counts(cut: str) -> dict:
-                rows = conn.execute(
-                    "SELECT processing_status, count(*) FROM opportunity_event_processing "
-                    "WHERE updated_at > ? GROUP BY processing_status",
-                    (cut,),
-                ).fetchall()
-                return {r[0]: r[1] for r in rows}
+                counts: dict[str, int] = {}
+                for status in EVENT_PROCESSING_STATUSES:
+                    n = conn.execute(
+                        "SELECT count(*) FROM opportunity_event_processing "
+                        "WHERE consumer_name=? AND processing_status=? AND updated_at > ?",
+                        (EVENT_REACTOR_CONSUMER, status, cut),
+                    ).fetchone()[0]
+                    if n:
+                        counts[status] = int(n)
+                return counts
 
             out["proc_1h"] = _proc_counts(c1)
             out["proc_24h"] = _proc_counts(c24)
@@ -313,19 +491,22 @@ def section_surface() -> dict:
         tr = ro(TRADES_DB)
         fc2 = ro(FORECASTS_DB)
         try:
-            # price-cache coverage: distinct condition_ids with a snapshot today
+            # price-cache coverage: latest current surface, not the full historical
+            # snapshot ledger. The historical table is audit evidence; status must
+            # answer the current operator question in bounded time.
             cov = tr.execute(
-                "SELECT count(DISTINCT condition_id) FROM executable_market_snapshots "
+                "SELECT count(DISTINCT condition_id) FROM executable_market_snapshot_latest "
                 "WHERE captured_at > ?",
                 (iso_cutoff(hours=24),),
             ).fetchone()[0]
             out["price_cache_conditions_24h"] = cov
-            # captured_at age percentiles (cheap: order by captured_at desc per condition)
+            # captured_at age percentiles over latest condition surface.
             ages = tr.execute(
-                "SELECT captured_at FROM ("
-                "  SELECT condition_id, max(captured_at) AS captured_at "
-                "  FROM executable_market_snapshots WHERE captured_at > ? "
-                "  GROUP BY condition_id) ORDER BY captured_at",
+                "SELECT max(captured_at) AS captured_at "
+                "FROM executable_market_snapshot_latest "
+                "WHERE captured_at > ? "
+                "GROUP BY condition_id "
+                "ORDER BY captured_at",
                 (iso_cutoff(hours=24),),
             ).fetchall()
             if ages:
@@ -382,7 +563,7 @@ def _screen_edges(fc: sqlite3.Connection, tr: sqlite3.Connection, today: str) ->
             if not cond or label not in qlcb:
                 continue
             row = tr.execute(
-                "SELECT orderbook_top_ask FROM executable_market_snapshots "
+                "SELECT orderbook_top_ask FROM executable_market_snapshot_latest "
                 "WHERE condition_id=? AND outcome_label='YES' "
                 "ORDER BY captured_at DESC LIMIT 1",
                 (cond,),
@@ -412,7 +593,7 @@ def section_selection() -> dict:
     slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
     edge (winner's curse corrected); slope << 1 means still under-shrinking;
     intercept != 0 means residual center bias. This is the settlement-graded
-    winner's-curse diagnostic over the EB-shrinkage SHADOW columns (the
+    winner's-curse diagnostic over the EB-shrinkage audit columns (the
     decision-replacement flag was removed 2026-06-13; the live selection gate is
     the BH/FDR pass unconditionally — these columns remain settlement telemetry).
 
@@ -449,7 +630,7 @@ def section_selection() -> dict:
                 authority_by_token[r["token_id"]] = r["selection_authority"]
         out["receipts_with_edge_shrunk"] = len(shrunk_by_token)
         if not shrunk_by_token:
-            out["status"] = "no receipts carry edge_shrunk yet (shadow not populated)"
+            out["status"] = "no receipts carry edge_shrunk yet (audit column not populated)"
             return out
 
         tconn = ro(TRADES_DB)
@@ -634,7 +815,13 @@ def render_text(data: dict) -> str:
     if d.get("error"):
         L.append(f"DAEMONS  ERR {d['error']}")
     else:
-        cells = [f"{r['label']}=pid{r['pid']}/{r['status']}" for r in d["rows"]]
+        cells = []
+        for r in d["rows"]:
+            if r.get("ok"):
+                cells.append(f"{r['label']}=pid{r['pid']}/{r['status']}")
+                continue
+            issues = ",".join(r.get("issues") or ["down"])
+            cells.append(f"{r['label']}=DOWN({issues})")
         L.append("DAEMONS  " + ("  ".join(cells) if cells else "(none)"))
     L.append("")
 
@@ -897,7 +1084,8 @@ def section_price_holes() -> dict:
         out["cities_total"] = 0
         return out
 
-    # 2. Freshest captured_at per condition_id from trades DB (no cross-DB JOIN).
+    # 2. Freshest captured_at per condition_id from the current latest table
+    #    (no cross-DB JOIN). Do not scan the historical snapshot ledger here.
     #    Use a single query with IN over all condition_ids across all open cities.
     all_conds = [c for conds in city_to_conds.values() for c in conds]
     try:
@@ -906,7 +1094,7 @@ def section_price_holes() -> dict:
             placeholders = ",".join("?" * len(all_conds))
             cond_snap_rows = tr.execute(
                 f"SELECT condition_id, max(captured_at) AS freshest "
-                f"FROM executable_market_snapshots "
+                f"FROM executable_market_snapshot_latest "
                 f"WHERE condition_id IN ({placeholders}) "
                 f"GROUP BY condition_id",
                 all_conds,

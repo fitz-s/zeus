@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def transition_phase(
     reason: str,
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
+    extra_payload: Mapping[str, object] | None = None,
 ) -> bool:
     """Atomically transition a position into pending_exit + emit canonical event.
 
@@ -142,11 +143,40 @@ def transition_phase(
         if not trade_id:
             return False
         current_row = conn.execute(
-            "SELECT phase FROM position_current WHERE position_id = ?",
+            """
+            SELECT phase, chain_state, shares, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
             (trade_id,),
         ).fetchone()
         current_phase = str(current_row[0] or "").strip().lower() if current_row is not None else ""
-        if is_terminal_state(current_phase) or current_phase == "economically_closed":
+        current_chain_state = str(current_row[1] or "").strip().lower() if current_row is not None else ""
+        def _positive_position_exposure() -> bool:
+            for value in (
+                current_row[3] if current_row is not None else None,
+                current_row[2] if current_row is not None else None,
+                getattr(position, "chain_shares", None),
+                getattr(position, "shares", None),
+            ):
+                try:
+                    numeric = float(value or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if numeric > 0.01:
+                    return True
+            return False
+
+        redecision_quarantine_exit = (
+            current_phase == "quarantined"
+            and current_chain_state
+            == "entry_authority_quarantined"
+            and _positive_position_exposure()
+        )
+        if (
+            current_phase == "economically_closed"
+            or (is_terminal_state(current_phase) and not redecision_quarantine_exit)
+        ):
             return False
         sequence_no_row = conn.execute(
             "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -157,7 +187,11 @@ def transition_phase(
         phase_before = phase_for_runtime_position(
             state=getattr(position, "pre_exit_state", "") or "holding",
         ).value
-        phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
+        phase_after = (
+            "pending_exit"
+            if redecision_quarantine_exit and phase_before == "quarantined"
+            else fold_lifecycle_phase(phase_before, "pending_exit").value
+        )
         projection_position = _copy.copy(position)
         if not any(
             getattr(projection_position, field, "")
@@ -174,16 +208,52 @@ def transition_phase(
         if projection.get("phase") != "pending_exit":
             return False
         projection["updated_at"] = occurred_at
+        exit_state = str(getattr(position, "exit_state", "") or "").strip()
+        last_exit_order_id = getattr(position, "last_exit_order_id", "") or ""
+        last_exit_command_id = getattr(position, "last_exit_command_id", "") or ""
+        if last_exit_order_id and not last_exit_command_id:
+            try:
+                command_row = conn.execute(
+                    """
+                    SELECT command_id
+                      FROM venue_commands
+                     WHERE position_id = ?
+                       AND intent_kind = 'EXIT'
+                       AND venue_order_id = ?
+                     ORDER BY updated_at DESC, created_at DESC, command_id DESC
+                     LIMIT 1
+                    """,
+                    (trade_id, last_exit_order_id),
+                ).fetchone()
+                if command_row is not None:
+                    last_exit_command_id = str(command_row[0] or "")
+            except Exception:
+                last_exit_command_id = ""
+        if event_type == "EXIT_INTENT":
+            projection["order_status"] = "exit_intent"
+            projection["order_id"] = None
+        elif event_type == "EXIT_ORDER_POSTED":
+            projection["order_status"] = "sell_placed"
+            projection["order_id"] = last_exit_order_id or None
+        elif event_type == "EXIT_ORDER_REJECTED" and exit_state in {
+            "retry_pending",
+            "backoff_exhausted",
+        }:
+            projection["order_status"] = exit_state
+            projection["order_id"] = last_exit_order_id or None
         payload = {
-            "status": getattr(position, "exit_state", ""),
+            "status": exit_state,
             "exit_reason": getattr(position, "exit_reason", "") or reason,
             "error": error or getattr(position, "last_exit_error", ""),
             "retry_count": getattr(position, "exit_retry_count", 0),
             "next_retry_at": getattr(position, "next_exit_retry_at", ""),
-            "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
+            "last_exit_order_id": last_exit_order_id,
+            "last_exit_command_id": last_exit_command_id,
         }
+        if extra_payload:
+            payload.update(dict(extra_payload))
         env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest", "shadow"}:
+        if env not in {"live", "test", "replay", "backtest"}:
             env = "live"
         event = {
             "event_id": f"{trade_id}:phase_transition:{sequence_no}",
@@ -199,8 +269,8 @@ def transition_phase(
             ),
             "decision_id": None,
             "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
-            "order_id": getattr(position, "last_exit_order_id", "") or None,
-            "command_id": None,
+            "order_id": last_exit_order_id or None,
+            "command_id": last_exit_command_id or None,
             "caused_by": "transition_phase",
             "idempotency_key": f"{trade_id}:phase_transition:{sequence_no}",
             "venue_status": str(getattr(position, "exit_state", "") or "rejected"),

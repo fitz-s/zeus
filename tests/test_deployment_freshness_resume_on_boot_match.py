@@ -13,7 +13,7 @@ now matches boot SHA), any lingering deployment_freshness_4h_divergence pause
 must be automatically cleared so entries are not perpetually blocked.
 
 Coverage:
-  R1: SHA match → pause cleared (tombstone gone, control_overrides expired, log emitted)
+  R1: SHA match → pause cleared (control_overrides expired, log emitted)
   R2: SHA mismatch → pause NOT cleared (operator must investigate)
   R3: entries not paused → no-op (resume_entries not called)
   R4: entries paused for different reason → not touched by auto-resume
@@ -27,8 +27,10 @@ Meta-verify (sed-flip):
 
 import sqlite3
 import logging
+import json
 import os
 import subprocess
+import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -92,17 +94,28 @@ def _run_auto_resume(
     *,
     boot_sha: str = BOOT_SHA,
     current_sha: str = BOOT_SHA,
+    git_diff_paths: tuple[str, ...] = ("src/main.py",),
     git_raises: Exception | None = None,
+    state_dir: Path | None = None,
 ) -> None:
     """Run _boot_deployment_freshness_auto_resume with controlled git output."""
     def _fake_git(cmd, **kw):
         if git_raises:
             raise git_raises
+        if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+            return ("\n".join(git_diff_paths) + "\n").encode()
         return current_sha.encode()
 
     with patch.object(main_module, "_BOOT_STATE", {"sha": boot_sha, "ts": datetime.now(_UTC)}):
         with patch("subprocess.check_output", side_effect=_fake_git):
-            _boot_deployment_freshness_auto_resume()
+            if state_dir is not None:
+                with patch("src.config.state_path", side_effect=lambda name: state_dir / name):
+                    _boot_deployment_freshness_auto_resume()
+            else:
+                with tempfile.TemporaryDirectory() as tmp_state:
+                    tmp_dir = Path(tmp_state)
+                    with patch("src.config.state_path", side_effect=lambda name: tmp_dir / name):
+                        _boot_deployment_freshness_auto_resume()
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +146,7 @@ class TestAutoResumeOnShaMatch:
         with patch("src.state.db.get_world_connection", side_effect=factory):
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
-                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
 
         # Reconnect to verify the DB row was expired
         fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
@@ -156,7 +169,7 @@ class TestAutoResumeOnShaMatch:
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 with caplog.at_level(logging.INFO, logger="zeus"):
-                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
 
         assert "deployment_freshness_auto_resume" in caplog.text
         assert BOOT_SHA[:8] in caplog.text
@@ -172,11 +185,42 @@ class TestAutoResumeOnShaMatch:
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 assert cp.is_entries_paused(), "pre-condition: in-memory must show paused"
-                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
                 # resume_entries calls refresh_control_state() at the end
                 assert not cp.is_entries_paused(), (
                     "in-memory entries_paused must be False after auto-resume"
                 )
+
+    def test_r1_sha_match_updates_freshness_state_file(self, tmp_path):
+        """SHA match: stale mismatch file is replaced with a fresh state proof."""
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+        df_path = tmp_path / "deployment_freshness.json"
+        df_path.write_text(
+            json.dumps(
+                {
+                    "boot_sha": DIFF_SHA,
+                    "current_sha": BOOT_SHA,
+                    "status": "mismatch",
+                    "pause_reason": "deployment_freshness_mismatch",
+                    "detected_at": (datetime.now(_UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
+
+        payload = json.loads(df_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "fresh"
+        assert payload["pause_reason"] is None
+        assert payload["boot_sha"] == BOOT_SHA
+        assert payload["current_sha"] == BOOT_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +249,33 @@ class TestAutoResumeBlockedOnShaMMismatch:
         assert state["entries_paused"] is True, "pause must remain when SHA still mismatched"
         assert "NOT auto-resuming" in caplog.text
 
+    def test_r2_non_runtime_sha_mismatch_clears_deployment_pause(self, tmp_path):
+        """Tests/docs-only drift is not a deployment freshness blocker."""
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(
+                    boot_sha=BOOT_SHA,
+                    current_sha=DIFF_SHA,
+                    git_diff_paths=("tests/test_only.py",),
+                    state_dir=tmp_path,
+                )
+
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is False
+        payload = json.loads((tmp_path / "deployment_freshness.json").read_text())
+        assert payload["status"] == "fresh"
+        assert payload["code_plane_status"] == "non_runtime_diff"
+
 
 # ---------------------------------------------------------------------------
 # R3: entries not paused → no-op
@@ -226,6 +297,36 @@ class TestAutoResumeNoop:
                     _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
 
         resume_mock.assert_not_called()
+
+    def test_r3_no_pause_still_refreshes_freshness_state_file(self, tmp_path):
+        """If DB pause was already cleared, boot still replaces stale freshness state."""
+        _, conn = _setup_world_db(tmp_path)
+        conn.close()
+        df_path = tmp_path / "deployment_freshness.json"
+        df_path.write_text(
+            json.dumps(
+                {
+                    "boot_sha": DIFF_SHA,
+                    "current_sha": DIFF_SHA,
+                    "status": "fresh",
+                    "pause_reason": None,
+                    "detected_at": (datetime.now(_UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
+
+        payload = json.loads(df_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "fresh"
+        assert payload["pause_reason"] is None
+        assert payload["boot_sha"] == BOOT_SHA
+        assert payload["current_sha"] == BOOT_SHA
 
     def test_r4_different_pause_reason_not_touched(self, tmp_path):
         """Entries paused for a DIFFERENT reason are not cleared by auto-resume."""

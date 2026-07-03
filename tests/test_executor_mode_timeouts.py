@@ -14,7 +14,7 @@ MODE_TIMEOUTS dictionary was never updated. cycle_runtime._mode_timeout_seconds(
 imports MODE_TIMEOUTS and raises if the key is absent — every candidate the
 imminent mode found crashed at this boundary BEFORE reaching the venue submit
 call. Daemon decision_log id=1116/1117 confirmed 47-52 candidates per cycle,
-0 entry orders submitted, all 13 control gates CLEAR.
+    0 entry orders submitted, current blocker snapshot CLEAR.
 
 Sed-flip verification: remove the "imminent_open_capture" key from
 MODE_TIMEOUTS → test_mode_timeout_seconds_accepts_imminent_open_capture

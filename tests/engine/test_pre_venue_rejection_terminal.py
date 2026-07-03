@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-07-02
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
@@ -99,6 +99,34 @@ def test_pre_venue_depth_rejection_is_terminal_pre_submit_error():
     assert "DEPTH_INSUFFICIENT" in result.reason_code
 
 
+def test_gate_runtime_block_is_terminal_pre_submit_error():
+    """A live_venue_submit runtime gate fires before the venue boundary.
+
+    It must release the EDLI cap as a known no-side-effect pre-submit rejection,
+    not create a SubmitUnknown/PENDING_RECONCILE lock.
+    """
+
+    def _executor_submit(intent, conn=None, decision_id="", snapshot_conn=None):
+        raise RuntimeError(
+            "[gate_runtime] BLOCKED cap='live_venue_submit': condition "
+            "'deployment_freshness_mismatch' is active (boot_sha=old current_sha=new)"
+        )
+
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=_FINAL,
+        execution_command_cert=_COMMAND,
+        conn=None,  # type: ignore[arg-type]
+        decision_time=_now(),
+        executor_submit=_executor_submit,
+    )
+
+    assert result.status == "PRE_SUBMIT_ERROR", result.status
+    assert result.venue_call_started is False
+    assert result.side_effect_known is True
+    assert result.reconciliation_followup_required is False
+    assert "deployment_freshness_mismatch" in result.reason_code
+
+
 def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
     """Guard not weakened: a generic exception AFTER the venue call started (the
     side effect is genuinely unknown) must still be POST_SUBMIT_UNKNOWN with
@@ -125,7 +153,21 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
     "reason",
     [
         "entry_cooldown:same_token_entry_cooling_down",
+        "entries_paused:operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
         "duplicate_entry_same_token:open_position_same_token",
+        "executable_snapshot_gate:BOOK_WITNESS_STALE",
+        "pre_submit_collateral_reservation_failed:INSUFFICIENT_PUSD",
+        "pre_submit_collateral_refresh_failed:WALLET_READ_FAILED",
+        "risk_allocator_pre_submit_blocked:DAY_CAP_EXHAUSTED",
+        "entry_decision_identity:token_id mismatch",
+        "corrected_execution_identity:condition_id mismatch",
+        "final_order_type_mismatch:expected_maker_limit",
+        "post_only_order_type_mismatch:expected_post_only",
+        "entry_taker_quality:EV_NOT_STRONG_ENOUGH_AFTER_FEES",
+        "entry_actionable_certificate:missing proof",
+        "entry_economics:non_positive_edge",
+        "invalid_submit_amount_precision:rounded_to_zero",
+        "decision_source_integrity:source_run_after_decision_time",
     ],
 )
 def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(reason):

@@ -15,14 +15,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat budget
+FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS = STATUS_FRESH_BUDGET_SECONDS
+DAY0_DECISION_TRACE_LOOKBACK_SECONDS = 3600
+DAY0_DECISION_TRACE_SAMPLE_LIMIT = 50
 FORECAST_PIPELINE_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -50,6 +54,172 @@ def _read_json(path: Path) -> Optional[dict]:
         return None
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _current_git_head() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_repo_root()),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    head = proc.stdout.strip()
+    return head or None
+
+
+def _runtime_code_surface(state_dir: Path) -> dict:
+    payload = _read_json(state_dir / "loaded_sha.json")
+    if payload is None:
+        return {"ok": False, "issue": "LOADED_SHA_MISSING"}
+    loaded_sha = str(
+        payload.get("loaded_sha")
+        or payload.get("boot_sha")
+        or payload.get("current_sha")
+        or ""
+    ).strip()
+    if not loaded_sha:
+        return {"ok": False, "issue": "LOADED_SHA_EMPTY", "loaded_sha": loaded_sha}
+    if not _is_full_git_sha(loaded_sha):
+        return {
+            "ok": False,
+            "issue": f"LOADED_SHA_INVALID:loaded={loaded_sha}",
+            "loaded_sha": loaded_sha,
+        }
+    from src.control.runtime_code_plane import runtime_code_plane_diff
+
+    code_plane = runtime_code_plane_diff(
+        _repo_root(),
+        boot_sha=loaded_sha,
+        timeout=2.0,
+    )
+    current_sha = code_plane.current_sha
+    if not current_sha:
+        return {
+            "ok": False,
+            "issue": "CURRENT_GIT_HEAD_UNAVAILABLE",
+            "loaded_sha": loaded_sha,
+        }
+    if code_plane.error:
+        return {
+            "ok": False,
+            "issue": (
+                f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}:"
+                f"code_plane={code_plane.status}:{code_plane.error}"
+            ),
+            "loaded_sha": loaded_sha,
+            "current_sha": current_sha,
+            "code_plane_status": code_plane.status,
+        }
+    if loaded_sha != current_sha and code_plane.runtime_code_changed:
+        return {
+            "ok": False,
+            "issue": (
+                f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}:"
+                f"code_plane={code_plane.status}"
+            ),
+            "loaded_sha": loaded_sha,
+            "current_sha": current_sha,
+            "code_plane_status": code_plane.status,
+            "changed_paths_sample": list(code_plane.changed_paths[:20]),
+        }
+    return {
+        "ok": True,
+        "issue": None,
+        "loaded_sha": loaded_sha,
+        "current_sha": current_sha,
+        "code_plane_status": code_plane.status,
+        "changed_paths_sample": list(code_plane.changed_paths[:20]),
+    }
+
+
+def _is_full_git_sha(value: object) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in text)
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _process_command_line(pid: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    command = proc.stdout.strip()
+    return command or None
+
+
+def _looks_like_live_main_command(command: str) -> bool:
+    normalized = command.replace("\\", "/")
+    return " -m src.main" in normalized or normalized.endswith(" -m src.main") or "src/main.py" in normalized
+
+
+def _main_daemon_surface(status_summary: Optional[dict], heartbeat: Optional[dict]) -> dict:
+    """Attest the main live daemon process when current surfaces cite a PID."""
+
+    status_process = status_summary.get("process") if isinstance(status_summary, dict) else None
+    status_pid = (
+        _int_or_none(status_process.get("pid"))
+        if isinstance(status_process, dict)
+        else None
+    )
+    heartbeat_pid = _int_or_none(heartbeat.get("pid")) if isinstance(heartbeat, dict) else None
+    if status_pid is None and heartbeat_pid is None:
+        return {"ok": True, "issue": None, "attested": False, "pid": None}
+    if status_pid is not None and heartbeat_pid is not None and status_pid != heartbeat_pid:
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PID_MISMATCH",
+            "status_pid": status_pid,
+            "heartbeat_pid": heartbeat_pid,
+        }
+    pid = status_pid or heartbeat_pid
+    assert pid is not None
+    command = _process_command_line(pid)
+    if command is None:
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PROCESS_NOT_FOUND",
+            "pid": pid,
+        }
+    if not _looks_like_live_main_command(command):
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_COMMAND_MISMATCH",
+            "pid": pid,
+            "command": command,
+        }
+    return {
+        "ok": True,
+        "issue": None,
+        "attested": True,
+        "pid": pid,
+        "command": command,
+    }
+
+
 def _age_seconds(ts_str: str, now: datetime) -> Optional[float]:
     """Return age in seconds for an ISO timestamp string, or None if unparseable."""
     try:
@@ -61,6 +231,18 @@ def _age_seconds(ts_str: str, now: datetime) -> Optional[float]:
         return delta.total_seconds()
     except (ValueError, TypeError):
         return None
+
+
+def _parse_iso_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _int_value(payload: dict, *keys: str) -> int:
@@ -231,6 +413,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         _mapping_has_positive_counter(no_trade_reasons)
         or _has_text_value(cycle, "top_no_trade_reason", "dominant_no_trade_reason")
     )
+    entry_unavailable_reason = _entry_unavailable_reason(status_summary, cycle)
+    entry_unavailable_proof = bool(entry_unavailable_reason)
     deterministic_rejection_observed = _mapping_has_positive_counter(deterministic_rejections)
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
@@ -247,6 +431,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "venue_ack_observed": venue_acks > 0,
         "no_trades": no_trades,
         "no_trade_reason_proof": no_trade_reason_proof,
+        "entry_unavailable_proof": entry_unavailable_proof,
+        "entry_unavailable_reason": entry_unavailable_reason,
         "zero_candidate_has_proof": zero_candidate_has_proof,
         "deterministic_rejection_observed": deterministic_rejection_observed,
         "reconcile_progress_observed": (
@@ -260,10 +446,23 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "issue": "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF",
             "progress": progress,
         }
-    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof:
+    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof and not entry_unavailable_proof:
         return {
             "ok": False,
             "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
+            "progress": progress,
+        }
+    if (
+        candidates > 0
+        and final_intents <= 0
+        and submit_attempts <= 0
+        and no_trades > 0
+        and no_trade_reason_proof
+        and not entry_unavailable_proof
+    ):
+        return {
+            "ok": False,
+            "issue": "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW",
             "progress": progress,
         }
     if final_intents > 0 and submit_attempts <= 0:
@@ -279,6 +478,43 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "progress": progress,
         }
     return {"ok": True, "issue": None, "progress": progress}
+
+
+def _entry_unavailable_reason(status_summary: dict, cycle: dict) -> str | None:
+    """Return explicit entry-unavailable proof from status/control/cycle read models."""
+
+    control = status_summary.get("control")
+    if isinstance(control, dict) and control.get("entries_paused") is True:
+        return str(control.get("entries_pause_reason") or "entries_paused")
+
+    execution_capability = status_summary.get("execution_capability")
+    if isinstance(execution_capability, dict):
+        entry = execution_capability.get("entry")
+        if isinstance(entry, dict):
+            if entry.get("global_allow_submit") is False:
+                reasons: list[str] = []
+                for component in entry.get("components") or []:
+                    if not isinstance(component, dict) or component.get("allowed") is not False:
+                        continue
+                    component_name = str(component.get("component") or "entry_component")
+                    reason = str(component.get("reason") or "unavailable")
+                    reasons.append(f"{component_name}:{reason}")
+                if reasons:
+                    return ";".join(reasons)
+                unavailable_components = entry.get("unavailable_components")
+                if isinstance(unavailable_components, list) and unavailable_components:
+                    return "entry_unavailable:" + ",".join(str(c) for c in unavailable_components)
+                return "entry_global_allow_submit_false"
+
+    allocator = cycle.get("held_monitor_allocator_refresh")
+    if isinstance(allocator, dict):
+        entry = allocator.get("entry")
+        if isinstance(entry, dict) and entry.get("allow_submit") is False:
+            return str(entry.get("reason") or "held_monitor_allocator_entry_unavailable")
+    blocked_reason = cycle.get("entries_blocked_reason")
+    if isinstance(blocked_reason, str) and blocked_reason.strip():
+        return blocked_reason.strip()
+    return None
 
 
 def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
@@ -303,23 +539,23 @@ def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
             actions[action_name] = {
                 "status": "missing",
                 "global_allow_submit": None,
-                "blocked_components": [f"{action_name}_capability_missing"],
-                "blocked_reasons": [],
+                "unavailable_components": [f"{action_name}_capability_missing"],
+                "unavailable_reasons": [],
             }
             blocked.append(f"{action_name}:missing")
             continue
 
         status = str(action.get("status") or "unknown")
         allow_submit = action.get("global_allow_submit")
-        blocked_components = action.get("blocked_components")
-        if not isinstance(blocked_components, list):
-            blocked_components = []
-        blocked_reasons = []
+        unavailable_components = action.get("unavailable_components")
+        if not isinstance(unavailable_components, list):
+            unavailable_components = []
+        unavailable_reasons = []
         for component in action.get("components") or []:
             if not isinstance(component, dict):
                 continue
             if component.get("allowed") is False:
-                blocked_reasons.append(
+                unavailable_reasons.append(
                     {
                         "component": component.get("component"),
                         "reason": component.get("reason"),
@@ -327,25 +563,25 @@ def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
                 )
 
         action_blocked = (
-            status.lower() in {"blocked", "failed", "error"}
+            status.lower() in {"unavailable", "failed", "error"}
             or allow_submit is False
-            or bool(blocked_components)
-            or bool(blocked_reasons)
+            or bool(unavailable_components)
+            or bool(unavailable_reasons)
         )
         actions[action_name] = {
             "status": status,
             "global_allow_submit": allow_submit,
-            "blocked_components": blocked_components,
-            "blocked_reasons": blocked_reasons,
+            "unavailable_components": unavailable_components,
+            "unavailable_reasons": unavailable_reasons,
         }
         if action_blocked:
-            component_label = ",".join(str(c) for c in blocked_components) or status
+            component_label = ",".join(str(c) for c in unavailable_components) or status
             blocked.append(f"{action_name}:{component_label}")
 
     if blocked:
         return {
             "ok": False,
-            "issue": "LIVE_EXECUTION_CAPABILITY_BLOCKED: " + "; ".join(blocked),
+            "issue": "LIVE_EXECUTION_CAPABILITY_UNAVAILABLE: " + "; ".join(blocked),
             "actions": actions,
         }
     return {"ok": True, "issue": None, "actions": actions}
@@ -416,6 +652,359 @@ def _venue_heartbeat_surface(state_dir: Path, now: datetime) -> dict:
     }
 
 
+def _sqlite_ro_scalar(path: Path, sql: str) -> tuple[object | None, str | None]:
+    if not path.exists():
+        return None, "DB_MISSING"
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        try:
+            row = conn.execute(sql).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"DB_READ_FAILED:{type(exc).__name__}:{exc}"
+    if row is None:
+        return None, None
+    return row[0], None
+
+
+def _sqlite_ro_rows(
+    path: Path,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> tuple[list[dict], str | None]:
+    if not path.exists():
+        return [], "DB_MISSING"
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return [], f"DB_READ_FAILED:{type(exc).__name__}:{exc}"
+    return [dict(row) for row in rows], None
+
+
+def _forecast_to_event_bridge_surface(
+    state_dir: Path,
+    now: datetime,
+    *,
+    main_daemon_surface: dict,
+) -> dict:
+    """Prove live posterior production is reaching the trading event queue.
+
+    Forecast-live materializes ``forecast_posteriors`` while ``src.main`` emits
+    ``FORECAST_SNAPSHOT_READY`` opportunity events. A heartbeat on either side
+    alone is not business progress. Evaluate this bridge only when the main
+    daemon is currently attested; during an intentional stopped/restart-preflight
+    state, reporting the gap is useful but must not become a false blocker.
+    """
+
+    if not bool(main_daemon_surface.get("attested")):
+        return {
+            "ok": True,
+            "issue": "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED",
+            "evaluated": False,
+        }
+
+    forecast_db = state_dir / "zeus-forecasts.db"
+    world_db = state_dir / "zeus-world.db"
+    latest_posterior, posterior_err = _sqlite_ro_scalar(
+        forecast_db,
+        """
+        SELECT MAX(computed_at)
+          FROM forecast_posteriors
+         WHERE runtime_layer = 'live'
+        """,
+    )
+    if posterior_err:
+        return {
+            "ok": False,
+            "issue": f"LIVE_POSTERIOR_READ_UNAVAILABLE:{posterior_err}",
+            "evaluated": True,
+        }
+    latest_fsr, fsr_err = _sqlite_ro_scalar(
+        world_db,
+        """
+        SELECT MAX(created_at)
+          FROM opportunity_events
+         WHERE event_type = 'FORECAST_SNAPSHOT_READY'
+        """,
+    )
+    if fsr_err:
+        return {
+            "ok": False,
+            "issue": f"FORECAST_EVENT_READ_UNAVAILABLE:{fsr_err}",
+            "evaluated": True,
+        }
+
+    posterior_at = _parse_iso_utc(latest_posterior)
+    fsr_at = _parse_iso_utc(latest_fsr)
+    if posterior_at is None:
+        return {
+            "ok": False,
+            "issue": "LIVE_POSTERIOR_MISSING_OR_UNPARSEABLE",
+            "evaluated": True,
+            "latest_posterior_computed_at": latest_posterior,
+            "latest_fsr_created_at": latest_fsr,
+        }
+
+    posterior_age = max(0.0, (now.astimezone(timezone.utc) - posterior_at).total_seconds())
+    fsr_age = (
+        max(0.0, (now.astimezone(timezone.utc) - fsr_at).total_seconds())
+        if fsr_at is not None
+        else None
+    )
+    lag_seconds = (
+        (posterior_at - fsr_at).total_seconds()
+        if fsr_at is not None
+        else float("inf")
+    )
+    detail = {
+        "evaluated": True,
+        "latest_posterior_computed_at": posterior_at.isoformat(),
+        "latest_fsr_created_at": fsr_at.isoformat() if fsr_at is not None else None,
+        "posterior_age_seconds": posterior_age,
+        "fsr_age_seconds": fsr_age,
+        "posterior_to_fsr_lag_seconds": lag_seconds,
+        "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,
+    }
+    if (
+        lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+        and posterior_age > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+    ):
+        return {
+            "ok": False,
+            "issue": (
+                "FORECAST_TO_EVENT_BRIDGE_STALLED:"
+                f"posterior_newer_by={lag_seconds:.0f}s"
+            ),
+            **detail,
+        }
+    return {"ok": True, "issue": None, **detail}
+
+
+def _day0_decision_trace_surface(
+    state_dir: Path,
+    now: datetime,
+    *,
+    main_daemon_surface: dict,
+) -> dict:
+    """Prove processed Day0 events leave a money-path trace.
+
+    A processed ``DAY0_EXTREME_UPDATED`` row is only useful operationally if the
+    operator can tell which of the mutually exclusive outcomes happened:
+    command emitted, no-submit receipt, terminal no-trade/regret, or compile
+    failure. This is observability only; it does not rank or gate trades.
+    """
+
+    if not bool(main_daemon_surface.get("attested")):
+        return {
+            "ok": True,
+            "issue": "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED",
+            "evaluated": False,
+        }
+
+    world_db = state_dir / "zeus-world.db"
+    trade_db = state_dir / "zeus_trades.db"
+    cutoff = (
+        now.astimezone(timezone.utc)
+        - timedelta(seconds=DAY0_DECISION_TRACE_LOOKBACK_SECONDS)
+    ).isoformat()
+    day0_events, event_err = _sqlite_ro_rows(
+        world_db,
+        """
+        SELECT event_id, entity_key, created_at
+          FROM opportunity_events
+         WHERE event_type = 'DAY0_EXTREME_UPDATED'
+           AND created_at >= ?
+         ORDER BY rowid DESC
+         LIMIT ?
+        """,
+        (cutoff, DAY0_DECISION_TRACE_SAMPLE_LIMIT),
+    )
+    if event_err:
+        return {
+            "ok": False,
+            "issue": f"DAY0_EVENT_READ_UNAVAILABLE:{event_err}",
+            "evaluated": True,
+        }
+    if not day0_events:
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": True,
+            "recent_event_count": 0,
+            "processed_event_count": 0,
+            "missing_trace_count": 0,
+        }
+
+    event_ids = tuple(
+        str(row.get("event_id") or "").strip()
+        for row in day0_events
+        if str(row.get("event_id") or "").strip()
+    )
+    if not event_ids:
+        return {
+            "ok": False,
+            "issue": "DAY0_EVENT_ID_MISSING",
+            "evaluated": True,
+            "recent_event_count": len(day0_events),
+        }
+    placeholders = ",".join("?" for _ in event_ids)
+    processing_rows, processing_err = _sqlite_ro_rows(
+        world_db,
+        f"""
+        SELECT event_id, processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = 'edli_reactor_v1'
+           AND event_id IN ({placeholders})
+        """,
+        event_ids,
+    )
+    if processing_err:
+        return {
+            "ok": False,
+            "issue": f"DAY0_PROCESSING_READ_UNAVAILABLE:{processing_err}",
+            "evaluated": True,
+        }
+    processing_by_event = {
+        str(row.get("event_id") or ""): row for row in processing_rows
+    }
+    processed_event_ids = tuple(
+        event_id
+        for event_id in event_ids
+        if str(processing_by_event.get(event_id, {}).get("processing_status") or "")
+        == "processed"
+    )
+    missing: list[dict[str, object]] = []
+    traced = 0
+    trace_counts = _day0_trace_counts_for_events(
+        world_db=world_db,
+        trade_db=trade_db,
+        event_ids=processed_event_ids,
+    )
+    for event in day0_events:
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id not in processed_event_ids:
+            continue
+        trace_count = trace_counts.get(event_id, 0)
+        if trace_count > 0:
+            traced += 1
+        else:
+            missing.append(
+                {
+                    "event_id": event_id,
+                    "entity_key": event.get("entity_key"),
+                    "created_at": event.get("created_at"),
+                    "processed_at": processing_by_event.get(event_id, {}).get("processed_at"),
+                }
+            )
+
+    detail = {
+        "evaluated": True,
+        "lookback_seconds": DAY0_DECISION_TRACE_LOOKBACK_SECONDS,
+        "recent_event_count": len(day0_events),
+        "processed_event_count": len(processed_event_ids),
+        "traced_processed_event_count": traced,
+        "missing_trace_count": len(missing),
+        "missing_trace_sample": missing[:5],
+    }
+    if missing:
+        return {
+            "ok": False,
+            "issue": f"DAY0_PROCESSED_WITHOUT_DECISION_TRACE:n={len(missing)}",
+            **detail,
+        }
+    return {"ok": True, "issue": None, **detail}
+
+
+def _day0_trace_counts_for_events(
+    *,
+    world_db: Path,
+    trade_db: Path,
+    event_ids: tuple[str, ...],
+) -> dict[str, int]:
+    counts = {event_id: 0 for event_id in event_ids}
+    if not event_ids:
+        return counts
+    _add_day0_trace_counts_from_db(
+        world_db,
+        counts,
+        checks=(
+            ("SELECT 1 FROM decision_compile_failures WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            ("SELECT 1 FROM no_trade_regret_events WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            ("SELECT 1 FROM edli_no_submit_receipts WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            (
+                """
+                SELECT 1
+                  FROM decision_certificates INDEXED BY idx_decision_certificates_semantic
+                 WHERE certificate_type = 'ActionableTradeCertificate'
+                   AND semantic_key >= ?
+                   AND semantic_key < ?
+                 LIMIT 1
+                """,
+                _actionable_semantic_range,
+            ),
+        ),
+    )
+    _add_day0_trace_counts_from_db(
+        trade_db,
+        counts,
+        checks=(
+            ("SELECT 1 FROM venue_commands WHERE decision_id LIKE ? LIMIT 1", lambda event_id: (f"%{event_id}%",)),
+            (
+                """
+                SELECT 1
+                  FROM decision_certificates INDEXED BY idx_decision_certificates_semantic
+                 WHERE certificate_type = 'ActionableTradeCertificate'
+                   AND semantic_key >= ?
+                   AND semantic_key < ?
+                 LIMIT 1
+                """,
+                _actionable_semantic_range,
+            ),
+        ),
+    )
+    return counts
+
+
+def _actionable_semantic_range(event_id: str) -> tuple[str, str]:
+    return (f"actionable:{event_id}:", f"actionable:{event_id};")
+
+
+def _add_day0_trace_counts_from_db(
+    path: Path,
+    counts: dict[str, int],
+    *,
+    checks: tuple[tuple[str, object], ...],
+) -> None:
+    if not path.exists():
+        return
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        for event_id in counts:
+            for sql, params_builder in checks:
+                try:
+                    params = params_builder(event_id)  # type: ignore[operator]
+                    if conn.execute(sql, params).fetchone() is not None:
+                        counts[event_id] += 1
+                except Exception:  # noqa: BLE001
+                    continue
+    finally:
+        conn.close()
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -423,13 +1012,17 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults six surfaces:
+    Consults eight surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
-      3. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
-      4. forecast_pipeline — current replacement/BPF scheduler health
-      5. status_summary — status_summary.json top-level timestamp freshness
-      6. execution_capability — entry/exit side-effect gate
+      3. runtime_code — loaded_sha.json vs current git HEAD
+      4. main_daemon — status/heartbeat PID still points at src.main
+      5. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
+      6. forecast_pipeline — current replacement/BPF scheduler health
+      7. forecast_event_bridge — live posteriors reaching FSR event emission
+      8. day0_decision_trace — processed Day0 events have decision evidence
+      9. status_summary — status_summary.json top-level timestamp freshness
+      10. execution_capability — entry/exit side-effect gate
 
     Writes state/live_health_composite.json atomically.
 
@@ -480,6 +1073,16 @@ def compute_composite_live_health(
             hb_issue,
         )
 
+    runtime_code_surface = _runtime_code_surface(sd)
+    surfaces["runtime_code"] = runtime_code_surface
+    if not runtime_code_surface["ok"]:
+        failing.append("runtime_code")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "runtime_code",
+            runtime_code_surface["issue"],
+        )
+
     venue_surface = _venue_heartbeat_surface(sd, now)
     surfaces["venue_heartbeat"] = venue_surface
     if not venue_surface["ok"]:
@@ -488,6 +1091,18 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "venue_heartbeat",
             venue_surface["issue"],
+        )
+
+    ss_path = sd / "status_summary.json"
+    ss_data = _read_json(ss_path)
+    main_daemon_surface = _main_daemon_surface(ss_data, hb_data)
+    surfaces["main_daemon"] = main_daemon_surface
+    if not main_daemon_surface["ok"]:
+        failing.append("main_daemon")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "main_daemon",
+            main_daemon_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #
@@ -547,10 +1162,36 @@ def compute_composite_live_health(
             forecast_surface["issue"],
         )
 
+    forecast_event_bridge_surface = _forecast_to_event_bridge_surface(
+        sd,
+        now,
+        main_daemon_surface=main_daemon_surface,
+    )
+    surfaces["forecast_event_bridge"] = forecast_event_bridge_surface
+    if not forecast_event_bridge_surface["ok"]:
+        failing.append("forecast_event_bridge")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "forecast_event_bridge",
+            forecast_event_bridge_surface["issue"],
+        )
+
+    day0_trace_surface = _day0_decision_trace_surface(
+        sd,
+        now,
+        main_daemon_surface=main_daemon_surface,
+    )
+    surfaces["day0_decision_trace"] = day0_trace_surface
+    if not day0_trace_surface["ok"]:
+        failing.append("day0_decision_trace")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "day0_decision_trace",
+            day0_trace_surface["issue"],
+        )
+
     # Surface 4: status_summary freshness                                 #
     # ------------------------------------------------------------------ #
-    ss_path = sd / "status_summary.json"
-    ss_data = _read_json(ss_path)
     if ss_data is None:
         ss_issue = "STATUS_SUMMARY_MISSING"
         ss_ok = False

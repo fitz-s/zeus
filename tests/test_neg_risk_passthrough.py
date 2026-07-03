@@ -27,8 +27,6 @@ _ALLOWED_NEG_RISK_FILES = {
     "src/contracts/venue_submission_envelope.py",
     "src/execution/exit_lifecycle.py",
     "src/execution/executor.py",
-    "src/strategy/candidates/__init__.py",
-    "src/strategy/candidates/neg_risk_basket.py",
     "src/state/db.py",
     "src/state/snapshot_repo.py",
     "src/state/venue_command_repo.py",

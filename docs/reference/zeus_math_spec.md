@@ -6,7 +6,7 @@
 
 **Version 2** (2026-04-13): corrections incorporated per user review of v1 — logit clipping explicit, open-boundary bins allowed, Monte Carlo pseudocode deduplicated across bins, stream-of-consciousness removed, `decision_group` concept added as independent sample unit.
 
-> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the **LEGACY BASELINE** path — an independent baseline / LCB cap joined to the live q as a floor (`effective_q_lcb = min(replacement, baseline)`), NOT the primary q. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
+> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the diagnostic/comparison baseline path, NOT the primary q. The former baseline-to-live `min(...)` cap/floor join was deleted; baseline outputs may appear as provenance/comparison only and must not cap, floor, or veto live replacement q without new authority. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
 
 ---
 
@@ -83,16 +83,15 @@ distinct-endpoint [A, B]:     [A − 0.5, B + 0.5)
 
 This fixes the degenerate point-bin problem (interior bins always get non-zero mass). q is persisted by `replacement_forecast_materializer._insert_posterior` (owns q_mode).
 
-### 0.1e q_lcb floor and the baseline junction
+### 0.1e q_lcb floor and the removed baseline junction
 
 ```
 q_lcb = Wilson lower bound (z = 1.645)         — event_reactor_adapter._wilson_lower_bound
         capped per-(city, season, metric) by settlement-residual σ
                                                — _resolve_replacement_settlement_floor_lcb
-effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
 ```
 
-Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The min-cap is where the §6/§7 baseline q_lcb enters — as a floor, never as the primary q. Edge = q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
+Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The former §6/§7 baseline q_lcb min-cap join is deleted. Baseline q may be emitted as comparison/provenance only; it is not a live authority, cap, floor, or fallback. Edge = replacement q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
 
 ---
 
@@ -332,7 +331,7 @@ This guarantees every possible `settlement_value` falls in exactly one bin. Beca
 
 ## 6. Extended Platt calibration (LEGACY BASELINE)
 
-> Baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math feeds the baseline / LCB-cap path (`src/calibration/platt.py` `ExtendedPlattCalibrator.predict`).
+> Diagnostic baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math may produce comparison/provenance output only; it must not cap, floor, or veto live replacement q without new authority.
 
 ### 6.1 Model (with logit numerical safety)
 
@@ -631,9 +630,8 @@ The **maker-only, single-share** special case collapses to the familiar identity
 Σ_i b_i < K − 1      (NO basket,  r = 0)
 ```
 
-The constant `0.97` in `src/strategy/candidates/neg_risk_basket.py` is an empirical
-mis-statement of this condition (see §14.11). The correct gate is the fee-adjusted exact
-inequality above, evaluated on swept depth — not a top-ask sum vs a hand-tuned constant.
+The correct gate is the fee-adjusted exact inequality above, evaluated on swept
+depth, not a top-ask sum versus a hand-tuned constant.
 
 ### 11.7 Sizing by arbitrage optimization (NOT Kelly)
 
@@ -839,26 +837,6 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 - `Bin.low`/`high` type is float per current `src/types/market.py`; `-inf`/`+inf` allowed by Python but unverified across all Bin consumers.
 - **Fix**: audit `find_bin`, `market_events` storage, and Bin construction for ±inf handling.
 
-### 14.11 `neg_risk_basket` uses a heuristic threshold, not the exact arbitrage condition (§11.6)
-- `src/strategy/candidates/neg_risk_basket.py:54` — `_BASKET_ARB_THRESHOLD = Decimal("0.97")`,
-  gated at line 195 as `yes_ask_sum >= 0.97 → no_trade`. This is an empirical mis-statement of
-  the §11.6 condition. Correct gate: fee-adjusted exact inequality `Π(q*) > 0` on swept depth
-  (maker-only special case: `Σ a_i < 1`), not a top-ask sum vs a hand-tuned constant.
-- The strategy only checks a scalar `neg_risk_yes_ask_sum`; it has no NO-basket scan (§11.6
-  `Π_N`) and no order-book sweep (§11.5) — it cannot detect the larger of the two arbitrages
-  nor size by §11.7 `q*`.
-- The required inputs are **unwired**: `neg_risk_family_complete`, `neg_risk_token_count`,
-  `neg_risk_yes_ask_sum` are documented "not yet wired in MarketAnalysisVNext" (file docstring
-  lines 20–23). `MarketAnalysisVNext` is a single-market snapshot and lacks a family-level
-  executable book (`A_i(q)`, `B_i(q)` level data per leg).
-- The enter-path `CandidateDecision` (lines 230–237) is predictive-shaped (`side`,
-  `target_price`, `edge`, `p_posterior`) and cannot express a multi-leg deterministic basket
-  (`legs`, `deterministic_profit_usd`, `basket_execution_id` per §11.8).
-- **Fix**: replace the threshold with the §11.6 exact condition; add a `FamilyOrderBookSnapshot`
-  + family book fields to `MarketAnalysisVNext`; scan both `Π_Y` and `Π_N` over depth breakpoints
-  (§11.7); emit a basket-shaped decision (§11.8). This converts the strategy from a permanent-
-  no_trade shadow stub into the application-grade arbitrage of §11.4–11.9.
-
 ---
 
 ## 15. Deferred upgrades (future work, not in current scope)
@@ -973,7 +951,7 @@ max_f  E[ log(1 + Σ_i f_i · R_i(Y)) ]
 ```
 over selected leg combinations of an exclusive-outcome payoff matrix; default `max_legs=1` keeps it behaviourally identical to the Stage A emergency gate. Wave 4 bumps `max_legs` via caller config (shadow first), preserving Stage A as fallback.
 
-**Market prior fusion stays shadow-only.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. `MarketPriorDistribution` contract (complete normalised distribution + lineage + freshness + liquidity + validation evidence) gates any future blending experiment. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` forbids unverified blending of a calibrated model with an unvalidated market distribution.
+**Market prior fusion is not a corrected posterior path.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. Corrected posterior construction consumes calibrated model belief only. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` explains why unverified blending of a calibrated model with an unvalidated market distribution is forbidden.
 
 **Acceptance for §15.7 being closed:** all of INV-38, INV-39, INV-40 antibody tests GREEN, `_size_at_execution_price_boundary` constructs no `ExecutionPrice` with `price_type="implied_probability"`, `_bootstrap_bin` samples `c_b` from `EntryQuoteEvidence.cost_uncertainty`, no soft uncertainty enters Kelly via more than one path.
 

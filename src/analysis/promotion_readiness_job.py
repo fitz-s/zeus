@@ -42,7 +42,7 @@ from src.analysis.live_readiness_tribunal import (
     promotion_predicate,
 )
 from src.analysis.promotion_readiness import PromotionReadinessValidator
-from src.contracts.evidence_tier import EvidenceTier
+from src.contracts.evidence_tier import EvidenceTier, next_evidence_tier, previous_evidence_tier
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def run_promotion_readiness_job(
         breakeven = evidence.breakeven_win_rate
 
         if promotion_predicate(tier_current, tier_required, ci_lower, breakeven, cost_of_capital):
-            _tier_target = EvidenceTier(min(7, tier_current.value + 1))
+            _tier_target = next_evidence_tier(tier_current)
             _verdict_kind = VerdictKind.PROMOTE
             _verdict_reason = (
                 f"PROMOTE: ci_lower={ci_lower:.4f} > breakeven={breakeven:.4f} + "
@@ -128,7 +128,7 @@ def run_promotion_readiness_job(
                 f"{tier_current.name} → {_tier_target.name} [advisory; operator apply required]"
             )
         elif ci_lower is not None and ci_lower < breakeven - cost_of_capital:
-            _tier_target = EvidenceTier(max(0, tier_current.value - 1))
+            _tier_target = previous_evidence_tier(tier_current)
             _verdict_kind = VerdictKind.DEMOTE
             _verdict_reason = (
                 f"DEMOTE: ci_lower={ci_lower:.4f} < breakeven={breakeven:.4f} - "

@@ -63,12 +63,6 @@ class TestClassify:
     def test_migrations_is_tier0(self):
         assert classify("migrations/0042_add_column.sql") == 0
 
-    def test_hard_safety_kernel_is_tier0(self):
-        assert classify("scripts/topology_v_next/hard_safety_kernel.py") == 0
-
-    def test_admission_engine_is_tier0(self):
-        assert classify("scripts/topology_v_next/admission_engine.py") == 0
-
     def test_safety_overrides_is_tier0(self):
         assert classify("bindings/zeus/safety_overrides.yaml") == 0
 

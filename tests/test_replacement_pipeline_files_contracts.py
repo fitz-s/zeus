@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-06-10
+# Last reused/audited: 2026-06-30
 # Authority basis: pipeline-contract project, operator directive 2026-06-10
 """Relationship tests for the replacement-pipeline file contracts.
 
@@ -42,6 +42,17 @@ from src.data.replacement_forecast_materialization_request_builder import (
 # Fixtures: a real seed payload + its on-disk artifacts (mirrors the queue test
 # _write_seed_inputs so the REQUEST round-trip exercises the genuine builder).
 # ---------------------------------------------------------------------------
+def _openmeteo_payload() -> dict[str, object]:
+    hours = list(range(24))
+    return {
+        "hourly_units": {"temperature_2m": "C"},
+        "hourly": {
+            "time": [f"2026-06-07T{hour:02d}:00" for hour in hours],
+            "temperature_2m": [19.0 + (hour % 9) for hour in hours],
+        },
+    }
+
+
 def _write_seed_artifacts(base: Path) -> dict[str, object]:
     (base / "aifs_samples.json").write_text(
         json.dumps(
@@ -56,7 +67,7 @@ def _write_seed_artifacts(base: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     (base / "openmeteo_payload.json").write_text(
-        json.dumps({"hourly_units": {"temperature_2m": "C"}, "hourly": {"time": ["2026-06-07T00:00"], "temperature_2m": [20.0]}}),
+        json.dumps(_openmeteo_payload()),
         encoding="utf-8",
     )
     (base / "precision_metadata.json").write_text(

@@ -10,21 +10,20 @@ from src.contracts.evidence_tier import EvidenceTier
 
 
 # ---------------------------------------------------------------------------
-# T1-1: 8-member enum with correct values
+# T1-1: supported enum members with stable values
 # ---------------------------------------------------------------------------
 
-def test_t1_eight_members() -> None:
-    """EvidenceTier has exactly 8 members."""
-    assert len(EvidenceTier) == 8
+def test_t1_supported_members() -> None:
+    """EvidenceTier has no shadow-only intermediate member."""
+    assert len(EvidenceTier) == 7
 
 
 def test_t1_member_values() -> None:
-    """Members have the correct integer values 0..7."""
+    """Members preserve stable integer values without reusing the removed slot."""
     expected = {
         "IDEA": 0,
         "DETERMINISTIC_SEMANTICS": 1,
         "REPLAY_PASS": 2,
-        "SHADOW_PASS": 3,
         "PAPER_COHORT": 4,
         "LIVE_PILOT_TINY": 5,
         "LIVE_LIMITED_HAIRCUT": 6,
@@ -50,10 +49,10 @@ def test_t1_ordering_ascending() -> None:
 
 
 def test_t1_live_pilot_tiny_ge_check() -> None:
-    """LIVE_PILOT_TINY (5) satisfies >= LIVE_PILOT_TINY; SHADOW_PASS (3) does not."""
+    """LIVE_PILOT_TINY (5) satisfies >= LIVE_PILOT_TINY; REPLAY_PASS (2) does not."""
     assert EvidenceTier.LIVE_PILOT_TINY >= EvidenceTier.LIVE_PILOT_TINY
     assert EvidenceTier.LIVE_NORMAL >= EvidenceTier.LIVE_PILOT_TINY
-    assert not (EvidenceTier.SHADOW_PASS >= EvidenceTier.LIVE_PILOT_TINY)
+    assert not (EvidenceTier.REPLAY_PASS >= EvidenceTier.LIVE_PILOT_TINY)
     assert not (EvidenceTier.IDEA >= EvidenceTier.LIVE_PILOT_TINY)
 
 

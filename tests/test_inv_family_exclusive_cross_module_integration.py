@@ -2,7 +2,7 @@
 # Purpose: Cross-module relationship antibody — live family-exclusive entry gate
 #          fires through execute_discovery_phase (cycle_runtime), not just in unit isolation.
 #          P0-1 opus critic Major #1 follow-up.
-# Reuse: Run when cycle_runtime discovery execution, family fallback submit behavior, or
+# Reuse: Run when cycle_runtime discovery execution, ranked-family submit behavior, or
 #        optimizer-owned multi-leg portfolio semantics change.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive
 #                  weather family sizing), Stage-B enum persistence follow-up.
@@ -374,11 +374,11 @@ def test_gate_disabled_all_three_decisions_reach_execution_layer(
     ), "gate-disabled path must not stamp any dedup rejection reason"
 
 
-def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
+def test_live_scalar_family_ranked_alternatives_are_not_parallel_submit_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """RELATIONSHIP: scalar ranked family fallbacks collapse before live submit.
+    """RELATIONSHIP: scalar ranked family alternatives collapse before live submit.
 
     Ranked scalar siblings are not an execution queue. The family gate admits
     one best scalar decision before reprice/submit, so a failed first sibling
@@ -392,8 +392,8 @@ def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     decisions = _three_family_decisions()
     for rank, decision in enumerate(decisions, start=1):
         decision.strategy_key = "center_buy"
-        decision.family_fallback_rank = rank
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = rank
+        decision.family_ranked_candidate_count = len(decisions)
         decision.tokens.update(
             {
                 "market_id": f"market-{rank}",
@@ -402,7 +402,7 @@ def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
             }
         )
 
-    conn = get_connection(tmp_path / "family-fallback-live.db")
+    conn = get_connection(tmp_path / "family-ranked-live.db")
     init_schema(conn)
     deps, captured, artifact, portfolio, summary = _build_harness(decisions)
     deps.select_final_order_type = lambda conn, snapshot_id: "FOK"
@@ -410,7 +410,7 @@ def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     submitted: list[str] = []
 
     def _capture_snapshot(conn, *, market, decision, clob, captured_at, scan_authority):
-        rank = int(getattr(decision, "family_fallback_rank", 0) or 0)
+        rank = int(getattr(decision, "family_ranked_candidate_rank", 0) or 0)
         return {
             "executable_snapshot_id": f"snap-rank-{rank}",
             "condition_id": f"condition-rank-{rank}",
@@ -421,7 +421,7 @@ def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
 
     def _reprice(conn, decision, snapshot_fields, final_intent_context):
         reprice_attempts.append(str(decision.decision_id))
-        if getattr(decision, "family_fallback_rank", 0) == 1:
+        if getattr(decision, "family_ranked_candidate_rank", 0) == 1:
             raise ValueError("primary_leg_no_executable_book")
         hypothesis_id = f"intent-{decision.decision_id}"
         decision.final_execution_intent = types.SimpleNamespace(
@@ -477,7 +477,7 @@ def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     assert artifact.trade_cases[0]["decision_id"] == decisions[1].decision_id
     skipped = [
         ntc for ntc in artifact.no_trade_cases
-        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        if "mutually_exclusive_family_ranked_alternative_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
     assert skipped == []
@@ -497,8 +497,8 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
 ) -> None:
     """Optimizer-owned multi-leg portfolios submit every selected leg.
 
-    The fallback queue should stop after one accepted fallback alternative, but
-    selected portfolio legs are additive parts of the optimized payoff vector.
+    Ranked alternatives stop after one accepted non-portfolio leg, but selected
+    portfolio legs are additive parts of the optimized payoff vector.
     """
 
     from src.state.db import get_connection, init_schema
@@ -509,11 +509,11 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
     decisions = _three_family_decisions()
     for rank, decision in enumerate(decisions, start=1):
         decision.strategy_key = "center_buy"
-        decision.family_fallback_rank = rank
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = rank
+        decision.family_ranked_candidate_count = len(decisions)
         decision.family_portfolio_selected_leg_count = 2
         decision.family_portfolio_leg_role = (
-            "portfolio_selected" if rank <= 2 else "fallback_alternative"
+            "portfolio_selected" if rank <= 2 else "ranked_alternative"
         )
         decision.tokens.update(
             {
@@ -531,7 +531,7 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
     submitted: list[str] = []
 
     def _capture_snapshot(conn, *, market, decision, clob, captured_at, scan_authority):
-        rank = int(getattr(decision, "family_fallback_rank", 0) or 0)
+        rank = int(getattr(decision, "family_ranked_candidate_rank", 0) or 0)
         return {
             "executable_snapshot_id": f"snap-rank-{rank}",
             "condition_id": f"condition-rank-{rank}",
@@ -599,7 +599,7 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
     assert summary["family_portfolio_selected_submits"] == 2
     skipped = [
         ntc for ntc in artifact.no_trade_cases
-        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        if "mutually_exclusive_family_ranked_alternative_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
     assert skipped == []
@@ -610,11 +610,11 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
     assert [ntc.decision_id for ntc in family_dedup] == [decisions[2].decision_id]
 
 
-def test_paper_scalar_family_fallbacks_are_not_parallel_submit_candidates(
+def test_paper_scalar_family_ranked_alternatives_are_not_parallel_submit_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """RELATIONSHIP: scalar family fallback collapse is invariant in every env."""
+    """RELATIONSHIP: scalar family ranked-alternative collapse is invariant in every env."""
 
     from src.state.db import get_connection, init_schema
 
@@ -624,8 +624,8 @@ def test_paper_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     decisions = _three_family_decisions()
     for rank, decision in enumerate(decisions, start=1):
         decision.strategy_key = "center_buy"
-        decision.family_fallback_rank = rank
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = rank
+        decision.family_ranked_candidate_count = len(decisions)
         decision.tokens.update(
             {
                 "market_id": f"market-{rank}",
@@ -634,7 +634,7 @@ def test_paper_scalar_family_fallbacks_are_not_parallel_submit_candidates(
             }
         )
 
-    conn = get_connection(tmp_path / "family-fallback-paper.db")
+    conn = get_connection(tmp_path / "family-ranked-paper.db")
     init_schema(conn)
     deps, captured, artifact, portfolio, summary = _build_harness(decisions)
     created: list[str] = []
@@ -676,7 +676,7 @@ def test_paper_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     assert len(artifact.trade_cases) == 1
     skipped = [
         ntc for ntc in artifact.no_trade_cases
-        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        if "mutually_exclusive_family_ranked_alternative_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
     assert skipped == []

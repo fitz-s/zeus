@@ -99,6 +99,7 @@ class _FakeEvent:
     def __init__(self, event_id: str) -> None:
         self.event_id = event_id
         self.causal_snapshot_id = f"snap-{event_id}"
+        self.event_type = "FORECAST_SNAPSHOT_READY"
 
 
 def test_live_adapter_submit_releases_trade_lock_per_event(tmp_path, monkeypatch):
@@ -134,17 +135,21 @@ def test_live_adapter_submit_releases_trade_lock_per_event(tmp_path, monkeypatch
     write_count = {"n": 0}
 
     def _fake_build_receipt(event, *, trade_conn, **kwargs):  # noqa: ANN001
+        from src.events.reactor import EventSubmissionReceipt
+
         write_count["n"] += 1
         trade_conn.execute(
             "INSERT INTO adapter_probe (v) VALUES (?)", (write_count["n"],)
         )
 
-        class _R:
-            proof_accepted = False
-            decision_proof_bundle = None
-
         # _submit returns this object directly on the non-accepted early path.
-        return _R()
+        return EventSubmissionReceipt(
+            submitted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            proof_accepted=False,
+            decision_proof_bundle=None,
+        )
 
     monkeypatch.setattr(
         adapter_mod, "build_event_bound_no_submit_receipt", _fake_build_receipt

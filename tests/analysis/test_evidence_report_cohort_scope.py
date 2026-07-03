@@ -42,7 +42,7 @@ _DC_SQL = """
         authority_id, authority_version, algorithm_id, algorithm_version,
         payload_json, payload_hash, certificate_hash, verifier_status, created_at
     ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-              ?, 'FINAL_INTENT', 'SHADOW', ?,
+              ?, 'FINAL_INTENT', 'NO_SUBMIT', ?,
               'test_authority', '1.0', 'test_algorithm', '1.0',
               ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', ?)
 """
@@ -62,16 +62,10 @@ def _insert_certificate(
         (cert_id, cert_id, UTC_NOW, payload, cert_id, cert_id, UTC_NOW),
     )
 
-_SE_SQL = """
-    INSERT INTO shadow_experiments
-        (experiment_id, strategy_id, config_hash, cohort_tag, started_at, immutable)
-    VALUES (?, ?, 'h', ?, ?, 0)
-"""
-
 _RD_SQL = """
     INSERT INTO regret_decompositions
-        (decision_event_id, experiment_id, total_regret_usd, computed_at)
-    VALUES (?, ?, ?, ?)
+        (decision_event_id, experiment_id, strategy_id, cohort_tag, total_regret_usd, computed_at)
+    VALUES (?, ?, ?, ?, ?, ?)
 """
 
 
@@ -96,8 +90,7 @@ def _seed_chain(
         _DE_SQL,
         (de_id, de_id, UTC_NOW, UTC_NOW, strategy_key, UTC_NOW, source),
     )
-    conn.execute(_SE_SQL, (experiment_id, strategy_key, cohort_tag, UTC_NOW))
-    conn.execute(_RD_SQL, (de_id, experiment_id, regret, UTC_NOW))
+    conn.execute(_RD_SQL, (de_id, experiment_id, strategy_key, cohort_tag, regret, UTC_NOW))
     # C2 fix: n_decisions now reads decision_certificates, not decision_events.
     # Seed the corresponding FinalIntentCertificate row so n_decisions counts correctly.
     # Pass seed_certificate=False for chains that should NOT appear in n_decisions
@@ -111,15 +104,15 @@ class TestSourceFilterConsistency:
     """source filter must scope n_decisions AND n_settled AND n_wins to the same population."""
 
     def test_source_filter_applies_to_all_three_metrics(self) -> None:
-        """MP-LEA-001: shadow_decision source scopes n_decisions=1, n_settled=1, n_wins=1.
+        """MP-LEA-001: offline_decision source scopes n_decisions=1, n_settled=1, n_wins=1.
         A live_decision chain for the same strategy must not bleed into any metric."""
         conn = _fresh_conn()
         _seed_chain(
             conn,
-            de_id="de-shadow",
+            de_id="de-offline",
             strategy_key="center_buy",
-            source="shadow_decision",
-            experiment_id="exp-shadow",
+            source="offline_decision",
+            experiment_id="exp-offline",
             cohort_tag="cohort-A",
             regret=0.10,
         )
@@ -139,17 +132,17 @@ class TestSourceFilterConsistency:
 
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
-            source="shadow_decision",
+            source="offline_decision",
             breakeven_win_rate=0.5,
         )
-        assert report.n_decisions == 1, f"n_decisions={report.n_decisions} should be 1 (shadow only)"
-        assert report.n_settled == 1, f"n_settled={report.n_settled} should be 1 (shadow only)"
+        assert report.n_decisions == 1, f"n_decisions={report.n_decisions} should be 1 (offline only)"
+        assert report.n_settled == 1, f"n_settled={report.n_settled} should be 1 (offline only)"
         assert report.n_wins == 1, f"n_wins={report.n_wins} should be 1 (regret>0)"
 
     def test_source_filter_excluded_loses_both_count_and_wins(self) -> None:
-        """When the only chain is a non-shadow source with no certificate, all metrics=0."""
+        """When the only chain is a different source with no certificate, all metrics=0."""
         conn = _fresh_conn()
         # C2: live_decision entity has no certificate in the active lane → n_decisions=0.
         _seed_chain(
@@ -165,9 +158,9 @@ class TestSourceFilterConsistency:
 
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
-            source="shadow_decision",
+            source="offline_decision",
             breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 0
@@ -193,7 +186,7 @@ class TestCohortTagFilterConsistency:
             conn,
             de_id="de-cohA",
             strategy_key="center_buy",
-            source="shadow_decision",
+            source="offline_decision",
             experiment_id="exp-cohA",
             cohort_tag="cohort-A",
             regret=0.10,
@@ -202,7 +195,7 @@ class TestCohortTagFilterConsistency:
             conn,
             de_id="de-cohB",
             strategy_key="center_buy",
-            source="shadow_decision",
+            source="offline_decision",
             experiment_id="exp-cohB",
             cohort_tag="cohort-B",
             regret=-0.05,  # loss in cohort-B
@@ -210,7 +203,7 @@ class TestCohortTagFilterConsistency:
 
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
             cohort_tag="cohort-A",
             breakeven_win_rate=0.5,
@@ -230,7 +223,7 @@ class TestCohortTagFilterConsistency:
             conn,
             de_id="de-win",
             strategy_key="center_buy",
-            source="shadow_decision",
+            source="offline_decision",
             experiment_id="exp-win",
             cohort_tag="cohort-win",
             regret=0.10,
@@ -239,7 +232,7 @@ class TestCohortTagFilterConsistency:
             conn,
             de_id="de-loss",
             strategy_key="center_buy",
-            source="shadow_decision",
+            source="offline_decision",
             experiment_id="exp-loss",
             cohort_tag="cohort-loss",
             regret=-0.10,
@@ -247,7 +240,7 @@ class TestCohortTagFilterConsistency:
 
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
             cohort_tag="cohort-loss",
             breakeven_win_rate=0.5,
@@ -274,7 +267,7 @@ class TestBayesianPriorContract:
         """ci_lower must be None when n_settled=0 — prevents hardcoded-0.5 fallback."""
         conn = _fresh_conn()
         report = build_evidence_report(
-            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn, breakeven_win_rate=0.5
+            "center_buy", EvidenceTier.REPLAY_PASS, conn=conn, breakeven_win_rate=0.5
         )
         assert report.ci_lower is None
         assert report.ci_upper is None
@@ -284,7 +277,7 @@ class TestBayesianPriorContract:
         conn = _fresh_conn()
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
             breakeven_win_rate=0.55,
         )
@@ -301,7 +294,7 @@ class TestBayesianPriorContract:
         with pytest.raises(ValueError, match="breakeven_win_rate"):
             build_evidence_report(
                 "center_buy",
-                EvidenceTier.SHADOW_PASS,
+                EvidenceTier.REPLAY_PASS,
                 conn=conn,
                 # breakeven_win_rate intentionally omitted — should raise
             )
@@ -317,15 +310,15 @@ class TestBayesianPriorContract:
             conn,
             de_id="de-settled",
             strategy_key="center_buy",
-            source="shadow_decision",
+            source="offline_decision",
             experiment_id="exp-A",
             cohort_tag="cohort-A",
             regret=0.10,
         )
-        # Unsettled decision for same strategy — no regret row, no shadow_experiment link
+        # Unsettled decision for same strategy — no regret row, no experiment link
         conn.execute(
             _DE_SQL,
-            ("de-unsettled", "de-unsettled", UTC_NOW, UTC_NOW, "center_buy", UTC_NOW, "shadow_decision"),
+            ("de-unsettled", "de-unsettled", UTC_NOW, UTC_NOW, "center_buy", UTC_NOW, "offline_decision"),
         )
         # C2 fix: unsettled decisions must also appear in decision_certificates so
         # n_decisions counts them in the full-strategy-universe denominator (P1-7).
@@ -334,7 +327,7 @@ class TestBayesianPriorContract:
 
         report = build_evidence_report(
             "center_buy",
-            EvidenceTier.SHADOW_PASS,
+            EvidenceTier.REPLAY_PASS,
             conn=conn,
             cohort_tag="cohort-A",
             breakeven_win_rate=0.5,

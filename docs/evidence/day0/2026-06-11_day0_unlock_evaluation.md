@@ -9,7 +9,7 @@
 ## VERDICT: NOT UNLOCKABLE — and the binding constraint is EVIDENCE PRODUCTION, not waiting time.
 
 Settled gradeable day0 samples: **0 of ~150 required**. Unchanged from the 08:25Z study
-(docs/evidence/day0/2026-06-11_day0_shadow_accuracy_profitability.md) — but today's
+(docs/evidence/day0/2026-06-11_retired_day0_no_submit_scope_accuracy_profitability.md) — but today's
 numbers sharpen WHERE the pipeline loses the evidence, in three stacked layers:
 
 | Layer | Measured now (12:04Z) | Loss |

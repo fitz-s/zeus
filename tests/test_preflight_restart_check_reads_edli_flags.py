@@ -102,7 +102,6 @@ def _run_preflight(settings: dict, promotion_evidence: dict | None = None) -> di
 
 def _settings(*, capture: bool, fusion: bool,
                arm: bool = False,
-               qlcb: bool = False,
                fused_q: bool = True,
                auth: bool = False, kelly: bool = False, flip: bool = False) -> dict:
     return {
@@ -110,7 +109,6 @@ def _settings(*, capture: bool, fusion: bool,
             "replacement_0_1_bayes_precision_fusion_capture_enabled": capture,
             "replacement_0_1_bayes_precision_fusion_enabled": fusion,
             "replacement_0_1_fused_q_shape_enabled": fused_q,
-            "q_lcb_settlement_coverage_gate_enabled": qlcb,
             "edli_live_operator_authorized": arm,
         },
         "feature_flags": {

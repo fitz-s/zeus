@@ -1,5 +1,7 @@
 # subdir-dict monkey-patch process-global race surface
 
+Status: ARCHIVED_REFERENCE
+
 <!-- Created: 2026-05-13 -->
 <!-- Last reused or audited: 2026-05-13 -->
 <!-- Authority basis: PR #108 "Out of scope" note; Task #53 -->

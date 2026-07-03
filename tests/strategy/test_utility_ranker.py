@@ -45,8 +45,7 @@ utility ranker beats simpler rules:
         optimistic than the conservative own-q_lcb_no path the ranker must use.
         (spec §3 / §4 / §9 Hidden #3 "NO overconfidence".)
 
-DEFAULT-OFF / SHADOW: these exercise pure objects + pure functions. No live
-decision path is touched.
+These exercise pure objects and pure functions. No live decision path is touched.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # Created: 2026-04-18
 # Last reused or audited: 2026-05-23
-# Authority basis: FIX-3 task brief + docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+# Authority basis: FIX-3 task brief + docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
 """Forecast-layer uncertainty policy seams.
 
 Phase-1 de-hardcode starts by centralizing where forecast/measurement sigma is
@@ -546,7 +546,11 @@ def day0_nowcast_context(
 ) -> dict:
     source = str(observation_source or "")
     source_lower = source.lower()
-    trusted = any(tag in source_lower for tag in ("wu", "asos", "obs"))
+    trusted = (
+        any(tag in source_lower for tag in ("wu", "asos", "obs"))
+        or source_lower == "hko_hourly_accumulator"
+        or source_lower.startswith("ogimet_metar_")
+    )
     source_factor = 1.0 if trusted else 0.0
     hours = min(6.0, max(0.0, float(hours_remaining)))
     short_lead_progress = 1.0 - (hours / 6.0)

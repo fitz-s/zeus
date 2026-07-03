@@ -1,5 +1,7 @@
 # Exit Strategy Integration Plan — Follow-up to Pure-Math PR
 
+Status: ARCHIVED_REFERENCE
+
 Created: 2026-05-27
 Authority basis: Exit Strategy math review (operator, 2026-05-27)
 Audit doc: `exit_strategy_audit_2026_05_27.md`

@@ -400,6 +400,64 @@ def test_slug_pattern_discovery_rotates_under_request_budget(monkeypatch):
     assert [event["_discovery_path"] for event in first + second] == ["slug_pattern"] * 4
 
 
+def test_default_slug_pattern_discovery_covers_configured_opening_horizon(monkeypatch):
+    """The default slug sweep must reach deep current/next-day markets in one tick."""
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", raising=False)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_LOOKAHEAD_DAYS", raising=False)
+
+    now = datetime(2026, 6, 25, 18, 30, tzinfo=timezone.utc)
+    target_dates = ms._slug_pattern_target_dates(now)
+    job_count = (
+        len(ms.SLUG_DISCOVERY_CITIES)
+        * len(ms.SLUG_DISCOVERY_PREFIXES)
+        * len(target_dates)
+    )
+
+    assert ms._slug_pattern_max_requests_from_env(None) >= job_count
+
+
+def test_slug_pattern_default_reaches_deep_slug_without_waiting_for_cursor(monkeypatch):
+    """Default discovery should not need many ticks before reaching late-sorted cities/dates."""
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, slug: str):
+            self._slug = slug
+
+        def json(self):
+            if self._slug == "highest-temperature-in-city-19-on-june-27-2026":
+                return [{"id": "evt-deep", "slug": self._slug, "markets": [{}]}]
+            return []
+
+    calls: list[str] = []
+
+    def fake_gamma_get(path: str, *, params: dict | None = None, timeout: float, retries: int):
+        assert path == "/events"
+        slug = str((params or {})["slug"])
+        calls.append(slug)
+        return Response(slug)
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_SLUG_CONCURRENCY", "4")
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_CITIES", [f"city-{i:02d}" for i in range(20)])
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_PREFIXES", ["highest-temperature-in-{city}-on-{date}"])
+    monkeypatch.setattr(ms, "_SLUG_DISCOVERY_CURSOR", 0)
+    monkeypatch.setattr(ms, "_gamma_get", fake_gamma_get)
+    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now, **_kwargs: True)
+
+    results = ms._fetch_events_by_slug_pattern(
+        set(),
+        datetime(2026, 6, 25, 18, 30, tzinfo=timezone.utc),
+        target_dates=["2026-06-25", "2026-06-26", "2026-06-27"],
+        budget_seconds=100,
+    )
+
+    assert "highest-temperature-in-city-19-on-june-27-2026" in calls
+    assert [event["id"] for event in results] == ["evt-deep"]
+
+
 def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     """Executable snapshot refresh must not monopolize live background execution."""
 
@@ -493,14 +551,14 @@ def test_snapshot_refresh_db_lock_wait_is_bound_to_capture_budget(monkeypatch):
     assert summary["inserted"] == 0
     assert summary["failed"] == 3
     assert summary["failure_samples"][0]["error"] == "database is locked"
-    # Fitz #5 lock-category kill (2026-06-08): the old min(250ms, remaining)
-    # clamp fail-fasted EVERY contended insert (inserted=0 -> coverage NONE ->
-    # armed daemon could not trade). The contract is now a DURABLE FLOOR
-    # (default 4000ms after the live lock-starvation fix) that is still restored
-    # to the caller's original setting afterward.
-    assert all(t == 4000 for t in observed_timeouts), observed_timeouts
-    # Remaining-budget tightening: waits never grow as the cycle burns down.
-    assert observed_timeouts == sorted(observed_timeouts, reverse=True), observed_timeouts
+    # Batch substrate refresh is progress-oriented: one locked condition must not
+    # consume the whole capture reserve. The loop now divides the remaining
+    # capture budget across the remaining candidates instead of spending the
+    # single-capture 4s floor on each row.
+    assert summary["failed"] <= len(observed_timeouts) <= summary["attempted"] * 3
+    assert all(0 < t <= 4000 for t in observed_timeouts), observed_timeouts
+    assert any(t < 4000 for t in observed_timeouts), observed_timeouts
+    assert observed_timeouts[0] < 4000, observed_timeouts
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
@@ -553,6 +611,8 @@ def test_reconstructed_snapshot_recapture_requires_explicit_current_clob_tradabi
         def get_clob_market_info(self, condition_id: str) -> dict:
             return {
                 "condition_id": condition_id,
+                "archived": False,
+                "enable_order_book": True,
                 "tokens": [{"token_id": "yes-stale"}, {"token_id": "no-stale"}],
                 "feesEnabled": True,
             }
@@ -706,6 +766,8 @@ def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
         def get_clob_market_info(self, condition_id: str) -> dict:
             return {
                 "condition_id": condition_id,
+                "archived": False,
+                "enable_order_book": True,
                 "tokens": [{"token_id": "yes-side"}, {"token_id": "no-side"}],
                 "feesEnabled": True,
             }
@@ -956,10 +1018,10 @@ class TestB017MarketSnapshotProvenance:
         )
         assert get_last_scan_authority() == "STALE"
 
-    def test_b017_network_failure_without_cache_returns_empty_fallback(
+    def test_b017_network_failure_without_cache_returns_fetch_failed_no_cache(
         self, monkeypatch
     ):
-        """No cache + fetch failure => authority=EMPTY_FALLBACK and
+        """No cache + fetch failure => authority=FETCH_FAILED_NO_CACHE and
         empty events, NOT VERIFIED."""
         def _raise(*_a, **_kw):
             raise httpx.ConnectError("simulated network failure")
@@ -967,10 +1029,10 @@ class TestB017MarketSnapshotProvenance:
         monkeypatch.setattr(ms, "_fetch_events_by_tags", _raise)
 
         snap = _get_active_events_snapshot()
-        assert snap.authority == "EMPTY_FALLBACK"
+        assert snap.authority == "FETCH_FAILED_NO_CACHE"
         assert snap.events == []
         assert snap.stale_age_seconds is None
-        assert get_last_scan_authority() == "EMPTY_FALLBACK"
+        assert get_last_scan_authority() == "FETCH_FAILED_NO_CACHE"
 
     def test_b017_legacy_api_still_returns_list_for_backwards_compat(
         self, monkeypatch
@@ -2288,6 +2350,7 @@ class TestSourceContractGate:
     ):
         from scripts import source_contract_auto_convert as auto
 
+        monkeypatch.setenv("ZEUS_ALLOW_LIVE_DB_BACKUP", "1")
         fixture = tmp_path / "events.json"
         fixture.write_text(
             json.dumps(
@@ -2425,11 +2488,21 @@ class TestSourceContractGate:
         assert any("--apply" in command for command in commands)
         assert any("--no-dry-run" in command for command in commands)
 
+    def test_source_auto_convert_db_backup_requires_explicit_opt_in(self, tmp_path):
+        from scripts import source_contract_auto_convert as auto
+
+        db_path = tmp_path / "zeus-world.db"
+        db_path.write_bytes(b"fixture")
+
+        with pytest.raises(RuntimeError, match="ZEUS_ALLOW_LIVE_DB_BACKUP=1"):
+            auto.backup_world_db(db_path, evidence_root=tmp_path / "evidence")
+
     def test_auto_convert_execute_apply_rolls_back_config_and_source_fact_on_failure(
         self, monkeypatch, tmp_path, capsys
     ):
         from scripts import source_contract_auto_convert as auto
 
+        monkeypatch.setenv("ZEUS_ALLOW_LIVE_DB_BACKUP", "1")
         fixture = tmp_path / "events.json"
         fixture.write_text(
             json.dumps(
@@ -3003,6 +3076,41 @@ class TestSourceContractAuditPersistence:
             None, report=invalid_report_status, db_path=audit_db
         )["status"] == "refused_invalid_report_status"
 
+    @pytest.mark.parametrize(
+        "scan_authority",
+        ["FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "NEVER_FETCHED"],
+    )
+    def test_source_contract_audit_accepts_precise_unverified_scan_authority(
+        self, tmp_path, scan_authority
+    ):
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source="https://www.wunderground.com/history/daily/fr/paris/LFPG",
+        )
+        report = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
+            authority=scan_authority,
+        )
+        audit_db = tmp_path / f"audit-{scan_authority}.db"
+
+        result = append_source_contract_audit_events(None, report=report, db_path=audit_db)
+
+        assert result["status"] in {"written", "unchanged"}
+        verify_conn = sqlite3.connect(str(audit_db))
+        verify_conn.row_factory = sqlite3.Row
+        try:
+            row = verify_conn.execute(
+                "SELECT scan_authority FROM source_contract_audit_events"
+            ).fetchone()
+        finally:
+            verify_conn.close()
+        assert row["scan_authority"] == scan_authority
+
     def test_watch_source_contract_persists_audit_only_with_explicit_db_path(
         self, tmp_path, capsys
     ):
@@ -3218,6 +3326,8 @@ class TestForwardMarketSubstrateProducer:
             def get_clob_market_info(self, condition_id: str) -> dict:
                 return {
                     "condition_id": condition_id,
+                    "archived": False,
+                    "enable_order_book": True,
                     "tokens": [
                         {"token_id": "cond-transition-yes"},
                         {"token_id": "cond-transition-no"},
@@ -3316,7 +3426,7 @@ class TestForwardMarketSubstrateProducer:
         assert transition["prev_hash"] != transition["new_hash"]
         assert transition["delta_ms"] >= 0
 
-    def test_snapshot_refresh_budget_skips_expired_child_markets(self):
+    def test_snapshot_refresh_budget_skips_closed_elapsed_child_markets(self):
         conn = _make_persisted_substrate_conn()
         captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
 
@@ -3324,6 +3434,8 @@ class TestForwardMarketSubstrateProducer:
             def get_clob_market_info(self, condition_id: str) -> dict:
                 return {
                     "condition_id": condition_id,
+                    "archived": False,
+                    "enable_order_book": True,
                     "tokens": [
                         {"token_id": f"{condition_id}-yes"},
                         {"token_id": f"{condition_id}-no"},
@@ -3344,7 +3456,15 @@ class TestForwardMarketSubstrateProducer:
             def get_fee_rate(self, token_id: str) -> float:
                 return 0
 
-        def outcome(condition_id: str, market_end_at: str) -> dict:
+        def outcome(
+            condition_id: str,
+            market_end_at: str,
+            *,
+            active: bool = True,
+            closed: bool = False,
+            accepting_orders: bool = True,
+            enable_orderbook: bool = True,
+        ) -> dict:
             return {
                 "title": f"{condition_id} bin",
                 "token_id": f"{condition_id}-yes",
@@ -3356,10 +3476,10 @@ class TestForwardMarketSubstrateProducer:
                 "range_low": 1,
                 "range_high": 2,
                 "executable": True,
-                "active": True,
-                "closed": False,
-                "accepting_orders": True,
-                "enable_orderbook": True,
+                "active": active,
+                "closed": closed,
+                "accepting_orders": accepting_orders,
+                "enable_orderbook": enable_orderbook,
                 "market_end_at": market_end_at,
                 "raw_gamma_payload_hash": "a" * 64,
                 "token_map_raw": {
@@ -3370,10 +3490,10 @@ class TestForwardMarketSubstrateProducer:
                     "id": f"{condition_id}-gamma",
                     "conditionId": condition_id,
                     "questionID": f"{condition_id}-question",
-                    "active": True,
-                    "closed": False,
-                    "acceptingOrders": True,
-                    "enableOrderBook": True,
+                    "active": active,
+                    "closed": closed,
+                    "acceptingOrders": accepting_orders,
+                    "enableOrderBook": enable_orderbook,
                     "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
                 },
             }
@@ -3382,7 +3502,13 @@ class TestForwardMarketSubstrateProducer:
             "event_id": "expired-event",
             "slug": "highest-temperature-in-expired-on-may-20-2026",
             "outcomes": [
-                outcome(f"expired-{index}", "2026-05-20T12:00:00+00:00")
+                outcome(
+                    f"expired-{index}",
+                    "2026-05-20T12:00:00+00:00",
+                    active=False,
+                    closed=True,
+                    accepting_orders=False,
+                )
                 for index in range(3)
             ],
         }
@@ -3408,6 +3534,108 @@ class TestForwardMarketSubstrateProducer:
         assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
             ("highest-temperature-in-future-on-may-21-2026", "future-0")
         ]
+        assert summary["executable_snapshot_candidate_rejection_counts"] == {
+            "market_end_at_elapsed": 3,
+        }
+
+    def test_snapshot_refresh_keeps_live_tradeable_child_after_parent_enddate(self):
+        conn = _make_persisted_substrate_conn()
+        captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+
+        class AnyConditionClob:
+            def get_clob_market_info(self, condition_id: str) -> dict:
+                return {
+                    "condition_id": condition_id,
+                    "archived": False,
+                    "enable_order_book": True,
+                    "tokens": [
+                        {"token_id": f"{condition_id}-yes"},
+                        {"token_id": f"{condition_id}-no"},
+                    ],
+                    "feesEnabled": True,
+                }
+
+            def get_orderbook_snapshot(self, token_id: str) -> dict:
+                return {
+                    "asset_id": token_id,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": True,
+                    "bids": [],
+                    "asks": [{"price": "0.42", "size": "100"}],
+                }
+
+            def get_fee_rate(self, token_id: str) -> float:
+                return 0
+
+        market = {
+            "event_id": "day0-event",
+            "slug": "highest-temperature-in-day0-on-may-20-2026",
+            "market_end_at": "2026-05-20T12:00:00+00:00",
+            "market_close_at": "2026-05-20T12:00:00+00:00",
+            "outcomes": [
+                {
+                    "title": "day0 bin",
+                    "token_id": "day0-0-yes",
+                    "no_token_id": "day0-0-no",
+                    "market_id": "day0-0",
+                    "condition_id": "day0-0",
+                    "question_id": "day0-0-question",
+                    "gamma_market_id": "day0-0-gamma",
+                    "range_low": 1,
+                    "range_high": 2,
+                    "executable": True,
+                    "active": True,
+                    "closed": False,
+                    "accepting_orders": True,
+                    "enable_orderbook": True,
+                    "market_end_at": "2026-05-20T12:00:00+00:00",
+                    "raw_gamma_payload_hash": "d" * 64,
+                    "token_map_raw": {
+                        "clobTokenIds": ["day0-0-yes", "day0-0-no"],
+                        "outcomes": ["Yes", "No"],
+                    },
+                    "gamma_market_raw": {
+                        "id": "day0-0-gamma",
+                        "conditionId": "day0-0",
+                        "questionID": "day0-0-question",
+                        "active": True,
+                        "closed": False,
+                        "acceptingOrders": True,
+                        "enableOrderBook": True,
+                        "clobTokenIds": ["day0-0-yes", "day0-0-no"],
+                    },
+                }
+            ],
+        }
+
+        summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=AnyConditionClob(),
+            captured_at=captured_at,
+            max_outcomes=1,
+        )
+
+        assert summary["attempted"] == 1
+        assert summary["inserted"] == 1
+        assert "market_end_at_elapsed" not in summary["executable_snapshot_candidate_rejection_counts"]
+        assert summary["executable_snapshot_candidate_override_counts"] == {
+            "market_end_at_elapsed_live_tradeability": 1,
+        }
+        rows = conn.execute(
+            "SELECT event_slug, condition_id FROM executable_market_snapshots"
+        ).fetchall()
+        assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
+            ("highest-temperature-in-day0-on-may-20-2026", "day0-0")
+        ]
+
+    def test_tag_discovery_does_not_early_break_on_parent_enddate(self):
+        """Parent endDate must not stop tag pagination for Day0-visible markets."""
+        source = inspect.getsource(ms._get_active_events)
+
+        assert "oldest_end" not in source
+        assert "past endDates" not in source
 
     def test_snapshot_refresh_prioritizes_opening_hunt_window_under_budget(self):
         conn = _make_persisted_substrate_conn()
@@ -3417,6 +3645,8 @@ class TestForwardMarketSubstrateProducer:
             def get_clob_market_info(self, condition_id: str) -> dict:
                 return {
                     "condition_id": condition_id,
+                    "archived": False,
+                    "enable_order_book": True,
                     "tokens": [
                         {"token_id": f"{condition_id}-yes"},
                         {"token_id": f"{condition_id}-no"},
@@ -4062,6 +4292,55 @@ class TestForwardMarketSubstrateProducer:
         assert snapshot.authority == "STALE"
         assert snapshot.events == []
 
+    def test_persisted_reader_keeps_complete_day0_family_after_parent_enddate(self):
+        """Parent endDate is not live visibility authority for persisted substrate."""
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-05-20', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-may-20-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(
+            conn,
+            market_end_at="2026-05-20T10:00:00+00:00",
+        )
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert len(snapshot.events) == 1
+        market = snapshot.events[0]
+        assert market["hours_to_resolution"] == pytest.approx(-5 / 60)
+        assert [o["condition_id"] for o in market["outcomes"]] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        executable = [o for o in market["outcomes"] if o["executable"]]
+        assert [o["condition_id"] for o in executable] == ["cond-mid"]
+
     def test_persisted_reader_joins_trade_snapshots_to_forecasts_market_events(self):
         trade_conn = _make_persisted_substrate_conn()
         forecasts_conn = _make_forward_substrate_conn()
@@ -4205,7 +4484,10 @@ class TestForwardMarketSubstrateProducer:
         assert provenance["source_contract"]["station_id"] is None
         assert "weather.gov.hk" in provenance["resolution_sources"][0]
 
-    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    @pytest.mark.parametrize(
+        "authority",
+        ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "", None],
+    )
     def test_market_source_contract_refuses_degraded_scan_authority(self, authority):
         parsed = _parse_event(
             _gamma_temperature_event(),
@@ -4517,7 +4799,10 @@ class TestForwardMarketSubstrateProducer:
         finally:
             check_conn.close()
 
-    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    @pytest.mark.parametrize(
+        "authority",
+        ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "", None],
+    )
     def test_forward_substrate_refuses_degraded_scan_authority(self, authority, tmp_path, request):
         """Only a fresh VERIFIED scan can create forward market substrate."""
         db_path, conn = _make_forward_substrate_db(tmp_path, request)

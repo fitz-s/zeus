@@ -18,6 +18,53 @@ import types
 from unittest.mock import MagicMock
 
 
+def test_presubmit_strategy_floor_errors_map_to_submit_abort_reasons():
+    from src.engine.event_reactor_adapter import _presubmit_strategy_floor_abort_reason
+    from src.events.live_order_aggregate import LiveOrderAggregateError
+
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated entry price below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated expected profit below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated submit edge density below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated requires q_lcb_5pct <= q_live")
+    ) is None
+
+
+def test_taker_reservation_races_map_to_price_moved_abort_reason():
+    from src.engine.event_reactor_adapter import _submit_price_moved_abort_reason
+
+    assert _submit_price_moved_abort_reason(
+        ValueError("TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43")
+    ) == (
+        "SUBMIT_ABORTED_PRICE_MOVED:"
+        "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:best_ask=0.6:reservation=0.43"
+    )
+    assert _submit_price_moved_abort_reason(
+        ValueError("TAKER_SELL_TOUCH_BELOW_RESERVATION:best_bid=0.51:reservation=0.55")
+    ) == (
+        "SUBMIT_ABORTED_PRICE_MOVED:"
+        "TAKER_SELL_TOUCH_BELOW_RESERVATION:best_bid=0.51:reservation=0.55"
+    )
+    assert _submit_price_moved_abort_reason(
+        ValueError("LIVE_AUTHORITY_GRAPH_REJECTED")
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # P0-A: _selected_candidate_mode_fields_from_receipt
 # ---------------------------------------------------------------------------
@@ -210,31 +257,36 @@ class TestActionablePayloadThreadsProofMode:
 # ---------------------------------------------------------------------------
 
 class TestModeFlipGuard:
-    """SUBMIT_ABORTED_MODE_FLIPPED raised when proof mode != fresh mode."""
+    """Unsafe proof/fresh mode disagreements still abort."""
 
-    def _call_with_proof_mode(self, proof_mode: str, fresh_bid: float, fresh_ask: float):
-        """Simulate _build_live_execution_command_certificates mode-flip check."""
-        order_mode_result = "MAKER"  # tight spread → MAKER (spread 4%)
-        _proof_mode = str(proof_mode or "").strip().upper() or None
-        if _proof_mode is not None and _proof_mode != str(order_mode_result).strip().upper():
-            raise ValueError(
-                f"SUBMIT_ABORTED_MODE_FLIPPED:proof_mode={_proof_mode}:fresh_mode={order_mode_result}"
-            )
-        return order_mode_result
+    def _call_with_proof_mode(self, proof_mode: str, fresh_mode: str):
+        """Call the real submit-boundary validator."""
+        from src.engine.event_reactor_adapter import _validate_final_order_mode_or_abort
+
+        return _validate_final_order_mode_or_abort(
+            proof_mode=proof_mode,
+            fresh_mode=fresh_mode,
+            fresh_best_bid=0.48,
+            fresh_best_ask=0.50,
+        )
 
     def test_no_flip_maker_proof_maker_fresh(self):
-        # Consistent: no exception
-        mode = self._call_with_proof_mode("MAKER", 0.48, 0.50)
+        mode = self._call_with_proof_mode("MAKER", "MAKER")
         assert mode == "MAKER"
+
+    def test_maker_proof_taker_fresh_upgrades(self):
+        mode = self._call_with_proof_mode("MAKER", "TAKER")
+        assert mode == "TAKER"
 
     def test_flip_taker_proof_maker_fresh_raises(self):
         with pytest.raises(ValueError, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            self._call_with_proof_mode("TAKER", 0.48, 0.50)
+            self._call_with_proof_mode("TAKER", "MAKER")
 
     def test_no_proof_mode_no_flip_check(self):
-        # Legacy: proof has no mode → no exception regardless of fresh mode
-        _proof_mode = str("" or "").strip().upper() or None
-        assert _proof_mode is None  # no comparison happens
+        from src.engine.event_reactor_adapter import _SubmitAbortedModeFlipped
+
+        with pytest.raises(_SubmitAbortedModeFlipped, match="MISSING_OR_UNKNOWN_PROOF_MODE"):
+            self._call_with_proof_mode("", "TAKER")
 
     def test_select_edli_order_mode_flip_logic(self):
         """Direct unit test of the ValueError in _build_live_execution_command_certificates.
@@ -351,12 +403,31 @@ class TestPayloadInferencePathDead:
 
 class TestSingleModeAuthorityFreshSide:
     """Twin-authority #9 antibody (2026-06-11 live): the validator's fresh mode
-    comes from the SAME K4.0 rest-then-cross policy as the proof — after the
-    fleeting-edge narrowing, the legacy governor+EV-override re-derivation said
-    TAKER while every proof said REST_DEFAULT/MAKER: a 100% MODE_FLIPPED rate
-    that silently requeued the whole day-ahead lane to the retry cap."""
+    comes from the SAME K4.0 rest-then-cross policy as the proof. The policy is
+    now mode-consistent: rest when the fresh taker does not materially beat the
+    maker leg, cross when it does and the conservative q/q_exec cap clears."""
 
-    def test_far_horizon_two_sided_book_fresh_mode_is_maker(self):
+    def test_far_horizon_two_sided_book_without_material_taker_advantage_is_maker(self):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        mode = _fresh_rest_then_cross_mode(
+            actionable_payload={"q_lcb_5pct": 0.68, "c_fee_adjusted": 0.70},
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-06-12T12:00:00+00:00"}
+            ),
+            fresh_best_bid=0.58,
+            fresh_best_ask=0.665,
+            tick_size=0.01,
+            decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert mode == "MAKER", (
+            "26h out on a two-sided book the shared policy rests when taker "
+            "does not materially beat maker"
+        )
+
+    def test_far_horizon_two_sided_book_material_taker_advantage_is_taker(self):
         from types import SimpleNamespace
         from datetime import datetime, timezone
         from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
@@ -371,9 +442,9 @@ class TestSingleModeAuthorityFreshSide:
             tick_size=0.01,
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
-        assert mode == "MAKER", (
-            "26h out on a two-sided book the shared policy rests — the proof said "
-            "the same, so the validator must AGREE, not flip"
+        assert mode == "TAKER", (
+            "far-horizon does not force maker when fresh taker clears the "
+            "conservative bound and materially beats maker"
         )
 
     def test_near_end_huge_edge_fresh_mode_is_taker(self):

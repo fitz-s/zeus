@@ -26,13 +26,14 @@ Cross-module relationship pinned:
     (every name in the boot/catalog set exists in the engine's universe)
 
 Behavioral pin:
-    LIVE_SAFE_STRATEGIES == {"opening_inertia", "center_buy",
-    "settlement_capture", "shoulder_sell"} after the 2026-04-29
-    operator-approved boot/catalog expansion.
+    LIVE_SAFE_STRATEGIES is the current live boot/catalog set from the strategy
+    registry. Retired strategies may remain reportable for historical
+    attribution, but they are not boot-safe.
 
 Runtime live-entry authority:
-    _LIVE_ALLOWED_STRATEGIES == {"opening_inertia", "center_buy",
-    "settlement_capture"}; shoulder_sell remains blocked at is_strategy_enabled().
+    _LIVE_ALLOWED_STRATEGIES is the runtime-entry subset from the strategy
+    registry and evidence-tier authority. shoulder_sell remains blocked at
+    is_strategy_enabled().
 
 Boot guard:
     Runtime is live-only. Any enabled strategy outside LIVE_SAFE_STRATEGIES
@@ -84,7 +85,6 @@ def _inject_ghost_strategy(monkeypatch, *, live_status: str = "live") -> str:
         metric_support={"high": "blocked", "low": "blocked"},
         kelly_default_multiplier=0.0,
         kelly_phase_overrides={},
-        min_shadow_decisions=0,
         min_settled_decisions=0,
         promotion_evidence_ref=None,
     )
@@ -121,7 +121,14 @@ def test_live_safe_strategies_pins_current_allowlist():
     """
     from src.control.control_plane import LIVE_SAFE_STRATEGIES
 
-    expected = frozenset({"opening_inertia", "center_buy", "settlement_capture", "shoulder_sell"})
+    expected = frozenset({
+        "center_buy",
+        "day0_nowcast_entry",
+        "forecast_qkernel_entry",
+        "imminent_open_capture",
+        "opening_inertia",
+        "settlement_capture",
+    })
     assert LIVE_SAFE_STRATEGIES == expected, (
         f"LIVE_SAFE_STRATEGIES drift detected. Expected {sorted(expected)}, "
         f"got {sorted(LIVE_SAFE_STRATEGIES)}. If this is a deliberate expansion, "
@@ -178,10 +185,24 @@ def test_stage0_strategy_authority_surfaces_are_explicitly_split():
     }
     reportable = set(EDGE_OBSERVATION_KEYS)
 
-    assert buildable == runtime_canonical == portfolio_canonical == reportable == boot_safe
-    assert live_allowed == {"settlement_capture", "center_buy", "opening_inertia", "imminent_open_capture"}
+    reportable_keys = set(strategy_profile.reportable_strategy_keys())
+
+    assert buildable == runtime_canonical == portfolio_canonical == boot_safe
+    assert reportable == reportable_keys
+    assert reportable == boot_safe | {"shoulder_sell"}
+    assert live_allowed == {
+        "center_buy",
+        "day0_nowcast_entry",
+        "forecast_qkernel_entry",
+        "imminent_open_capture",
+        "opening_inertia",
+        "settlement_capture",
+    }
     assert positive_sizing == live_allowed
-    assert "shoulder_sell" in boot_safe
+    assert "forecast_qkernel_entry" in live_allowed
+    assert "day0_nowcast_entry" in live_allowed
+    assert "shoulder_sell" in reportable
+    assert "shoulder_sell" not in boot_safe
     assert "shoulder_sell" not in live_allowed
     # Pre-A4: STRATEGY_KELLY_MULTIPLIERS["shoulder_sell"] == 0.0 etc.
     # Post-A4: equivalent assertion via registry.
@@ -206,10 +227,12 @@ def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
     assert "ENABLE_NEW_TAXONOMY" not in flags
     assert "NEW_TAXONOMY_LIVE" not in flags
     assert control_plane._LIVE_ALLOWED_STRATEGIES == frozenset({
-        "settlement_capture",
         "center_buy",
-        "opening_inertia",
+        "day0_nowcast_entry",
+        "forecast_qkernel_entry",
         "imminent_open_capture",
+        "opening_inertia",
+        "settlement_capture",
     })
     control_plane._control_state["live_allowed_strategies"] = strategy_profile.live_allowed_keys()
     control_plane._control_state["live_allowed_strategies_status"] = "ok"
@@ -217,6 +240,8 @@ def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
     assert control_plane.is_strategy_enabled("center_buy") is True
     assert control_plane.is_strategy_enabled("opening_inertia") is True
     assert control_plane.is_strategy_enabled("imminent_open_capture") is True
+    assert control_plane.is_strategy_enabled("day0_nowcast_entry") is True
+    assert control_plane.is_strategy_enabled("forecast_qkernel_entry") is True
     assert control_plane.is_strategy_enabled("shoulder_sell") is False
     assert control_plane.is_strategy_enabled("shoulder_buy") is False
     assert control_plane.is_strategy_enabled("center_sell") is False
@@ -501,7 +526,8 @@ def test_boot_helper_round_trips_real_db_gate(monkeypatch, tmp_path):
         c.row_factory = sqlite3.Row
         return c
 
-    # Setup: operator issues set_strategy_gate for all 3 non-safe strategies.
+    # Setup: operator issues set_strategy_gate for representative live and
+    # reportable-only strategies.
     conn = fake_conn()
     init_schema(conn)
     for strategy in ("center_buy", "shoulder_sell", "settlement_capture"):
@@ -523,6 +549,7 @@ def test_boot_helper_round_trips_real_db_gate(monkeypatch, tmp_path):
     # Simulate fresh process: empty _control_state, refresh from real DB.
     monkeypatch.setattr(db, "get_world_connection", fake_conn)
     monkeypatch.setattr(cp, "get_world_connection", fake_conn)
+    monkeypatch.setattr(cp, "get_world_connection_with_trades_required", fake_conn)
     monkeypatch.setattr(cp, "_control_state", {})
 
     # Production path: refresh_state=True (the default — what main() uses).

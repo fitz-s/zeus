@@ -25,6 +25,12 @@ from typing import Any, Iterator, Literal, Mapping, Sequence
 from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
 from src.contracts.execution_intent import ExecutionIntent
 from src.riskguard.risk_level import RiskLevel
+from src.state.canonical_projections import (
+    counts_as_active_exposure,
+    is_closed_exposure,
+    is_optimistic_exposure,
+    weighted_lot_exposure_micro,
+)
 
 OrderMode = Literal["MAKER", "TAKER", "NO_TRADE"]
 ExposureState = Literal[
@@ -37,8 +43,9 @@ ExposureState = Literal[
     "QUARANTINED",
 ]
 
-_ACTIVE_EXPOSURE_STATES = {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE", "EXIT_PENDING"}
-_CLOSED_EXPOSURE_STATES = {"ECONOMICALLY_CLOSED_OPTIMISTIC", "ECONOMICALLY_CLOSED_CONFIRMED", "SETTLED"}
+# A4 exposure classification now lives in src.state.canonical_projections
+# (counts_as_active_exposure / is_closed_exposure / is_optimistic_exposure /
+# weighted_lot_exposure_micro) — single typed source instead of local frozensets.
 _UNRESOLVED_SIDE_EFFECT_STATES = {
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
     "UNKNOWN",
@@ -277,12 +284,12 @@ class RiskAllocator:
         optimistic = 0
         weighted = 0
         for lot in self._lots:
-            if lot.market_id != market_id or lot.state in _CLOSED_EXPOSURE_STATES:
+            if lot.market_id != market_id or is_closed_exposure(lot.state):
                 continue
-            if lot.state == "OPTIMISTIC_EXPOSURE":
+            if is_optimistic_exposure(lot.state):
                 optimistic += int(lot.exposure_micro)
                 weighted += int(round(lot.exposure_micro * self.cap_policy.optimistic_exposure_weight))
-            elif lot.state in _ACTIVE_EXPOSURE_STATES:
+            elif counts_as_active_exposure(lot.state):
                 confirmed += int(lot.exposure_micro)
                 weighted += int(lot.exposure_micro)
         return confirmed, optimistic, weighted
@@ -290,7 +297,7 @@ class RiskAllocator:
     def _remaining_capacity(self, scope: str, key: str, cap: int) -> int:
         exposure = 0
         for lot in self._lots:
-            if lot.state in _CLOSED_EXPOSURE_STATES:
+            if is_closed_exposure(lot.state):
                 continue
             if scope == "event" and lot.event_id != key:
                 continue
@@ -302,11 +309,9 @@ class RiskAllocator:
         return max(int(cap) - exposure, 0)
 
     def _weighted_lot_exposure(self, lot: ExposureLot) -> int:
-        if lot.state == "OPTIMISTIC_EXPOSURE":
-            return int(round(lot.exposure_micro * self.cap_policy.optimistic_exposure_weight))
-        if lot.state in _ACTIVE_EXPOSURE_STATES:
-            return int(lot.exposure_micro)
-        return 0
+        return weighted_lot_exposure_micro(
+            lot.state, int(lot.exposure_micro), self.cap_policy.optimistic_exposure_weight
+        )
 
 
 class PortfolioGovernor:

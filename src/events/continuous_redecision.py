@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-29
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, opus-critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). Implements P1 (belief cache) + P2
 #   (cheap screen + enqueue). screen_exit/screen_exit_cancel deleted Wave 3 (zero live callers —
@@ -77,6 +77,12 @@ BELIEF_REPRICE_DELTA: float = 3.0 * TICK_SIZE
 # Submit-side quote freshness bound. Resting GTC orders are not cancelled by age alone here;
 # the rest screen requires new evidence or book drift, and deadline ownership stays in execution.
 PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
+# Price-channel held/candidate quote refresh writes execution_feasibility_evidence
+# every scheduler tick, while executable_market_snapshots only moves on substrate
+# refresh. Continuous redecision may consume the former as a live book witness,
+# but only under a short TTL so a quiet or failed sidecar cannot fabricate fresh
+# price from an old row.
+FEASIBILITY_QUOTE_FRESHNESS_SECONDS: float = 90.0
 # §4.5 moved-book pull: a resting maker quote whose limit is no longer within this many ticks of the
 # current best bid is on a stale book that has walked away — pull and re-quote at the fresh price.
 # One tick of tolerance: a quote exactly at best is fine; a quote a full tick or more off-best is
@@ -88,6 +94,13 @@ REST_BOOK_DRIFT_TICKS: float = 1.0
 # while allowing the full cert path to re-price before the 20-minute hard
 # rest-then-cross escalation deadline.
 REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
+# Family optimum shifts use the same capital-efficiency shape as q-kernel's
+# ROI frontier, but only with screen-time inputs. Keep ultra-cheap dust from
+# pulling a live family slot; the full submit gate still owns strategy-specific
+# floors and expected-profit checks.
+REST_SHIFT_MIN_EXECUTABLE_COST: float = 0.02
+REST_SHIFT_MIN_PAYOFF_Q_LCB: float = 0.02
+REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO: float = 0.10
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
@@ -109,6 +122,7 @@ _TERMINAL_NO_VALUE_SQL = """
          OR rejection_reason LIKE 'FDR_REJECTED:%'
          OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
          OR rejection_reason LIKE 'EVENT_BOUND_CANDIDATE_REJECTED:%'
+         OR rejection_reason LIKE 'SUBMIT_ABORTED_EDGE_REVERSED:%'
         )
     )
  OR (
@@ -200,6 +214,19 @@ class RepriceDecision:
     action: str
     reason: str
     detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; bid-limit drift for BOOK_MOVED.
+    replacement_condition_id: str = ""
+    replacement_bin_label: str = ""
+    replacement_side: str = ""
+
+
+@dataclass(frozen=True)
+class _FamilyRestCandidate:
+    condition_id: str
+    bin_label: str
+    side: str
+    score: float
+    edge: float
+    quote: PriceQuote
 
 
 def _no_value_refutation_event_types_compatible(
@@ -614,11 +641,32 @@ def _decision_time_utc(decision_time: str | datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
+def _belief_forecast_only_admissible(
+    belief: CachedBelief,
+    *,
+    decision_time_utc: datetime | None,
+) -> bool:
     if decision_time_utc is None:
         return False
     metric = str(belief.metric or _metric_from_family_id(belief.family_id) or "").strip()
     if metric not in {"high", "low"}:
+        return False
+    try:
+        from src.strategy.market_phase import market_phase_admits
+
+        return market_phase_admits(
+            city=str(belief.city or "").strip(),
+            target_date=str(belief.target_date or "").strip(),
+            metric=metric,
+            decision_time=decision_time_utc,
+            market_row={},
+        )
+    except Exception:
+        return False
+
+
+def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
+    if decision_time_utc is None:
         return False
     try:
         from src.strategy.market_phase import family_venue_closed
@@ -637,6 +685,7 @@ def _all_latest_beliefs(
     *,
     decision_time: str | datetime | None = None,
     scan_limit: int | None = None,
+    forecast_only_admissible: bool = False,
 ) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
@@ -664,7 +713,7 @@ def _all_latest_beliefs(
           FROM probability_trace_fact
          WHERE decision_id >= ?
            AND decision_id < ?
-         ORDER BY recorded_at DESC, decision_id DESC
+         ORDER BY recorded_at DESC, trace_id DESC
          LIMIT ?
         """,
         (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
@@ -675,6 +724,11 @@ def _all_latest_beliefs(
     for row in rows:
         belief = _row_to_belief(row)
         if belief is None:
+            continue
+        if forecast_only_admissible and not _belief_forecast_only_admissible(
+            belief,
+            decision_time_utc=decision_time_utc,
+        ):
             continue
         if _belief_venue_closed(belief, decision_time_utc=decision_time_utc):
             continue
@@ -855,6 +909,8 @@ def _is_family_level_redecision_refutation(reason: str) -> bool:
     decision attempt.
     """
 
+    if _is_operational_non_value_summary(reason):
+        return False
     return (
         reason.startswith("TRADE_SCORE_NON_POSITIVE")
         or reason.startswith("TRADE_SCORE_BLOCKED")
@@ -864,6 +920,29 @@ def _is_family_level_redecision_refutation(reason: str) -> bool:
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:"
         )
     )
+
+
+def _is_operational_non_value_summary(reason: str) -> bool:
+    """Reasons that say "not submit-able right now", not "no economic value".
+
+    Active-order duplicate suppression and held-position monitor ownership are
+    enforced at the submit/monitor boundary from current state. Persisted summary
+    rows carrying those labels must not become family-level no-value evidence;
+    doing so freezes unrelated bins/directions in the same weather family until
+    cooldown even though the original rejection was operational ownership.
+    """
+
+    reason_text = str(reason or "")
+    if not reason_text.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:"):
+        return False
+    operational_markers = (
+        "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED",
+        "held_family_monitor_owned",
+        "held_position_monitor_owned",
+        "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED",
+        "OPEN_POSITION_SAME_MARKET_MONITOR_OWNED",
+    )
+    return any(marker in reason_text for marker in operational_markers)
 
 
 def _full_decision_family_refutation_still_blocks(
@@ -1131,6 +1210,9 @@ def recent_no_value_event_refutation(
         return None
 
     for row in rows:
+        reason = str(row[1] or "")
+        if _is_operational_non_value_summary(reason):
+            continue
         row_event_type = str(row[6] or "").strip()
         if not _no_value_refutation_event_types_compatible(event.event_type, row_event_type):
             continue
@@ -1138,7 +1220,7 @@ def recent_no_value_event_refutation(
         if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:
             return RecentNoValueEventRefutation(
                 event_id=str(row[0] or ""),
-                rejection_reason=str(row[1] or ""),
+                rejection_reason=reason,
                 created_at=str(row[2] or ""),
                 evidence_match="payload_hash",
             )
@@ -1146,7 +1228,7 @@ def recent_no_value_event_refutation(
         if causal_snapshot_id and prior_causal and causal_snapshot_id == prior_causal:
             return RecentNoValueEventRefutation(
                 event_id=str(row[0] or ""),
-                rejection_reason=str(row[1] or ""),
+                rejection_reason=reason,
                 created_at=str(row[2] or ""),
                 evidence_match="causal_snapshot_id",
             )
@@ -1264,18 +1346,20 @@ def read_freshest_executable_prices(
 
     ``executable_market_snapshots`` is native to the selected outcome token: a NO row's
     ``orderbook_top_ask`` is the cost to buy NO, not a YES ask. Prefer native
-    selected-token rows for each side and use the complement only as a fallback
-    when the opposite side has not been captured. Each quote carries the source
+    selected-token rows for each side and infer the opposite-side quote only from
+    the same binary market identity when that side has not been captured. Each quote carries the source
     snapshot's ``freshness_deadline`` so the screen's stale-price guard (R7) is
     exact. Crossed or non-finite books are skipped (no phantom edge)."""
     if not condition_ids:
         return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
     try:
         cols = {row[1] for row in trade_conn.execute(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
-        return {}
-    if not {
+        cols = set()
+    token_sides: dict[tuple[str, str], str] = {}
+    if {
         "condition_id",
         "orderbook_top_bid",
         "orderbook_top_ask",
@@ -1285,17 +1369,26 @@ def read_freshest_executable_prices(
         "yes_token_id",
         "no_token_id",
     }.issubset(cols):
-        return {}
-    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
-    out: dict[tuple[str, str], PriceQuote] = {}
-    for cid, side_books in _side_books_by_condition(rows).items():
-        for side, book in side_books.items():
-            if 0.0 < book["ask"] < 1.0:
-                out[(cid, side)] = PriceQuote(
-                    price=book["ask"],
-                    freshness_deadline=str(book["freshness_deadline"]),
-                    tick_size=float(book.get("tick_size", TICK_SIZE)),
-                )
+        rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
+        token_sides = _condition_side_tokens(rows)
+        for cid, side_books in _side_books_by_condition(rows).items():
+            for side, book in side_books.items():
+                if 0.0 < book["ask"] < 1.0:
+                    _merge_price_quote(
+                        out,
+                        (cid, side),
+                        PriceQuote(
+                            price=book["ask"],
+                            freshness_deadline=str(book["freshness_deadline"]),
+                            tick_size=float(book.get("tick_size", TICK_SIZE)),
+                        ),
+                    )
+    for key, quote in _freshest_feasibility_quotes_by_condition(
+        trade_conn,
+        token_sides=token_sides,
+        quote_column="ask",
+    ).items():
+        _merge_price_quote(out, key, quote)
     return out
 
 
@@ -1313,12 +1406,14 @@ def read_freshest_resting_best_bids(
     """
     if not condition_ids:
         return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
     try:
         cols = {row[1] for row in trade_conn.execute(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
-        return {}
-    if not {
+        cols = set()
+    token_sides: dict[tuple[str, str], str] = {}
+    if {
         "condition_id",
         "orderbook_top_bid",
         "orderbook_top_ask",
@@ -1328,18 +1423,166 @@ def read_freshest_resting_best_bids(
         "yes_token_id",
         "no_token_id",
     }.issubset(cols):
-        return {}
-    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
-    out: dict[tuple[str, str], PriceQuote] = {}
-    for cid, side_books in _side_books_by_condition(rows).items():
-        for side, book in side_books.items():
-            if 0.0 < book["bid"] < 1.0:
-                out[(cid, side)] = PriceQuote(
-                    price=book["bid"],
-                    freshness_deadline=str(book["freshness_deadline"]),
-                    tick_size=float(book.get("tick_size", TICK_SIZE)),
-                )
+        rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
+        token_sides = _condition_side_tokens(rows)
+        for cid, side_books in _side_books_by_condition(rows).items():
+            for side, book in side_books.items():
+                if 0.0 < book["bid"] < 1.0:
+                    _merge_price_quote(
+                        out,
+                        (cid, side),
+                        PriceQuote(
+                            price=book["bid"],
+                            freshness_deadline=str(book["freshness_deadline"]),
+                            tick_size=float(book.get("tick_size", TICK_SIZE)),
+                        ),
+                    )
+    for key, quote in _freshest_feasibility_quotes_by_condition(
+        trade_conn,
+        token_sides=token_sides,
+        quote_column="bid",
+    ).items():
+        _merge_price_quote(out, key, quote)
     return out
+
+
+def _merge_price_quote(
+    quotes: dict[tuple[str, str], PriceQuote],
+    key: tuple[str, str],
+    quote: PriceQuote,
+) -> None:
+    existing = quotes.get(key)
+    if existing is None:
+        quotes[key] = quote
+        return
+    try:
+        existing_deadline = _parse(existing.freshness_deadline).astimezone(timezone.utc)
+        new_deadline = _parse(quote.freshness_deadline).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return
+    if new_deadline >= existing_deadline:
+        quotes[key] = quote
+
+
+def _freshest_feasibility_quotes_by_condition(
+    trade_conn: sqlite3.Connection,
+    *,
+    token_sides: dict[tuple[str, str], str],
+    quote_column: str,
+    ttl_seconds: float = FEASIBILITY_QUOTE_FRESHNESS_SECONDS,
+) -> dict[tuple[str, str], PriceQuote]:
+    if quote_column not in {"bid", "ask"} or not token_sides:
+        return {}
+    try:
+        cols = {row[1] for row in trade_conn.execute(
+            "PRAGMA table_info(execution_feasibility_evidence)").fetchall()}
+    except sqlite3.Error:
+        return {}
+    required = {
+        "condition_id",
+        "outcome_label",
+        "direction",
+        "quote_seen_at",
+        "created_at",
+        "best_bid_before",
+        "best_ask_before",
+    }
+    if not required.issubset(cols):
+        return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
+    seen_tokens: set[str] = set()
+    for key, raw_token_id in sorted(token_sides.items()):
+        condition_id, expected_side = key
+        token_id = str(raw_token_id or "").strip()
+        if not condition_id or not token_id or token_id in seen_tokens:
+            continue
+        seen_tokens.add(token_id)
+        rows = trade_conn.execute(
+            """
+            SELECT condition_id,
+                   outcome_label,
+                   direction,
+                   quote_seen_at,
+                   created_at,
+                   best_bid_before,
+                   best_ask_before
+              FROM execution_feasibility_evidence
+             WHERE token_id = ?
+             ORDER BY created_at DESC
+             LIMIT 12
+            """,
+            (token_id,),
+        ).fetchall()
+        for row in rows:
+            row_condition_id = str(_row_cell(row, 0, "condition_id") or "").strip()
+            if row_condition_id != condition_id:
+                continue
+            side = _feasibility_row_side(row)
+            if side != expected_side:
+                continue
+            try:
+                bid = float(_row_cell(row, 5, "best_bid_before"))
+                ask = float(_row_cell(row, 6, "best_ask_before"))
+            except (TypeError, ValueError):
+                continue
+            if not _valid_book(bid, ask):
+                continue
+            seen_at = _parse_feasibility_quote_time(row)
+            if seen_at is None:
+                continue
+            deadline = seen_at + timedelta(seconds=max(0.0, float(ttl_seconds)))
+            price = ask if quote_column == "ask" else bid
+            _merge_price_quote(
+                out,
+                (condition_id, side),
+                PriceQuote(
+                    price=price,
+                    freshness_deadline=deadline.isoformat(),
+                    tick_size=TICK_SIZE,
+                ),
+            )
+    return out
+
+
+def _condition_side_tokens(rows: list[sqlite3.Row | tuple]) -> dict[tuple[str, str], str]:
+    out: dict[tuple[str, str], str] = {}
+    for row in rows:
+        condition_id = str(_row_cell(row, 0, "condition_id") or "").strip()
+        selected = str(_row_cell(row, 4, "selected_outcome_token_id") or "").strip()
+        side = _selected_side(row)
+        if not condition_id or side is None or not selected:
+            continue
+        out.setdefault((condition_id, side), selected)
+    return out
+
+
+def _feasibility_row_side(row: sqlite3.Row | tuple) -> str | None:
+    outcome = str(_row_cell(row, 1, "outcome_label") or "").strip().upper()
+    if outcome == "YES":
+        return "buy_yes"
+    if outcome == "NO":
+        return "buy_no"
+    direction = str(_row_cell(row, 2, "direction") or "").strip().lower()
+    if direction in {"buy_yes", "sell_yes"}:
+        return "buy_yes"
+    if direction in {"buy_no", "sell_no"}:
+        return "buy_no"
+    return None
+
+
+def _parse_feasibility_quote_time(row: sqlite3.Row | tuple) -> datetime | None:
+    for index, key in ((3, "quote_seen_at"), (4, "created_at")):
+        raw = str(_row_cell(row, index, key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = _parse(raw)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
 
 
 def _freshest_executable_price_rows_by_condition(
@@ -1373,12 +1616,26 @@ def _freshest_executable_price_rows_by_condition(
         predicates = ["condition_id = ?"]
         if "enable_orderbook" in cols:
             predicates.append("COALESCE(enable_orderbook, 1) = 1")
-        if "active" in cols:
-            predicates.append("COALESCE(active, 1) = 1")
         if "closed" in cols:
             predicates.append("COALESCE(closed, 0) = 0")
         if "accepting_orders" in cols:
             predicates.append("COALESCE(accepting_orders, 1) = 1")
+        if _table_exists(trade_conn, "executable_market_snapshot_invalidations"):
+            predicates.append(
+                """
+                NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations inv
+                     WHERE inv.invalidated_at >= executable_market_snapshots.captured_at
+                       AND (
+                            inv.condition_id = executable_market_snapshots.condition_id
+                            OR inv.token_id = executable_market_snapshots.selected_outcome_token_id
+                            OR inv.token_id = executable_market_snapshots.yes_token_id
+                            OR inv.token_id = executable_market_snapshots.no_token_id
+                       )
+                )
+                """
+            )
         where_clause = " AND ".join(predicates)
         condition_rows = trade_conn.execute(
             """
@@ -1440,7 +1697,7 @@ def _row_tick_size(row: sqlite3.Row | tuple) -> float:
 def _side_books_by_condition(
     rows: list[sqlite3.Row | tuple],
 ) -> dict[str, dict[str, dict[str, float | str]]]:
-    """Return side-native books with complement fallback, keyed by condition and buy side."""
+    """Return native books plus binary-complement inferred books by condition and buy side."""
 
     native: dict[tuple[str, str], dict[str, float | str]] = {}
     inferred: dict[tuple[str, str], dict[str, float | str]] = {}
@@ -1502,7 +1759,11 @@ def screen_entry_redecisions(
 
     Pure read on both DBs. NO HTTP, NO writes. The reactor's scheduler job owns ``acted_state``."""
     if beliefs is None:
-        beliefs = _all_latest_beliefs(world_conn, decision_time=decision_time)
+        beliefs = _all_latest_beliefs(
+            world_conn,
+            decision_time=decision_time,
+            forecast_only_admissible=True,
+        )
     # Collect every condition_id referenced by a cached belief (one price read for the batch).
     all_cids: set[str] = set()
     for belief in beliefs:
@@ -1532,6 +1793,132 @@ def screen_entry_redecisions(
         recent_full_economics_rejections=recent_rejections,
         beliefs=beliefs,
     )
+
+
+def entry_substrate_refresh_scope(
+    trade_conn: sqlite3.Connection,
+    *,
+    beliefs: list[CachedBelief],
+    decision_time: str | datetime,
+    max_families: int = 6,
+    min_edge: float = 0.01,
+    refresh_margin: float = 0.0,
+    max_conditions_per_family: int = 2,
+) -> dict[tuple[str, str, str], set[str]]:
+    """Families whose live beliefs cannot be screened because price substrate is stale.
+
+    The entry screen must not score stale books. But using that same stale-book
+    rejection as the only refresh trigger deadlocks discovery: once every book
+    expires, no family reaches confirmation refresh and entry trading collapses
+    to whichever family happens to have a fresh sidecar row. This helper is a
+    read-only input-refresh selector: it asks for fresh executable books for
+    open belief families with missing or expired YES/NO quotes, then the normal
+    post-refresh screen decides whether any edge exists. It never emits a
+    redecision by itself.
+    """
+
+    if not beliefs:
+        return {}
+    try:
+        limit = max(1, int(max_families))
+    except (TypeError, ValueError):
+        limit = 60
+    dt = _decision_time_utc(decision_time)
+    if dt is None:
+        return {}
+    all_cids: set[str] = set()
+    for belief in beliefs:
+        all_cids.update(
+            str(c or "").strip()
+            for c in (belief.condition_ids or [])
+            if str(c or "").strip()
+        )
+    price_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=all_cids)
+    try:
+        per_family_limit = max(1, int(max_conditions_per_family))
+    except (TypeError, ValueError):
+        per_family_limit = 2
+    try:
+        refresh_floor = float(min_edge) - max(0.0, float(refresh_margin))
+    except (TypeError, ValueError):
+        refresh_floor = -0.01
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for belief in beliefs:
+        metric = str(
+            belief.metric
+            or _metric_from_family_id(belief.family_id)
+            or _metric_from_bin_labels(belief.bin_labels)
+            or ""
+        ).strip()
+        family_key = (
+            str(belief.city or "").strip(),
+            str(belief.target_date or "").strip(),
+            metric,
+        )
+        if not (family_key[0] and family_key[1] and family_key[2] in {"high", "low"}):
+            continue
+        condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
+        ranked_refresh: list[tuple[float, str]] = []
+        for idx, condition_id in enumerate(condition_ids):
+            if not condition_id:
+                continue
+            best_refresh_score: float | None = None
+            for direction in ("buy_yes", "buy_no"):
+                quote = price_by_cid.get((condition_id, direction))
+                q_lcb = (
+                    _vec_float_at(belief.q_lcb_yes_vec, idx)
+                    if direction == "buy_yes"
+                    else _vec_float_at(belief.q_lcb_no_vec, idx)
+                )
+                if q_lcb is None:
+                    continue
+                try:
+                    posterior = (
+                        float(belief.p_posterior_vec[idx])
+                        if direction == "buy_yes"
+                        else one_minus(float(belief.p_posterior_vec[idx]))
+                    )
+                except (IndexError, TypeError, ValueError):
+                    posterior = float(q_lcb)
+                if quote is None:
+                    # A missing executable quote is not evidence of value. The
+                    # previous 0.50 placeholder made high-probability NO legs on
+                    # almost every non-winning bin outrank an actually priced YES
+                    # edge, expanding confirm-refresh into broad family warming.
+                    # Broad discovery owns missing substrate; this live money
+                    # path only refreshes candidates whose current/stale price can
+                    # still prove a near-edge before the post-refresh screen emits.
+                    continue
+                try:
+                    if _parse(quote.freshness_deadline).astimezone(timezone.utc) <= dt:
+                        score = _entry_screen_robust_trade_score(
+                            q_posterior=posterior,
+                            q_lcb_5pct=float(q_lcb),
+                            price=float(quote.price),
+                            tick_size=quote.tick_size,
+                        )
+                        best_refresh_score = (
+                            score
+                            if best_refresh_score is None
+                            else max(best_refresh_score, score)
+                        )
+                except (TypeError, ValueError):
+                    best_refresh_score = (
+                        float(q_lcb) - 0.5
+                        if best_refresh_score is None
+                        else max(best_refresh_score, float(q_lcb) - 0.5)
+                    )
+            if best_refresh_score is not None and best_refresh_score >= refresh_floor:
+                ranked_refresh.append((best_refresh_score, condition_id))
+        if ranked_refresh:
+            ranked_refresh.sort(reverse=True)
+            out[family_key] = {
+                condition_id
+                for _score, condition_id in ranked_refresh[:per_family_limit]
+            }
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _latest_posterior_source_cycle_for_family(
@@ -1727,6 +2114,215 @@ class OpenRest:
     created_at: str = ""
     fact_state: str = ""
     matched_size: float | None = None
+    city: str = ""
+    target_date: str = ""
+    metric: str = ""
+
+
+def _fresh_quote_or_none(quote: PriceQuote | None, screen_time: datetime) -> PriceQuote | None:
+    if quote is None:
+        return None
+    try:
+        deadline = _parse(quote.freshness_deadline)
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        compare_time = screen_time
+        if compare_time.tzinfo is None:
+            compare_time = compare_time.replace(tzinfo=timezone.utc)
+        if deadline.astimezone(timezone.utc) <= compare_time.astimezone(timezone.utc):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return quote
+
+
+def _belief_side_probability(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+) -> tuple[float, float] | None:
+    try:
+        yes_post = float(belief.p_posterior_vec[idx])
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not math.isfinite(yes_post) or not (0.0 <= yes_post <= 1.0):
+        return None
+    if side == "buy_yes":
+        q_lcb = _vec_float_at(belief.q_lcb_yes_vec, idx)
+        posterior = yes_post
+    elif side == "buy_no":
+        q_lcb = _vec_float_at(belief.q_lcb_no_vec, idx)
+        posterior = one_minus(yes_post)
+    else:
+        return None
+    if q_lcb is None:
+        return None
+    return posterior, q_lcb
+
+
+def _family_rest_candidate_score(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+    price: float,
+    tick_size: object = None,
+) -> float | None:
+    probs = _belief_side_probability(belief, idx=idx, side=side)
+    if probs is None:
+        return None
+    posterior, q_lcb = probs
+    cost = _entry_screen_c95_cost(float(price), tick_size=tick_size)
+    edge = min(float(q_lcb) - cost, float(posterior) - cost)
+    if not math.isfinite(edge):
+        return None
+    if edge <= 0.0:
+        return edge
+    if cost < REST_SHIFT_MIN_EXECUTABLE_COST - _EPS:
+        return None
+    if float(q_lcb) < REST_SHIFT_MIN_PAYOFF_Q_LCB - _EPS:
+        return None
+    edge_density = edge / cost
+    kelly_fraction_lcb = edge / max(1.0 - cost, _EPS)
+    score = edge_density * kelly_fraction_lcb
+    if not math.isfinite(score):
+        return None
+    return score
+
+
+def _family_rest_candidate_edge(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+    price: float,
+    tick_size: object = None,
+) -> float | None:
+    probs = _belief_side_probability(belief, idx=idx, side=side)
+    if probs is None:
+        return None
+    posterior, q_lcb = probs
+    edge = _entry_screen_robust_trade_score(
+        q_posterior=posterior,
+        q_lcb_5pct=q_lcb,
+        price=float(price),
+        tick_size=tick_size,
+    )
+    if not math.isfinite(edge):
+        return None
+    return edge
+
+
+def _family_optimum_shift_pull(
+    rest: OpenRest,
+    *,
+    belief: CachedBelief | None,
+    price_by_cid: dict[tuple[str, str], PriceQuote],
+    screen_time: datetime,
+    value_refresh_min_age_seconds: float,
+) -> RepriceDecision | None:
+    """Pull a live maker rest only when a different family sibling is now superior.
+
+    This is the order-management bridge between "one active live order per
+    weather family" and "keep chasing the best executable window until fill".
+    Duplicate suppression still owns final no-double-submit safety. This
+    function only proves that the current rest is no longer the best use of the
+    family's live slot, then asks the existing cancel + redecision path to
+    re-run the full reactor.
+    """
+
+    if belief is None or rest.side not in {"buy_yes", "buy_no"}:
+        return None
+    if rest.quote_age_ms < float(value_refresh_min_age_seconds) * 1000.0:
+        return None
+    labels = [str(label or "") for label in (belief.bin_labels or [])]
+    condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
+    try:
+        rest_idx = labels.index(str(rest.bin_label or ""))
+    except ValueError:
+        return None
+    if rest_idx >= len(condition_ids):
+        return None
+
+    rest_quote = _fresh_quote_or_none(
+        price_by_cid.get((str(rest.condition_id or "").strip(), rest.side)),
+        screen_time,
+    )
+    rest_tick = rest_quote.tick_size if rest_quote is not None else TICK_SIZE
+    current_score = _family_rest_candidate_score(
+        belief,
+        idx=rest_idx,
+        side=rest.side,
+        price=float(rest.limit_price),
+        tick_size=rest_tick,
+    )
+    if current_score is None:
+        return None
+
+    best: _FamilyRestCandidate | None = None
+    for idx, raw_condition_id in enumerate(condition_ids):
+        condition_id = str(raw_condition_id or "").strip()
+        if not condition_id:
+            continue
+        label = labels[idx] if idx < len(labels) else ""
+        for side in ("buy_yes", "buy_no"):
+            if condition_id == str(rest.condition_id or "").strip() and side == rest.side:
+                continue
+            quote = _fresh_quote_or_none(price_by_cid.get((condition_id, side)), screen_time)
+            if quote is None:
+                continue
+            score = _family_rest_candidate_score(
+                belief,
+                idx=idx,
+                side=side,
+                price=float(quote.price),
+                tick_size=quote.tick_size,
+            )
+            if score is None:
+                continue
+            edge = _family_rest_candidate_edge(
+                belief,
+                idx=idx,
+                side=side,
+                price=float(quote.price),
+                tick_size=quote.tick_size,
+            )
+            if edge is None:
+                continue
+            floor = _improve_delta_for_tick(quote.tick_size)
+            if edge < floor - _EPS:
+                continue
+            if best is None or score > best.score:
+                best = _FamilyRestCandidate(
+                    condition_id=condition_id,
+                    bin_label=label,
+                    side=side,
+                    score=score,
+                    edge=edge,
+                    quote=quote,
+                )
+
+    if best is None:
+        return None
+    score_delta = best.score - current_score
+    # ``best.edge`` has already cleared the price-unit round-trip floor above.
+    # ``score`` is ROI/growth-density, so compare it to current_score in its own
+    # units instead of comparing a dimensionless score delta to a price tick.
+    required_score_delta = max(abs(current_score) * REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO, _EPS)
+    if score_delta < required_score_delta - _EPS:
+        return None
+    return RepriceDecision(
+        family_id=rest.family_id,
+        bin_label=rest.bin_label,
+        side=rest.side,
+        action="CANCEL_REPLACE",
+        reason="FAMILY_OPTIMUM_SHIFT",
+        detail=score_delta,
+        replacement_condition_id=best.condition_id,
+        replacement_bin_label=best.bin_label,
+        replacement_side=best.side,
+    )
 
 
 def screen_resting_orders(
@@ -1741,14 +2337,37 @@ def screen_resting_orders(
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
     book has walked away from our limit by at least REST_BOOK_DRIFT_TICKS. Order age alone is not
     trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
-    owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the
-    scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
+    owner is src.state.order_state_predicates.rest_deadline_exceeded, wired by
+    src.execution.staleness_cancel (W4.2; retired src.execution.maker_rest_escalation was the prior
+    owner). Pure read; returns decisions only — the scheduler job enqueues the redecision and
+    performs cancellation through the existing cancel path.
+
+    Entry cheap-screen and submit-layer duplicate-suppression receipts are not
+    cancellation authority. They can select families for a full reactor pass or
+    prevent duplicate submission, but a live rest may only be pulled by
+    order-management evidence produced for that rest.
+    """
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
+    beliefs_by_family: dict[str, CachedBelief] = {}
     condition_ids = {r.condition_id for r in open_rests if r.condition_id}
+    for rest in open_rests:
+        family_id = str(rest.family_id or "")
+        if not family_id or family_id in beliefs_by_family:
+            continue
+        belief = latest_cached_belief(world_conn, family_id=family_id)
+        if belief is None:
+            continue
+        beliefs_by_family[family_id] = belief
+        condition_ids.update(
+            str(c or "").strip()
+            for c in (belief.condition_ids or [])
+            if str(c or "").strip()
+        )
     bid_by_cid = read_freshest_resting_best_bids(trade_conn, condition_ids=condition_ids)
     ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
     out: list[tuple[OpenRest, RepriceDecision]] = []
     for rest in open_rests:
+        belief = beliefs_by_family.get(str(rest.family_id or ""))
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
         decision = screen_reprice(
             world_conn,
@@ -1789,20 +2408,69 @@ def screen_resting_orders(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
                     )
-        # 3) Confirmed-value refresh — GATED under GTC-FIRST (operator goal 2026-06-23 "GTC not
-        #    taker"; the screen partner of mode_consistent_ev rule 6a'). This pull existed to
-        #    re-price an aged rest into a CROSS when crossing the ask was still +EV. With 6a'
-        #    gated (fresh +EV candidates REST instead of crossing), the pull's re-decision now
-        #    just RE-RESTS at the same bid+tick maker limit — so firing it cancelled-and-re-rested
-        #    a still-+EV resting maker every value-refresh window: pure churn that reset the venue
-        #    order / queue position and stopped the GTC rest from surviving to fill (live
-        #    2026-06-23: GTC rests cancelled reason=CONFIRMED_VALUE_REFRESH before any fill). The
-        #    rest is therefore HELD: it survives the full escalation window to fill as a GTC maker,
-        #    and the maker-rest deadline (src.execution.maker_rest_escalation) still escalates it to
-        #    a cross if unfilled. Adverse moves are STILL caught by screen_reprice (belief-decay,
-        #    above) and BOOK_MOVED still re-pegs to keep us competitive — so fair-value protection
-        #    is unchanged; only the now-pointless cross-pull churn is removed. (Reversible: restore
-        #    this block to re-enable the value-refresh cross-pull alongside rule 6a'.)
+        if decision is None:
+            # 3) Confirmed-value refresh. This is not an age-only cancel: an aged maker rest is
+            # pulled only when the latest conservative held-side q_lcb still clears the current
+            # executable ask, fee, c95 tick, and a material-improvement floor. The cancel then
+            # routes through the existing EDLI cert path; _family_rest_state arms the
+            # post-real-maker-window escalation lane, and executor duplicate guards still own
+            # final submit safety.
+            ask = ask_by_cid.get((rest.condition_id, rest.side))
+            if ask is not None:
+                try:
+                    if _parse(ask.freshness_deadline) <= screen_time:
+                        ask = None
+                except (TypeError, ValueError):
+                    ask = None
+            if ask is not None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
+                held_q_lcb = (
+                    _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side)
+                    if belief is not None
+                    else None
+                )
+                if held_q_lcb is not None:
+                    try:
+                        idx = belief.bin_labels.index(rest.bin_label) if belief is not None else -1
+                        yes_post = float(belief.p_posterior_vec[idx]) if idx >= 0 else float("nan")
+                        posterior_q = yes_post if rest.side == "buy_yes" else one_minus(yes_post)
+                    except (TypeError, ValueError, IndexError):
+                        posterior_q = float("nan")
+                    if math.isfinite(posterior_q):
+                        score = _entry_screen_robust_trade_score(
+                            q_posterior=posterior_q,
+                            q_lcb_5pct=float(held_q_lcb),
+                            price=float(ask.price),
+                            tick_size=ask.tick_size,
+                        )
+                        material_price_change = abs(float(ask.price) - float(rest.limit_price))
+                        material_refresh_floor = _improve_delta_for_tick(ask.tick_size)
+                        executable_tick = _quote_tick_size(ask.tick_size)
+                        if (
+                            material_price_change >= executable_tick - _EPS
+                            and score >= material_refresh_floor - _EPS
+                        ):
+                            decision = RepriceDecision(
+                                family_id=rest.family_id,
+                                bin_label=rest.bin_label,
+                                side=rest.side,
+                                action="CANCEL_REPLACE",
+                                reason="CONFIRMED_VALUE_REFRESH",
+                                detail=score,
+                            )
+        if decision is None:
+            # 4) Family optimum shift. A family-level duplicate mutex should not
+            # make a stale open rest invisible when a different sibling/direction
+            # is now the materially better executable window. Pull the old rest
+            # only after the maker window and only when the replacement leg has
+            # a positive robust edge that beats the current rest by round-trip
+            # friction; the full reactor still owns the replacement submit.
+            decision = _family_optimum_shift_pull(
+                rest,
+                belief=belief,
+                price_by_cid=ask_by_cid,
+                screen_time=screen_time,
+                value_refresh_min_age_seconds=value_refresh_min_age_seconds,
+            )
         if decision is not None:
             out.append((rest, decision))
     return out

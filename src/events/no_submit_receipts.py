@@ -254,6 +254,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # persist it so the serving calibrator is recoverable from the blob forever.
     if payload.get("q_source") is None:
         payload.pop("q_source", None)
+    if payload.get("day0_probability_authority") is None:
+        payload.pop("day0_probability_authority", None)
     qkernel_source = str(payload.get("q_source") or "").strip() == "qkernel_spine"
     qkernel_authority = str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
     if payload.get("qkernel_execution_economics") is None or not (qkernel_source or qkernel_authority):
@@ -300,6 +302,12 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # decided is first-class decision provenance, recoverable from the blob forever.
     if payload.get("submit_lane") is None:
         payload.pop("submit_lane", None)
+    if payload.get("min_entry_price") is None:
+        payload.pop("min_entry_price", None)
+    if payload.get("min_expected_profit_usd") is None:
+        payload.pop("min_expected_profit_usd", None)
+    if payload.get("min_submit_edge_density") is None:
+        payload.pop("min_submit_edge_density", None)
     # C2 selection-shrinkage telemetry fields (task #60): ALWAYS excluded from
     # receipt_json — never hashed. Their canonical home is the queryable COLUMNS
     # (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority).

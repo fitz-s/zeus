@@ -1,6 +1,6 @@
 # Created: 2026-06-23
 # Last audited: 2026-06-23
-# Authority basis: docs/plans/2026-06-23-full-lifecycle-audit-impl.md (Phase 1, P0-1) +
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-06-23-full-lifecycle-audit-impl.md (Phase 1, P0-1) +
 #   external lifecycle audit P0-1 (taker authorization must use an execution-conditioned bound,
 #   not the plain model q_lcb). Antibody: reverting the q_exec_lcb bound in
 #   select_rest_then_cross_mode (back to gating on q_lcb) re-admits the blocked-taker case below.

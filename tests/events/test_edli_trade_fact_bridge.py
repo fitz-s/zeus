@@ -238,6 +238,18 @@ def _pre_submit_payload() -> dict:
         "current_best_bid": 0.71,
         "current_best_ask": 0.72,
         "limit_price": 0.72,
+        "size": 7.0,
+        "q_live": 0.95,
+        "q_lcb_5pct": 0.90,
+        "expected_edge": 0.18,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_type": "portfolio",
+        },
         "would_cross_book": True,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -258,6 +270,8 @@ def _pre_submit_payload() -> dict:
         "venue_connectivity_checked_at": NOW.isoformat(),
         "balance_allowance_authority_id": "wallet",
         "balance_allowance_checked_at": NOW.isoformat(),
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
     }
 
 

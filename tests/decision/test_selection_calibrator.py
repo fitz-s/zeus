@@ -139,6 +139,7 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     art = _artifact({key: {"n": 200, "hit_rate": 0.46}})
+    art["_meta"]["armed_sides"] = ["YES", "NO"]
 
     v = sc.apply_selection_calibrator(
         raw_side_prob=raw_yes_prob,
@@ -150,15 +151,15 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     )
     assert v.trade is True
     assert v.abstained is False
+    assert v.basis == "SELECTION_BETA_95"
     # The lower bound clears the 0.30 cost -> genuine edge survives.
     assert v.q_safe - 0.30 > 0.0
     assert v.q_safe <= raw_yes_prob + 1e-9  # still a lower bound
 
 
-def test_legacy_sel_v1_artifact_is_no_only_so_buy_yes_passes_through():
-    # The promoted sel_v1 artifact was fitted for the buy-NO adverse-selection pathology. It may
-    # contain sparse YES cells as corpus bookkeeping, but without explicit YES arming those cells
-    # are not live authority and must not zero every buy_yes candidate.
+def test_legacy_sel_v1_sparse_yes_cell_does_not_arm_buy_yes():
+    # Legacy sel_v1 artifacts can predate explicit side metadata. Sparse YES cells remain corpus
+    # bookkeeping only; side scope is inferred only from deep cells that clear min_n.
     side, lead_b, bin_class = "YES", "L1", "modal"
     raw_yes_prob = 0.65
     bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
@@ -173,10 +174,35 @@ def test_legacy_sel_v1_artifact_is_no_only_so_buy_yes_passes_through():
         admission_margin=0.20,
         artifact=art,
     )
+    assert v.trade is False
+    assert v.abstained is True
+    assert v.basis == "SIDE_NOT_ARMED"
+    assert v.q_safe == 0.0
+
+
+def test_legacy_sel_v1_deep_yes_cell_infers_buy_yes_authority():
+    # Live artifacts generated before explicit armed_sides may still contain deep YES cells. Those
+    # cells are real calibrator authority and must not be silently renamed to NO-only.
+    side, lead_b, bin_class = "YES", "L1", "modal"
+    raw_yes_prob = 0.65
+    bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
+    key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
+    art = _artifact({key: {"n": 80, "hit_rate": 0.70}})
+
+    v = sc.apply_selection_calibrator(
+        raw_side_prob=raw_yes_prob,
+        side=side,
+        lead_days=1.0,
+        bin_class=bin_class,
+        admission_margin=0.20,
+        artifact=art,
+    )
+
     assert v.trade is True
     assert v.abstained is False
-    assert v.basis == "SIDE_NOT_ARMED"
-    assert v.q_safe == pytest.approx(raw_yes_prob)
+    assert v.basis == "SELECTION_BETA_95"
+    assert v.n_g == 80
+    assert 0.0 < v.q_safe <= raw_yes_prob
 
 
 def test_explicitly_armed_yes_missing_cell_still_fails_closed():
@@ -242,6 +268,7 @@ def test_fail_closed_on_under_min_n_cell():
 def test_fail_closed_on_missing_cell_in_active_artifact():
     # An active artifact that did not grade THIS side/cell -> abstain (no silent authority).
     art = _artifact({"YES|L1|modal|pb9": {"n": 200, "hit_rate": 0.46}})
+    art["_meta"]["armed_sides"] = ["YES", "NO"]
     v = sc.apply_selection_calibrator(
         raw_side_prob=0.875, side="NO", lead_days=1.0, bin_class="nonmodal",
         admission_margin=0.175, artifact=art,
@@ -281,7 +308,7 @@ def test_blocker_fix_runtime_and_fitter_version_strings_agree():
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     # Artifact stamped exactly as the fitter would stamp it.
     art = {
-        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30},
+        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30, "armed_sides": ["NO"]},
         "cells": {key: {"n": 104, "hit_rate": 0.679}},
     }
     v = sc.apply_selection_calibrator(

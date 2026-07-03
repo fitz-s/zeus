@@ -450,7 +450,7 @@ def test_missing_decision_group_cannot_write_transfer_evidence() -> None:
     [
         ("training_allowed", {"training_allowed": 0}),
         ("authority", {"authority": "UNVERIFIED"}),
-        ("causality_status", {"causality_status": "RUNTIME_ONLY_FALLBACK"}),
+        ("causality_status", {"causality_status": "ISSUE_TIME_MISSING"}),
     ],
 )
 def test_non_eligible_target_pairs_do_not_write_transfer_evidence(field: str, overrides: dict) -> None:

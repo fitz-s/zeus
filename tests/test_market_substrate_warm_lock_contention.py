@@ -43,6 +43,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -121,6 +122,106 @@ def _make_clob_mock() -> MagicMock:
         "feeSchedule": {"makerFeeRate": "0.0", "takerFeeRate": "0.02"}
     }
     return clob
+
+
+def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
+    """The coordinator lease must cover the durable snapshot write unit only.
+
+    The refresh loop may spend seconds on CLOB/network prefetch, but the
+    per-row persist context must wrap the append, transition write, and commit
+    together so the unified writer lease is held for milliseconds, not for the
+    whole substrate refresh.
+    """
+
+    events: list[object] = []
+    commit_records: list[dict[str, object]] = []
+
+    class _FakeConn:
+        total_changes = 0
+
+        def commit(self) -> None:
+            events.append("commit")
+
+        def rollback(self) -> None:
+            events.append("rollback")
+
+    class _FakeLease:
+        def record_commit(self, **kwargs) -> None:
+            commit_records.append(kwargs)
+
+    class _PersistContext:
+        def __enter__(self):
+            events.append("enter")
+            return _FakeLease()
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            events.append("exit")
+            return False
+
+    def _fake_insert(conn, snapshot) -> None:
+        events.append(("insert", snapshot.condition_id))
+        conn.total_changes += 1
+
+    monkeypatch.setattr(ms, "insert_snapshot", _fake_insert)
+    monkeypatch.setattr(ms, "_write_book_hash_transition", lambda **_kwargs: None)
+    monkeypatch.setattr(ms, "_prev_orderbook_hash_by_market", {})
+
+    conn = _FakeConn()
+    market = _make_market(1)
+    outcome = market["outcomes"][0]
+    outcome["question_id"] = "question-1"
+    outcome["active"] = True
+    prefetched_book = {
+        "asset_id": outcome["token_id"],
+        "market": outcome["token_id"],
+        "bids": [{"price": "0.55", "size": "100"}],
+        "asks": [{"price": "0.60", "size": "100"}],
+        "tick_size": "0.01",
+        "min_order_size": "1",
+        "neg_risk": False,
+    }
+    decision = SimpleNamespace(
+        edge=SimpleNamespace(direction="buy_yes"),
+        tokens={
+            "token_id": outcome["token_id"],
+            "no_token_id": outcome["no_token_id"],
+            "market_id": outcome["condition_id"],
+        },
+    )
+
+    class _Clob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": outcome["token_id"], "outcome": "YES"},
+                    {"token_id": outcome["no_token_id"], "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "1",
+                "neg_risk": False,
+            }
+
+    ms.capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=decision,
+        clob=_Clob(),
+        captured_at=_NOW,
+        scan_authority="VERIFIED",
+        prefetched_orderbook=prefetched_book,
+        tolerate_missing_book=True,
+        persist_context_factory=_PersistContext,
+        commit_after_persist=True,
+    )
+
+    assert events == ["enter", ("insert", outcome["condition_id"]), "commit", "exit"]
+    assert commit_records
+    assert commit_records[0]["rows_changed"] == 1
+    assert commit_records[0]["commit_ms"] >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +406,131 @@ def test_capture_busy_timeout_not_shrunk_below_floor(monkeypatch):
     assert _snapshot_capture_busy_timeout_ms(10.0) >= FLOOR_MS
 
 
+def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(monkeypatch):
+    """Batch substrate refresh must prefer family coverage over one locked row."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+
+    single = _snapshot_capture_busy_timeout_ms(12.0)
+    batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+
+    assert single >= 4000
+    assert 0 < batch < single
+    assert batch >= 150
+
+
+def test_small_priority_capture_busy_timeout_splits_candidate_budget(monkeypatch):
+    """Small priority recaptures must not let one locked row spend the reserve."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_SHARE_MAX_CANDIDATES", raising=False)
+
+    broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+    priority = _snapshot_capture_busy_timeout_ms(
+        12.0,
+        remaining_candidates=2,
+        priority_candidate=True,
+    )
+
+    assert broad_batch < priority < 8000
+    assert priority == 6000
+
+
+def test_late_small_priority_capture_keeps_durable_floor(monkeypatch):
+    """Late-cycle money-path recapture must not collapse to the progress floor."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    priority = _snapshot_capture_busy_timeout_ms(
+        0.02,
+        remaining_candidates=2,
+        priority_candidate=True,
+    )
+    broad = _snapshot_capture_busy_timeout_ms(
+        0.02,
+        remaining_candidates=2,
+        priority_candidate=False,
+    )
+
+    assert priority >= 4000
+    assert broad < priority
+
+
+def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
+    """Family-sized money-path recaptures must wait out normal WAL contention."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+    priority_family = _snapshot_capture_busy_timeout_ms(
+        12.0,
+        remaining_candidates=21,
+        priority_candidate=True,
+    )
+
+    assert broad_batch < priority_family
+    assert priority_family >= 4000
+
+
+def test_claim_priority_batch_capture_busy_timeout_keeps_durable_floor(monkeypatch):
+    """A live claim-order warm batch must not fail-fast under normal WAL contention."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    priority_claim_batch = _snapshot_capture_busy_timeout_ms(
+        5.0,
+        remaining_candidates=32,
+        priority_candidate=True,
+    )
+
+    assert priority_claim_batch >= 4000
+
+
+def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
+    """An oversized priority batch must make progress past one locked row."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+    priority_batch = _snapshot_capture_busy_timeout_ms(
+        12.0,
+        remaining_candidates=46,
+        priority_candidate=True,
+    )
+
+    assert priority_batch == broad_batch
+    assert 0 < priority_batch < 4000
+
+
+def test_multi_candidate_lock_retries_yield_to_next_candidate():
+    """A locked candidate in a multi-row refresh should not retry in place."""
+
+    assert ms._snapshot_capture_effective_lock_retries(
+        configured_retries=2,
+        remaining_candidates=4,
+    ) == 0
+    assert ms._snapshot_capture_effective_lock_retries(
+        configured_retries=2,
+        remaining_candidates=1,
+    ) == 2
+
+
 # ---------------------------------------------------------------------------
 # R-INTERVAL: the warm-cycle refresh budget must fit inside the scheduler interval
 # (the OTHER half of the coverage-starvation: even when inserts succeed, a cycle
@@ -341,3 +567,25 @@ def test_refresh_budget_fits_inside_warm_interval(monkeypatch):
     assert interval_s <= 30.0, (
         f"warm interval {interval_s}s exceeds the 30s executable-price freshness window"
     )
+
+
+def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatch):
+    """Background substrate refresh must not inherit the long discovery CLOB timeout.
+
+    The warm lane retries continuously and must stay inside its 20s cadence.
+    ``ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS`` is allowed to be longer for broad
+    discovery, but it must not make pending-family /books or targeted decision
+    refresh block most of a live cycle. The default must still exceed the
+    measured cold TLS handshake envelope for the CLOB host.
+    """
+
+    import src.data.substrate_observer as substrate_observer
+
+    monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "9.0")
+    monkeypatch.delenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", raising=False)
+
+    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(4.0)
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "2.25")
+
+    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(2.25)

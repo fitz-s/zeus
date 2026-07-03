@@ -117,10 +117,9 @@ def _request(city: str = "Paris", tz: str = "Europe/Paris") -> ReplacementForeca
         baseline_source_run_id="b0-run",
         baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         baseline_source_available_at=_dt(2),
-        aifs_extraction=_aifs_extraction(), aifs_source_run_id="aifs-run", aifs_source_available_at=_dt(2, 30),
         openmeteo_anchor=_anchor(), openmeteo_source_run_id="om9-run", openmeteo_source_available_at=_dt(3),
         bins=_bins(), source_cycle_time=_dt(0), computed_at=_dt(4), expires_at=_dt(6),
-        anchor_artifact_id=None, aifs_artifact_id=None, openmeteo_precision_guard=_precision_guard(),
+        anchor_artifact_id=None, openmeteo_precision_guard=_precision_guard(),
     )
 
 
@@ -175,14 +174,16 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
         target_local_date=_date.fromisoformat(target_date), tz_name=tz,
     )
     all_vals = {"ecmwf_ifs": anchor_value, **live_values}
+    source_available_at = _dt(3).isoformat()
+    captured_at = _dt(3, 30).isoformat()
     for m, v in all_vals.items():
         conn.execute(
             """INSERT INTO raw_model_forecasts
                (model, city, target_date, metric, source_cycle_time, source_available_at,
                 captured_at, lead_days, forecast_value_c, endpoint, model_name, source_family)
-               VALUES (?, ?, ?, 'high', ?, 'avail', 'cap', ?, ?, 'single_runs', ?,
+               VALUES (?, ?, ?, 'high', ?, ?, ?, ?, ?, 'single_runs', ?,
                        'openmeteo_single_runs')""",
-            (m, req.city, target_date, cyc, lead, v, m),
+            (m, req.city, target_date, cyc, source_available_at, captured_at, lead, v, m),
         )
 
 
@@ -194,7 +195,7 @@ def _enable_flag(monkeypatch):
 def _disable_other_layers(monkeypatch):
     # Wave-2 item 7: the EB-bias layer is permanently deleted (center never shifted),
     # so only the member-vote smoothing layer remains to neutralize here.
-    monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None)
+    monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None, raising=False)
 
 
 # =====================================================================================
@@ -266,6 +267,97 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
     ).fetchone()
     assert pc["posterior_method"] == "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"  # column unchanged
     assert fusion["model_set_hash"] and fusion["resolution_mix_hash"] and fusion["lead_bucket"]
+
+
+def test_source_clock_accepts_registered_station_entry_sources(monkeypatch, tmp_path) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+hko_fnd,"
+        "ecmwf_ifs:0.5+hko_fnd:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    try:
+        _install_seams(
+            monkeypatch,
+            live_values={"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2},
+            history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"],
+        )
+        conn = _conn()
+        _seed_current_single_runs(
+            conn,
+            live_values={
+                "ukmo_global_deterministic_10km": 23.0,
+                "icon_eu": 23.2,
+                "hko_fnd": 31.0,
+            },
+        )
+
+        pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
+        fusion = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
+
+        assert fusion["method"] == "SOURCE_CLOCK_FIXED_WEIGHT"
+        assert fusion["source_clock_one_scheme"] is not None
+        assert "hko_fnd" in fusion["used_models"]
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
+
+
+def test_source_clock_skips_frozen_scheme_that_omits_live_station_source(monkeypatch, tmp_path) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+ukmo_global_deterministic_10km,"
+        "ecmwf_ifs:0.5+ukmo_global_deterministic_10km:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    try:
+        _install_seams(
+            monkeypatch,
+            live_values={
+                "ukmo_global_deterministic_10km": 23.0,
+                "icon_eu": 23.2,
+                "hko_fnd": 31.0,
+            },
+            history_models=[
+                "ecmwf_ifs",
+                "ukmo_global_deterministic_10km",
+                "icon_eu",
+                "hko_fnd",
+            ],
+        )
+        conn = _conn()
+        _seed_current_single_runs(
+            conn,
+            live_values={
+                "ukmo_global_deterministic_10km": 23.0,
+                "icon_eu": 23.2,
+                "hko_fnd": 31.0,
+            },
+        )
+
+        pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
+        fusion = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
+
+        assert fusion["method"] != "SOURCE_CLOCK_FIXED_WEIGHT"
+        assert fusion["source_clock_one_scheme"] is None
+        assert "hko_fnd" in fusion["used_models"]
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
 
 
 # =====================================================================================

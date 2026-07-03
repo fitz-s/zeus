@@ -2,11 +2,11 @@
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase6_evidence_ladder/PHASE_6_PLAN.md §T2+T3
 #                  + §Schema-Bump-Summary (T2+T3 in same PR = single bump N→N+1)
-"""Phase 6 T2+T3 — DDL for shadow_experiments, evidence_tier_assignments,
-and regret_decompositions tables (world DB).
+"""Phase 6 T2+T3 — DDL for evidence_tier_assignments and
+regret_decompositions tables (world DB).
 
 Single-bump approach: T2 and T3 tables land in the same schema version bump
-per plan §Schema-Bump-Summary. All three tables are created here.
+per plan §Schema-Bump-Summary.
 
 INV-37: caller supplies conn; never auto-opens.
 """
@@ -16,21 +16,8 @@ import sqlite3
 
 
 # ---------------------------------------------------------------------------
-# T2 tables: shadow_experiments + evidence_tier_assignments + index
+# T2 tables: evidence_tier_assignments + index
 # ---------------------------------------------------------------------------
-
-CREATE_SHADOW_EXPERIMENTS_SQL = """
-CREATE TABLE IF NOT EXISTS shadow_experiments (
-    experiment_id  TEXT PRIMARY KEY,
-    strategy_id    TEXT NOT NULL,
-    config_hash    TEXT NOT NULL,
-    started_at     TEXT NOT NULL,
-    closed_at      TEXT,
-    cohort_tag     TEXT NOT NULL,
-    immutable      INTEGER NOT NULL DEFAULT 1
-        CHECK (immutable IN (0, 1))
-)
-"""
 
 CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL = """
 CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
@@ -66,8 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_eta_strategy_assigned
 CREATE_REGRET_DECOMPOSITIONS_SQL = """
 CREATE TABLE IF NOT EXISTS regret_decompositions (
     id                              INTEGER PRIMARY KEY AUTOINCREMENT,
-    experiment_id                   TEXT NOT NULL
-        REFERENCES shadow_experiments(experiment_id),
+    experiment_id                   TEXT,
+    strategy_id                     TEXT NOT NULL DEFAULT '',
+    cohort_tag                      TEXT NOT NULL DEFAULT '',
     decision_event_id               TEXT NOT NULL,
     forecast_error_usd              REAL,
     observation_error_usd           REAL,
@@ -88,17 +76,27 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     Idempotent (IF NOT EXISTS). Called from db.py init_schema during daemon boot.
 
     Tables created:
-      - shadow_experiments      (T2 — world DB)
       - evidence_tier_assignments (T2 — world DB) + idx_eta_strategy_assigned
       - regret_decompositions   (T3 — world DB)
 
     INV-37: caller provides conn; never auto-opens.
     """
-    conn.execute(CREATE_SHADOW_EXPERIMENTS_SQL)
     conn.execute(CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL)
     _migrate_evidence_tier_assignments_schema(conn)
     conn.execute(CREATE_IDX_ETA_STRATEGY_ASSIGNED_SQL)
     conn.execute(CREATE_REGRET_DECOMPOSITIONS_SQL)
+    _migrate_regret_decompositions_schema(conn)
+
+
+def _migrate_regret_decompositions_schema(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(regret_decompositions)").fetchall()
+    }
+    if "strategy_id" not in columns:
+        conn.execute("ALTER TABLE regret_decompositions ADD COLUMN strategy_id TEXT NOT NULL DEFAULT ''")
+    if "cohort_tag" not in columns:
+        conn.execute("ALTER TABLE regret_decompositions ADD COLUMN cohort_tag TEXT NOT NULL DEFAULT ''")
 
 
 def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:

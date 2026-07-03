@@ -6,7 +6,7 @@
 #          are recorded-pending (not hard-failed), and that the precondition
 #          check raises on unregistered cities.
 # Reuse: Inspect onboard_cities.py + naming_conventions.yaml before running;
-#        authority: docs/operations/ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md
+#        authority: docs/archive/2026-Q2/operations_historical/ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md
 """Completeness tests for the city onboarding pipeline (scripts/onboard_cities.py).
 
 RED-FIRST TDD: these tests are written against the CURRENT (broken) state of

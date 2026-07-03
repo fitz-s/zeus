@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-24
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
-#   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md), STEP 6 validation.
+#   (docs/archive/2026-Q2/operations_historical/ENS_REFIT_PLAN_2026-05-24.md), STEP 6 validation.
 # Purpose: Blocked-OOS validation of calibration_pairs_v2 quality for both
 #   'none' and 'full_transport_v1' error-model families; outputs markdown table.
 # Reuse: Run after a full rebuild+refit against an isolated staging DB; read-only.

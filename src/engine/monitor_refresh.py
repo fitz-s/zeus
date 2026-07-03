@@ -84,10 +84,12 @@ from src.calibration.ens_bias_repo import read_bias_model
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
+_DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
+_DAY0_NOWCAST_MAX_OBSERVATION_AVAILABILITY_LAG = timedelta(hours=6)
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
@@ -96,6 +98,43 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
 _nowcast_consecutive_write_failures = 0
+
+
+def _monitor_receipt_float(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _monitor_receipt_vector(values) -> list[float | None]:
+    try:
+        arr = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return []
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    return [_monitor_receipt_float(item) for item in arr.tolist()]
+
+
+def _monitor_receipt_quantiles(values) -> dict[str, float | None]:
+    try:
+        arr = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return {"count": 0, "min": None, "q50": None, "q90": None, "max": None}
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {"count": 0, "min": None, "q50": None, "q90": None, "max": None}
+    return {
+        "count": int(arr.size),
+        "min": _monitor_receipt_float(np.min(arr)),
+        "q50": _monitor_receipt_float(np.quantile(arr, 0.5)),
+        "q90": _monitor_receipt_float(np.quantile(arr, 0.9)),
+        "max": _monitor_receipt_float(np.max(arr)),
+    }
 
 
 @dataclass(frozen=True)
@@ -132,11 +171,21 @@ def _model_only_native_posterior(p_native: float) -> float:
     return p
 
 
-def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: str) -> float:
+def _normalize_monitor_direction(direction: object) -> str:
+    """Normalize entry direction before converting YES-bin belief to held side."""
+    direction_value = getattr(direction, "value", direction)
+    text = str(direction_value or "").strip().lower()
+    if text in {"buy_yes", "yes", "direction.yes"}:
+        return "buy_yes"
+    if text in {"buy_no", "no", "direction.no"}:
+        return "buy_no"
+    raise ValueError(f"unsupported monitor direction {direction!r}")
+
+
+def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: object) -> float:
     """Convert a YES-bin point probability into the held-side outcome space."""
     p_yes = _model_only_native_posterior(p_yes_bin)
-    direction_value = getattr(direction, "value", direction)
-    if str(direction_value) == "buy_no":
+    if _normalize_monitor_direction(direction) == "buy_no":
         return _model_only_native_posterior(one_minus(p_yes))
     return p_yes
 
@@ -382,6 +431,10 @@ def _build_monitor_one_calibrator_q(
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+def _set_day0_zero_probability_exit_authority(position: Position, has_authority: bool) -> None:
+    setattr(position, _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR, has_authority)
 
 
 # K6 stage-1 belief-dead watchdog (2026-06-12). A fail-closed hold on missing
@@ -678,13 +731,25 @@ def _attempt_held_belief_readthrough(
             return None
         seed_path, seed_payload = seed
 
+        # The on-disk seed is a source/anchor envelope, not the monitor decision
+        # instant. Re-use its source-cycle identity, but stamp the read-only
+        # request with the current monitor clock so arrival/freshness guards do
+        # not compare a new decision time to an expired seed TTL.
+        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
+        from src.engine.position_belief import monitor_belief_max_age_hours
+
+        readthrough_ttl_h = max(0.01, float(monitor_belief_max_age_hours()))
+        readthrough_payload = dict(seed_payload)
+        readthrough_payload["computed_at"] = _now.isoformat()
+        readthrough_payload["expires_at"] = (_now + timedelta(hours=readthrough_ttl_h)).isoformat()
+
         from src.data.replacement_forecast_materialization_request_builder import (
             build_materialize_request_dataclass,
             build_replacement_forecast_materialization_request,
         )
 
         build = build_replacement_forecast_materialization_request(
-            seed_payload, base_dir=seed_path.parent
+            readthrough_payload, base_dir=seed_path.parent
         )
         if not build.ok or build.request is None:
             return None
@@ -704,8 +769,11 @@ def _attempt_held_belief_readthrough(
         # live monitor cycle), so all single_runs available at that instant are
         # admitted.  source_cycle_time (the forecast cycle, "06:00 UTC") is kept
         # verbatim — it is NOT a wall-clock and must NOT be advanced.
-        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
-        request = replace(request, computed_at=_now)
+        request = replace(
+            request,
+            computed_at=_now,
+            expires_at=_now + timedelta(hours=readthrough_ttl_h),
+        )
 
         from src.data.replacement_forecast_materializer import (
             compute_replacement_posterior_readonly,
@@ -782,6 +850,35 @@ def _record_nowcast_write_failure(*, market_slug: str, trade_id: str) -> int:
     return _nowcast_consecutive_write_failures
 
 
+def _parse_day0_nowcast_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _day0_nowcast_freshness_rejection_reason(
+    *,
+    observation_time: str | None,
+    observation_available_at: str | None,
+) -> str | None:
+    if not observation_available_at:
+        return None
+    observed_at = _parse_day0_nowcast_timestamp(observation_time)
+    available_at = _parse_day0_nowcast_timestamp(observation_available_at)
+    if observed_at is None or available_at is None:
+        return "day0_nowcast_observation_clock_unparseable"
+    lag = available_at - observed_at
+    if lag > _DAY0_NOWCAST_MAX_OBSERVATION_AVAILABILITY_LAG:
+        return f"day0_nowcast_observation_stale:lag_hours={lag.total_seconds() / 3600.0:.2f}"
+    return None
+
+
 def _ens_result_phase2_keys(ens_result: dict) -> tuple[
     str | None, str | None, str | None
 ]:
@@ -848,7 +945,56 @@ def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     degradation_level = ens_result.get("degradation_level")
     if degradation_level:
         validations.append(f"forecast_degradation:{degradation_level}")
+    source_models = [
+        str(model).strip()
+        for model in (ens_result.get("source_models") or [])
+        if str(model).strip()
+    ]
+    if source_models:
+        validations.append(f"forecast_source_models:{','.join(source_models)}")
+    expected_models = [
+        str(model).strip()
+        for model in (ens_result.get("expected_models") or [])
+        if str(model).strip()
+    ]
+    if expected_models:
+        validations.append(f"forecast_expected_models:{','.join(expected_models)}")
+    source_model_count = ens_result.get("source_model_count")
+    if source_model_count is not None:
+        validations.append(f"forecast_source_model_count:{source_model_count}")
+    fetch_time = ens_result.get("fetch_time")
+    if fetch_time:
+        validations.append(f"forecast_fetch_time:{fetch_time}")
     return validations
+
+
+def _day0_hourly_bundle_authority_rejection_reason(ens_result: dict) -> str | None:
+    if str(ens_result.get("source_id") or "") != "day0_hourly_vectors":
+        return None
+    expected = {
+        str(model).strip()
+        for model in (ens_result.get("expected_models") or [])
+        if str(model).strip()
+    }
+    observed = {
+        str(model).strip()
+        for model in (ens_result.get("source_models") or [])
+        if str(model).strip()
+    }
+    if not expected:
+        return "day0_hourly_bundle_expected_models_missing"
+    missing = sorted(expected - observed)
+    if missing:
+        return "day0_hourly_bundle_missing_expected_models:" + ",".join(missing)
+    try:
+        count = int(ens_result.get("source_model_count"))
+    except (TypeError, ValueError):
+        return "day0_hourly_bundle_source_model_count_missing"
+    if count < len(expected):
+        return f"day0_hourly_bundle_source_model_count_short:{count}/{len(expected)}"
+    if ens_result.get("fetch_time") is None:
+        return "day0_hourly_bundle_fetch_time_missing"
+    return None
 
 
 def _parse_utc_datetime(raw: object) -> datetime | None:
@@ -874,6 +1020,11 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     """
 
     from src.state.db import get_forecasts_connection_read_only
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        day0_hourly_models_for_city,
+        read_freshest_day0_hourly_vectors,
+    )
 
     city_name = str(getattr(city, "name", "") or "")
     if not city_name:
@@ -882,53 +1033,34 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     decision_time = now or datetime.now(timezone.utc)
     try:
         conn = get_forecasts_connection_read_only()
-        conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         return None
     try:
-        latest = conn.execute(
-            """
-            SELECT captured_at
-            FROM day0_hourly_vectors
-            WHERE city = ? AND target_date = ?
-              AND datetime(captured_at) <= datetime(?)
-            ORDER BY datetime(captured_at) DESC
-            LIMIT 1
-            """,
-            (city_name, target_date, decision_time.isoformat()),
-        ).fetchone()
-        if latest is None:
-            return None
-        captured_at = str(latest["captured_at"] or "")
-        rows = conn.execute(
-            """
-            SELECT model, timezone_name, times_json, temps_c_json
-            FROM day0_hourly_vectors
-            WHERE city = ? AND target_date = ? AND captured_at = ?
-            ORDER BY model
-            """,
-            (city_name, target_date, captured_at),
-        ).fetchall()
+        expected_models = day0_hourly_models_for_city(city)
+        vectors = read_freshest_day0_hourly_vectors(
+            city=city_name,
+            target_date=target_date,
+            now=decision_time,
+            conn=conn,
+            expected_models=expected_models,
+            require_expected=bool(expected_models),
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        )
     except sqlite3.Error:
         return None
     finally:
         conn.close()
-    if not rows:
+    if not vectors:
         return None
 
     times: list[str] | None = None
     member_rows: list[list[float]] = []
-    for row in rows:
-        try:
-            row_times = json.loads(row["times_json"] or "null")
-            temps_c = json.loads(row["temps_c_json"] or "null")
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(row_times, list) or not isinstance(temps_c, list):
-            return None
+    captured_times: list[datetime] = []
+    for vector in vectors:
+        row_times = [str(item) for item in vector.times]
+        temps_c = list(vector.temps_c)
         if len(row_times) != len(temps_c) or not row_times:
             return None
-        row_times = [str(item) for item in row_times]
         if times is None:
             times = row_times
         elif row_times != times:
@@ -946,15 +1078,21 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
             member_rows.append(values_c)
         else:
             return None
+        captured_dt = _parse_utc_datetime(vector.captured_at)
+        if captured_dt is not None:
+            captured_times.append(captured_dt)
     if times is None or not member_rows:
         return None
-    captured_dt = _parse_utc_datetime(captured_at)
+    captured_dt = max(captured_times) if captured_times else None
     return {
         "members_hourly": np.asarray(member_rows, dtype=float),
         "times": times,
         "fetch_time": captured_dt,
         "source_id": "day0_hourly_vectors",
         "forecast_source_role": "day0_remaining_window_live",
+        "source_models": [vector.model for vector in vectors],
+        "expected_models": expected_models,
+        "source_model_count": len(vectors),
     }
 
 
@@ -1879,19 +2017,11 @@ def _fetch_canonical_day0_observation_from_instants(
     *,
     reference_time: datetime,
 ) -> Day0ObservationContext | None:
-    """Build an executable Day0 observation from canonical observation_instants.
-
-    NOAA-settled cities do not have an observation_client live fetcher, but their
-    settlement-station METAR rows are already persisted in the same canonical
-    surface used by hard-fact Day0 triggers. This adapter feeds that source into
-    the normal Day0Router math instead of falling back to stale replacement
-    posteriors.
-    """
+    """Build an executable Day0 observation from canonical observation_instants."""
 
     try:
         from src.data.day0_observation_reader import (
-            COVERAGE_NONE,
-            read_day0_observed_extrema,
+            read_day0_observation_context_from_instants,
         )
         from src.state.db import get_world_connection_read_only
     except Exception:
@@ -1899,17 +2029,15 @@ def _fetch_canonical_day0_observation_from_instants(
 
     city_name = str(getattr(city, "name", "") or "")
     timezone_name = str(getattr(city, "timezone", "") or "")
-    unit = str(getattr(city, "settlement_unit", "C") or "C")
     if not city_name or not timezone_name:
         return None
     conn = None
     try:
         conn = get_world_connection_read_only()
-        result = read_day0_observed_extrema(
+        return read_day0_observation_context_from_instants(
             conn,
-            city=city_name,
+            city=city,
             target_date=target_d.isoformat(),
-            timezone_name=timezone_name,
             decision_time_utc=reference_time,
         )
     except Exception:
@@ -1920,33 +2048,6 @@ def _fetch_canonical_day0_observation_from_instants(
                 conn.close()
             except Exception:
                 pass
-
-    if result.coverage_status == COVERAGE_NONE or result.chosen_source is None:
-        return None
-    if result.high_so_far is None or result.low_so_far is None:
-        return None
-    observation_time = result.last_observation_time_utc
-    if not observation_time:
-        return None
-    current_temp = (
-        float(result.current_temp)
-        if result.current_temp is not None
-        else float("nan")
-    )
-    return Day0ObservationContext(
-        current_temp=current_temp,
-        high_so_far=float(result.high_so_far),
-        low_so_far=float(result.low_so_far),
-        source=str(result.chosen_source),
-        observation_time=observation_time,
-        unit=unit,
-        station_id=str(result.provenance.get("chosen_source") or result.chosen_source),
-        sample_count=int(result.row_count),
-        last_sample_time=observation_time,
-        coverage_status=str(result.coverage_status),
-        observation_available_at=str(result.decision_time_utc),
-        provider_reported_time="canonical_observation_instants",
-    )
 
 
 def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
@@ -2010,9 +2111,25 @@ def _day0_observed_extreme_from_canonical_surface(
                       AND target_date = ?
                       AND substr(local_timestamp, 1, 10) = target_date
                       AND utc_timestamp <= ?
-                      AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
                       AND COALESCE(causality_status, 'OK') = 'OK'
-                      AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                      AND (
+                            (
+                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                                AND COALESCE(source_role, '') = 'historical_hourly'
+                                AND COALESCE(training_allowed, 0) = 1
+                                AND (
+                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
+                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                                )
+                            )
+                            OR (
+                                city = 'Hong Kong'
+                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                                AND COALESCE(source_role, '') = 'runtime_monitoring'
+                                AND COALESCE(training_allowed, 0) = 0
+                            )
+                      )
                       AND {extreme_col} IS NOT NULL
                     """,
                     (city_name, target_date, now_iso),
@@ -2507,6 +2624,16 @@ def _refresh_day0_observation(
     live_forecast_source = "day0_hourly_vectors"
     if ens_result is not None:
         forecast_source_validations = _monitor_forecast_source_validations(ens_result)
+        hourly_bundle_rejection = _day0_hourly_bundle_authority_rejection_reason(ens_result)
+        if hourly_bundle_rejection is not None:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                live_forecast_source,
+                *forecast_source_validations,
+                "day0_hourly_bundle_authority_gate",
+                hourly_bundle_rejection,
+            ]
         extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],
@@ -2679,6 +2806,80 @@ def _refresh_day0_observation(
         position.direction,
     )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
+    zero_probability_exit_authority = (
+        maturity_rejection is None
+        and "day0_observation_stale_monitor_bound" not in coverage_validations
+    )
+    zero_probability_exit_authority_reason = (
+        "mature_day0_extreme"
+        if zero_probability_exit_authority
+        else "stale_or_immature_day0_remaining_window"
+    )
+    held_probability_collapsed = current_p_posterior <= 1e-9
+    if held_probability_collapsed and not zero_probability_exit_authority:
+        applied.append("day0_zero_probability_exit_authority_blocked")
+    setattr(
+        position,
+        "_day0_monitor_probability_receipt",
+        {
+            "schema_version": 1,
+            "selected_method": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+            "metric": temperature_metric.temperature_metric,
+            "unit": str(getattr(city, "settlement_unit", "") or ""),
+            "target_date": str(target_d),
+            "held_idx": int(held_idx),
+            "held_direction": str(getattr(position, "direction", "") or ""),
+            "held_yes_probability": _monitor_receipt_float(p_cal_yes),
+            "held_side_probability": _monitor_receipt_float(current_p_posterior),
+            "zero_probability_exit_authority": bool(zero_probability_exit_authority),
+            "zero_probability_exit_authority_reason": zero_probability_exit_authority_reason,
+            "bin_labels": [str(getattr(bin_, "label", bin_)) for bin_ in all_bins],
+            "p_raw_vector": _monitor_receipt_vector(p_raw_vector),
+            "p_cal_vector": _monitor_receipt_vector(p_cal_full),
+            "observation": {
+                "source": str(_day0_observation_field(obs, "source", "") or ""),
+                "observation_time": _day0_observation_field(obs, "observation_time"),
+                "observation_available_at": _day0_observation_field(
+                    obs, "observation_available_at"
+                ),
+                "provider_reported_time": _day0_observation_field(
+                    obs, "provider_reported_time"
+                ),
+                "coverage_status": _day0_observation_field(obs, "coverage_status"),
+                "current_temp": _monitor_receipt_float(current_temp),
+                "observed_high_so_far": _monitor_receipt_float(observed_high_so_far),
+                "observed_low_so_far": _monitor_receipt_float(observed_low_so_far),
+            },
+            "remaining_window": {
+                "source": live_forecast_source,
+                "source_models": list(ens_result.get("source_models") or [])
+                if ens_result is not None
+                else [],
+                "expected_models": list(ens_result.get("expected_models") or [])
+                if ens_result is not None
+                else [],
+                "source_model_count": int(ens_result.get("source_model_count") or 0)
+                if ens_result is not None
+                else None,
+                "fetch_time": str(ens_result.get("fetch_time") or "")
+                if ens_result is not None
+                else "",
+                "forecast_source_validations": list(forecast_source_validations),
+                "hours_remaining": _monitor_receipt_float(hours_remaining),
+                "member_extrema_summary": _monitor_receipt_quantiles(member_extrema),
+            },
+            "temporal_context": {
+                "daypart": str(getattr(temporal_context, "daypart", "") or ""),
+                "post_peak_confidence": _monitor_receipt_float(
+                    getattr(temporal_context, "post_peak_confidence", None)
+                ),
+                "current_utc_timestamp": str(
+                    getattr(temporal_context, "current_utc_timestamp", "") or ""
+                ),
+            },
+            "maturity_validations": list(maturity_validations),
+        },
+    )
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
     setattr(position, "_bootstrap_context", {
@@ -2698,6 +2899,15 @@ def _refresh_day0_observation(
         position,
         metric=temperature_metric.temperature_metric,
     )
+    _set_day0_zero_probability_exit_authority(position, zero_probability_exit_authority)
+    if held_probability_collapsed and not zero_probability_exit_authority:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            *applied,
+            *_day0_remaining_window_belief_validations(
+                temperature_metric.temperature_metric,
+            ),
+        ]
     _set_monitor_probability_fresh(position, True)
 
     # T5 nowcast wiring (Phase 2 T5): gate on market_slug + hours_remaining.
@@ -2753,8 +2963,9 @@ def _day0_extreme_authority_rejection_reason(
 
     if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
         return "day0_extreme_maturity_unavailable:no_intraday_extreme"
-    if classification == BoundClassification.DETERMINISTIC:
-        return None
+    # A deterministic remaining-window forecast is still forecast evidence, not a
+    # settlement hard fact. The observed high/low may only sponsor live exit
+    # authority once the same temporal maturity law below is satisfied.
 
     if temperature_metric.is_high():
         daypart = str(getattr(temporal_context, "daypart", "") or "")
@@ -2783,7 +2994,7 @@ def _maybe_write_day0_nowcast(
     observation_time: "str | None",
     observation_available_at: "str | None" = None,
 ) -> None:
-    """Attempt a day0_nowcast_runs write if position carries a market_slug and
+    """Attempt a day0_nowcast_runs write for a canonical market slug when
     hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
     and swallowed so the monitor loop is never interrupted.
 
@@ -2795,8 +3006,8 @@ def _maybe_write_day0_nowcast(
         Default None keeps every existing call signature valid.
 
     Guards:
-      - position.market_slug must be non-empty (positions from v1-vintage
-        positions.json default to None and are silently skipped).
+      - position.market_slug must be present or uniquely resolvable from
+        forecast-class market_events using exact persisted position identities.
       - hours_remaining must be <= 6 (G8c: within the terminal nowcast window).
       - temporal_context must be non-None (daypart requires it).
       - observation_time must be non-empty.
@@ -2806,34 +3017,77 @@ def _maybe_write_day0_nowcast(
     Phase 2 T5 GREEN: calls write_nowcast_run with live fit_run_id from
     day0_horizon_platt_fits.
     """
-    if not getattr(position, "market_slug", None):
-        return
+    market_slug = str(getattr(position, "market_slug", None) or "").strip()
     if hours_remaining > 6:
         return
     if temporal_context is None:
         return
     if not observation_time:
         return
+    freshness_rejection = _day0_nowcast_freshness_rejection_reason(
+        observation_time=observation_time,
+        observation_available_at=observation_available_at,
+    )
+    if freshness_rejection:
+        logger.debug(
+            "T5 nowcast: stale observation clock for %s target_date=%s "
+            "observation_time=%s observation_available_at=%s reason=%s",
+            getattr(position, "trade_id", "?"),
+            target_d.isoformat(),
+            observation_time,
+            observation_available_at,
+            freshness_rejection,
+        )
+        return
+    _metric_str = (
+        temperature_metric.temperature_metric
+        if hasattr(temperature_metric, "temperature_metric")
+        else str(temperature_metric)
+    )
 
     try:
         from src.state.day0_nowcast_store import (  # noqa: PLC0415
+            ensure_identity_platt_fit,
             read_latest_platt_fit,
+            resolve_market_slug_for_position_identity,
             write_nowcast_run,
         )
 
+        if not market_slug:
+            market_slug = (
+                resolve_market_slug_for_position_identity(
+                    token_id=getattr(position, "token_id", None),
+                    condition_id=getattr(position, "condition_id", None),
+                    market_id=getattr(position, "market_id", None),
+                    city=getattr(position, "city", None),
+                    target_date=getattr(position, "target_date", None),
+                    temperature_metric=_metric_str,
+                    bin_label=getattr(position, "bin_label", None),
+                )
+                or ""
+            )
+            if not market_slug:
+                logger.debug(
+                    "T5 nowcast: no unique canonical market_slug for %s "
+                    "token_id=%s condition_id=%s city=%s target_date=%s metric=%s",
+                    getattr(position, "trade_id", "?"),
+                    getattr(position, "token_id", None),
+                    getattr(position, "condition_id", None),
+                    getattr(position, "city", None),
+                    getattr(position, "target_date", None),
+                    _metric_str,
+                )
+                return
+
         fit = read_latest_platt_fit()
         if fit is None:
-            logger.debug(
-                "T5 nowcast: no platt fit available yet for %s — skipping write",
-                position.market_slug,
-            )
-            return
-
-        _metric_str = (
-            temperature_metric.temperature_metric
-            if hasattr(temperature_metric, "temperature_metric")
-            else str(temperature_metric)
-        )
+            fit = ensure_identity_platt_fit()
+            if fit is None:
+                logger.debug(
+                    "T5 nowcast: no platt fit available yet for %s — skipping write",
+                    market_slug,
+                )
+                return
 
         # ThePath P1 ITEM 1: thread the honest obs-availability clock. The live
         # observation_client stamps observation_available_at = now()-at-fetch.
@@ -2843,7 +3097,7 @@ def _maybe_write_day0_nowcast(
         _obs_provenance = "live_fetch" if _obs_avail else "UNVERIFIED"
 
         write_nowcast_run(
-            market_slug=position.market_slug,
+            market_slug=market_slug,
             temperature_metric=_metric_str,
             target_date=target_d.isoformat(),
             observation_time=observation_time,
@@ -2859,7 +3113,7 @@ def _maybe_write_day0_nowcast(
         logger.debug(
             "T5 nowcast write OK: %s market_slug=%s hours_remaining=%.1f daypart=%s fit_run_id=%s",
             getattr(position, "trade_id", "?"),
-            position.market_slug,
+            market_slug,
             hours_remaining,
             temporal_context.daypart,
             fit.fit_run_id,
@@ -2867,13 +3121,13 @@ def _maybe_write_day0_nowcast(
         _record_nowcast_write_success()
     except Exception as exc:  # noqa: BLE001
         _record_nowcast_write_failure(
-            market_slug=str(getattr(position, "market_slug", "?") or "?"),
+            market_slug=market_slug or str(getattr(position, "market_slug", "?") or "?"),
             trade_id=str(getattr(position, "trade_id", "?") or "?"),
         )
         logger.warning(
             "T5 nowcast write FAILED (non-fatal) for %s market_slug=%s: %s",
             getattr(position, "trade_id", "?"),
-            getattr(position, "market_slug", "?"),
+            market_slug or getattr(position, "market_slug", "?"),
             exc,
             exc_info=True,
         )
@@ -3244,6 +3498,7 @@ def _day0_absorbing_hard_fact_overlay(
         "forecast_posteriors_dominated_by_day0_hard_fact",
     )
     _set_monitor_probability_fresh(hard_pos, True)
+    _set_day0_zero_probability_exit_authority(hard_pos, True)
     return float(belief.held_side_prob), hard_pos, True
 
 
@@ -3274,6 +3529,7 @@ def _refresh_day0_monitor_probability(
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
+        EntryMethod.QKERNEL_SPINE.value: _refresh_ens_member_counting,
         EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
     }
     refresh_pos = pos
@@ -3296,6 +3552,48 @@ def _refresh_day0_monitor_probability(
             target_d=target_d,
         )
     except ObservationUnavailableError:
+        metric = resolve_position_metric(pos)[0]
+        from src.engine.position_belief import (
+            load_replacement_belief,
+            monitor_belief_max_age_hours,
+        )
+
+        try:
+            belief = load_replacement_belief(
+                city=pos.city,
+                target_date=pos.target_date,
+                temperature_metric=metric,
+                bin_label=pos.bin_label,
+                direction=str(getattr(pos.direction, "value", pos.direction)),
+                max_age_hours=monitor_belief_max_age_hours(),
+            )
+        except Exception as exc:  # noqa: BLE001 - fallback must stay fail-soft
+            belief = None
+            logger.debug(
+                "day0 observation unavailable replacement fallback read failed for %s: %s",
+                getattr(pos, "trade_id", "?"),
+                exc,
+            )
+        if belief is not None and belief.fresh:
+            _append_monitor_validation(
+                refresh_pos,
+                "day0_observation_unavailable:replacement_posterior_available_not_exit_authority",
+            )
+            _append_monitor_validation(refresh_pos, belief.freshness_validation())
+
+        readthrough_prob = _attempt_held_belief_readthrough(
+            pos, city=city, target_d=target_d, metric=metric
+        )
+        if readthrough_prob is not None:
+            _append_monitor_validation(
+                refresh_pos,
+                "day0_observation_unavailable:replacement_belief_readthrough_available_not_exit_authority",
+            )
+            _append_monitor_validation(
+                refresh_pos,
+                "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
+            )
+
         _set_monitor_probability_fresh(refresh_pos, False)
         _append_monitor_validation(
             refresh_pos,
@@ -3304,7 +3602,7 @@ def _refresh_day0_monitor_probability(
         _enqueue_single_family_belief_reseed_failsoft(
             city=str(pos.city),
             target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
+            metric=metric,
         )
         return pos.p_posterior, refresh_pos, False
 
@@ -3472,6 +3770,10 @@ def monitor_probability_refresh(
     # Return the stored entry-time posterior as the value carrier but with
     # is_fresh=False so refresh_position records NaN current_p_posterior and
     # the exit organ treats belief as unavailable (never a stale-as-fresh).
+    _posterior_provenance = pos.selected_method or pos.entry_method
+    if not _posterior_provenance:
+        _append_monitor_validation(pos, "stored_entry_probability_provenance_missing")
+        return float("nan"), pos, False
     return pos.p_posterior, pos, False
 
 
@@ -3500,6 +3802,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
+    _set_day0_zero_probability_exit_authority(pos, False)
+    try:
+        delattr(pos, "_day0_monitor_probability_receipt")
+    except AttributeError:
+        pass
 
     # 1. Refresh held-token quote
     market_refreshed = False
@@ -3531,6 +3838,19 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
         if _bootstrap_ctx is not None:
             setattr(pos, "_bootstrap_context", _bootstrap_ctx)
+        _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
+        if _day0_receipt is not None:
+            setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
+        _set_day0_zero_probability_exit_authority(
+            pos,
+            bool(
+                getattr(
+                    refresh_pos,
+                    _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+                    False,
+                )
+            ),
+        )
 
         # Persist monitor state on Position only when the producer explicitly
         # attests freshness. Stored entry-time posterior is not a current

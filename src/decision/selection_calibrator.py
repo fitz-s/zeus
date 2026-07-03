@@ -10,7 +10,7 @@
 #   Kelly. Same artifact-gated, FAIL-CLOSED posture as the σ-floor and the OOF guard — but stricter:
 #   ABSENT is NOT inert here. A missing/malformed/stale/under-min-N artifact emits NO new entries
 #   (q_safe=0, trade=False), NEVER a raw center-bootstrap q_lcb fallback.
-"""Selection-aware settlement q_lcb calibrator — the runtime serving rule (no shadow, no de-bias).
+"""Selection-aware settlement q_lcb calibrator — the runtime serving rule.
 
 THE CRUX (settlement-graded, 2026-06-22): the live book is net-negative because the admission gate
 ``q_lcb_side > price`` adversely-selects exactly the bins where the model most under-estimates the
@@ -43,12 +43,11 @@ ARTIFACT (versioned, FAIL-CLOSED — absent is NOT inert): the table is read fro
 ``state/selection_calibrator.json`` (gitignored generated artifact, fit ONLY by
 scripts/fit_selection_calibrator.py walk-forward over settled rows). Unlike the OOF guard, absence
 is fail-closed: the live admission path emits NO new entries when the artifact is
-missing/malformed/stale/under-min-N for an armed side. The artifact carries the posterior version
-it was fit under; a version mismatch is stale -> fail-closed. The artifact also declares which
-executable sides it is armed to calibrate. An unarmed side is outside this correction's authority
-and passes through unchanged to the existing q_lcb/price/qkernel/family optimizer gates. This
-module NEVER fits per-city offsets, NEVER moves μ, NEVER anchors to price, and NEVER constructs a
-parallel q.
+missing/malformed/stale/under-min-N, or when the executable side is not armed by explicit metadata
+or by deep cells in legacy artifacts that predate that metadata. The artifact carries the posterior
+version it was fit under; a version mismatch is stale -> fail-closed. An unarmed side is outside
+this correction's authority, and outside authority is not a live-money license. This module NEVER
+fits per-city offsets, NEVER moves mu, NEVER anchors to price, and NEVER constructs a parallel q.
 """
 from __future__ import annotations
 
@@ -485,12 +484,13 @@ def _fail_closed(cell_key: str, basis: str) -> CalibratorVerdict:
     )
 
 
-def _artifact_armed_sides(meta: Mapping) -> frozenset[str]:
+def _artifact_armed_sides(meta: Mapping, cells: Mapping, *, min_n: int) -> frozenset[str]:
     """Executable sides this artifact is authorized to calibrate.
 
-    Legacy ``sel_v1`` artifacts predate explicit side-scope metadata, but were promoted for the
-    buy-NO adverse-selection pathology. Treat them as NO-only unless a future artifact explicitly
-    opts in additional sides.
+    Prefer explicit side-scope metadata from current fitter output. Some already-promoted
+    ``sel_v1`` artifacts predate that metadata while still carrying deep YES/NO cells; in that
+    case infer side scope from cells whose selected support clears ``min_n``. Sparse bookkeeping
+    cells do not arm a side.
     """
 
     raw = (
@@ -498,10 +498,19 @@ def _artifact_armed_sides(meta: Mapping) -> frozenset[str]:
         or meta.get("calibrated_sides")
         or meta.get("selection_calibrated_sides")
     )
-    if raw is None and str(meta.get("version", "")) == "sel_v1":
-        raw = ("NO",)
     if raw is None:
-        return frozenset()
+        inferred: set[str] = set()
+        for key, cell in cells.items():
+            side = str(key).split("|", 1)[0].strip().upper()
+            if side not in {"YES", "NO"} or not isinstance(cell, Mapping):
+                continue
+            try:
+                support = int(cell.get("n_selected", cell.get("n", 0)) or 0)
+            except (TypeError, ValueError):
+                support = 0
+            if support >= int(min_n):
+                inferred.add(side)
+        return frozenset(inferred)
     if isinstance(raw, str):
         values = (raw,)
     else:
@@ -559,24 +568,9 @@ def apply_selection_calibrator(
 
     min_n = int(meta.get("min_n", MIN_N)) if isinstance(meta, Mapping) else MIN_N
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
-    armed_sides = _artifact_armed_sides(meta)
+    armed_sides = _artifact_armed_sides(meta, cells, min_n=min_n)
     if clean_side not in armed_sides:
-        try:
-            q_identity = float(raw_side_prob)
-        except (TypeError, ValueError):
-            q_identity = 0.0
-        if not math.isfinite(q_identity):
-            q_identity = 0.0
-        q_identity = max(0.0, min(1.0, q_identity))
-        return CalibratorVerdict(
-            q_safe=q_identity,
-            trade=True,
-            abstained=False,
-            cell_key=key,
-            L_g=float("nan"),
-            n_g=0,
-            basis="SIDE_NOT_ARMED",
-        )
+        return _fail_closed(key, "SIDE_NOT_ARMED")
 
     cell = cells.get(key)
     if not isinstance(cell, Mapping):
@@ -657,7 +651,7 @@ def apply_selection_calibrator(
 #     )
 #
 # It returns the calibrated lower bound when the calibrator LICENSES the cell and 0.0 (no-trade)
-# when it fails closed. There is no shadow/default-off alias in the live seam: the artifact was
+# when it fails closed. There is no default-off alias in the live seam: the artifact was
 # promoted to runtime and absence/staleness/thinness must block entries rather than silently falling
 # back to the raw center-bootstrap bound.
 

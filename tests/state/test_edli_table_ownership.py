@@ -21,6 +21,7 @@ EDLI_WORLD_TABLES = {
 
 EDLI_TRADE_TABLES = {
     "execution_feasibility_evidence",
+    "execution_feasibility_latest",
 }
 
 
@@ -57,6 +58,7 @@ def test_db_table_ownership_registers_edli_tables():
     assert EDLI_TRADE_TABLES <= tables_for(DBIdentity.TRADE)
     assert EDLI_WORLD_TABLES.isdisjoint(tables_for(DBIdentity.TRADE))
     assert owner("execution_feasibility_evidence") is DBIdentity.TRADE
+    assert owner("execution_feasibility_latest") is DBIdentity.TRADE
 
 
 def test_schema_version_check_accepts_edli_bump():

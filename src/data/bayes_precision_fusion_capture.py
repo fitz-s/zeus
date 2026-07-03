@@ -46,7 +46,7 @@ from src.forecast.bayes_precision_fusion import (
     MIN_TRAIN,
     ModelInstrument,
 )
-# NOTE (FINAL no-shadow §4): ``eb_bias`` is deliberately NOT imported — the consumed
+# NOTE (single-serving-rule §4): ``eb_bias`` is deliberately NOT imported — the consumed
 # posterior center is RAW (z = x), so the EB shift primitive must never reach this path.
 from src.forecast.grid_representativeness_loader import (
     sigma_repr_sq_for as _sigma_repr_sq_for,
@@ -61,25 +61,25 @@ def _available_after_decision(
     *,
     model_label: str = "",
 ) -> bool:
-    """True iff ``available_at`` is genuinely AFTER ``decision_utc`` (arrival-guard exclusion).
+    """True iff the model must be excluded by the arrival guard.
 
-    FAIL-OPEN: returns False (admit) when ``available_at`` is None/empty/unparseable — the guard
-    never excludes a model on the strength of missing or malformed availability evidence. Naive
-    timestamps are interpreted as UTC (Zeus persists UTC wall-clocks).
+    Missing or malformed availability evidence is not live authority. The guard
+    therefore excludes those models the same way it excludes a source that became
+    available after ``decision_utc``. Naive timestamps are interpreted as UTC
+    (Zeus persists UTC wall-clocks).
 
-    LOUD FALLBACK: every admit on missing/malformed evidence emits a WARNING so that a model
-    admitted without availability proof is VISIBLE in logs (freshness-contract: no silent admit).
-    The model_label parameter (e.g. the model name) is included in the warning for traceability."""
+    The model_label parameter (e.g. the model name) is included in warnings for
+    traceability."""
     from datetime import timezone as _tz  # noqa: PLC0415
 
     _label = f" model={model_label!r}" if model_label else ""
     if available_at is None:
         _LOG.warning(
-            "BAYES_PRECISION_FUSION arrival guard: admitted%s on MISSING available_at "
-            "(fail-open; no availability evidence to exclude on)",
+            "BAYES_PRECISION_FUSION arrival guard: excluded%s on MISSING available_at "
+            "(fail-closed; no availability evidence)",
             _label,
         )
-        return False
+        return True
     try:
         if isinstance(available_at, datetime):
             avail = available_at
@@ -87,11 +87,11 @@ def _available_after_decision(
             text = str(available_at).strip()
             if not text:
                 _LOG.warning(
-                    "BAYES_PRECISION_FUSION arrival guard: admitted%s on EMPTY available_at "
-                    "(fail-open; no availability evidence to exclude on)",
+                    "BAYES_PRECISION_FUSION arrival guard: excluded%s on EMPTY available_at "
+                    "(fail-closed; no availability evidence)",
                     _label,
                 )
-                return False
+                return True
             avail = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if avail.tzinfo is None:
             avail = avail.replace(tzinfo=_tz.utc)
@@ -99,13 +99,13 @@ def _available_after_decision(
         return avail.astimezone(_tz.utc) > decision.astimezone(_tz.utc)
     except Exception as _parse_exc:
         _LOG.warning(
-            "BAYES_PRECISION_FUSION arrival guard: admitted%s on UNPARSEABLE available_at %r "
-            "(fail-open; malformed availability evidence ignored): %s",
+            "BAYES_PRECISION_FUSION arrival guard: excluded%s on UNPARSEABLE available_at %r "
+            "(fail-closed; malformed availability evidence): %s",
             _label,
             available_at,
             _parse_exc,
         )
-        return False
+        return True
 
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
 # icon_global / icon_d2 are OM model ids; the France AROME-HD model is OM
@@ -128,6 +128,17 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     # snap cold. OM serves these single-runs ids directly.
     "gfs_hrrr": "gfs_hrrr",
     "gem_hrdps_continental": "gem_hrdps_continental",
+    # Source-clock vNext city one-scheme candidates (2026-06-25). These are not admitted by
+    # the legacy provider-family selector globally; they are downloaded so the materializer can
+    # serve the per-city fixed source basket selected by the grid-aware source-clock artifact.
+    "dmi_harmonie_europe": "dmi_harmonie_arome_europe",
+    "knmi_harmonie_netherlands": "knmi_harmonie_arome_netherlands",
+    "kma_gdps": "kma_gdps",
+    "kma_ldps": "kma_ldps",
+    "met_nordic": "metno_nordic",
+    "italiameteo_icon_2i": "italia_meteo_arpae_icon_2i",
+    "jma_msm": "jma_msm",
+    "nam_conus": "ncep_nam_conus",
 }
 
 # BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the
@@ -289,9 +300,8 @@ class BayesPrecisionFusionCaptureResult:
     disagree_var: float
     selection: SelectedModelSet
     dropped_models: tuple[str, ...]
-    # Count of models admitted because availability evidence was missing/malformed
-    # (FAIL-OPEN path). Non-zero means the arrival guard ran without evidence for
-    # those models — visible in telemetry, never silently hidden.
+    # Legacy telemetry field retained for compatibility. Under the fail-closed
+    # live contract, missing/malformed availability is dropped, so this is always 0.
     admitted_on_missing_availability: int = 0
     # v3 rule 5: the anchor cell's sigma_repr^2 (degC^2), widening the fusion prior tau0.
     # 0.0 when the grid-representativeness deploy flag is OFF or the anchor cell is unknown.
@@ -309,16 +319,16 @@ class BayesPrecisionFusionCaptureResult:
 
 
 def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
-    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (FINAL no-shadow §4).
+    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (single-serving-rule §4).
 
-    2026-06-18 UNIFY (FINAL no-shadow execution flow §4): under the operator RAW
+    2026-06-18 UNIFY (single-serving-rule flow §4): under the operator RAW
     no-de-bias law the consumed-posterior instrument center is the RAW model value
     ``z = x`` — NOT the EB-corrected ``z = x − b̂``. This is the change that makes the
     materialized ``forecast_posteriors`` center the RAW diagonal center, so the EXIT
     (``position_belief``) and MONITOR (``monitor_refresh``) belief reads — both
     sourced from ``forecast_posteriors`` — match the spine ENTRY belief (which is
     already RAW via ``_NoOpDebiasAuthority``). It closes the #135 two-center split
-    (RAW-entry vs EB-exit) WITHOUT a shadow product: there is one RAW belief.
+    (RAW-entry vs EB-exit) WITHOUT a parallel product: there is one RAW belief.
 
     The walk-forward ``history`` is RETAINED but consumed ONLY for width / provenance
     (the residual std → anchor τ0, the cross-source disagreement var, the predictive
@@ -361,11 +371,10 @@ def capture_bayes_precision_instruments(
     pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
     the decision instant could not have been possessed by then, so fusing it would let a
     faster/replacement source bias q before its real availability. Such a model is EXCLUDED here.
-    SHADOW-Q-STAGED: this guard CAN change q for a cell where a provider's honest availability is
-    future vs decision — that is the point; in current production it is expected to exclude ~0 (the
-    extras' captured_at lands hours after the cycle, well before any decision). FAIL-OPEN: a model
-    is admitted when its availability is NULL/missing, or when ``decision_utc`` is not supplied
-    (legacy/test callers) — the guard never tightens on absent evidence.
+    ARRIVAL-AUTHORITY: this guard CAN change q for a cell where a provider's honest availability is
+    future vs decision — that is the point. A model with NULL/missing/malformed availability is
+    excluded when ``decision_utc`` is supplied, because absent provenance is not live authority.
+    Legacy/test callers that omit ``decision_utc`` retain the historical no-arrival-guard behavior.
 
     NEVER raises. Any failure of an individual model -> that model is dropped. A total failure
     (all extras dropped) -> empty likelihood -> the caller keeps the single-anchor posterior.
@@ -380,27 +389,24 @@ def capture_bayes_precision_instruments(
     # ---- fail-soft per-model live capture ----
     present_values: dict[str, float] = {}
     dropped: list[str] = []
-    _missing_avail_count = 0  # models admitted because availability evidence was absent/malformed
+    _missing_avail_count = 0  # compatibility field; missing availability is dropped, not admitted
     for model in candidate_models:
         # ARRIVAL GUARD: exclude an extra whose honest availability is after the decision instant
         # (it was not possessed yet — fusing it would bias q early). Fail-OPEN on NULL/missing
         # availability or when decision_utc is absent. Shadow-q-staged (expected to drop ~0 today).
         if decision_utc is not None:
             _raw_avail = availability.get(model)
-            # Track admits on missing/malformed evidence for telemetry (loud, never silent).
-            # A model is admitted-on-missing when its availability key is absent, None, or empty
-            # string — the same cases _available_after_decision warns on internally. We count here
-            # so the BayesPrecisionFusionCaptureResult carries a visible counter the caller can surface.
             _avail_is_missing = (
                 _raw_avail is None
                 or (isinstance(_raw_avail, str) and not _raw_avail.strip())
             )
             if _available_after_decision(_raw_avail, decision_utc, model_label=model):
-                _LOG.warning(
-                    "BAYES_PRECISION_FUSION arrival guard excluded %s: honest source_available_at %s "
-                    "is after decision %s (not yet possessed; shadow-q-staged)",
-                    model, _raw_avail, decision_utc.isoformat(),
-                )
+                if not _avail_is_missing:
+                    _LOG.warning(
+                        "BAYES_PRECISION_FUSION arrival guard excluded %s: honest source_available_at %s "
+                        "is after decision %s (not yet possessed)",
+                        model, _raw_avail, decision_utc.isoformat(),
+                    )
                 dropped.append(model)
                 continue
             if _avail_is_missing:
@@ -465,11 +471,11 @@ def capture_bayes_precision_instruments(
             return 0.0
         return _sigma_repr_sq_for(city, model_name)
 
-    # UNIFY (FINAL no-shadow §4): instruments enter RAW (z = x), NOT EB-corrected
+    # UNIFY (single-serving-rule §4): instruments enter RAW (z = x), NOT EB-corrected
     # (z = x − b̂). The walk-forward residual history is retained for width/provenance
     # (anchor τ0, disagreement var, σ_resid) but never shifts the center, so the fused
     # μ* the materializer writes to forecast_posteriors is the RAW diagonal center —
-    # the same RAW belief the spine entry path serves (one belief, no shadow).
+    # the same RAW belief the spine entry path serves (one belief).
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
         z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)

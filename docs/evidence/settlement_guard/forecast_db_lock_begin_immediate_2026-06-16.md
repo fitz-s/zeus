@@ -33,7 +33,7 @@ for the lock instead of failing on the upgrade. Readers are unaffected; the live
 already serializes same-class writers. No WAL change (respects the deliberate delete-mode
 decision). No new cap/gate.
 
-- `scripts/materialize_replacement_forecast_shadow.py:268` (the evidenced hot failure — spawned
+- `scripts/materialize_replacement_forecast.py:268` (the evidenced hot failure — spawned
   fresh each 5-min cycle, so the fix is live immediately, no daemon restart).
 - `src/data/bayes_precision_fusion_download.py:830` (download persist; already retry-looped —
   IMMEDIATE makes each attempt clean).

@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P4 + §8 T5 (D-A two-clock unification through MarketPhase axis A) + §8 T2 (Phase A ↔ LifecyclePhase B consistency post-D-A).
-"""P4 D-A two-clock unification tests (PLAN_v3 §6.P4).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P4 + §8 T5, corrected by live venue evidence 2026-06-26 (Gamma endDate is resolution timing, not venue close).
+"""P4 D-A Day0 dispatch tests.
 
 The two pre-P4 D-A clocks were:
 
@@ -12,13 +12,12 @@ The two pre-P4 D-A clocks were:
    ``hours_to_resolution < params['max_hours_to_resolution']`` against
    UTC ``endDate − now``.
 
-These disagreed by ``(24h - city.utc_offset)``. For LA (UTC-8 winter),
-clock 1 fired DAY0_WINDOW 18+h AFTER Polymarket trading already
-closed (POST_TRADING).
+These disagreed by ``(24h - city.utc_offset)``. The original P4 fix used
+Gamma ``endDate`` as the end of Day0. Live venue evidence later proved that
+weather markets can remain active and accepting orders after ``endDate``.
 
-P4 unifies both through ``MarketPhase.SETTLEMENT_DAY``:
-``SETTLEMENT_DAY = [city-local 00:00 of target_date, 12:00 UTC of
-target_date)``.
+Current dispatch unifies both through city-local target-day membership, with
+explicit venue-closed payloads excluded.
 
 Flag ``ZEUS_MARKET_PHASE_DISPATCH`` (shared with P3) gates the
 migration. The post-A6 default is ON and activates the unified phase
@@ -40,12 +39,6 @@ from src.engine.dispatch import (
     market_phase_dispatch_enabled,
     should_enter_day0_window,
 )
-from src.strategy.market_phase import (
-    MarketPhase,
-    market_phase_for_decision,
-    settlement_day_entry_utc,
-)
-
 
 UTC = timezone.utc
 
@@ -186,15 +179,9 @@ def test_filter_flag_on_excludes_pre_settlement_day_market(
 def test_filter_flag_on_excludes_post_trading_market(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The D-A bug exemplar: legacy filter let LA markets through 18+h
-    after Polymarket already closed. Flag ON cleanly excludes them.
+    """Local target day end, not Gamma endDate, closes Day0 dispatch.
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
-    # LA target=2026-05-08; Polymarket endDate = 12:00 UTC. At
-    # decision_time = 2026-05-09 02:00 UTC (= 19:00 PDT 2026-05-08, 5h
-    # before LA city-local end-of-target), legacy hours_to_settlement
-    # would be ~5h ⇒ legacy fires DAY0_WINDOW. But Polymarket has been
-    # closed for 14h. Phase = POST_TRADING.
     market = _market(
         city_name="LA",
         city_timezone="America/Los_Angeles",
@@ -202,6 +189,39 @@ def test_filter_flag_on_excludes_post_trading_market(
         market_end_at="2026-05-08T12:00:00Z",
         hours_to_resolution=-14.0,
     )
+    decision_time = datetime(2026, 5, 9, 7, 0, 1, tzinfo=UTC)
+    assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is False
+
+
+def test_filter_flag_on_keeps_market_after_gamma_enddate_when_local_day_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    market = _market(
+        city_name="LA",
+        city_timezone="America/Los_Angeles",
+        target_date="2026-05-08",
+        market_end_at="2026-05-08T12:00:00Z",
+        hours_to_resolution=-14.0,
+    )
+    market["closed"] = False
+    market["acceptingOrders"] = True
+    decision_time = datetime(2026, 5, 9, 2, 0, tzinfo=UTC)
+    assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is True
+
+
+def test_filter_flag_on_excludes_explicit_venue_closed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    market = _market(
+        city_name="LA",
+        city_timezone="America/Los_Angeles",
+        target_date="2026-05-08",
+        market_end_at="2026-05-08T12:00:00Z",
+    )
+    market["closed"] = True
+    market["acceptingOrders"] = False
     decision_time = datetime(2026, 5, 9, 2, 0, tzinfo=UTC)
     assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is False
 
@@ -222,10 +242,7 @@ def test_filter_flag_on_excludes_market_with_none_city(
 def test_filter_flag_on_fail_soft_on_naive_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A naive market_end_at would crash phase computation. Flag ON
-    must fail-soft toward exclusion (False), consistent with site 4's
-    fail-soft semantics. The legacy filter would have included the
-    market; excluding under flag-ON is the safer side.
+    """A naive market_end_at no longer affects Day0 dispatch.
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
     market = _market(
@@ -235,7 +252,7 @@ def test_filter_flag_on_fail_soft_on_naive_payload(
         market_end_at="2026-05-08T12:00:00",  # naive, no tz suffix
     )
     decision_time = datetime(2026, 5, 8, 6, 0, tzinfo=UTC)
-    assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is False
+    assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is True
 
 
 # ---------------------------------------------------------------------- #
@@ -283,20 +300,29 @@ def test_day0_transition_flag_on_tokyo_enters_at_local_midnight(
 def test_day0_transition_flag_on_does_not_fire_post_trading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The D-A bug exemplar: pre-P4, legacy 6h threshold fired
-    DAY0_WINDOW at 2026-05-09 02:00 UTC for LA target=2026-05-08
-    (5h before LA local end-of-target). But Polymarket has been
-    POST_TRADING for 14h. Flag ON respects the phase axis and does
-    NOT fire the transition.
+    """Day0 transition remains active until the local target day ends.
     """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    decision_time = datetime(2026, 5, 9, 7, 0, 1, tzinfo=UTC)
+    assert should_enter_day0_window(
+        target_date_str="2026-05-08",
+        city_timezone="America/Los_Angeles",
+        decision_time_utc=decision_time,
+        legacy_hours_to_settlement=5.5,  # legacy says ENTER
+    ) is False, "outside local target day must NOT enter DAY0_WINDOW under flag ON"
+
+
+def test_day0_transition_flag_on_stays_active_after_gamma_enddate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
     decision_time = datetime(2026, 5, 9, 2, 0, tzinfo=UTC)
     assert should_enter_day0_window(
         target_date_str="2026-05-08",
         city_timezone="America/Los_Angeles",
         decision_time_utc=decision_time,
-        legacy_hours_to_settlement=5.5,  # legacy says ENTER
-    ) is False, "post-trading market must NOT enter DAY0_WINDOW under flag ON"
+        legacy_hours_to_settlement=5.5,
+    ) is True
 
 
 def test_day0_transition_flag_on_does_not_fire_pre_settlement_day(
@@ -361,26 +387,15 @@ def _city_in_settlement_day(
     target_local_date: date,
     decision_time_utc: datetime,
 ) -> bool:
-    """Pure expectation: at ``decision_time_utc``, is this city's market
-    for ``target_local_date`` in ``MarketPhase.SETTLEMENT_DAY``?
-    """
-    sd_entry = settlement_day_entry_utc(
-        target_local_date=target_local_date,
-        city_timezone=city_timezone,
-    )
-    polymarket_end = datetime.combine(
-        target_local_date,
-        datetime.min.time().replace(hour=12),
-        tzinfo=UTC,
-    )
-    return sd_entry <= decision_time_utc < polymarket_end
+    """Pure expectation: is this city's local target day active?"""
+    local_date = decision_time_utc.astimezone(ZoneInfo(city_timezone)).date()
+    return local_date == target_local_date
 
 
 def test_t5_settlement_day_count_matches_internal_q5_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PLAN_v3 §8 T5 + INTERNAL Q5: at every UTC hour, the count of
-    cities in ``MarketPhase.SETTLEMENT_DAY`` for a same target_date is
+    """At every UTC hour, the count of cities whose local target day is active is
     bounded by [0, 51]. With a single target_date in scope, the
     SETTLEMENT_DAY window is at most 24h wide, so each city is in
     settlement_day for one contiguous interval per target_date.
@@ -400,7 +415,7 @@ def test_t5_settlement_day_count_matches_internal_q5_bounds(
     for hour in (0, 6, 9, 12, 15, 21):
         decision_time = datetime(2026, 5, 8, hour, 0, tzinfo=UTC)
 
-        # Expected: cities whose phase is SETTLEMENT_DAY at this UTC.
+        # Expected: cities whose local target day is active at this UTC.
         expected_in_phase = {
             c["name"]
             for c in cities
@@ -442,9 +457,7 @@ def test_t5_settlement_day_count_matches_internal_q5_bounds(
 def test_t5_count_drops_to_zero_after_polymarket_endDate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At 12:00 UTC of target_date and beyond, ALL cities have
-    transitioned to POST_TRADING. The filter must return zero
-    candidates — this is the cleanest single-target invariant.
+    """12:00 UTC endDate is not a Day0 dispatch close.
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
     cities = _load_cities()
@@ -462,10 +475,16 @@ def test_t5_count_drops_to_zero_after_polymarket_endDate(
         m for m in markets
         if filter_market_to_settlement_day(market=m, decision_time_utc=decision_time)
     ]
-    assert filtered == [], (
-        f"All cities must be POST_TRADING at 12:00 UTC of target_date; "
-        f"got {len(filtered)} cities still in filter"
-    )
+    expected = {
+        c["name"]
+        for c in cities
+        if _city_in_settlement_day(
+            city_timezone=c["timezone"],
+            target_local_date=date(2026, 5, 8),
+            decision_time_utc=decision_time,
+        )
+    }
+    assert {m["city"].name for m in filtered} == expected
 
 
 # ---------------------------------------------------------------------- #
@@ -476,8 +495,8 @@ def test_t5_count_drops_to_zero_after_polymarket_endDate(
 def test_t2_phase_a_b_coordination_at_day0_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T2 (axis A ↔ axis B): the per-position DAY0_WINDOW transition
-    fires exactly when the market enters MarketPhase.SETTLEMENT_DAY.
+    """T2: the per-position DAY0_WINDOW transition
+    fires exactly when the local target day starts.
     Under flag ON, this is now a *direct* relationship rather than an
     indirect 6h threshold.
 
@@ -508,10 +527,7 @@ def test_t2_phase_a_b_coordination_at_day0_transition(
 def test_t2_phase_a_b_coordination_at_post_trading_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At Polymarket endDate (12:00 UTC), market exits SETTLEMENT_DAY
-    into POST_TRADING. After this instant, no new DAY0_WINDOW
-    transitions should fire even if legacy threshold says otherwise.
-    Pins F1 + the D-A bug closure.
+    """At Polymarket endDate, Day0 remains active if the local day is active.
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
     just_after_endDate = datetime(2026, 5, 8, 12, 0, 1, tzinfo=UTC)
@@ -523,7 +539,7 @@ def test_t2_phase_a_b_coordination_at_post_trading_boundary(
         city_timezone="Asia/Tokyo",
         decision_time_utc=just_after_endDate,
         legacy_hours_to_settlement=2.99,
-    ) is False, "POST_TRADING must not enter DAY0_WINDOW under flag ON"
+    ) is True, "Gamma endDate must not end DAY0_WINDOW while local target day is active"
 
 
 # ---------------------------------------------------------------------- #

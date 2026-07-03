@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 3, PR A — invariant scaffold)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 3, PR A — invariant scaffold)
 """Antibody invariants: no fake `Position` reaches the trading path.
 
 Finding 3 (P1 complexity debt): chain-only venue tokens are currently

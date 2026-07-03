@@ -1,6 +1,6 @@
 # Created: 2026-06-04
 # Last reused/audited: 2026-06-13
-# Authority basis: docs/operations/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md
 #                  R4/#175 — the receipt writer's _ensure_column-migrated columns
 #                  must be in required_columns so a stale live DB FATALs at boot
 #                  instead of silently failing 37 receipt writes as no-trades.

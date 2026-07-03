@@ -1,4 +1,9 @@
-"""Entry-forecast rollout gate for canary/live promotion."""
+"""Control-plane validator for entry-forecast promotion evidence.
+
+This module is intentionally not live evaluator authority. It validates
+operator CLI promotion evidence; executable forecast reader/config checks
+own live candidate admission.
+"""
 
 from __future__ import annotations
 
@@ -38,8 +43,6 @@ def evaluate_entry_forecast_rollout_gate(
 ) -> EntryForecastRolloutDecision:
     if config.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         return EntryForecastRolloutDecision("BLOCKED", ("ENTRY_FORECAST_ROLLOUT_BLOCKED",))
-    if config.rollout_mode is EntryForecastRolloutMode.SHADOW:
-        return EntryForecastRolloutDecision("SHADOW_ONLY", ("ENTRY_FORECAST_SHADOW_MODE",))
     if evidence is None:
         return EntryForecastRolloutDecision("BLOCKED", ("ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING",))
 

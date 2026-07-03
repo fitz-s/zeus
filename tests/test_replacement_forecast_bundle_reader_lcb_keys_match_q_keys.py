@@ -28,5 +28,5 @@ def test_bundle_dataclass_rejects_q_lcb_keys_that_do_not_match_q_keys() -> None:
             baseline_source_run_id="b0",
             dependency_json={},
             provenance_json={"bin_topology_hash": "test-topology"},
-            trade_authority_status="SHADOW_VETO_ONLY",
+            trade_authority_status="BLOCKED",
         )

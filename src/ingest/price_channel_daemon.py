@@ -58,9 +58,10 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,23 @@ _scheduler: Any | None = None
 # _graceful_shutdown matches src/main.py / src/ingest_main.py / src/riskguard/riskguard.py.
 _PROCESS_START = time.monotonic()
 
+
+def _git_head_at_boot() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
+
 _heartbeat_fails = 0
+MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -123,7 +140,26 @@ def _scheduler_job(job_name: str):
                 result = fn(*args, **kwargs)
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
-                    _write_scheduler_health(job_name, failed=False, reason=None)
+                    business_liveness = result if isinstance(result, dict) else None
+                    failed = bool(
+                        isinstance(business_liveness, dict)
+                        and business_liveness.get("scheduler_failed")
+                    )
+                    reason = (
+                        str(
+                            business_liveness.get("scheduler_failure_reason")
+                            or business_liveness.get("status")
+                            or ""
+                        )
+                        if isinstance(business_liveness, dict)
+                        else None
+                    )
+                    _write_scheduler_health(
+                        job_name,
+                        failed=failed,
+                        reason=reason or None,
+                        extra=business_liveness,
+                    )
                 except Exception:  # noqa: BLE001 — health write must never break the job
                     pass
                 return result
@@ -138,6 +174,33 @@ def _scheduler_job(job_name: str):
     return _decorator
 
 
+def _scheduler_skip_listener(event: Any) -> None:
+    """Persist APScheduler max-instance skips as business liveness failures."""
+
+    job_name = str(getattr(event, "job_id", "") or "")
+    if not job_name:
+        return
+    try:
+        from src.observability.scheduler_health import _write_scheduler_health
+
+        scheduled = [
+            ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            for ts in (getattr(event, "scheduled_run_times", None) or [])
+        ]
+        _write_scheduler_health(
+            job_name,
+            failed=False,
+            skipped=True,
+            skip_reason="max_instances_reached",
+            extra={
+                "scheduler_skip_reason": "max_instances_reached",
+                "scheduled_run_times": scheduled,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to write scheduler skip health", exc_info=True)
+
+
 def _write_price_channel_heartbeat() -> None:
     """Write daemon-heartbeat-price-channel-ingest.json every 60s (liveness for the sensor)."""
     global _heartbeat_fails
@@ -149,6 +212,7 @@ def _write_price_channel_heartbeat() -> None:
             "daemon": "price-channel-ingest",
             "alive_at": datetime.now(timezone.utc).isoformat(),
             "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
@@ -161,6 +225,7 @@ def _write_price_channel_heartbeat() -> None:
 
 def main() -> None:
     global _scheduler
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES
     from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -233,6 +298,7 @@ def main() -> None:
             "heartbeat": APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
+    _scheduler.add_listener(_scheduler_skip_listener, EVENT_JOB_MAX_INSTANCES)
 
     # PRODUCER 1: start the persistent user-channel WS ingestor THREAD. This is the
     # ws_gap_guard latch WRITER — running it HERE (not in the order daemon) is the
@@ -260,6 +326,8 @@ def main() -> None:
         id="edli_market_channel_ingestor",
         max_instances=1,
         coalesce=True,
+        next_run_time=datetime.now(timezone.utc)
+        + timedelta(seconds=MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS),
     )
     # PRODUCER 2A: held-position quote witness refresh. This must not share executor
     # capacity with broad user-channel reconcile or market-substrate scans; monitor/

@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (PR B — typed model scaffold; consumed by PR C/D)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (PR B — typed model scaffold; consumed by PR C/D)
 """Typed objects for chain/local position truth.
 
 Source-of-truth law (audit § 1, target architecture):
@@ -36,6 +36,44 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
+
+# Quarantined is a local lifecycle bucket, not proof that money is no longer at
+# risk. Only chain states that still assert current venue exposure may keep a
+# quarantined row in live monitor/redecision lanes. A plain confirmed chain
+# absence is no-current-risk reconciliation debt; a confirmed venue fill with a
+# missing/contradictory chain snapshot is represented as entry_authority_quarantined.
+CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
+    {
+        "synced",
+        "chain_present",
+        "exit_pending_missing",
+        "entry_authority_quarantined",
+    }
+)
+
+REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+    }
+)
+
+NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
+    {
+        "chain_absent_confirmed_position_unattributed",
+        "chain_confirmed_zero",
+        "external_operator_closed",
+        "local_only",
+        "quarantined",
+        "quarantine_expired",
+    }
+)
+
+
+def has_current_money_risk_chain_state(value: object) -> bool:
+    """True when a chain_state still represents live venue exposure."""
+
+    return str(getattr(value, "value", value) or "").strip() in CURRENT_MONEY_RISK_CHAIN_STATES
 
 
 # --------------------------------------------------------------------------- #
@@ -188,9 +226,8 @@ class ChainOnlyReviewState(str, Enum):
 
       UNRESOLVED   — chain-only token detected; entry gate fires.
       EXPIRED      — chain-only persisted past the 48h review window;
-                     entry gate continues to fire but the row is flagged
-                     for operator escalation. (Auto-expiry NEVER clears
-                     the fact — only operator action does.)
+                     no longer freezes unrelated new entries, but remains
+                     flagged for operator/reconciliation attention.
       ACKNOWLEDGED — operator has reviewed and chosen to keep the fact
                      active (e.g. waiting for redeem); equivalent to
                      UNRESOLVED for gating purposes but reduces noise in
@@ -252,13 +289,14 @@ class ChainOnlyFact:
     def blocks_entry(self) -> bool:
         """True iff this fact should block new entries this cycle.
 
-        UNRESOLVED + EXPIRED + ACKNOWLEDGED all block. Only RESOLVED clears.
-        Expiry is an escalation marker, NOT auto-resolution — leaving an
-        expired chain-only fact in place is a stronger operator signal,
-        not a weaker one.
+        Only fresh unresolved/operator-acknowledged facts block unrelated new
+        entries. EXPIRED remains visible as review debt, but stale review debt
+        is not current chain truth and must not permanently freeze the live
+        entry engine.
         """
         return (
-            self.review_state != ChainOnlyReviewState.RESOLVED
+            self.review_state
+            in {ChainOnlyReviewState.UNRESOLVED, ChainOnlyReviewState.ACKNOWLEDGED}
             and self.entry_block_scope != "position_only"
         )
 

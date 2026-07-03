@@ -14,6 +14,7 @@ UNKNOWN must never be treated as FRESH.
 
   * For non-fail-closed modes (e.g. OPENING_HUNT): UNKNOWN → degrade+continue.
     summary["degraded_data"] is True
+    summary["freshness_entry_blocked"] is True
     summary["freshness_gate_error"] is present
     summary["skipped"] is NOT True
 
@@ -112,15 +113,16 @@ def test_freshness_gate_crash_skips_imminent_open_capture(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# OPENING_HUNT: UNKNOWN freshness → degrade+continue (NOT skip)
+# OPENING_HUNT: UNKNOWN freshness → block entries, continue monitor/exit (NOT skip)
 # ---------------------------------------------------------------------------
 
-def test_freshness_gate_crash_degrades_opening_hunt(monkeypatch):
-    """T-FGC-3: evaluate_freshness_mid_run raises → OPENING_HUNT degrades, NOT skipped.
+def test_freshness_gate_crash_blocks_opening_hunt_entries(monkeypatch):
+    """T-FGC-3: evaluate_freshness_mid_run raises → OPENING_HUNT blocks entries, NOT skipped.
 
     OPENING_HUNT is not fail-closed (settlement is days away; ensemble-disabled degrade
     already exists as the non-fatal path). A crashed gate → degraded_data=True + error
-    tag, but the cycle continues rather than short-circuiting.
+    tag, but entry discovery is blocked while the cycle continues rather than
+    short-circuiting.
     """
     import src.engine.cycle_runner as cr
     from src.engine.discovery_mode import DiscoveryMode
@@ -135,6 +137,9 @@ def test_freshness_gate_crash_degrades_opening_hunt(monkeypatch):
 
     assert summary.get("degraded_data") is True, (
         f"Expected degraded_data=True for OPENING_HUNT on freshness gate crash, got: {summary}"
+    )
+    assert summary.get("freshness_entry_blocked") is True, (
+        f"Expected freshness_entry_blocked=True for OPENING_HUNT on freshness gate crash, got: {summary}"
     )
     assert "freshness_gate_error" in summary, (
         f"Expected freshness_gate_error in summary, got keys: {list(summary.keys())}"

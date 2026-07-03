@@ -60,7 +60,7 @@ def run_tests(api: Any) -> Any:
         "WMO_ROUNDING",
         "LIFECYCLE",
         "CANONICAL_DB_TRUTH",
-        "LIVE_BACKTEST_SHADOW",
+        "LIVE_BACKTEST_AUDIT_BOUNDARY",
         "STRATEGY_KEY",
         "UNIT_BIN_TOPOLOGY",
         "P_RAW_PROVENANCE",

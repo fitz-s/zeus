@@ -523,7 +523,11 @@ def load_fixture(path: Path) -> list[dict[str, Any]]:
 
 def fetch_active_events() -> tuple[list[dict[str, Any]], str]:
     snapshot = ms._get_active_events_snapshot()
-    if snapshot.authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+    if snapshot.authority in {
+        "FETCH_FAILED_NO_CACHE",
+        "KEYWORD_DISCOVERY_UNVERIFIED",
+        "NEVER_FETCHED",
+    }:
         return [], snapshot.authority
     return list(snapshot.events), snapshot.authority
 
@@ -736,7 +740,11 @@ def main(argv: list[str] | None = None) -> int:
         authority = "FIXTURE"
     else:
         events, authority = fetch_active_events()
-        if authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+        if authority in {
+            "FETCH_FAILED_NO_CACHE",
+            "KEYWORD_DISCOVERY_UNVERIFIED",
+            "NEVER_FETCHED",
+        }:
             report = {
                 "status": "DATA_UNAVAILABLE",
                 "checked_at_utc": datetime.now(timezone.utc).isoformat(),

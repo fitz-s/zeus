@@ -1,5 +1,5 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-02
+# Last reused or audited: 2026-07-01
 # Authority basis: BUG #113 (守護 CI-separation exit must be LIVE) — design §4.6 / SD-7;
 #   continuous_redecision.screen_exit CI-separation + EVIDENCE_UNAVAILABLE third state;
 #   src/state/portfolio.py Position.evaluate_exit (the LIVE exit path).
@@ -47,6 +47,7 @@ def _exit_context(
     current_ci: tuple[float, float] | None,
     belief_available: bool = True,
     market_velocity_1h: float = 0.0,
+    day0_active: bool = False,
 ) -> ExitContext:
     return ExitContext(
         exit_reason="",
@@ -59,7 +60,7 @@ def _exit_context(
         market_vig=1.0,
         hours_to_settlement=12.0,
         position_state="holding",
-        day0_active=False,
+        day0_active=day0_active,
         whale_toxicity=False,
         divergence_score=0.0,
         market_velocity_1h=market_velocity_1h,
@@ -106,6 +107,31 @@ def test_ci_overlap_does_not_exit_on_mere_move():
     decision = pos.evaluate_exit(ctx)
     assert decision.should_exit is False
     assert "CI_OVERLAP" in (decision.reason + decision.trigger).upper()
+
+
+def test_day0_ci_overlap_continues_into_standard_exit_optimizer():
+    """Day0 overlap is evidence, not a terminal hold.
+
+    The remaining-window Day0 CI is often wide by construction. If it overlaps
+    entry, the live path must still let the same EV/consecutive optimizer used
+    by ordinary held positions decide whether to exit.
+    """
+    pos = _held_position(entry_posterior=0.70)
+    pos.neg_edge_count = consecutive_confirmations()
+    ctx = _exit_context(
+        fresh_prob=0.50,
+        entry_posterior=0.70,
+        entry_ci=(0.60, 0.80),
+        current_ci=(0.45, 0.78),
+        day0_active=True,
+    )
+
+    decision = pos.evaluate_exit(ctx)
+
+    assert decision.should_exit is True
+    assert decision.trigger == "EDGE_REVERSAL"
+    assert "ci_overlap_nonterminal_day0" in decision.applied_validations
+    assert "day0_standard_exit_optimizer" in decision.applied_validations
 
 
 # --- (c) EVIDENCE_UNAVAILABLE third state → distinct HOLD, not an exit ------------------

@@ -185,6 +185,23 @@ def _import_helper():
     return _ensure_fresh_executable_snapshot
 
 
+def test_market_reconstruction_is_identity_only_not_fake_live_tradability():
+    """Persisted snapshot identity must not masquerade as current venue state."""
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    market = _market_dict_from_snapshot(_stale_snapshot(captured_at=NOW))
+    outcome = market["outcomes"][0]
+    gamma_market_raw = outcome["gamma_market_raw"]
+
+    assert outcome["identity_only"] is True
+    assert gamma_market_raw["identity_only"] is True
+    assert gamma_market_raw["tradability_authority"] == "persisted_snapshot_reconstruction"
+    for fake_live_field in ("active", "closed", "enable_orderbook", "executable"):
+        assert fake_live_field not in outcome
+    for fake_live_field in ("active", "closed", "enableOrderBook", "acceptingOrders"):
+        assert fake_live_field not in gamma_market_raw
+
+
 def test_stale_snapshot_with_clob_recaptures_fresh(conn):
     """RED→GREEN: stale persisted snapshot + a client must re-capture, not raise stale."""
     stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))

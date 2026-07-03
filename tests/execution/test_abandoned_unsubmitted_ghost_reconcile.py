@@ -53,6 +53,7 @@ def _pre_submit_payload(*, event_id: str, final_intent_id: str) -> dict:
     """A PreSubmitRevalidated payload the production ledger accepts (post-only maker)."""
     return {
         "event_id": event_id,
+        "event_type": "FORECAST_SNAPSHOT_READY",
         "final_intent_id": final_intent_id,
         "condition_id": "condition-1",
         "token_id": "token-yes",
@@ -69,6 +70,35 @@ def _pre_submit_payload(*, event_id: str, final_intent_id: str) -> dict:
         "current_best_bid": 0.41,
         "current_best_ask": 0.43,
         "limit_price": 0.40,
+        "size": 10.0,
+        "q_live": 0.50,
+        "q_lcb_5pct": 0.45,
+        "expected_edge": 0.05,
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_type": "direct",
+            "route_id": "DIRECT_YES:bin-1@proof",
+            "side": "YES",
+            "candidate_id": "YES:bin-1:DIRECT_YES:bin-1@proof",
+            "bin_id": "bin-1",
+            "payoff_q_point": 0.50,
+            "payoff_q_lcb": 0.45,
+            "cost": 0.40,
+            "edge_lcb": 0.05,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.05,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.45,
+        },
+        "expected_edge_source_certificate_hash": "edge-cert-hash-1",
+        "cost_basis_source_certificate_hash": "cost-cert-hash-1",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -219,6 +249,22 @@ def test_reconcile_terminalizes_aged_never_submitted_ghost():
     summary = reconcile_abandoned_unsubmitted_ghosts(conn)
     assert summary["advanced"] == 1, summary
     assert summary["errors"] == 0, summary
+    assert summary["continuations"] == [
+        {
+            "reason": "abandoned_unsubmitted_ghost",
+            "aggregate_id": "event-1:intent-1",
+            "execution_command_id": "cmd-1",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "family_id": "fam-1",
+            "city": "boston",
+            "target_date": "2026-06-23",
+            "metric": "high",
+            "condition_id": "condition-1",
+            "token_id": "token-yes",
+            "direction": "buy_yes",
+        }
+    ]
 
     # The appended terminal is a SubmitRejected that the production ledger's
     # _validate_event_append accepts (proves the pre-submit payload is legal).
@@ -231,6 +277,73 @@ def test_reconcile_terminalizes_aged_never_submitted_ghost():
 
     # The duplicate-suppression lock now sees the aggregate as terminal -> RELEASE.
     assert _terminal_per_duplicate_lock(conn, "event-1:intent-1")
+
+
+def test_reconcile_ignores_prior_rejected_attempt_when_current_command_is_ghost():
+    """A prior rejected attempt on the same aggregate is not venue presence for
+    the current ExecutionCommandCreated row.
+
+    This mirrors the live stuck class from 2026-06-26: an aggregate had an older
+    VenueSubmitAttempted/SubmitRejected/CapTransitioned sequence, then a later
+    second ExecutionCommandCreated with no venue command row. The old candidate
+    SQL disqualified the whole aggregate because of the historical terminal
+    events, leaving the current command stuck forever.
+    """
+    from src.execution.command_recovery import reconcile_abandoned_unsubmitted_ghosts
+
+    conn = _conn()
+    ledger = _build_ghost(conn, occurred_at=OLD, with_submit_attempt=True)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitRejected",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "execution_receipt_hash": "receipt-1",
+            "reason_code": "prior_attempt_rejected",
+            "venue_call_started": True,
+            "pre_submit_rejection": False,
+        },
+        occurred_at=OLD,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "execution_receipt_hash": "receipt-1",
+            "to_status": "RELEASED",
+            "projection_status": "RELEASED",
+            "transition_reason": "prior_attempt_rejected",
+        },
+        occurred_at=OLD,
+        source_authority="live_cap_ledger",
+    )
+    cap_usage = conn.execute(
+        "SELECT usage_id FROM edli_live_cap_usage WHERE execution_command_id = ?",
+        ("cmd-1",),
+    ).fetchone()
+    LiveCapLedger(conn).release(str(cap_usage["usage_id"]), "prior_attempt_rejected")
+
+    _build_ghost(conn, execution_command_id="cmd-2", occurred_at=OLD + timedelta(minutes=5))
+    assert LiveOrderAggregateLedger(conn).get_projection("event-1:intent-1").current_state == (
+        "EXECUTION_COMMAND_CREATED"
+    )
+    assert _cap_status(conn, "cmd-2") == "RESERVED"
+
+    summary = reconcile_abandoned_unsubmitted_ghosts(conn)
+
+    assert summary["advanced"] == 1, summary
+    assert summary["errors"] == 0, summary
+    assert summary["continuations"][0]["execution_command_id"] == "cmd-2"
+    assert summary["continuations"][0]["metric"] == "high"
+    projection = LiveOrderAggregateLedger(conn).get_projection("event-1:intent-1")
+    assert projection.current_state == "SUBMIT_REJECTED"
+    assert _cap_status(conn, "cmd-2") == "RELEASED"
 
 
 def test_appended_terminal_is_legal_pre_submit_submit_rejected():
@@ -352,7 +465,7 @@ def test_no_ghosts_is_a_clean_noop():
 
     conn = _conn()
     summary = reconcile_abandoned_unsubmitted_ghosts(conn)
-    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0, "continuations": []}
 
 
 def test_reconcile_payload_is_legal_per_production_validate_event_append():

@@ -85,6 +85,42 @@ def test_generated_at_tracks_timestamp_in_lockstep(tmp_path, monkeypatch):
         )
 
 
+def test_cycle_pulse_refreshes_control_pause_truth(tmp_path, monkeypatch):
+    """Pulse writes must not preserve stale control state from a prior status file."""
+    target = _redirect_status_path(tmp_path, monkeypatch)
+    target.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-06-20T00:00:00+00:00",
+                "timestamp": "2026-06-20T00:00:00+00:00",
+                "control": {
+                    "entries_paused": False,
+                    "entries_pause_source": None,
+                    "entries_pause_reason": None,
+                    "edge_threshold_multiplier": 1.0,
+                    "strategy_gates": {},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(status_summary, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary, "get_entries_pause_source", lambda: "manual_command")
+    monkeypatch.setattr(
+        status_summary,
+        "get_entries_pause_reason",
+        lambda: "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
+    )
+    monkeypatch.setattr(status_summary, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary, "strategy_gates", lambda: {})
+
+    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+
+    control = json.loads(target.read_text())["control"]
+    assert control["entries_paused"] is True
+    assert control["entries_pause_source"] == "manual_command"
+    assert control["entries_pause_reason"] == "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix"
+
+
 def test_cycle_pulse_preserves_edli_business_candidate_counters(tmp_path, monkeypatch):
     """Chain-sync pulse must not erase the EDLI business-plane candidate proof."""
     target = _redirect_status_path(tmp_path, monkeypatch)

@@ -1,5 +1,5 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-29
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
 #                  family sizing), Fitz §1 (structural decision > patch).
 
@@ -58,16 +58,15 @@ BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
 DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 1
 # Hard cap on a family portfolio's worst-case loss (USD). When set, the
-# optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
-# the caller falls back to the single-leg safety selector. Default None = no cap (relies
-# on per-leg Kelly + portfolio_heat to bound exposure).
+# optimizer rejects portfolios with ``max_loss_usd > cap``. Default None = no cap
+# (relies on per-leg Kelly + portfolio_heat to bound exposure).
 ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 
 
 def _family_portfolio_max_legs() -> int:
     """Live max_legs for the Stage B family portfolio optimizer.
 
-    Unknown or invalid values fall back to the live default.
+    Unknown or invalid values use the live default.
     """
     try:
         raw = os.environ.get(
@@ -82,7 +81,7 @@ def _family_portfolio_max_legs() -> int:
 def _family_portfolio_max_loss_usd() -> float | None:
     """Optional hard-cap on Stage B portfolio worst-case loss (USD).
 
-    Returns None when unset, disabled, or invalid (fail-open: no cap).
+    Returns None when unset, disabled, or invalid.
     """
     raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, "").strip()
     if not raw:
@@ -94,6 +93,12 @@ def _family_portfolio_max_loss_usd() -> float | None:
     return cap if cap > 0.0 else None
 
 from src.contracts.no_trade_reason import NoTradeReason
+from src.contracts.canonical_lifecycle import (
+    PositionPhase,
+    VenueOrderStatus,
+    VenueTradeStatus,
+)
+from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
 from src.config import get_mode, settings
 
 # Audit reason string for dropped bins.
@@ -102,7 +107,7 @@ MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
 # loss-cap rejection path. NoTradeReason enum bump is deferred until the next
 # DB-migration PR (SV15 CHECK constraint requires schema_version bump + re-pin).
 # The string constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so
-# operators can grep / aggregate optimizer loss-cap fallbacks from logs.
+# operators can grep / aggregate optimizer loss-cap rejections from logs.
 # See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
 # section Wave 4.
 FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
@@ -189,13 +194,13 @@ class ExclusiveOutcomePortfolio:
     capital_cost_usd: float = 0.0
     capital_efficiency: float = 0.0
     max_loss_usd: float = 0.0
-    fallback_candidate_legs: tuple[Any, ...] = ()
+    ranked_candidate_legs: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.selected_legs:
             object.__setattr__(self, "selected_legs", (self.selected_leg,))
-        if not self.fallback_candidate_legs:
-            object.__setattr__(self, "fallback_candidate_legs", self.selected_legs)
+        if not self.ranked_candidate_legs:
+            object.__setattr__(self, "ranked_candidate_legs", self.selected_legs)
 
 
 @dataclass(frozen=True)
@@ -221,12 +226,16 @@ _BLOCKING_EXPOSURE_PHASES = frozenset(
         "acked",
         "live",
         "partial",
+        "partially_matched",
         "partially_filled",
+        "matched",
         "filled",
         "submit_unknown_side_effect",
         "unknown",
         "review_required",
         "submitted",
+        "submitting",
+        "quarantined",
     }
 )
 
@@ -378,6 +387,9 @@ def _weather_family_exposures_from_portfolio_impl(portfolio: Any) -> list[Weathe
     return exposures
 
 
+# venue_commands.state legacy-display union (mixes command truth + persisted order
+# outcomes). Not cleanly enum-mappable yet — left raw until the A1 command-truth /
+# legacy-display split; the canonical members here are ACKED + REVIEW_REQUIRED.
 _TRADE_COMMAND_BLOCKING_STATES = frozenset(
     {
         "ACKED",
@@ -392,21 +404,59 @@ _TRADE_COMMAND_BLOCKING_STATES = frozenset(
         "SUBMITTED",
     }
 )
+# Order-fact states that block re-entry. Open-order core is sourced from the
+# canonical OPEN_ORDER_FACT_STATES; terminal MATCHED from VenueOrderStatus blocks
+# via standing exposure. ACKED/UNKNOWN/REVIEW_REQUIRED are legacy order-fact echoes
+# retained until order-fact ingress is normalized. Byte-identical to the prior set.
 _TRADE_ORDER_BLOCKING_STATES = frozenset(
-    {
-        "LIVE",
-        "RESTING",
-        "PARTIALLY_MATCHED",
-        "MATCHED",
+    set(OPEN_ORDER_FACT_STATES)
+    | {
+        VenueOrderStatus.MATCHED.value,
         "ACKED",
         "UNKNOWN",
         "REVIEW_REQUIRED",
     }
 )
-_TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
-_TRADE_POSITION_BLOCKING_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit"}
+# Trade-chain fact states that block re-entry (a fill is in progress / done).
+# MATCHED/MINED/CONFIRMED sourced from VenueTradeStatus; "PARTIAL" is a legacy raw
+# trade-fact synonym retained until trade-fact ingress is normalized.
+_TRADE_FACT_BLOCKING_STATES = frozenset(
+    {
+        VenueTradeStatus.MATCHED.value,
+        VenueTradeStatus.MINED.value,
+        VenueTradeStatus.CONFIRMED.value,
+        "PARTIAL",
+    }
 )
+# Position phases that block re-entry, sourced from the canonical PositionPhase enum
+# (the pre-terminal "family is live" phases). Byte-identical to the prior literals.
+_TRADE_POSITION_BLOCKING_PHASES = frozenset(
+    {
+        PositionPhase.PENDING_ENTRY.value,
+        PositionPhase.ACTIVE.value,
+        PositionPhase.DAY0_WINDOW.value,
+        PositionPhase.PENDING_EXIT.value,
+        PositionPhase.QUARANTINED.value,
+    }
+)
+
+
+def _state_text_blocks_reentry(state_text: str) -> bool:
+    """True iff a persisted phase / venue-order / trade / command state text means a
+    same-family entry is already live and a same-family re-entry must block.
+
+    The legacy lowercase exposure-phase superset and the uppercase command/order/
+    trade sets are OR-ed exactly as the inline dedup gate did; the three cleanly-
+    mappable sets are now sourced from the canonical lifecycle enums, so the block
+    decision tracks the typed vocabulary instead of independently re-encoded raw
+    strings (INV-CL-1) while staying byte-identical to the prior literal sets.
+    """
+    return (
+        state_text.lower() in _BLOCKING_EXPOSURE_PHASES
+        or state_text.upper() in _TRADE_COMMAND_BLOCKING_STATES
+        or state_text.upper() in _TRADE_ORDER_BLOCKING_STATES
+        or state_text.upper() in _TRADE_FACT_BLOCKING_STATES
+    )
 
 
 def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
@@ -538,6 +588,9 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     ) -> None:
         if not (city and target_date and metric):
             return
+        phase_text = str(phase or "pending_entry")
+        if not _state_text_blocks_reentry(phase_text):
+            return
         exposure = WeatherFamilyExposure(
             key=WeatherFamilyKey(
                 str(city),
@@ -546,7 +599,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
                 str(market_family_id or ""),
             ),
             bin_label=str(bin_label or ""),
-            phase=str(phase or "pending_entry"),
+            phase=phase_text,
             position_id=str(position_id or ""),
         )
         dedupe_key = (
@@ -718,12 +771,26 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     me_slug = _column_expr(me_cols, "me", "market_slug")
     me_range_label = _column_expr(me_cols, "me", "range_label")
     me_outcome = _column_expr(me_cols, "me", "outcome")
+    slug_metric_expr = (
+        "CASE "
+        f"WHEN LOWER(COALESCE({me_slug}, {snap_slug}, {vc_market_id}, '')) "
+        "LIKE '%lowest-temperature%' THEN 'low' "
+        f"WHEN LOWER(COALESCE({me_slug}, {snap_slug}, {vc_market_id}, '')) "
+        "LIKE '%highest-temperature%' THEN 'high' "
+        "ELSE NULL END"
+    )
+    me_metric = _column_expr(
+        me_cols,
+        "me",
+        "temperature_metric",
+        default=slug_metric_expr,
+    )
     market_table = _qualified_table(market_schema, "market_events")
     command_identity_sql = f"""
         SELECT DISTINCT
             me.city,
             me.target_date,
-            me.temperature_metric,
+            {me_metric} AS temperature_metric,
             COALESCE({me_slug}, {snap_slug}, {vc_market_id}, {env_condition}, {snap_condition}) AS market_family_id,
             COALESCE({me_range_label}, {me_outcome}, {env_label}, {snap_label}) AS bin_label,
             vc.state AS phase,
@@ -1375,7 +1442,7 @@ def buy_no_native_quote_evidence_submit_enabled() -> bool:
 
 
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
-    """Return structural live-execution reason before a leg consumes fallback rank."""
+    """Return structural live-execution reason before a leg consumes ranked selection."""
 
     structural = _edge_family_candidate_rejection_reason(edge)
     if structural:
@@ -1546,12 +1613,6 @@ def build_weather_family_decision(
 
     # Wave 4 (2026-05-27): max_legs controls the live family portfolio optimizer.
     max_legs = _family_portfolio_max_legs()
-    try:
-        fallback_candidate_count = int(
-            os.environ.get("ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES", "3")
-        )
-    except ValueError:
-        fallback_candidate_count = 3
     portfolio = optimize_exclusive_outcome_portfolio(
         candidate_edges,
         city=city,
@@ -1564,13 +1625,12 @@ def build_weather_family_decision(
     if portfolio is None:
         return None
     # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
-    # optimizer's portfolio exceeds it, return None so the caller can use the
-    # deterministic single-leg safety selector. Fail-open (no cap) when env unset.
+    # optimizer's portfolio exceeds it, reject this family decision explicitly.
     loss_cap = _family_portfolio_max_loss_usd()
     if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
         logger.warning(
             "[%s] city=%s target=%s metric=%s "
-            "max_loss_usd=%.4f > cap=%.4f - falling back to single-leg safety selector",
+            "max_loss_usd=%.4f > cap=%.4f - rejecting family portfolio",
             FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
             city, target_date, temperature_metric,
             float(portfolio.max_loss_usd), loss_cap,
@@ -1580,30 +1640,29 @@ def build_weather_family_decision(
     selected_legs = list(portfolio.selected_legs)
     if len(selected_legs) > 1:
         # A multi-leg family portfolio is a coherent payoff vector. Ranked
-        # scalar siblings are not interchangeable fallback legs for it; replacing
-        # one selected leg requires re-optimizing the portfolio, not appending the
-        # old scalar fallback queue.
-        fallback_candidates = selected_legs
+        # scalar siblings are not interchangeable alternatives for it; replacing
+        # one selected leg requires re-optimizing the portfolio.
+        ranked_candidates = selected_legs
     else:
         # A scalar entry has no first-class ordered-alternative intent today.
-        # Emitting ranked sibling fallbacks as separate should_trade decisions lets
+        # Emitting ranked sibling alternatives as separate should_trade decisions lets
         # the submit loop race a second same-family order after an unknown first
         # attempt. Keep only the optimized leg until ordered alternatives are a
         # typed execution-intent primitive.
-        fallback_candidates = [portfolio.selected_leg]
+        ranked_candidates = [portfolio.selected_leg]
     portfolio = ExclusiveOutcomePortfolio(
         family_key=portfolio.family_key,
         selected_leg=portfolio.selected_leg,
         selected_legs=portfolio.selected_legs,
-        fallback_candidate_legs=tuple(fallback_candidates),
+        ranked_candidate_legs=tuple(ranked_candidates),
         candidate_legs=portfolio.candidate_legs,
         candidate_leg_descriptors=portfolio.candidate_leg_descriptors,
         selection_score=portfolio.selection_score,
         expected_net_profit_usd=portfolio.expected_net_profit_usd,
         expected_fill_probability=portfolio.expected_fill_probability,
         objective=(
-            f"{portfolio.objective}:ranked_executable_fallback_top_"
-            f"{len(fallback_candidates)}"
+            f"{portfolio.objective}:ranked_selected_legs_top_"
+            f"{len(ranked_candidates)}"
         ),
         payoff_matrix=portfolio.payoff_matrix,
         posterior_vector=portfolio.posterior_vector,
@@ -1615,8 +1674,8 @@ def build_weather_family_decision(
         capital_efficiency=portfolio.capital_efficiency,
         max_loss_usd=portfolio.max_loss_usd,
     )
-    selected_set = set(id(edge) for edge in portfolio.fallback_candidate_legs)
-    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.fallback_candidate_legs)
+    selected_set = set(id(edge) for edge in portfolio.ranked_candidate_legs)
+    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.ranked_candidate_legs)
     dropped: list[FamilyPreselectionDrop] = []
     for edge, rejection_reason in excluded_blocked_edges:
         dropped.append(
@@ -1779,7 +1838,7 @@ def dedup_mutually_exclusive_families(
         portfolio_selected = [
             i
             for i in idxs
-            if int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+            if int(getattr(decisions[i], "family_ranked_candidate_count", 0) or 0) > 1
             and str(getattr(decisions[i], "family_portfolio_leg_role", "") or "")
             == "portfolio_selected"
         ]
@@ -1787,8 +1846,8 @@ def dedup_mutually_exclusive_families(
             selected_set = set(portfolio_selected)
             for i in portfolio_selected:
                 validations = getattr(decisions[i], "applied_validations", None)
-                if isinstance(validations, list) and "family_ranked_executable_fallback" not in validations:
-                    validations.append("family_ranked_executable_fallback")
+                if isinstance(validations, list) and "family_ranked_executable_alternative" not in validations:
+                    validations.append("family_ranked_executable_alternative")
             for i in idxs:
                 if i in selected_set:
                     continue
@@ -1800,10 +1859,10 @@ def dedup_mutually_exclusive_families(
                 d.rejection_reason_detail = (
                     f"family={city}|{target_date}|{temperature_metric} "
                     f"dropped_bin={_decision_bin_label(d)!r} "
-                    "(portfolio selected legs only; scalar fallback alternative not live)"
+                    "(portfolio selected legs only; ranked scalar alternative not live)"
                 )
             logger.info(
-                "[MUTUALLY_EXCLUSIVE_FAMILY_FALLBACK_CANDIDATES] family=%s candidate_count=%d",
+                "[MUTUALLY_EXCLUSIVE_FAMILY_RANKED_CANDIDATES] family=%s candidate_count=%d",
                 "|".join(key),
                 len(portfolio_selected),
             )

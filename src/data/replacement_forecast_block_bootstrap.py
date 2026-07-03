@@ -1,4 +1,4 @@
-"""Cluster/block bootstrap diagnostics for replacement forecast shadow evidence."""
+"""Cluster/block bootstrap diagnostics for replacement forecast blocked evidence."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def run_replacement_forecast_block_bootstrap(
     confidence_level: float = 0.95,
     min_blocks: int = 5,
 ) -> ReplacementForecastBlockBootstrapResult:
-    """Estimate shadow-evidence uncertainty with correlated replay rows kept in blocks."""
+    """Estimate blocked-evidence uncertainty with correlated replay rows kept in blocks."""
 
     if not block_axes:
         raise ValueError("block_axes must not be empty")
@@ -212,7 +212,7 @@ def run_replacement_forecast_block_bootstrap(
         reasons.append("REPLACEMENT_BLOCK_BOOTSTRAP_CI_OVERLAPS_ZERO")
     if lower < 0.0:
         reasons.append("REPLACEMENT_BLOCK_BOOTSTRAP_NEGATIVE_LOWER_BOUND")
-    status = "DIAGNOSTIC_PASS" if not reasons else "SHADOW_ONLY"
+    status = "DIAGNOSTIC_PASS" if not reasons else "BLOCKED"
 
     return ReplacementForecastBlockBootstrapResult(
         status=status,

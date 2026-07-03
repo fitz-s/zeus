@@ -905,7 +905,7 @@ def _build_minimal_db() -> sqlite3.Connection:
             fill_authority TEXT,
             recovery_authority TEXT,
             chain_shares REAL,
-            -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
+            -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28).
             chain_avg_price REAL,
             chain_cost_basis_usd REAL,
             chain_seen_at TEXT,

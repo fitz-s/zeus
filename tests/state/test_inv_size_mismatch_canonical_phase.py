@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 2, PR A scaffold; flipped by PR C)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 2, PR A scaffold; flipped by PR C)
 """Antibody invariants: chain↔local size mismatch routes through canonical review.
 
 Finding 2 (P1 likely bug): when canonical size correction is unavailable,

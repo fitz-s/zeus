@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: C3 calibration surface docs/operations/c3_sigma_calibration_surface_2026-06-12.md
+# Authority basis: C3 calibration surface docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md
 #   n=127 A_24h C-unit cells; mode-bin realized win rate 0.17 vs mean q 0.43-0.46 (2.5x too peaked)
 #   Recommended k=2.4 for C-unit cities. F cities: n=25 insufficient, keep market-anchor cap.
 """Read-only before/after evidence table for the operator σ-scale flip decision.
@@ -169,7 +169,7 @@ def main() -> None:
     lines: list[str] = [
         "# σ Scale k=2.4 Before/After Evidence Table",
         f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')}",
-        f"**Authority:** docs/operations/c3_sigma_calibration_surface_2026-06-12.md",
+        f"**Authority:** docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md",
         f"**Proposed k:** {K_PROPOSED} (C-unit cities only; F cities unchanged)",
         f"**Source:** freshest fused_normal_direct posterior per C-unit family, next {N_TARGET_DATES} target dates",
         "",
@@ -273,7 +273,7 @@ def main() -> None:
         "",
         "---",
         "",
-        "*Read-only script: docs/operations/c3_sigma_calibration_surface_2026-06-12.md. No code modified.*",
+        "*Read-only script: docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md. No code modified.*",
     ]
 
     output = "\n".join(lines) + "\n"

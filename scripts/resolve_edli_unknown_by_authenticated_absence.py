@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from src.execution.edli_absence_resolver import resolve
+from src.execution.edli_absence_resolver import build_absence_proof, resolve
 
 
 def main() -> int:

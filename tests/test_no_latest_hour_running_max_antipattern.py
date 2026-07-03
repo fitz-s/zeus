@@ -1,6 +1,6 @@
 # Created: 2026-05-23
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   src/data/day0_observation_reader.py module docstring (Root C fix).
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Repo-static antibody: no production reader may use the latest-hour running_max anti-pattern (Root C bug, 2026-05-22).

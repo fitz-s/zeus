@@ -2,12 +2,10 @@
 # Last reused or audited: 2026-05-06
 # Authority basis: ULTIMATE_DESIGN §4 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 0.F
 
-"""Generative route function — Phase 0.F implementation.
+"""Generative route function for architecture gate routing.
 
 Reads capabilities.yaml and invariants.yaml, cross-references changed paths,
 returns a RouteCard. Token-budgeted render function covers T0..T3 tiers.
-
-Replaces nothing yet (shadow mode only). Sunset: 2027-05-06.
 """
 
 from __future__ import annotations

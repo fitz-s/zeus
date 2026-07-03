@@ -1,7 +1,7 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect replacement forecast shadow/veto output from repricing or retargeting order intents.
+# Purpose: Protect replacement forecast output from repricing or retargeting order intents.
 # Reuse: Run before wiring replacement forecast output near final intent or executor boundaries.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
 """Replacement forecast order-intent immutability tests."""

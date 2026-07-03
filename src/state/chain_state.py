@@ -34,8 +34,16 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Optional, Sequence
 
+from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
+
 if TYPE_CHECKING:
     pass
+
+
+_CHAIN_LOCAL_NON_ACTIVE_STATES = frozenset(
+    set(TERMINAL_STATES)
+    | {LifecyclePhase.ECONOMICALLY_CLOSED.value, "pending_tracked"}
+)
 
 
 class ChainState(str, Enum):
@@ -107,8 +115,7 @@ def classify_chain_state(
     for pos in getattr(portfolio, "positions", []):
         # Skip inactive / pending states (mirrors chain_reconciliation.py logic)
         pos_state = str(getattr(pos, "state", "") or "")
-        if pos_state in {"pending_tracked", "settled", "voided", "admin_closed",
-                         "expired", "quarantined_void"}:
+        if pos_state in _CHAIN_LOCAL_NON_ACTIVE_STATES:
             continue
 
         verified = getattr(pos, "chain_verified_at", "") or ""

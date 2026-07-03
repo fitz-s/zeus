@@ -1,12 +1,12 @@
 # Created: 2026-06-14
 # Last reused or audited: 2026-06-19
 # Authority basis: freshness-throughput starvation fix (#92,
-#   docs/evidence/deadloop_2026-06-14/binding_wall.md). The decision-triggered
-#   family snapshot refresher's reconstruct returned None for EVERY family because
-#   the topology rows omitted the family-identity columns.
-"""RED-on-revert regression test: the decision-triggered family snapshot refresher
-MUST re-inject city/target_date/temperature_metric into the topology rows before
-calling ``reconstruct_weather_market_from_static_topology``.
+#   docs/evidence/deadloop_2026-06-14/binding_wall.md). The family snapshot
+#   producer's reconstruct returned None for EVERY family because topology rows
+#   omitted the family-identity columns.
+"""RED-on-revert regression test: the sidecar family snapshot producer MUST
+re-inject city/target_date/temperature_metric into topology rows before calling
+``reconstruct_weather_market_from_static_topology``.
 
 Root cause (2026-06-12 - 2026-06-14, ``decision_triggered_targeted_refresh``
 marker at ZERO; processed approx 0):
@@ -21,18 +21,18 @@ marker at ZERO; processed approx 0):
   That silent None made ``family_snapshot_refresher`` return False for every
   family, so a STALE live family could never get a fresh row and requeued forever.
 
-Fix (main.py, inside ``_edli_decision_family_snapshot_refresher._refresh``):
+Fix (src/data/substrate_observer.py, inside
+``_refresh_pending_family_snapshots``):
   Re-inject the three family-identity fields into every topology row before
-  reconstruct, mirroring the warm-job lane ``refresh_pending_family_snapshots``
-  (main.py ~L3580) that already does this and therefore works.
+  reconstruct.
 
 Tests in this file:
   1. CONTRACT -- topology rows from ``_event_family_market_topology_rows`` lack
      city/target_date/temperature_metric; reconstruct on them returns None;
      reconstruct on the SAME rows WITH the three fields re-injected reconstructs.
      This is the exact gap the call-site fix closes.
-  2. CALL-SITE GUARD -- the decision-triggered refresher in main.py
-     (``_edli_decision_family_snapshot_refresher``) MUST re-inject
+  2. CALL-SITE GUARD -- the sidecar producer
+     (``_refresh_pending_family_snapshots``) MUST re-inject
      ``temperature_metric`` (the load-bearing field reconstruct reads). This test
      reads the source file directly so reverting the re-injection is immediately RED.
 
@@ -231,31 +231,59 @@ def test_reconstruct_needs_family_identity_reinjection() -> None:
     snaps.close()
 
 
+def test_reconstruct_keeps_local_day_family_after_parent_enddate() -> None:
+    """Warm-lane reconstruction must not hide Day0/redecision family by endDate."""
+    topo = _topology_conn()
+    snaps = _snapshot_conn()
+
+    payload = {"city": CITY, "target_date": TARGET_DATE, "metric": METRIC}
+    rows = [
+        {**dict(r), "city": CITY, "target_date": TARGET_DATE, "temperature_metric": METRIC}
+        for r in _event_family_market_topology_rows(topo, payload)
+    ]
+
+    market = reconstruct_weather_market_from_static_topology(
+        snaps,
+        topology_rows=rows,
+        now_utc=datetime(2026, 6, 15, 13, 0, 0, tzinfo=UTC),
+    )
+
+    assert market is not None
+    assert market["hours_to_resolution"] == -1.0
+    assert len(market["outcomes"]) == _CONDITION_COUNT
+    assert market["condition_ids"] == [
+        f"condition-{index}" for index in range(1, _CONDITION_COUNT + 1)
+    ]
+
+    topo.close()
+    snaps.close()
+
+
 # ---------------------------------------------------------------------------
-# Test 2 -- CALL-SITE GUARD: the decision-triggered refresher re-injects the
+# Test 2 -- CALL-SITE GUARD: the sidecar producer re-injects the
 #   family-identity fields before reconstruct.  Reverting that is immediately RED.
 # ---------------------------------------------------------------------------
 
-_MAIN_SRC = Path(__file__).parent.parent.parent / "src" / "main.py"
+_SUBSTRATE_OBSERVER_SRC = Path(__file__).parent.parent.parent / "src" / "data" / "substrate_observer.py"
 
 
-def test_decision_refresher_reinjects_family_identity() -> None:
-    """ANTIBODY: _edli_decision_family_snapshot_refresher MUST re-inject
+def test_sidecar_refresher_reinjects_family_identity() -> None:
+    """ANTIBODY: _refresh_pending_family_snapshots MUST re-inject
     temperature_metric (the load-bearing identity field reconstruct reads) into the
     topology rows before calling reconstruct.
 
-    Reads main.py source directly so removing the re-injection is RED without
+    Reads substrate_observer.py source directly so removing the re-injection is RED without
     driving the full live CLOB fetch path.
 
     RED-on-revert: deleting the
     ``"temperature_metric": metric`` re-injection (or the whole list-comprehension)
-    from the refresher fails this assertion."""
-    src = _MAIN_SRC.read_text(encoding="utf-8")
+    from the producer fails this assertion."""
+    src = _SUBSTRATE_OBSERVER_SRC.read_text(encoding="utf-8")
 
-    anchor = "def _edli_decision_family_snapshot_refresher("
+    anchor = "def _refresh_pending_family_snapshots("
     assert anchor in src, (
-        "Expected the decision-triggered refresher builder in main.py -- "
-        "check _edli_decision_family_snapshot_refresher is still present."
+        "Expected the sidecar family snapshot producer in substrate_observer.py -- "
+        "check _refresh_pending_family_snapshots is still present."
     )
     # Scope to the refresher body: from its def to the next top-level def.
     body_start = src.index(anchor)
@@ -264,10 +292,10 @@ def test_decision_refresher_reinjects_family_identity() -> None:
 
     assert '"temperature_metric": metric' in body, (
         "DECISION-REFRESH IDENTITY RE-INJECTION REVERTED: "
-        "_edli_decision_family_snapshot_refresher no longer re-injects "
+        "_refresh_pending_family_snapshots no longer re-injects "
         '"temperature_metric" into the topology rows before reconstruct. Without it, '
         "reconstruct_weather_market_from_static_topology returns None at its identity "
-        "guard (market_scanner.py ~L3535) for EVERY family, the refresher returns "
+        "guard (market_scanner.py ~L3535) for EVERY family, the producer returns "
         "False, and STALE live families requeue forever "
         "(decision_triggered_targeted_refresh marker at ZERO; processed approx 0)."
     )
@@ -277,9 +305,10 @@ def test_decision_refresher_reinjects_family_identity() -> None:
         "the refresher must re-inject city AND target_date alongside "
         "temperature_metric -- reconstruct's identity guard requires all three"
     )
+    assert "reconstruct_weather_market_from_static_topology(" in body
 
 
-def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypatch) -> None:
+def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh() -> None:
     """Gate-level snapshot blocks must not run producer I/O in the reactor.
 
     A blocked event is already requeued into the pending event table; that table is
@@ -289,33 +318,79 @@ def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypat
 
     import src.main as main
 
-    def fail_refresh(*_args, **_kwargs):
-        raise AssertionError("reactor must not call substrate producer refresh")
+    refresher = main._edli_reactor_family_snapshot_refresher()
 
-    monkeypatch.setattr(main, "_refresh_pending_family_snapshots", fail_refresh)
+    assert not hasattr(main, "_refresh_pending_family_snapshots")
+    assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
+
+
+def test_reactor_refresher_marks_sidecar_priority_family(monkeypatch) -> None:
+    """Gate-level blocks must become explicit sidecar priority work, not plain backlog."""
+
+    import src.main as main
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.data.substrate_priority.mark_money_path_substrate_priority",
+        lambda **kwargs: calls.append(kwargs),
+    )
 
     refresher = main._edli_reactor_family_snapshot_refresher()
 
     assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
+    assert calls == [
+        {
+            "reason": "reactor_blocked_family_refresh",
+            "ttl_seconds": 45.0,
+            "families": [("Auckland", "2026-06-20", "low")],
+            "condition_ids": (),
+            "merge_existing": True,
+        }
+    ]
 
 
-def test_reactor_market_absence_provider_reads_gamma_empty_backoff(monkeypatch) -> None:
-    """The reactor terminalizes no-listed-market blocks only from Gamma-empty proof.
+def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backoff(monkeypatch) -> None:
+    """The reactor terminalizes no-listed-market blocks only from durable sidecar proof.
 
-    The provider must read the same normalized family key the warm lane writes, including
-    metric aliases, and must stop proving absence when the backoff expires.
+    Main no longer owns the sidecar's process-local backoff map. It must read only
+    durable shared evidence.
     """
 
     import src.main as main
+    from src.data import market_absence_evidence
 
-    monkeypatch.setattr(main.time, "monotonic", lambda: 100.0)
-    key = main._substrate_refresh_family_key("Auckland", "2026-06-20", "lowest")
-    monkeypatch.setattr(main, "_GAMMA_EMPTY_BACKOFF_UNTIL", {key: 130.0})
+    monkeypatch.setattr(
+        market_absence_evidence,
+        "has_recent_market_unavailable_evidence",
+        lambda **_kwargs: False,
+    )
+
+    provider = main._edli_reactor_family_market_absence_provider()
+
+    assert not hasattr(main, "_GAMMA_EMPTY_BACKOFF_UNTIL")
+    assert provider(city="Auckland", target_date="2026-06-20", metric="low") is False
+
+
+def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch) -> None:
+    """Market-unavailable evidence is produced by the substrate-observer process.
+
+    The order daemon's provider must read the shared evidence surface, not only its
+    own process-local backoff map.
+    """
+
+    import src.main as main
+    from src.data import market_absence_evidence
+
+    def _has_recent_market_unavailable_evidence(*, city, target_date, metric, now=None, path=None):
+        return (city, target_date, metric) == ("Auckland", "2026-06-20", "low")
+
+    monkeypatch.setattr(
+        market_absence_evidence,
+        "has_recent_market_unavailable_evidence",
+        _has_recent_market_unavailable_evidence,
+    )
 
     provider = main._edli_reactor_family_market_absence_provider()
 
     assert provider(city="Auckland", target_date="2026-06-20", metric="low") is True
     assert provider(city="Auckland", target_date="2026-06-20", metric="high") is False
-
-    monkeypatch.setattr(main.time, "monotonic", lambda: 131.0)
-    assert provider(city="Auckland", target_date="2026-06-20", metric="low") is False

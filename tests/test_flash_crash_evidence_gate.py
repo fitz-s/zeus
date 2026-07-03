@@ -178,7 +178,7 @@ def test_portfolio_evaluate_exit_belief_confirmed_crash_exits():
     )
     decision = pos.evaluate_exit(ctx)
     assert decision.should_exit is True
-    assert decision.trigger in {"FLASH_CRASH_PANIC", "MODEL_DIVERGENCE_PANIC"}
+    assert decision.trigger == "FLASH_CRASH_PANIC"
 
 
 # --- 4. Single-site coherence (Wave 3, 2026-06-03) -----------------------------------

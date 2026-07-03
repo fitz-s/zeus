@@ -113,6 +113,9 @@ class VenueSubmissionEnvelope:
                 "compatibility submission envelope cannot authorize live submit: "
                 f"{reason}"
             )
+        funder = str(self.funder_address or "").strip()
+        if funder in {"", "UNRESOLVED_PRE_SUBMIT_FUNDER"}:
+            raise ValueError("live submission envelope missing bound funder_address")
         expected_token = self.yes_token_id if self.outcome_label == "YES" else self.no_token_id
         if self.selected_outcome_token_id != expected_token:
             raise ValueError(

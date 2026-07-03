@@ -48,6 +48,8 @@ _ROOT = os.path.dirname(_SCRIPT_DIR)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from src.contracts.settlement_semantics import SettlementSemantics
+
 # --- live DBs: ALWAYS the main tree (worktree ships only stubs) -------------
 _LIVE_STATE = "/Users/leofitz/zeus/state"
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
@@ -163,9 +165,14 @@ def build_grid_omega(
 ) -> OutcomeSpace:
     step = 1.0 if unit == "C" else 2.0
     # span wide enough to hold center +/- ~8 sigma and the realized value
-    anchor = round(center_native)
-    lo_anchor = min(anchor, round(settlement_value))
-    hi_anchor = max(anchor, round(settlement_value))
+    if unit == "C":
+        semantics = SettlementSemantics.default_wu_celsius("QKERNEL_ARM_REPLAY")
+    else:
+        semantics = SettlementSemantics.default_wu_fahrenheit("QKERNEL_ARM_REPLAY")
+    anchor = semantics.round_single(center_native)
+    settled_anchor = semantics.round_single(settlement_value)
+    lo_anchor = min(anchor, settled_anchor)
+    hi_anchor = max(anchor, settled_anchor)
     span = 12 if unit == "C" else 12  # interior steps each side
     if unit == "C":
         interior_lows = list(range(int(lo_anchor) - span, int(hi_anchor) + span + 1))

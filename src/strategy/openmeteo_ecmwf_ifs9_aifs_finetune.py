@@ -237,7 +237,7 @@ def evaluate_openmeteo_ecmwf_ifs9_aifs_nested_finetune(
         SoftAnchorGuardrailBucketCoverage(
             guardrail_bucket=bucket,
             row_count=count,
-            status="PASS" if count >= min_rows_per_guardrail_bucket else "SHADOW_ONLY",
+            status="PASS" if count >= min_rows_per_guardrail_bucket else "BLOCKED",
             reason_codes=(
                 ("REPLACEMENT_FINETUNE_GUARDRAIL_BUCKET_ROW_COVERAGE_PASS",)
                 if count >= min_rows_per_guardrail_bucket
@@ -257,7 +257,7 @@ def evaluate_openmeteo_ecmwf_ifs9_aifs_nested_finetune(
         reasons.append("REPLACEMENT_FINETUNE_INCOMPLETE_FOLDS")
     if any(bucket.status != "PASS" for bucket in bucket_coverage):
         reasons.append("REPLACEMENT_FINETUNE_GUARDRAIL_BUCKET_COVERAGE_INSUFFICIENT")
-    status = "PROMOTION_EVIDENCE_READY" if not reasons else "SHADOW_EVIDENCE_ONLY"
+    status = "PROMOTION_EVIDENCE_READY" if not reasons else "BLOCKED"
     if "REPLACEMENT_FINETUNE_HIGH_LOW_METRIC_MIXING_BLOCKED" in reasons:
         status = "BLOCKED"
     mean_brier = sum(float(fold.holdout_brier) for fold in scored_folds) / len(scored_folds) if scored_folds else None

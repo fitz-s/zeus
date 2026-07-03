@@ -312,6 +312,38 @@ def test_run_cycle_idempotent_re_run():
     assert second["skipped"] >= first["written"]
 
 
+def test_run_subprocess_injects_51_scripts_dir_on_pythonpath(monkeypatch):
+    """TIGGE legacy scripts import sibling modules from 51-source scripts dir."""
+    import os
+
+    captured: dict = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeCompleted()
+
+    monkeypatch.setenv("PYTHONPATH", "/Users/leofitz/zeus-live-main")
+    monkeypatch.setattr(tigge_pipeline.subprocess, "run", fake_run)
+
+    tigge_pipeline._run_subprocess(
+        [sys.executable, str(tigge_pipeline.SCRIPTS_DIR_51 / "tigge_mx2t6_download_resumable.py")],
+        timeout=5,
+        label="download_antibody",
+    )
+
+    env = captured.get("env")
+    assert env is not None
+    pythonpath = env.get("PYTHONPATH", "")
+    parts = [os.path.normpath(p) for p in pythonpath.split(os.pathsep)]
+    assert parts[0] == os.path.normpath(str(tigge_pipeline.SCRIPTS_DIR_51))
+    assert os.path.normpath("/Users/leofitz/zeus-live-main") in parts
+
+
 # ---------------------------------------------------------------------------
 # Daemon-level antibody: scheduler decorator swallows exceptions so a single
 # cycle failure must NOT crash other ingest jobs.

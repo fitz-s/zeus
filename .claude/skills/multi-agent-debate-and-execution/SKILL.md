@@ -201,7 +201,7 @@ EXECUTION ORDER (strict):
 - BATCH X → critic-gate review → land if APPROVE
 - File:line + content cites grep-verified within 10 min before commit (cite-CONTENT discipline)
 - NO `git add -A` (co-tenant safety)
-- Update BASELINE_PASSED in pre-commit-invariant-test.sh
+- Run dispatch-backed hook smoke if hook behavior changed
 - Per-batch critic dispatch is ON ME after each BATCH_X_DONE
 
 Cross-batch reminder: HARD NOT-IN-SCOPE for <surfaces> is the WRITER side.

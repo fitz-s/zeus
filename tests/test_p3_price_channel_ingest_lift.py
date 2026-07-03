@@ -32,9 +32,9 @@ from __future__ import annotations
 import ast
 import inspect
 import sqlite3
+import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAIN_PY = _REPO_ROOT / "src" / "main.py"
@@ -53,6 +53,171 @@ _LIFTED_PRODUCERS = (
     "_edli_market_channel_ingestor_cycle",
     "_edli_user_channel_reconcile_cycle",
 )
+
+
+def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    assert 30.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
+    assert pci.MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT <= 4
+    assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
+    assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
+
+
+def test_quote_refresh_no_coverage_is_business_failure() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "candidate_token_metadata": 32,
+            "candidate_quote_refresh_events": 0,
+            "budget_exhausted": True,
+            "budget_skipped_tokens": 32,
+        },
+        token_key="candidate_token_metadata",
+        event_key="candidate_quote_refresh_events",
+    )
+
+    assert failed is True
+    assert reason == "quote_refresh_budget_exhausted_no_coverage"
+
+
+def test_quote_refresh_partial_coverage_is_business_failure() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "held_token_metadata": 2,
+            "held_quote_refresh_events": 1,
+            "budget_exhausted": False,
+            "budget_skipped_tokens": 1,
+        },
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+
+    assert failed is True
+    assert reason == "quote_refresh_partial_coverage"
+
+
+def test_quote_refresh_complete_coverage_is_healthy_even_if_elapsed_crosses_budget() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "held_token_metadata": 2,
+            "held_quote_refresh_events": 2,
+            "budget_exhausted": True,
+            "budget_skipped_tokens": 0,
+        },
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+
+    assert failed is False
+    assert reason is None
+
+
+def test_price_channel_daemon_scheduler_health_uses_business_result(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+
+    wrapped = daemon._scheduler_job("edli_market_channel_ingestor")(
+        lambda: {
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "candidate_quote_refresh_no_coverage",
+        }
+    )
+    result = wrapped()
+
+    assert result["scheduler_failed"] is True
+    assert writes == [
+        {
+            "job_name": "edli_market_channel_ingestor",
+            "failed": True,
+            "reason": "candidate_quote_refresh_no_coverage",
+            "extra": result,
+        }
+    ]
+
+
+def test_price_channel_daemon_records_max_instance_skip(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+
+    daemon._scheduler_skip_listener(
+        types.SimpleNamespace(
+            job_id="edli_held_quote_refresh",
+            scheduled_run_times=[datetime(2026, 6, 30, tzinfo=timezone.utc)],
+        )
+    )
+
+    assert writes == [
+        {
+            "job_name": "edli_held_quote_refresh",
+            "failed": False,
+            "skipped": True,
+            "skip_reason": "max_instances_reached",
+            "extra": {
+                "scheduler_skip_reason": "max_instances_reached",
+                "scheduled_run_times": ["2026-06-30T00:00:00+00:00"],
+            },
+        }
+    ]
+
+
+def test_price_channel_clob_fetchers_are_budget_bound(monkeypatch) -> None:
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+    seen: dict[str, object] = {}
+
+    class FakeClob:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            seen["single_timeout"] = timeout
+            return {"asset_id": token_id}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            seen["batch_timeout"] = timeout
+            return {token_id: {"asset_id": token_id} for token_id in token_ids}
+
+    fetch_one, fetch_many = lane._budgeted_orderbook_fetchers(
+        FakeClob(),
+        deadline_monotonic=103.0,
+    )
+
+    assert fetch_one("tok-a") == {"asset_id": "tok-a"}
+    assert fetch_many is not None
+    assert fetch_many(["tok-b"]) == {"tok-b": {"asset_id": "tok-b"}}
+    assert seen["single_timeout"] is not None
+    assert seen["batch_timeout"] is not None
+
+
+def test_price_channel_clob_timeout_fails_when_deadline_exhausted(monkeypatch) -> None:
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+
+    try:
+        lane._price_channel_clob_timeout(100.1)
+    except TimeoutError as exc:
+        assert "budget exhausted before CLOB fetch" in str(exc)
+    else:  # pragma: no cover - explicit regression assertion
+        raise AssertionError("expected exhausted price-channel CLOB budget to raise")
 
 
 # ---------------------------------------------------------------------------
@@ -257,17 +422,21 @@ def test_open_position_tokens_are_market_channel_seed_priority():
             position_id TEXT PRIMARY KEY,
             phase TEXT,
             token_id TEXT,
-            no_token_id TEXT
+            no_token_id TEXT,
+            chain_shares REAL
         )
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?)",
         [
-            ("active-1", "active", "yes-active", "no-active"),
-            ("day0-1", "day0_window", None, "no-day0"),
-            ("exit-1", "pending_exit", "yes-exit", None),
-            ("closed-1", "economically_closed", "yes-closed", "no-closed"),
+            ("active-1", "active", "yes-active", "no-active", 5.0),
+            ("day0-1", "day0_window", None, "no-day0", 3.0),
+            ("exit-1", "pending_exit", "yes-exit", None, 2.0),
+            ("chain-quarantine-1", "quarantined", "yes-quarantine", "no-quarantine", 29.14),
+            ("zero-quarantine-1", "quarantined", "yes-zero-quarantine", "no-zero-quarantine", 0.0),
+            ("chain-voided-1", "voided", "yes-voided", "no-voided", 4.0),
+            ("closed-1", "economically_closed", "yes-closed", "no-closed", 7.0),
         ],
     )
 
@@ -276,16 +445,94 @@ def test_open_position_tokens_are_market_channel_seed_priority():
         "no-active",
         "no-day0",
         "yes-exit",
+        "yes-quarantine",
+        "no-quarantine",
+        "yes-voided",
+        "no-voided",
     }
 
 
-def test_market_channel_seed_first_prefers_held_positions_over_candidate_universe():
+def test_open_rest_tokens_are_market_channel_seed_priority():
+    from src.ingest.price_channel_ingest import _edli_open_rest_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        [
+            ("posting", "ENTRY", "POSTING", "tok-posting"),
+            ("acked", "ENTRY", "ACKED", "tok-acked"),
+            ("partial", "ENTRY", "PARTIAL", "tok-partial"),
+            ("exit", "EXIT", "ACKED", "tok-exit"),
+            ("filled", "ENTRY", "FILLED", "tok-filled"),
+            ("blank", "ENTRY", "ACKED", ""),
+        ],
+    )
+
+    assert _edli_open_rest_priority_token_ids(conn) == {
+        "tok-posting",
+        "tok-acked",
+        "tok-partial",
+    }
+
+
+def test_candidate_priority_uses_bounded_recent_row_window():
+    from src.ingest.price_channel_ingest import _edli_candidate_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            regret_event_id TEXT PRIMARY KEY,
+            token_id TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    recent = datetime.now(timezone.utc).isoformat()
+    rows = [(f"old-{idx}", f"stale-{idx}", "2026-01-01T00:00:00+00:00") for idx in range(250)]
+    rows.extend(
+        [
+            ("recent-1", "tok-a", recent),
+            ("recent-2", "tok-b", recent),
+            ("recent-3", "tok-a", recent),
+            ("recent-4", "tok-c", recent),
+        ]
+    )
+    conn.executemany("INSERT INTO no_trade_regret_events VALUES (?,?,?)", rows)
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    tokens = _edli_candidate_priority_token_ids(conn, lookback_hours=24.0, limit=3)
+
+    assert tokens == ["tok-c", "tok-a", "tok-b"]
+    regret_reads = [
+        sql
+        for sql in traces
+        if "FROM no_trade_regret_events" in sql and "sqlite_master" not in sql
+    ]
+    assert regret_reads
+    assert all("GROUP BY" not in sql.upper() for sql in regret_reads)
+    assert all("ORDER BY ROWID DESC" in sql.upper() for sql in regret_reads)
+
+
+def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
     assert _edli_market_channel_seed_first_token_ids(
         held_priority_token_ids={"held-yes", "held-no"},
+        open_rest_priority_token_ids={"rest-no"},
         candidate_priority_token_ids={"candidate-yes", "candidate-no"},
-    ) == {"held-yes", "held-no"}
+    ) == {"held-yes", "held-no", "rest-no", "candidate-yes", "candidate-no"}
 
 
 def test_market_channel_seed_first_falls_back_to_candidates_without_open_positions():
@@ -295,6 +542,397 @@ def test_market_channel_seed_first_falls_back_to_candidates_without_open_positio
         held_priority_token_ids=set(),
         candidate_priority_token_ids={"candidate-yes", "candidate-no"},
     ) == {"candidate-yes", "candidate-no"}
+
+
+def test_price_channel_money_path_tokens_resolve_to_redecision_families():
+    from src.ingest.price_channel_ingest import _edli_money_path_family_keys_for_tokens
+
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?)",
+        ("pos-1", "active", "Paris", "2026-06-20", "low", "held-yes", "held-no"),
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "rest-no", "rest-yes", "rest-no"),
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?)",
+        ("0xrest", "Tokyo", "2026-06-20", "high"),
+    )
+
+    assert _edli_money_path_family_keys_for_tokens(
+        trade,
+        forecasts,
+        {"held-no", "rest-no", "unknown-token"},
+    ) == {
+        ("Paris", "2026-06-20", "low"),
+        ("Tokyo", "2026-06-20", "high"),
+    }
+
+
+def test_price_channel_held_tokens_resolve_separately_from_entry_candidates():
+    from src.ingest.price_channel_ingest import _edli_held_family_keys_for_tokens
+
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?)",
+        [
+            ("pos-1", "active", "Paris", "2026-06-20", "low", "held-yes", "held-no"),
+            ("pos-2", "settled", "Tokyo", "2026-06-20", "high", "settled-yes", "settled-no"),
+        ],
+    )
+
+    assert _edli_held_family_keys_for_tokens(
+        trade,
+        {"held-no", "settled-no", "unknown-token"},
+    ) == {("Paris", "2026-06-20", "low")}
+
+
+def _seed_minimal_venue_order_tables(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            price REAL NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def test_price_channel_resting_order_tokens_resolve_bypassing_screen():
+    from src.ingest.price_channel_ingest import (
+        _edli_own_resting_order_token_ids,
+        _edli_resting_family_keys_for_tokens,
+    )
+
+    trade = sqlite3.connect(":memory:")
+    _seed_minimal_venue_order_tables(trade)
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "resting-yes", "resting-yes", "resting-no"),
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-rest", "resting-yes", "BUY", 0.5, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        ("vof-1", "cmd-rest", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+    )
+    # A resting command whose latest fact has already left the open states
+    # (cancel-confirmed) must NOT resolve — only the latest local_sequence
+    # row per command governs "open".
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-cancelled", "cancelled-token", "SELL", 0.6, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade.executemany(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        [
+            ("vof-2a", "cmd-cancelled", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+            ("vof-2b", "cmd-cancelled", "CANCEL_CONFIRMED", "REST", "2026-06-20T00:01:00", 2),
+        ],
+    )
+
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?)",
+        ("0xrest", "Denver", "2026-06-20", "low"),
+    )
+
+    resolved_tokens = _edli_own_resting_order_token_ids(
+        trade, {"resting-yes", "cancelled-token", "unknown-token"}
+    )
+    assert resolved_tokens == {"resting-yes"}
+
+    assert _edli_resting_family_keys_for_tokens(
+        trade,
+        forecasts,
+        {"resting-yes", "cancelled-token", "unknown-token"},
+    ) == {("Denver", "2026-06-20", "low")}
+
+
+def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
+    import src.ingest.price_channel_ingest as pci
+
+    src = inspect.getsource(pci._edli_emit_price_channel_redecisions_for_events)
+
+    assert "held_families = _edli_held_family_keys_for_tokens" in src
+    assert "entry_families = _edli_screened_entry_family_keys_for_price_channel" in src
+    assert "set(families) - set(held_families)" in src
+    assert "resting_families = _edli_resting_family_keys_for_tokens" in src
+    assert "families = held_families | entry_families | resting_families" in src
+    assert src.index("families = held_families | entry_families") < src.index(
+        "trigger.build_committed_snapshot_events"
+    )
+    assert src.index("resting_families = _edli_resting_family_keys_for_tokens") < src.index(
+        "trigger.build_committed_snapshot_events"
+    )
+    # Resting bucket is resolved AFTER (independently of) the entry screen call,
+    # never fed as one of its inputs.
+    assert src.index("entry_families = _edli_screened_entry_family_keys_for_price_channel") < src.index(
+        "resting_families = _edli_resting_family_keys_for_tokens"
+    )
+
+
+def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:
+    """COMPLETE/LIVE_ELIGIBLE Denver low coverage for target 2026-06-20 (same
+    shape as tests/events/test_forecast_snapshot_ready.py's Chicago seed)."""
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_available_at, captured_at, target_local_date,
+            city_id, city_timezone, temperature_metric, dataset_id,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            completeness_status, status
+        ) VALUES (
+            'run-rest-1', 'ecmwf-open-data', 'ens', '2026-06-20T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            '2026-06-20T00:00:00+00:00', '2026-06-20T04:15:00+00:00', '2026-06-20T04:16:00+00:00',
+            '2026-06-20', 'denver', 'America/Denver', 'low', 'v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members, expected_steps_json,
+            observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+            completeness_status, readiness_status, computed_at, expires_at
+        ) VALUES (
+            'cov-rest-1', 'run-rest-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-06-20T00', 'ens',
+            'denver', 'Denver', 'America/Denver', '2026-06-20', 'low', 'temperature',
+            'low_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
+            '2026-06-20T05:00:00+00:00', '2026-06-21T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-20T04:16:00+00:00', '2026-06-21T04:16:00+00:00'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+            forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+            members_unit, raw_orderbook_hash_transition_delta_ms
+        ) VALUES (
+            1, 'Denver', '2026-06-20', 'low', 'temperature', 'low_temp',
+            '2026-06-20T00:00:00+00:00', '2026-06-20T06:00:00+00:00',
+            '2026-06-20T04:15:00+00:00', '2026-06-20T04:16:00+00:00', 6,
+            '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]',
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', 'run-rest-1',
+            '2026-06-20T00', '2026-06-20T00:00:00+00:00', '2026-06-20T03:00:00+00:00',
+            '2026-06-20T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-06-20T05:00:00+00:00', 6, 'F', 0
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id, token_id, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "denver-low-2026-06-20",
+            "Denver",
+            "2026-06-20",
+            "low",
+            "0xrest",
+            "resting-yes",
+            "2026-06-20T04:16:00+00:00",
+        ),
+    )
+
+
+def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(monkeypatch):
+    """A family with NO position and NO screen pass (no beliefs seeded, so
+    `_edli_screened_entry_family_keys_for_price_channel` yields nothing) still
+    gets EDLI_REDECISION_PENDING when Zeus has its own open resting order on
+    the token — and the entity-key debounce already in
+    `_edli_pending_redecision_entity_keys` blocks a duplicate on the next tick."""
+    import types
+
+    from src.ingest.price_channel_ingest import _edli_emit_price_channel_redecisions_for_events
+    from src.state.db import init_schema
+
+    # Matches tests/events/test_forecast_snapshot_ready.py's autouse fixture:
+    # exercise the legacy ensemble-committed lane, not the replacement
+    # forecast_posteriors lane, which is orthogonal to this bridge test.
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
+        lambda: False,
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+
+    trade_conn = sqlite3.connect(":memory:")
+    _seed_minimal_venue_order_tables(trade_conn)
+    trade_conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "resting-yes", "resting-yes", "resting-no"),
+    )
+    trade_conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("cmd-rest", "resting-yes", "BUY", 0.5, "ACKED",
+         "2026-06-20T00:00:00", "2026-06-20T00:00:00"),
+    )
+    trade_conn.execute(
+        "INSERT INTO venue_order_facts (venue_order_id, command_id, state, source, observed_at, local_sequence)"
+        " VALUES (?,?,?,?,?,?)",
+        ("vof-1", "cmd-rest", "RESTING", "REST", "2026-06-20T00:00:00", 1),
+    )
+
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_denver_2026_06_20(forecasts_conn)
+
+    events = [
+        types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json='{"token_id": "resting-yes"}',
+        )
+    ]
+
+    first_emitted = _edli_emit_price_channel_redecisions_for_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        events,
+        received_at="2026-06-20T05:00:00+00:00",
+    )
+    assert first_emitted == 1
+    assert (
+        world_conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+        == 1
+    )
+
+    second_emitted = _edli_emit_price_channel_redecisions_for_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        events,
+        received_at="2026-06-20T05:05:00+00:00",
+    )
+    assert second_emitted == 0
+    assert (
+        world_conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+        == 1
+    )
 
 
 def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
@@ -324,9 +962,56 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     assert ordered == ["missing-token", "stale-token", "newer-token"]
 
 
+def test_feasibility_age_reads_latest_state_without_append_scan():
+    from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, created_at, schema_version
+        ) VALUES (?, 'buy_yes', ?, ?, 'cond', 'YES', ?, ?, 1)
+        """,
+        [
+            (
+                "newer-token",
+                "latest-newer",
+                "event-newer",
+                "2026-06-24T08:00:00+00:00",
+                "2026-06-24T08:00:00+00:00",
+            ),
+            (
+                "stale-token",
+                "latest-stale",
+                "event-stale",
+                "2026-06-24T07:30:00+00:00",
+                "2026-06-24T07:30:00+00:00",
+            ),
+        ],
+    )
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    ordered = _edli_order_token_ids_by_feasibility_age(
+        conn,
+        ["newer-token", "stale-token"],
+    )
+
+    append_reads = [
+        sql
+        for sql in traces
+        if "FROM execution_feasibility_evidence" in sql and "sqlite_master" not in sql
+    ]
+    assert ordered == ["stale-token", "newer-token"]
+    assert append_reads == []
+
+
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
-    from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
+    from src.ingest import price_channel_ingest as lane
     from src.state import db as state_db
     from src.state.db import init_schema, init_schema_trade_only
 
@@ -367,7 +1052,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-                '2026-06-25T00:00:00+00:00', '0.01', '5', '{}',
+                '2026-07-25T00:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -395,7 +1080,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             return {
                 "asset_id": token_id,
                 "market": "0xcondition",
@@ -410,7 +1095,12 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
 
-    result = _edli_refresh_held_position_quote_evidence()
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "candidate quote refresh must not own the held quote lane"
+    try:
+        result = lane._edli_refresh_held_position_quote_evidence()
+    finally:
+        lane._candidate_quote_seed_refresh_lock.release()
 
     assert result["held_priority_token_ids"] == 2
     assert result["held_token_metadata"] == 2
@@ -423,6 +1113,236 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         )
     finally:
         check.close()
+
+
+def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn: ["yes-token", "no-token"],
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES" if token_id == "yes-token" else "NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._held_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local held quote lock to be initially free"
+    try:
+        result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+    finally:
+        lane._held_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["skipped"] == "price_channel_held_quote_refresh_in_progress"
+    assert result["held_priority_token_ids"] == 2
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_events"] == 0
+    assert result["held_quote_refresh_attempted_tokens"] == 0
+    assert result["budget_skipped_tokens"] == 2
+
+
+def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_holds(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = ["closed-old-1", "closed-old-2", "live-held-1", "live-held-2"]
+    seen: dict[str, list[list[str]] | list[str]] = {"metadata": []}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_held_quote_refresh_max_tokens_per_cycle": 2,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        batch = list(token_ids)
+        seen["metadata"].append(batch)
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in batch
+            if token_id.startswith("live-held")
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            seen["rest_seed"] = list(token_ids)
+            return len(token_ids)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+
+    assert seen["metadata"] == [["closed-old-1", "closed-old-2"], ["live-held-1", "live-held-2"]]
+    assert seen["rest_seed"] == ["live-held-1", "live-held-2"]
+    assert result["held_priority_token_ids"] == 4
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_selected_tokens"] == 2
+    assert result["held_quote_refresh_metadata_scanned_tokens"] == 4
+    assert result["held_quote_refresh_metadata_missing_tokens"] == 2
+    assert result["held_quote_refresh_events"] == 2
+
+
+def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = [f"token-{idx}" for idx in range(10)]
+    seen: dict[str, list[str]] = {}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_held_quote_refresh_max_tokens_per_cycle": 3,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        selected = list(token_ids)
+        seen["metadata"] = selected
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in selected
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            selected = list(token_ids)
+            seen["rest_seed"] = selected
+            return len(selected)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+
+    assert seen["metadata"] == ordered[:3]
+    assert seen["rest_seed"] == ordered[:3]
+    assert result["held_quote_refresh_selected_tokens"] == 3
+    assert result["held_quote_refresh_deferred_tokens"] == 7
+    assert result["held_quote_refresh_attempted_tokens"] == 3
+    assert result["budget_skipped_tokens"] == 0
 
 
 def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
@@ -451,6 +1371,10 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         )
         """
     )
+    world_conn.execute(
+        "UPDATE no_trade_regret_events SET created_at = ? WHERE regret_event_id = 'regret-1'",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
     world_conn.commit()
     world_conn.close()
     trade_conn = sqlite3.connect(trade_path)
@@ -468,7 +1392,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-            '2026-06-25T12:00:00+00:00', '0.01', '5', '{}',
+            '2026-07-25T12:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -496,7 +1420,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             return {
                 "asset_id": token_id,
                 "market": "0xcondition",
@@ -524,6 +1448,433 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         )
     finally:
         check.close()
+
+
+def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_candidate_priority_token_ids",
+        lambda conn, *, limit: ["no-token"],
+    )
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: ["yes-token"])
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES" if token_id == "yes-token" else "NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local candidate quote lock to be initially free"
+    try:
+        result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=10.0)
+    finally:
+        lane._candidate_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["skipped"] == "price_channel_candidate_quote_refresh_in_progress"
+    assert result["candidate_priority_token_ids"] == 1
+    assert result["open_rest_priority_token_ids"] == 1
+    assert result["quote_priority_token_ids"] == 2
+    assert result["candidate_token_metadata"] == 2
+    assert result["candidate_quote_refresh_events"] == 0
+    assert result["candidate_quote_refresh_attempted_tokens"] == 0
+    assert result["budget_skipped_tokens"] == 2
+
+
+def test_candidate_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    ordered = [f"candidate-{idx}" for idx in range(6)]
+    seen: dict[str, list[str]] = {}
+
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_candidate_quote_refresh_max_tokens_per_cycle": 2,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: ordered)
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
+
+    def _metadata(conn, *, token_ids):  # noqa: ANN001
+        selected = list(token_ids)
+        seen["metadata"] = selected
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in selected
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            selected = list(token_ids)
+            seen["rest_seed"] = selected
+            return len(selected)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_candidate_priority_quote_evidence(limit=32, budget_seconds=10.0)
+
+    assert seen["metadata"] == ordered[:2]
+    assert seen["rest_seed"] == ordered[:2]
+    assert result["candidate_quote_refresh_selected_tokens"] == 2
+    assert result["candidate_quote_refresh_deferred_tokens"] == 4
+    assert result["candidate_quote_refresh_attempted_tokens"] == 2
+    assert result["budget_skipped_tokens"] == 0
+
+
+def test_candidate_priority_quote_refresh_budget_is_not_capped_when_held_positions_exist(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_candidate_priority_token_ids",
+        lambda conn, *, limit: ["no-token"],
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {"held-token"})
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local candidate quote lock to be initially free"
+    try:
+        result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=45.0)
+    finally:
+        lane._candidate_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["held_priority_token_ids"] == 1
+    assert result["budget_seconds"] == 45.0
+    assert "held_active_budget_cap_seconds" not in result
+    assert result["candidate_quote_refresh_events"] == 0
+
+
+def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (
+            'entry-resting-1', 'snap-resting', 'env-resting', 'pos-resting',
+            'decision-resting', 'idem-resting', 'ENTRY', '0xcondition',
+            'no-token', 'BUY', 5.0, 0.75, 'ACKED',
+            '2026-06-19T10:00:00+00:00', '2026-06-19T10:00:00+00:00'
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-resting', 'gamma-resting', 'event-resting', 'weather-test',
+            '0xcondition', 'question-resting', 'yes-token', 'no-token',
+            1, 1, 0, '2026-07-25T12:00:00+00:00', '0.01', '5',
+            '{}', '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-19T10:00:00+00:00',
+            '2026-06-19T10:05:00+00:00'
+        )
+        """
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_candidate_priority_quote_evidence(limit=4)
+
+    assert result["candidate_priority_token_ids"] == 0
+    assert result["open_rest_priority_token_ids"] == 1
+    assert result["quote_priority_token_ids"] == 1
+    assert result["candidate_token_metadata"] == 1
+    assert result["candidate_quote_refresh_events"] == 1
+    check = sqlite3.connect(trade_path)
+    try:
+        assert (
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            == 2
+        )
+    finally:
+        check.close()
+
+
+def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    now = datetime.now(timezone.utc)
+    decision_time = (now - timedelta(minutes=30)).isoformat()
+    new_created_at = (now - timedelta(minutes=10)).isoformat()
+    old_created_at = (now - timedelta(minutes=20)).isoformat()
+    market_end_at = (now + timedelta(days=1)).isoformat()
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.executemany(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason,
+            regret_bucket, token_id, decision_time, city, target_date, metric,
+            family_id, bin_label, direction, created_at, schema_version
+        ) VALUES (?, ?, 'EXECUTOR_EXPRESSIBILITY',
+            'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING',
+                'BOOK_GAP', ?, ?,
+                'Wellington', '2026-06-27', 'high', 'family-wellington-high',
+                'Will the highest temperature in Wellington be 12C?', 'buy_no',
+                ?, 1
+        )
+        """,
+        [
+            ("regret-new", "event-new", "zz-new-token", decision_time, new_created_at),
+            ("regret-old", "event-old", "aa-old-token", decision_time, old_created_at),
+        ],
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.executemany(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (?, ?, ?, 'weather-test', ?, ?,
+            ?, ?, 1, 1, 0, ?, '0.01', '5',
+            '{}', '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-25T16:00:00+00:00',
+            '2026-06-25T16:05:00+00:00'
+        )
+        """,
+        [
+            ("snap-new", "gamma-new", "event-new", "0xnew", "question-new", "yes-new", "zz-new-token", market_end_at),
+            ("snap-old", "gamma-old", "event-old", "0xold", "question-old", "yes-old", "aa-old-token", market_end_at),
+        ],
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
+
+    fetch_order: list[str] = []
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            fetch_order.append(token_id)
+            market = {
+                "zz-new-token": "0xnew",
+                "aa-old-token": "0xold",
+            }[token_id]
+            return {
+                "asset_id": token_id,
+                "market": market,
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=30.0)
+
+    assert result["candidate_quote_refresh_events"] == 2
+    assert fetch_order[:2] == ["zz-new-token", "aa-old-token"]
 
 
 # ===========================================================================
@@ -662,6 +2013,20 @@ def test_new_daemon_entry_point_exists_and_starts_ws_and_registers_both_cycles()
         )
 
 
+def test_market_channel_first_fire_is_staggered_from_held_quote_refresh():
+    """Candidate and held quote refresh must not start on the same second.
+
+    Both refresh lanes share the process-local REST seed lock. Starting both
+    interval jobs immediately made the candidate lane lose the lock every
+    minute, leaving executable candidate snapshots stale while held quotes
+    refreshed successfully.
+    """
+    daemon_src = _PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8")
+    assert "MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30" in daemon_src
+    assert "next_run_time=datetime.now(timezone.utc)" in daemon_src
+    assert "timedelta(seconds=MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS)" in daemon_src
+
+
 def test_new_daemon_does_not_import_trading_lane():
     """The new daemon module must NOT import the trading lane (whole-process isolation)."""
     src = _PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8")
@@ -727,6 +2092,8 @@ def test_launchd_plist_artifact_exists_and_targets_the_new_daemon():
         parsed = plistlib.load(fh)
     assert parsed.get("Label") == "com.zeus.price-channel-ingest"
     assert "src.ingest.price_channel_daemon" in parsed.get("ProgramArguments", [])
+    env = parsed.get("EnvironmentVariables") or {}
+    assert env.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE") == "2"
 
 
 # ===========================================================================
@@ -846,3 +2213,15 @@ def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module
     assert "get_orderbook_snapshot" in lane_src
     # And it is GONE from the order daemon (the lift, not a copy).
     assert "run_market_channel_service_forever" not in main_src
+
+
+def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_coordinator():
+    """The lifted price-channel lane must not race main/substrate snapshot writers."""
+
+    lane_src = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
+    assert 'acquire_lock("market_substrate_refresh")' in lane_src
+    assert "_edli_price_channel_trade_write_context_factory(" in lane_src
+    assert "snapshot_write_context_factory=" in lane_src
+    assert "price_channel_snapshot_invalidate" in lane_src
+    assert "db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE)" not in lane_src
+    assert "refresh_executable_market_substrate_snapshots(" in lane_src

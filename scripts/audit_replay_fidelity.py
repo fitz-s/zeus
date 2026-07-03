@@ -203,7 +203,6 @@ def run_audit() -> dict:
         )
 
     decision_log_rows = conn.execute("SELECT artifact_json FROM decision_log").fetchall()
-    shadow_signal_rows = conn.execute("SELECT COUNT(*) FROM world.shadow_signals").fetchone()[0]
     trade_cases = 0
     trade_cases_with_vectors = 0
     no_trade_cases = 0
@@ -273,7 +272,6 @@ def run_audit() -> dict:
             "no_trade_cases": no_trade_cases,
             "no_trade_cases_with_vectors": no_trade_cases_with_vectors,
             "future_ready_capture_present": (trade_cases_with_vectors + no_trade_cases_with_vectors) > 0,
-            "shadow_signals": shadow_signal_rows,
         },
         "historical_failure_buckets": {
             "overlap_rows": settlement_snapshot_overlap,

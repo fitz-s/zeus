@@ -1,21 +1,21 @@
 # Created: 2026-06-18
 # Last reused or audited: 2026-06-18
-# Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
-#   §"THE q_lcb RELIABILITY GUARD — exact form" + step 6/7 of the NO-SHADOW EXECUTION FLOW.
+# Authority basis: coarse-global removal single-serving-rule evidence packet.
+#   §"THE q_lcb RELIABILITY GUARD — exact form" + step 6/7 of the single-serving-rule flow.
 #   Operator RAW no-de-bias law: q_lcb is made honest by an EMPIRICAL out-of-fold reliability
 #   guard that does NOT move μ (not a de-bias → law-compliant) and is the LIVE SERVING RULE
-#   (not a parallel product → no shadow). Artifact-gated like the settlement σ-floor
+#   (not a parallel product). Artifact-gated like the settlement sigma-floor
 #   (src/data/replacement_forecast_materializer._replacement_sigma_scale_lookup precedent):
 #   Runtime compatibility remains INERT (pass-through, no abstain) only when the OOF
 #   reliability table is absent. Live restart preflight is stricter: it requires an
 #   ACTIVE_VALID artifact so "absent" is not confused with "ready".
 #   Once the artifact exists, a missing side-aware cell is an evidence gap and abstains.
-"""q_lcb empirical reliability guard — the RAW-honest serving rule (no shadow, no de-bias).
+"""q_lcb empirical reliability guard — the RAW-honest serving rule.
 
-THE CRUX (FINAL no-shadow execution flow): a RAW (uncorrected) center has a per-city
+THE CRUX (single-serving-rule flow): a RAW (uncorrected) center has a per-city
 LOCATION bias that width calibration cannot fix, so the predictive PIT is miscalibrated and
 the raw q_lcb is NOT automatically honest. The law forbids correcting the center (no de-bias)
-and forbids a shadow product. The resolution is an EMPIRICAL OUT-OF-FOLD RELIABILITY GUARD on
+and forbids a parallel product. The resolution is an EMPIRICAL OUT-OF-FOLD RELIABILITY GUARD on
 the SERVED q_lcb:
 
     q_safe[side, bin] = min( band.q_lcb[side, bin], L_g )
@@ -41,7 +41,7 @@ serving rule applied where the decision layer consumes q_lcb (family_decision_en
 abstains globally, the correct DIRECT decision is "do not trade those bins" — never "quietly
 use EB".
 
-ARTIFACT-GATED (no shadow, absent-artifact runtime-inert only): the OOF reliability table is read from
+ARTIFACT-GATED (absent-artifact runtime-inert only): the OOF reliability table is read from
 ``state/qlcb_oof_reliability.json`` (gitignored generated artifact, same posture as the σ-floor
 and the anchor-debias artifacts). When the artifact is ABSENT the runtime guard remains INERT
 for compatibility — it serves ``band.q_lcb`` unchanged and abstains on NOTHING. That is not a

@@ -176,7 +176,7 @@ def test_receipt_provenance_preserves_guardrail_regression_clusters() -> None:
         guardrail_report=report,
     ).as_dict()
 
-    assert provenance["guardrail_report_status"] == "SHADOW_ONLY"
+    assert provenance["guardrail_report_status"] == "BLOCKED"
     assert provenance["guardrail_promotion_allowed"] is False
     assert provenance["unresolved_regression_clusters"]
     assert provenance["net_delta_after_cost_pnl"] == pytest.approx(-0.60)

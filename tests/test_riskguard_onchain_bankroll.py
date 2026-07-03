@@ -47,6 +47,11 @@ import src.riskguard.riskguard as riskguard_module
 from src.riskguard.risk_level import RiskLevel
 from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import BankrollOfRecord
+from src.state.collateral_ledger import (
+    CollateralLedger,
+    CollateralSnapshot,
+    configure_global_ledger,
+)
 from src.state.db import get_connection, init_schema
 from src.state.portfolio import PortfolioState
 
@@ -55,11 +60,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _bor(value_usd: float, *, staleness_seconds: float = 0.0, cached: bool = False) -> BankrollOfRecord:
+def _bor(
+    value_usd: float,
+    *,
+    staleness_seconds: float = 0.0,
+    cached: bool = False,
+    source: str = "polymarket_wallet",
+) -> BankrollOfRecord:
     return BankrollOfRecord(
         value_usd=value_usd,
         fetched_at=_now(),
-        source="polymarket_wallet",
+        source=source,
         authority="canonical",
         staleness_seconds=staleness_seconds,
         cached=cached,
@@ -103,7 +114,11 @@ def _read_latest_details(risk_db) -> dict:
 
 
 def _seed_post_cutover_reference(
-    risk_db, *, age: timedelta, wallet_value_usd: float
+    risk_db,
+    *,
+    age: timedelta,
+    wallet_value_usd: float,
+    source: str = "polymarket_wallet",
 ) -> None:
     """Insert a post-cutover risk_state reference row (provenance-tagged)."""
     risk_conn = get_connection(risk_db)
@@ -119,13 +134,32 @@ def _seed_post_cutover_reference(
                 "initial_bankroll": wallet_value_usd,
                 "total_pnl": 0.0,
                 "effective_bankroll": wallet_value_usd,
-                "bankroll_truth_source": "polymarket_wallet",
+                "bankroll_truth_source": source,
             }),
             ts,
         ),
     )
     risk_conn.commit()
     risk_conn.close()
+
+
+def _install_collateral_snapshot(*, value_usd: float, age_seconds: float = 0.0) -> None:
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ledger = CollateralLedger()
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=int(value_usd * 1_000_000),
+            pusd_allowance_micro=int(value_usd * 1_000_000),
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=captured_at,
+            authority_tier="CHAIN",
+        )
+    )
+    configure_global_ledger(ledger)
 
 
 def test_tick_uses_onchain_wallet_for_trailing_loss(monkeypatch, tmp_path):
@@ -198,6 +232,65 @@ def test_tick_uses_cached_wallet_when_fresh_fetch_fails(monkeypatch, tmp_path):
     assert details["initial_bankroll"] == pytest.approx(199.40)
     assert details["bankroll_truth"]["staleness_seconds"] == pytest.approx(10.0)
     assert details["bankroll_truth"]["cached"] is True
+
+
+def test_tick_uses_fresh_collateral_snapshot_without_direct_wallet(monkeypatch, tmp_path):
+    """P4 CHAIN collateral snapshot is live bankroll truth for RiskGuard.
+
+    This locks the live split-process boundary: post-trade-capital owns the
+    recurring wallet/collateral read, and riskguard consumes that durable CHAIN
+    snapshot instead of independently requiring its own wallet environment.
+    """
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    _bootstrap_canonical_zeus_db(zeus_db)
+    _patch_tick_environment(monkeypatch, zeus_db=zeus_db, risk_db=risk_db)
+
+    def _direct_wallet_must_not_run(**_kwargs):
+        raise AssertionError("riskguard must consume fresh collateral snapshot before direct wallet")
+
+    try:
+        _install_collateral_snapshot(value_usd=1124.53)
+        monkeypatch.setattr(bankroll_provider, "current", _direct_wallet_must_not_run)
+
+        level = riskguard_module.tick()
+        assert level is not RiskLevel.DATA_DEGRADED
+
+        details = _read_latest_details(risk_db)
+        assert details["initial_bankroll"] == pytest.approx(1124.53)
+        assert details["bankroll_truth_source"] == "collateral_ledger_snapshot"
+        truth = details["bankroll_truth"]
+        assert truth["source"] == "collateral_ledger_snapshot"
+        assert truth["authority"] == "canonical"
+        assert truth["cached"] is True
+        assert truth["positions_read_verdict"] == "collateral_snapshot"
+    finally:
+        bankroll_provider.reset_cache_for_tests()
+        configure_global_ledger(None)
+
+
+def test_trailing_loss_reference_accepts_collateral_snapshot_source(tmp_path):
+    """Rows written from the P4 collateral snapshot remain valid risk history."""
+    risk_db = tmp_path / "risk_state.db"
+    _seed_post_cutover_reference(
+        risk_db,
+        age=timedelta(hours=25),
+        wallet_value_usd=1124.53,
+        source="collateral_ledger_snapshot",
+    )
+    risk_conn = get_connection(risk_db)
+    try:
+        reference = riskguard_module._trailing_loss_reference(
+            risk_conn,
+            now=datetime.now(timezone.utc).isoformat(),
+            lookback=timedelta(hours=24),
+        )
+    finally:
+        risk_conn.close()
+
+    assert reference["status"] == "ok"
+    assert reference["source"] == riskguard_module.TRAILING_LOSS_SOURCE_OK
+    assert reference["reference"]["initial_bankroll"] == pytest.approx(1124.53)
 
 
 def test_red_threshold_at_real_wallet_not_config_constant(monkeypatch, tmp_path):

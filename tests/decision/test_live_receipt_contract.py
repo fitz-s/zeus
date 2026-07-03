@@ -263,8 +263,7 @@ def test_ensure_table_additively_backfills_spine_on_pre_stage0_table() -> None:
             market_slug TEXT NOT NULL, temperature_metric TEXT NOT NULL,
             target_date TEXT NOT NULL, observation_time TEXT NOT NULL,
             decision_seq INTEGER NOT NULL, reason TEXT NOT NULL,
-            reason_detail TEXT, strategy_key TEXT, event_source TEXT,
-            shadow_runtime INTEGER NOT NULL DEFAULT 0, observed_at TEXT NOT NULL,
+            reason_detail TEXT, strategy_key TEXT, event_source TEXT, observed_at TEXT NOT NULL,
             schema_version INTEGER NOT NULL,
             schema_compatibility TEXT NOT NULL DEFAULT 'current',
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)

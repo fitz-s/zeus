@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-02
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:
 #   zeus_trades.db position_events b5d966a9-990 (Seoul 2026-06-07T15:08Z,
@@ -42,10 +42,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.calibration.qlcb_provenance import _qlcb_float
+from src.contracts.execution_price import ExecutionPrice
 from src.engine.event_reactor_adapter import (
     _apply_day0_mask_to_generated_probabilities,
     _apply_day0_mask_to_probability_vector,
     _day0_absorbing_mask,
+    _day0_hard_fact_fdr_maps,
     _day0_observation_age_minutes,
 )
 from src.signal.day0_obs_latency import (
@@ -112,6 +114,21 @@ def _full_lcb(family, value=0.2):
         out[(f"cond{i}", "buy_yes")] = value
         out[(f"cond{i}", "buy_no")] = value
     return out
+
+
+def _native_cost(price: float):
+    return (
+        None,
+        ExecutionPrice(
+            value=price,
+            price_type="ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        1.0,
+        None,
+        None,
+    )
 
 
 # ===========================================================================
@@ -181,6 +198,63 @@ class TestAbsorbingBoundary:
         assert _qlcb_float(lcb[("cond1", "buy_no")]) == pytest.approx(1.0)
         for i in range(2, 5):
             assert _qlcb_float(lcb[(f"cond{i}", "buy_no")]) == 0.0
+
+    def test_crossed_high_open_shoulder_gets_structural_buy_yes_license(self):
+        fam = _seoul_high_family()
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("high", 27.0, obs_age_minutes=500.0),
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond4"] == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond4", "buy_yes")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond4", "buy_no")]) == 0.0
+
+    def test_crossed_low_open_shoulder_gets_structural_buy_yes_license(self):
+        fam = _family(
+            "Seoul",
+            [_bin(None, 21.0), _bin(22.0, 22.0), _bin(23.0, 23.0), _bin(24.0, None)],
+            metric="low",
+        )
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("low", 21.0, obs_age_minutes=500.0),
+            family=fam,
+            q_by_condition={f"cond{i}": 0.25 for i in range(4)},
+            lcb_by_condition={(f"cond{i}", d): 0.2 for i in range(4) for d in ("buy_yes", "buy_no")},
+            decision_time=NOW,
+        )
+
+        assert q["cond0"] == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond0", "buy_yes")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond0", "buy_no")]) == 0.0
+
+    def test_day0_fdr_prefilter_uses_masked_hard_fact_lcb_not_forecast_prefilter(self):
+        fam = _seoul_high_family()
+        _q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=_payload("high", 27.0, obs_age_minutes=10.0),
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+        p_values, prefilter = _day0_hard_fact_fdr_maps(
+            family=fam,
+            native_costs={
+                ("cond0", "buy_no"): _native_cost(0.75),
+                ("cond4", "buy_yes"): _native_cost(0.60),
+            },
+            masked_lcb_by_condition=lcb,
+        )
+
+        assert p_values[("cond0", "buy_no")] == 0.0
+        assert prefilter[("cond0", "buy_no")] is True
+        assert p_values[("cond4", "buy_yes")] == 0.0
+        assert prefilter[("cond4", "buy_yes")] is True
+        assert p_values[("cond2", "buy_yes")] == 1.0
+        assert prefilter[("cond2", "buy_yes")] is False
 
 
 # ===========================================================================
@@ -360,6 +434,121 @@ class TestPreDay0LowCarryover:
             lead_hours_to_target_start=4.00,
         ) is not None
 
+    def test_edli_qkernel_spine_uses_pre_day0_low_carryover_members(self):
+        from src.data.day0_fast_obs import PreDay0LowWindow
+        from src.engine import event_reactor_adapter as era
+        from src.signal.day0_low_distribution import PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION
+
+        city = self._london_city()
+        family = SimpleNamespace(city="London", metric="low", target_date="2026-06-18")
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "1": {
+                            "n": 240,
+                            "residual_quantiles": [-0.2, 0.0, 0.4, 0.8],
+                        }
+                    }
+                }
+            },
+            "by_unit": {},
+        }
+        window = PreDay0LowWindow(
+            city="London",
+            station_id="EGLL",
+            target_date="2026-06-18",
+            unit="C",
+            window_start_time=datetime(2026, 6, 17, 21, 45, tzinfo=timezone.utc),
+            target_start_time=datetime(2026, 6, 17, 23, 0, tzinfo=timezone.utc),
+            window_low=12.0,
+            current_temp=12.3,
+            low_obs_time=datetime(2026, 6, 17, 22, 30, tzinfo=timezone.utc),
+            first_obs_time=datetime(2026, 6, 17, 21, 50, tzinfo=timezone.utc),
+            last_obs_time=datetime(2026, 6, 17, 22, 40, tzinfo=timezone.utc),
+            last_receipt_time=datetime(2026, 6, 17, 22, 41, tzinfo=timezone.utc),
+            sample_count=3,
+            skipped_unit_law=0,
+            quarantined_implausible=0,
+        )
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(era, "runtime_cities_by_name", lambda: {"London": city})
+        try:
+            members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+                family=family,
+                decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+                members_native=[15.0, 15.0, 15.0],
+                empirical_model=model,
+                low_window=window,
+            )
+        finally:
+            monkey.undo()
+
+        assert reason is None
+        assert meta is not None
+        assert meta["live_probability_applied"] is True
+        assert meta["original_member_count"] == 3
+        assert meta["conditioned_member_count"] == 12
+        assert len(members) == 12
+        assert min(members) == pytest.approx(11.8)
+        assert max(members) == pytest.approx(12.8)
+
+    def test_edli_qkernel_spine_blocks_when_pre_day0_low_evidence_missing(self):
+        from src.engine import event_reactor_adapter as era
+        from src.signal.day0_low_distribution import PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION
+
+        city = self._london_city()
+        family = SimpleNamespace(city="London", metric="low", target_date="2026-06-18")
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {},
+            "by_unit": {},
+        }
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(era, "runtime_cities_by_name", lambda: {"London": city})
+        try:
+            members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+                family=family,
+                decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+                members_native=[15.0, 15.0, 15.0],
+                empirical_model=model,
+                low_window=None,
+            )
+        finally:
+            monkey.undo()
+
+        assert members == [15.0, 15.0, 15.0]
+        assert meta is None
+        assert reason == "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:fast_obs_window_missing:lead_hours=0.250"
+
+    def test_edli_qkernel_spine_carryover_is_inactive_outside_low_window(self):
+        from src.engine import event_reactor_adapter as era
+
+        family = SimpleNamespace(city="London", metric="high", target_date="2026-06-18")
+        members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+            family=family,
+            decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+            members_native=[15.0, 15.0, 15.0],
+            empirical_model=None,
+            low_window=None,
+        )
+
+        assert members == [15.0, 15.0, 15.0]
+        assert meta is None
+        assert reason is None
+
 
 # ===========================================================================
 # R2 — stale-obs boundary guard (latency-aware dead/alive decisions)
@@ -479,6 +668,122 @@ class TestStaleObsBoundaryGuard:
         assert 0.0 < staleness_budget_minutes("Seoul") <= DEFAULT_STALENESS_BUDGET_MIN
 
 
+class TestDay0RemainingDayMaturityEntryGuard:
+    def test_immature_high_boundary_point_yes_has_no_submit_lcb(self):
+        fam = _seoul_high_family()
+        payload = _payload("high", 25.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_finite_yes_suppressed_conditions"
+            ]
+            == ["cond2", "cond3"]
+        )
+
+    def test_immature_high_non_boundary_point_yes_has_no_submit_lcb(self):
+        """Manila/Wellington class: an immature finite YES above the current
+        running high is still killable by a later higher reading, so it cannot
+        receive a live submit LCB just because the remaining-window point q is high."""
+        fam = _seoul_high_family()
+        payload = _payload("high", 24.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond3", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_finite_yes_suppressed_conditions"
+            ]
+            == ["cond1", "cond2", "cond3"]
+        )
+
+    def test_mature_high_finite_point_yes_keeps_submit_lcb(self):
+        fam = _seoul_high_family()
+        payload = _payload("high", 25.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "mature"
+        payload["_edli_day0_exit_authority_reason"] = "day0_high_extreme_post_peak"
+
+        _q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_finite_yes_suppressed_conditions"
+            ]
+            == []
+        )
+
+    def test_immature_low_boundary_point_yes_has_no_submit_lcb(self):
+        fam = _family(
+            "Seoul",
+            [_bin(None, 21.0), _bin(22.0, 22.0), _bin(23.0, 23.0), _bin(24.0, None)],
+            metric="low",
+        )
+        payload = _payload("low", 23.0, obs_age_minutes=10.0)
+        payload["_edli_q_source"] = "day0_remaining_day"
+        payload["_edli_day0_exit_authority_status"] = "immature"
+        payload["_edli_day0_exit_authority_reason"] = (
+            "day0_low_extreme_not_terminal:hours_remaining=12.0"
+        )
+
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=fam,
+            q_by_condition={f"cond{i}": 0.25 for i in range(4)},
+            lcb_by_condition={
+                (f"cond{i}", d): 0.2
+                for i in range(4)
+                for d in ("buy_yes", "buy_no")
+            },
+            decision_time=NOW,
+        )
+
+        assert q["cond2"] > 0.0
+        assert _qlcb_float(lcb[("cond1", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert (
+            payload["_edli_day0_lcb_transform"][
+                "immature_finite_yes_suppressed_conditions"
+            ]
+            == ["cond1", "cond2"]
+        )
+
+
 # ===========================================================================
 # R3 — transition monotonicity: the panic-sell category is dead
 # ===========================================================================
@@ -509,6 +814,67 @@ def _make_position(**overrides) -> Position:
 
 
 class TestDay0TransitionMonotonicity:
+    def test_hourly_day0_observation_uses_publication_clock_for_freshness(self):
+        """Paris 15C regression: WU hourly settlement rows publish after the
+        hourly bucket. A just-published canonical row remains executable even
+        when its observation_time is slightly older than the base 1h window."""
+        from src.data.observation_client import Day0ObservationContext
+        from src.engine.evaluator import _day0_observation_quality_rejection_reason
+        from src.types.metric_identity import MetricIdentity
+
+        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
+        obs = Day0ObservationContext(
+            current_temp=22.0,
+            high_so_far=22.0,
+            low_so_far=15.0,
+            source="wu_icao_history",
+            observation_time="2026-07-02T11:00:00+00:00",
+            observation_available_at="2026-07-02T11:43:33.517275+00:00",
+            provider_reported_time="canonical_observation_instants",
+            unit="C",
+            coverage_status="OK",
+        )
+
+        assert (
+            _day0_observation_quality_rejection_reason(
+                SimpleNamespace(name="Paris"),
+                obs,
+                MetricIdentity.from_raw("low"),
+                decision_time=decision_time,
+                allow_incomplete_window_bound=True,
+            )
+            is None
+        )
+
+    def test_hourly_day0_observation_fails_when_publication_clock_is_stale(self):
+        from src.data.observation_client import Day0ObservationContext
+        from src.engine.evaluator import _day0_observation_quality_rejection_reason
+        from src.types.metric_identity import MetricIdentity
+
+        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
+        obs = Day0ObservationContext(
+            current_temp=22.0,
+            high_so_far=22.0,
+            low_so_far=15.0,
+            source="wu_icao_history",
+            observation_time="2026-07-02T11:00:00+00:00",
+            observation_available_at="2026-07-02T10:43:33.517275+00:00",
+            provider_reported_time="canonical_observation_instants",
+            unit="C",
+            coverage_status="OK",
+        )
+
+        reason = _day0_observation_quality_rejection_reason(
+            SimpleNamespace(name="Paris"),
+            obs,
+            MetricIdentity.from_raw("low"),
+            decision_time=decision_time,
+            allow_incomplete_window_bound=True,
+        )
+
+        assert reason is not None
+        assert "Day0 observation is stale" in reason
+
     def test_seoul_incident_replay_single_tick_reversal_holds(self):
         """Replay of position b5d966a9-990 (2026-06-07T15:08Z): buy_no Seoul 25C,
         day0 arrival at local midnight, posterior step 0.795->0.644 from the
@@ -531,7 +897,8 @@ class TestDay0TransitionMonotonicity:
         )
         assert decision.should_exit is False
         assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
-        assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
+        assert "day0_observation_reversal_nonterminal" in decision.applied_validations
+        assert "consecutive_cycle_check" in decision.applied_validations
 
     def test_bin_contains_running_extreme_survives_day0_arrival(self):
         """Operator first principle: a position whose bin contains the running
@@ -614,13 +981,85 @@ class TestDay0TransitionMonotonicity:
         assert decision.should_exit is True
         assert decision.trigger == "CI_SEPARATED_REVERSAL"
 
+    def test_day0_zero_probability_with_sell_value_exits_even_inside_ci_noise_floor(self):
+        """Kuala Lumpur 34C regression: Day0 remaining-window q=0 plus a
+        real executable bid is an economic exit, not a panic sale. The CI noise
+        floor may protect light negative edge, but it must not hold a zero-value
+        claim when direct sell value dominates hold value."""
+        pos = _make_position(
+            direction="buy_yes",
+            entry_price=0.031,
+            p_posterior=0.121802485107885,
+            entry_ci_width=0.0,
+            shares=10.01029,
+            cost_basis_usd=0.3103,
+            size_usd=0.3103,
+        )
+        decision = pos.evaluate_exit(
+            ExitContext(
+                fresh_prob=0.0,
+                fresh_prob_is_fresh=True,
+                current_market_price=0.011,
+                current_market_price_is_fresh=True,
+                best_bid=0.011,
+                best_ask=0.03,
+                hours_to_settlement=18.0,
+                position_state="day0_window",
+                day0_active=True,
+                entry_posterior=0.121802485107885,
+                entry_ci=(0.121802485107885, 0.121802485107885),
+                current_ci=(0.0, 0.0),
+                belief_available=True,
+                day0_zero_probability_exit_authority=True,
+            )
+        )
+        assert decision.should_exit is True
+        assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+        assert "day0_zero_probability_sell_value_dominates" in decision.applied_validations
+
+    def test_day0_zero_probability_exit_bypasses_ci_overlap_hold(self):
+        """Paris 15C regression: an authoritative Day0 hard-fact that makes the
+        held side worthless is not an ordinary noisy model reversal. A wide CI
+        around the new point cannot block the sell-vs-hold EV exit."""
+        pos = _make_position(
+            direction="buy_no",
+            entry_price=0.49,
+            p_posterior=0.51,
+            entry_ci_width=0.40,
+            shares=10.91,
+            cost_basis_usd=5.35,
+            size_usd=5.35,
+        )
+        decision = pos.evaluate_exit(
+            ExitContext(
+                fresh_prob=0.0,
+                fresh_prob_is_fresh=True,
+                current_market_price=0.002,
+                current_market_price_is_fresh=True,
+                best_bid=0.002,
+                best_ask=0.012,
+                hours_to_settlement=6.0,
+                position_state="day0_window",
+                day0_active=True,
+                entry_posterior=0.51,
+                entry_ci=(0.20, 0.80),
+                current_ci=(0.0, 0.70),
+                belief_available=True,
+                day0_zero_probability_exit_authority=True,
+            )
+        )
+
+        assert decision.should_exit is True
+        assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+        assert "day0_zero_probability_sell_value_dominates" in decision.applied_validations
+        assert "ci_overlap_hold" not in decision.applied_validations
+
     def test_no_single_cycle_day0_reversal_sell_producer_in_source(self):
         """Static antibody: portfolio.py must not reconstruct the pre-2026-06-07
-        single-cycle DAY0_OBSERVATION_REVERSAL sell. The bare trigger may only
-        appear as the HELD_FOR_EVIDENCE hold or in the re-entry blocklist."""
+        single-cycle DAY0_OBSERVATION_REVERSAL sell."""
         source = (ROOT / "src" / "state" / "portfolio.py").read_text(encoding="utf-8")
         assert 'trigger="DAY0_OBSERVATION_REVERSAL"' not in source
-        assert 'trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"' in source
+        assert "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE" not in source
 
     def test_buy_no_day0_monitor_probability_uses_explicit_held_side_conversion(self):
         """Static antibody: buy_no monitor probability must be explicitly held-side.
@@ -827,15 +1266,14 @@ class TestDay0MaturityAuthority:
         )
         assert reason is None
 
-    def test_deterministic_bound_is_authority_at_any_daypart(self):
-        """Hard fact: obs already exceeds every remaining member -> authority
-        even pre-peak (the absorbing boundary is calendar-independent)."""
+    def test_deterministic_remaining_forecast_does_not_bypass_maturity(self):
+        """A remaining-window forecast can be deterministic without being a settlement hard fact."""
         reason = self._gate(
             observed_extreme_so_far=30.0,
             member_extrema_remaining=[25.0, 26.0, 27.0],
             temporal_context=SimpleNamespace(daypart="morning", post_peak_confidence=0.0),
         )
-        assert reason is None
+        assert reason is not None and "not_mature" in reason
 
     def test_no_observation_yet_is_never_authority(self):
         reason = self._gate(observed_extreme_so_far=None)
@@ -854,12 +1292,13 @@ class TestDay0MaturityAuthority:
             metric="low", hours_remaining=3.0,
             observed_extreme_so_far=24.0, member_extrema_remaining=[22.0, 23.0],
         ) is None
-        # DETERMINISTIC low (obs already undercuts every remaining member) is
-        # authority at any hour — hard fact, calendar-independent.
-        assert self._gate(
+        # A deterministic remaining-window LOW forecast is still not terminal
+        # observation authority while most of the local day remains.
+        reason = self._gate(
             metric="low", hours_remaining=20.0,
             observed_extreme_so_far=18.0, member_extrema_remaining=[19.0, 20.0],
-        ) is None
+        )
+        assert reason is not None and "not_terminal" in reason
 
 
 # ===========================================================================

@@ -62,7 +62,7 @@ CREATE TABLE backtest_runs (
     completed_at TEXT,
     status TEXT NOT NULL,
     authority_scope TEXT NOT NULL CHECK (
-        authority_scope = 'diagnostic_non_promotion'
+        authority_scope = 'offline_no_promotion'
     ),
     config_json TEXT NOT NULL,
     summary_json TEXT NOT NULL
@@ -114,8 +114,8 @@ CREATE TABLE backtest_outcome_comparison (
     forecast_reference_id TEXT,
     evidence_json TEXT NOT NULL,
     missing_reason_json TEXT NOT NULL,
-    authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
-        CHECK (authority_scope = 'diagnostic_non_promotion'),
+    authority_scope TEXT NOT NULL DEFAULT 'offline_no_promotion'
+        CHECK (authority_scope = 'offline_no_promotion'),
     created_at TEXT NOT NULL,
     FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
 )

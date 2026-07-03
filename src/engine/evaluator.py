@@ -3,7 +3,7 @@
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 #   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
-#   P0-D (2026-05-23): shadow sanity telemetry for non-day0 strategies.
+#   P0-D (2026-05-23): retired sanity telemetry for non-day0 strategies.
 #   D2 bias-family unify (2026-06-03): _resolve_unified_entry_bias_native + flag-gated
 #     bias-shift + identity-Platt on the FT entry sites. Authority basis: D2 bias-family
 #     unify / wiring verdict 2026-06-03.
@@ -65,21 +65,13 @@ from src.config import (
     get_mode,
     settings,
 )
-from src.control.entry_forecast_promotion_evidence_io import (
-    PromotionEvidenceCorruption,
-    read_promotion_evidence,
-)
-from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
 from src.data.calibration_transfer_policy import (
     MIN_TRANSFER_EVIDENCE_PAIRS,
     POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
-    evaluate_calibration_transfer_policy_with_evidence,
     source_platt_transfer_evidence_valid,
     target_transfer_cohort_evidence_valid,
 )
-from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
-from src.data.forecast_target_contract import ForecastTargetScope
 from src.contracts import (
     EntryMethod,
     EdgeContext,
@@ -191,11 +183,17 @@ from src.types.temperature import TemperatureDelta
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
-    # "metar_fast_lane": Option-B METAR fast-lane fallback (day0_obs_fastlane_plan §4.2).
     # Same physical settlement station as WU (ICAO identity enforced by
-    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
-    # Only fires when WU result is absent/stale/coverage-incomplete.
-    "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
+    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py). This is
+    # not a cross-source fallback: the AWC METAR channel is admitted only as a
+    # faster distribution tail for the same station when WU's live distribution
+    # is absent/stale/coverage-incomplete.
+    "wu_icao": frozenset({
+        "wu_api",
+        "same_station_fast_tail",
+        "wu_api+same_station_fast_tail",
+        "wu_icao_history",
+    }),
     # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
     # HKO native accumulator only.
     "hko": frozenset({"hko_hourly_accumulator"}),
@@ -203,9 +201,10 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # Tel Aviv/LLBG) do not have a WU executable source. The live Day0 monitor
     # consumes the canonical observation_instants surface populated from Ogimet
     # METAR rows for those settlement stations.
-    "noaa": frozenset({"ogimet_metar_uuww", "ogimet_metar_llbg"}),
+    "noaa": frozenset({"ogimet_metar_ltfm", "ogimet_metar_uuww", "ogimet_metar_llbg"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
+DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
 NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION = "buy_no_native_quote_available"
 NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
@@ -496,7 +495,7 @@ class EdgeDecision:
     spread: float = 0.0
     n_edges_found: int = 0
     n_edges_after_fdr: int = 0
-    fdr_fallback_fired: bool = False
+    fdr_family_scan_unavailable: bool = False
     fdr_family_size: int = 0
     sizing_bankroll: float = 0.0
     kelly_multiplier_used: float = 0.0
@@ -528,8 +527,8 @@ class EdgeDecision:
     # Persisted to no_trade_events by cycle_runtime after evaluate_candidate returns.
     rejection_reason_enum: Optional["NoTradeReason"] = None
     rejection_reason_detail: Optional[str] = None
-    family_fallback_rank: int = 0
-    family_fallback_candidate_count: int = 0
+    family_ranked_candidate_rank: int = 0
+    family_ranked_candidate_count: int = 0
     family_portfolio_selected_leg_count: int = 0
     family_portfolio_leg_role: str = ""
 
@@ -678,19 +677,19 @@ def _current_cluster_exposure_for_sizing(
     )
 
 
-def _projects_exposure_during_family_fallback_sizing(
+def _projects_exposure_during_family_ranked_sizing(
     *,
-    family_fallback_rank: int,
-    family_fallback_candidate_count: int,
+    family_ranked_candidate_rank: int,
+    family_ranked_candidate_count: int,
     family_portfolio_leg_role: str = "",
 ) -> bool:
-    """Fallback siblings are mutually exclusive attempts, not additive exposure."""
+    """Ranked siblings are mutually exclusive attempts, not additive exposure."""
 
     if str(family_portfolio_leg_role or "") == "portfolio_selected":
         return True
     return not (
-        int(family_fallback_candidate_count or 0) > 1
-        and int(family_fallback_rank or 0) > 0
+        int(family_ranked_candidate_count or 0) > 1
+        and int(family_ranked_candidate_rank or 0) > 0
     )
 
 
@@ -935,6 +934,58 @@ def _day0_observation_field(
     if isinstance(observation, dict):
         return observation.get(field, default)
     return getattr(observation, field, default)
+
+
+def _day0_canonical_extrema_source(source: str) -> bool:
+    normalized = str(source or "").strip().lower()
+    return (
+        normalized == "wu_icao_history"
+        or normalized == "hko_hourly_accumulator"
+        or normalized.startswith("ogimet_metar_")
+    )
+
+
+def _day0_hourly_publication_clock_is_fresh(
+    observation: "Day0ObservationContext",
+    *,
+    observation_source: str,
+    observation_age_seconds: float,
+    reference_time: datetime,
+) -> bool:
+    """Treat hourly settlement rows as fresh when their publication clock is fresh.
+
+    WU/Ogimet settlement rows are hourly observations with a material publication
+    delay. The value timestamp is expected to lag wall-clock time by one hourly
+    bucket plus source publication latency; the freshness question for executable
+    Day0 value is whether the latest available hourly row is itself recently
+    available, not whether its bucket boundary is less than 60 minutes old.
+    """
+
+    if not _day0_canonical_extrema_source(observation_source):
+        return False
+    max_observation_age_seconds = (
+        DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS
+        + DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS
+    ) * 3600.0
+    if observation_age_seconds > max_observation_age_seconds:
+        return False
+    available_at = _parse_day0_observation_time_utc(
+        _day0_observation_field(observation, "observation_available_at")
+    )
+    if available_at is None:
+        return False
+    available_age_seconds = (
+        reference_time - available_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if available_age_seconds < -DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS:
+        return False
+    return (
+        _freshness_registry.evaluate(
+            "day0_executable_observation",
+            max(0.0, available_age_seconds),
+        )
+        < FreshnessLevel.STALE
+    )
 
 
 def _parse_day0_observation_time_utc(value) -> datetime | None:
@@ -1212,7 +1263,7 @@ def _day0_observation_quality_rejection_reason(
     # temperature is diagnostic in the Day0 high/low value path, while the
     # observed extreme is the settlement-relevant bound. Do not block held
     # redecision on a missing diagnostic field for this canonical source.
-    current_temp_required = not observation_source.startswith("ogimet_metar_")
+    current_temp_required = not _day0_canonical_extrema_source(observation_source)
     required_fields = ["current_temp"] if current_temp_required else []
     if temperature_metric.is_low():
         required_fields.append("low_so_far")
@@ -1249,6 +1300,13 @@ def _day0_observation_quality_rejection_reason(
         )
     age_hours = max(0.0, age_seconds / 3600.0)
     if _freshness_registry.evaluate("day0_executable_observation", age_hours * 3600.0) >= FreshnessLevel.STALE:
+        if _day0_hourly_publication_clock_is_fresh(
+            observation,
+            observation_source=observation_source,
+            observation_age_seconds=age_seconds,
+            reference_time=reference_time,
+        ):
+            return None
         return (
             "Day0 observation is stale for executable probability generation: "
             f"city={city.name} age_hours={age_hours:.3f} "
@@ -1276,7 +1334,14 @@ def _default_strategy_policy(strategy_key: str) -> StrategyPolicy:
     )
 
 
-def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -> str | None:
+def _center_buy_ultra_low_price_telemetry_reason(strategy_key: str, edge: BinEdge) -> str | None:
+    """Legacy scalar low-price marker, not a live rejection authority.
+
+    Cheap center-buy YES is admitted or rejected by qkernel ROI/submit proof.
+    The legacy evaluator may still record this marker for audit, but it must
+    not independently veto a candidate.
+    """
+
     if strategy_key != "center_buy":
         return None
     if edge.direction != "buy_yes":
@@ -1324,17 +1389,6 @@ def _strategy_entry_price_floor_block_reason(strategy_key: str, edge: BinEdge) -
     if entry_price > policy.min_entry_price:
         return None
     is_tail_topology = bool(getattr(getattr(edge, "bin", None), "is_shoulder", False))
-    center_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
-    if center_reason:
-        return LowPriceRejection(
-            strategy_key=strategy_key,
-            direction=str(getattr(edge, "direction", "")),
-            entry_price=entry_price,
-            floor=CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY,
-            reason_code="CENTER_BUY_ULTRA_LOW_PRICE",
-            specialized_reason=center_reason,
-            is_tail_topology=is_tail_topology,
-        ).detail()
     if entry_price <= policy.min_entry_price:
         if policy.allow_ultra_low_tail and is_tail_topology:
             return None
@@ -1362,6 +1416,16 @@ def _expected_profit_usd_for_edge(edge: BinEdge, *, notional_usd: float, price: 
     except (TypeError, ValueError):
         edge_per_share = 0.0
     if edge_per_share <= 0.0:
+        try:
+            selected_method = str(edge.selected_method or "")
+        except AttributeError:
+            selected_method = ""
+        try:
+            entry_method = str(edge.entry_method or selected_method)
+        except AttributeError:
+            entry_method = selected_method
+        if not (selected_method or entry_method):
+            return 0.0
         try:
             edge_per_share = float(edge.p_posterior) - float(price)
         except (TypeError, ValueError):
@@ -1424,6 +1488,11 @@ def _live_entry_economic_floor_rejection(
             effective_expected_profit_usd * fill_probability
             - adverse_selection_cost_usd
         )
+    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
+        return (
+            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
+            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
+        )
     if effective_expected_profit_usd < policy.min_expected_profit_usd:
         display_profit = effective_expected_profit_usd if passive_order else expected_profit_usd
         detail = (
@@ -1439,11 +1508,6 @@ def _live_entry_economic_floor_rejection(
             "EXPECTED_PROFIT_BELOW_LIVE_FLOOR("
             f"{display_profit:.4f}<${policy.min_expected_profit_usd:.2f}; "
             f"strategy={strategy_key}{detail})"
-        )
-    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
-        return (
-            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
-            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
         )
     return None
 
@@ -1611,7 +1675,7 @@ def _size_at_execution_price_boundary(
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
-    P10E: shadow-off rollback path removed — fee-adjusted typed price is the
+    P10E: rollback path removed — fee-adjusted typed price is the
     only path. No feature flag; assert_kelly_safe() runs unconditionally.
 
     Per-trade safety-cap authority was removed 2026-05-04; per-cycle exposure
@@ -1720,7 +1784,7 @@ def _size_at_execution_price_boundary(
                 )
                 fee_adjusted_size = cap_usd
 
-    # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
+    # P10E strict: rollback path removed. R10 requires fee-adjusted typed price.
     return fee_adjusted_size
 
 
@@ -1921,7 +1985,7 @@ def _entry_forecast_evidence_errors(
 ) -> list[str]:
     """Validate the executable-entry forecast evidence contract.
 
-    Monitor/diagnostic fallbacks may have weaker provenance, but entry must not
+    Non-entry forecast sources may have weaker provenance, but entry must not
     proceed unless the forecast source, timing, payload hash, and authority
     fields are explicit enough to audit later and are knowable before the
     decision was made.
@@ -2242,61 +2306,6 @@ def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None
         return None, f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
 
 
-ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
-ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG = "ZEUS_ENTRY_FORECAST_READINESS_WRITER"
-
-
-def _entry_forecast_rollout_gate_flag_on() -> bool:
-    """Default ON since 2026-05-04 (operator authorization). Kill-switch
-    semantics: set the env var to ``"0"`` (or any non-empty string ≠ ``"1"``)
-    to disable the gate at the rollout-blocker site without redeploy.
-    Empty string and unset both keep the default-ON behavior.
-    """
-
-    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG, "1") != "0"
-
-
-def _entry_forecast_readiness_writer_flag_on() -> bool:
-    """Default OFF since 2026-05-04 (gate-purge fix-up per critic-opus PR #54).
-
-    The writer was the SECOND call site of evaluate_entry_forecast_rollout_gate
-    that Stage 1 missed. With rollout_mode='blocked' in config + missing
-    promotion-evidence, the writer would emit BLOCKED readiness_state rows
-    that the reader at evaluator.py:1658+ rejected, recreating the same
-    156-candidates-per-30min loop the rollout-blocker neutering was supposed
-    to eliminate.
-
-    Kill-switch semantics: set the env var to ``"1"`` to re-enable the
-    writer. Empty string and unset both keep the default-OFF behavior.
-    """
-
-    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "0") == "1"
-
-
-def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
-    """Always returns ``None`` — rollout-evidence gating retired 2026-05-04.
-
-    Operator decision (registry purge): this gate served the
-    modifications/rollout phase (require operator-approval JSON +
-    G1 evidence + calibration approval + canary success before live
-    orders could submit). That phase has ended. Live runtime safety is
-    covered by:
-
-    - gate 6 ``_risk_allows_new_entries(risk_level)`` — bankroll/loss
-    - gate 9 ``heartbeat_supervisor`` — execution path health
-    - gate 10 ``ws_gap_guard`` — real-time price feed health
-
-    The 156-candidates-per-30min that this gate was rejecting with
-    ``ENTRY_FORECAST_ROLLOUT_BLOCKED`` are now allowed through to the
-    live order path. The promotion-evidence JSON file, env-var flag,
-    and ``evaluate_entry_forecast_rollout_gate`` are kept callable for
-    Stage-2 follow-ups and observability tools but no longer block
-    cycle output.
-    """
-
-    return None
-
-
 def _entry_forecast_city_id(city: City) -> str:
     return city.name.upper().replace(" ", "_")
 
@@ -2316,118 +2325,6 @@ def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
             if value:
                 return value
     return ""
-
-
-def _write_entry_readiness_for_candidate(
-    conn,
-    *,
-    cfg: EntryForecastConfig,
-    city: City,
-    target_local_date: date,
-    temperature_metric: "MetricIdentity",
-    market_family: str,
-    condition_id: str,
-    decision_time: datetime,
-) -> None:
-    """Phase C-3 activation: when ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=1``,
-    write the per-candidate ``readiness_state`` row with
-    ``strategy_key='entry_forecast'`` so the live evaluator path's
-    subsequent ``read_executable_forecast`` call can find it.
-
-    The writer enforces all three gates (rollout / calibration /
-    promotion-evidence) at write time. Default OFF preserves the
-    fail-closed-by-construction state where no daemon path writes
-    entry_readiness rows and the reader recurrently blocks on
-    ``ENTRY_READINESS_MISSING``.
-
-    The ``ForecastTargetScope`` constructed here uses placeholder
-    temporal fields (``source_cycle_time``, ``target_window_*``,
-    ``required_step_hours``). The writer ignores those — it only
-    consumes ``city_id``/``city_timezone``/``target_local_date``/
-    ``temperature_metric``/``data_version``. Loading the proper
-    temporal fields would require a DB lookup the writer does not
-    need; using placeholders is correct here. If a future caller
-    needs full scope semantics, refactor the writer to accept the raw
-    fields it actually uses (city/target/metric/data_version) and
-    drop the scope dataclass coupling.
-    """
-
-    if conn is None:
-        return
-    try:
-        evidence = read_promotion_evidence()
-    except PromotionEvidenceCorruption:
-        evidence = None
-
-    rollout_decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
-    track = track_for_metric(cfg, temperature_metric.temperature_metric)
-    data_version = data_version_for_track(track)
-    # Phase β: delegate to evidence-gated function.  When the feature flag is
-    # off (the default), this transparently falls back to the legacy string-
-    # mapping policy — behaviour is byte-identical.  When the flag flips on,
-    # the DB row becomes authority and live_promotion_approved is ignored.
-    #
-    # Same-domain semantics (PR #65 Codex P1 follow-up 2026-05-06):
-    # source_id == target_source_id == cfg.source_id ('ecmwf_open_data') and
-    # source_cycle == target_cycle is genuinely same-domain — NOT an OpenData
-    # → TIGGE cross-source transfer being silently approved. The policy_id
-    # 'ecmwf_open_data_uses_tigge_localday_cal_v1' is a naming convention for
-    # the calibration mechanism (loading the TIGGE-fit Platt via the static
-    # _TRANSFER_SOURCE_BY_OPENDATA_VERSION data_version map at calibration-
-    # load time), not a runtime cross-domain transfer. ECMWF Opendata IS
-    # the TIGGE ensemble — same physical IFS forecast, different release
-    # channels (TIGGE = +48h archive mirror). See
-    # architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §1, §2.
-    # The validated_calibration_transfers evidence-row is required only for
-    # genuinely cross-source transfers (e.g. GFS → ECMWF), which this writer
-    # never issues.
-    _dh = decision_time.hour
-    _derived_cycle = "12" if _dh < 6 or _dh >= 18 else "00"
-    calibration_decision = evaluate_calibration_transfer_policy_with_evidence(
-        config=cfg,
-        source_id=cfg.source_id,
-        target_source_id=cfg.source_id,
-        source_cycle=_derived_cycle,
-        target_cycle=_derived_cycle,
-        horizon_profile="full",
-        season=season_from_date(str(target_local_date), lat=city.lat),
-        cluster=city.cluster,
-        metric=temperature_metric.temperature_metric,
-        platt_model_key=None,
-        conn=conn,
-        now=decision_time,
-        # Rollout-gate was retired 2026-05-04 (gate-purge); live_promotion_approved
-        # is unconditionally True here. The legacy fallback honours the flag, and
-        # the evidence-gated path (flag ON) ignores it in favour of the DB row.
-        live_promotion_approved=True,
-    )
-
-    placeholder_scope = ForecastTargetScope(
-        city_id=_entry_forecast_city_id(city),
-        city_name=city.name,
-        city_timezone=city.timezone,
-        target_local_date=target_local_date,
-        temperature_metric=temperature_metric.temperature_metric,
-        source_cycle_time=decision_time,
-        data_version=data_version,
-        target_window_start_utc=decision_time,
-        target_window_end_utc=decision_time,
-        required_step_hours=(),
-        market_refs=(),
-    )
-
-    write_entry_readiness(
-        conn,
-        scope=placeholder_scope,
-        rollout_decision=rollout_decision,
-        calibration_decision=calibration_decision,
-        promotion_evidence=evidence,
-        config=cfg,
-        market_family=market_family,
-        condition_id=condition_id,
-        producer_readiness_id="entry-readiness-via-evaluator",
-        computed_at=decision_time,
-    )
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -2493,10 +2390,6 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "imminent_open_capture"
-    from src.strategy.strategy_profile import _classify_via_registry
-    _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
-        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return "unclassified"
@@ -2518,10 +2411,6 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "imminent_open_capture"
-    from src.strategy.strategy_profile import _classify_via_registry
-    _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
-        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return None
@@ -2545,16 +2434,6 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "imminent_open_capture"
-    from src.strategy.strategy_profile import _classify_via_registry
-    _hyp_bin = SimpleNamespace(
-        is_shoulder=hypothesis.is_shoulder,
-        is_open_high=False,
-        is_open_low=False,
-    )
-    _hyp_edge = SimpleNamespace(direction=hypothesis.direction, bin=_hyp_bin)
-    _ctx = SimpleNamespace(edge=_hyp_edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
-        return "shoulder_impossible_tail_capture"
     if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"
     return None
@@ -2699,6 +2578,13 @@ def _apply_edli_live_family_before_selection(
     event_type = str(context.get("event_type") or "")
     payload = _edli_payload(context)
     causal_snapshot_id = str(context.get("causal_snapshot_id") or "")
+    analysis.selected_method = str(
+        context.get("selected_method") or context.get("entry_method") or event_type
+    )
+    analysis.entry_method = analysis.selected_method
+    _posterior_provenance = analysis.selected_method or analysis.entry_method
+    if not _posterior_provenance:
+        raise ValueError("EDLI_PROBABILITY_PROVENANCE_MISSING")
     probabilities = np.asarray(analysis.p_posterior, dtype=float)
     factor = "event_prior"
     if event_type == "FORECAST_SNAPSHOT_READY":
@@ -2734,7 +2620,12 @@ def _apply_edli_live_family_before_selection(
 
         def _edli_bootstrap_bin_no(bin_idx: int, _n: int) -> tuple[float, float, float]:
             p_market_no = analysis.buy_no_market_price(bin_idx)
-            edge = -float("inf")
+            p_yes = float(probabilities[bin_idx])
+            if not math.isfinite(p_yes):
+                edge = -float("inf")
+            else:
+                p_no = 1.0 - min(max(p_yes, 0.0), 1.0)
+                edge = float(p_no - p_market_no)
             return edge, edge, (0.0 if edge > 0.0 else 1.0)
 
         analysis._bootstrap_bin = _edli_bootstrap_bin  # type: ignore[method-assign]
@@ -3274,7 +3165,7 @@ _ENTRY_COMMAND_TERMINAL_NO_FILL_STATES = frozenset(
 _ENTRY_ORDER_FACT_TERMINAL_NO_FILL_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
-_ENTRY_DEDUP_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
+_ENTRY_DEDUP_NON_OPEN_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
 
 
 def _has_positive_trade_fact_for_command(conn, command_id: str) -> bool:
@@ -3398,7 +3289,7 @@ def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
             AND phase NOT IN (?,?,?,?,?)""",
-        (token_id, token_id, *_ENTRY_DEDUP_TERMINAL_PHASES),
+        (token_id, token_id, *_ENTRY_DEDUP_NON_OPEN_PHASES),
     ).fetchall()
     for row in rows:
         if _pending_entry_terminal_no_fill_cleared(conn, row):
@@ -3607,16 +3498,14 @@ def evaluate_candidate(
     entry_forecast_cfg: EntryForecastConfig | None = None
     if get_mode() == "live":
         entry_forecast_cfg, live_entry_forecast_blocker = _live_entry_forecast_config_or_blocker()
-        if live_entry_forecast_blocker is None and entry_forecast_cfg is not None:
-            live_entry_forecast_blocker = _live_entry_forecast_rollout_blocker(entry_forecast_cfg)
         if live_entry_forecast_blocker is not None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED.value],
+                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_READER_REJECTED.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
-                applied_validations=["entry_forecast_rollout", "legacy_entry_primary_fetch_blocked"],
-                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED,
+                applied_validations=["entry_forecast_config", "legacy_entry_primary_fetch_blocked"],
+                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_READER_REJECTED,
                 rejection_reason_detail=live_entry_forecast_blocker,
             )]
 
@@ -4120,6 +4009,14 @@ def evaluate_candidate(
             candidate.observation,
             "current_temp",
         )
+        if current_temp is None and _day0_canonical_extrema_source(
+            str(_day0_observation_field(candidate.observation, "source", ""))
+        ):
+            current_temp = (
+                observed_low_so_far
+                if temperature_metric.is_low()
+                else observed_high_so_far
+            )
         if current_temp is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
@@ -4169,10 +4066,13 @@ def evaluate_candidate(
             if _obs_time_for_nowcast is not None:
                 try:
                     from src.state.day0_nowcast_store import (
+                        ensure_identity_platt_fit,
                         read_latest_platt_fit,
                         write_nowcast_run,
                     )
                     _horizon_model = read_latest_platt_fit()
+                    if _horizon_model is None:
+                        _horizon_model = ensure_identity_platt_fit()
                     if _horizon_model is not None:
                         _nowcast = Day0HighNowcastSignal(
                             observed_high_so_far=float(observed_high_so_far or 0.0),
@@ -5381,8 +5281,8 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
-    # P0-D non-day0 HIGH validate_high_distribution SHADOW (log-only) DELETED 2026-06-14
-    # (gate-mass collapse: log-only shadow, no telemetry sink, no promotion path). Non-day0
+    # P0-D non-day0 HIGH validate_high_distribution log-only path DELETED 2026-06-14
+    # (gate-mass collapse: log-only path, no telemetry sink, no promotion path). Non-day0
     # HIGH is already covered by the per-edge probability_edge_bin_sanity gate below. The
     # day0 HIGH hard gate (above) is untouched.
 
@@ -5512,13 +5412,13 @@ def evaluate_candidate(
     else:
         edges = analysis.find_edges(n_bootstrap=n_bootstrap)
         edge_scan_trace = []
-    _fdr_fallback = False
+    _fdr_family_scan_unavailable = False
     _fdr_selection_unexecutable = ""
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
         logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc, exc_info=True)
-        _fdr_fallback = True
+        _fdr_family_scan_unavailable = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)
     entry_validations.append("bootstrap_ci")
@@ -5530,7 +5430,7 @@ def evaluate_candidate(
     # its result was never consumed — dead audit weight. Attesting
     # family_complete=True over that subset would be a structural lie under the
     # Q4 contract; the full-family path here is the only trustworthy selector.
-    if _fdr_fallback:
+    if _fdr_family_scan_unavailable:
         filtered = []
     elif full_family_hypotheses:
         selected_edge_keys = _selected_edge_keys_from_full_family(
@@ -5557,7 +5457,7 @@ def evaluate_candidate(
             "Full-family scan returned 0 hypotheses for %s/%s; failing closed",
             candidate.city.name, candidate.target_date,
         )
-        _fdr_fallback = True
+        _fdr_family_scan_unavailable = True
         filtered = []
     entry_validations.append("fdr_filter")
     try:
@@ -5603,7 +5503,7 @@ def evaluate_candidate(
         logger.warning("Failed to record selection family facts: %s", exc)
 
     if not filtered:
-        if _fdr_fallback:
+        if _fdr_family_scan_unavailable:
             stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
             rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
             rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
@@ -5636,18 +5536,18 @@ def evaluate_candidate(
             spread=_ensemble_spread_value(ensemble_spread, ens),
             n_edges_found=len(edges),
             n_edges_after_fdr=0,
-            fdr_fallback_fired=_fdr_fallback,
+            fdr_family_scan_unavailable=_fdr_family_scan_unavailable,
             fdr_family_size=_fdr_family_size,
             rejection_reason_enum=(
                 NoTradeReason.UNCATEGORIZED
-                if _fdr_fallback or _fdr_selection_unexecutable
+                if _fdr_family_scan_unavailable or _fdr_selection_unexecutable
                 else NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
                 if stage == "EDGE_INSUFFICIENT"
                 else NoTradeReason.UNCATEGORIZED
             ),
             rejection_reason_detail="; ".join(rejection_reasons),
         )
-        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in shadow mode.
+        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in log-only mode.
         if _tail_evidence is not None and _fdr_no_filtered_rej.prob_tail_mass_cal is None:
             _fdr_no_filtered_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
             _fdr_no_filtered_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
@@ -5664,32 +5564,32 @@ def evaluate_candidate(
         outcome_probabilities=p_cal,
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
-    family_fallback_rank_by_edge_id: dict[int, int] = {}
+    family_ranked_candidate_rank_by_edge_id: dict[int, int] = {}
     family_portfolio_role_by_edge_id: dict[int, str] = {}
     family_portfolio_selected_leg_count = 0
-    family_fallback_candidate_count = 0
+    family_ranked_candidate_count = 0
     if family_decision is not None:
-        fallback_candidates = tuple(
-            getattr(family_decision.portfolio, "fallback_candidate_legs", ())
+        ranked_candidates = tuple(
+            getattr(family_decision.portfolio, "ranked_candidate_legs", ())
             or family_decision.portfolio.selected_legs
         )
         selected_leg_ids = {
             id(edge) for edge in getattr(family_decision.portfolio, "selected_legs", ())
         }
         family_portfolio_selected_leg_count = len(selected_leg_ids)
-        filtered = list(fallback_candidates)
-        family_fallback_candidate_count = len(fallback_candidates)
-        family_fallback_rank_by_edge_id = {
+        filtered = list(ranked_candidates)
+        family_ranked_candidate_count = len(ranked_candidates)
+        family_ranked_candidate_rank_by_edge_id = {
             id(edge): rank
-            for rank, edge in enumerate(fallback_candidates, start=1)
+            for rank, edge in enumerate(ranked_candidates, start=1)
         }
         family_portfolio_role_by_edge_id = {
             id(edge): (
                 "portfolio_selected"
                 if id(edge) in selected_leg_ids
-                else "fallback_alternative"
+                else "ranked_alternative"
             )
-            for edge in fallback_candidates
+            for edge in ranked_candidates
         }
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
@@ -5715,9 +5615,9 @@ def evaluate_candidate(
                 spread=_ensemble_spread_value(ensemble_spread, ens),
                 n_edges_found=len(edges),
                 n_edges_after_fdr=n_edges_after_fdr_before_family_preselection,
-                fdr_fallback_fired=_fdr_fallback,
+                fdr_family_scan_unavailable=_fdr_family_scan_unavailable,
                 fdr_family_size=_fdr_family_size,
-                family_fallback_candidate_count=family_fallback_candidate_count,
+                family_ranked_candidate_count=family_ranked_candidate_count,
                 rejection_reason_enum=NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
                 rejection_reason_detail=(
                     f"family={city.name}|{target_date}|{temperature_metric.temperature_metric} "
@@ -5743,16 +5643,16 @@ def evaluate_candidate(
     for edge in filtered:
         _decisions_before_edge = len(decisions)
         decision_validations = list(entry_validations)
-        family_fallback_rank = family_fallback_rank_by_edge_id.get(id(edge), 0)
+        family_ranked_candidate_rank = family_ranked_candidate_rank_by_edge_id.get(id(edge), 0)
         family_portfolio_leg_role = family_portfolio_role_by_edge_id.get(id(edge), "")
-        family_fallback_candidate = (
-            family_fallback_candidate_count > 1
-            and family_fallback_rank > 0
+        family_ranked_candidate = (
+            family_ranked_candidate_count > 1
+            and family_ranked_candidate_rank > 0
         )
         if family_portfolio_leg_role == "portfolio_selected":
             decision_validations.append("family_portfolio_selected_leg")
-        elif family_fallback_candidate:
-            decision_validations.append("family_fallback_risk_not_cumulative")
+        elif family_ranked_candidate:
+            decision_validations.append("family_ranked_alternative_not_cumulative")
         if edge.support_index is None:
             decisions.append(EdgeDecision(
                 False,
@@ -5880,7 +5780,7 @@ def evaluate_candidate(
         # probability_edge_bin_sanity fires only when edge bin is sub-floor, gap>=min_edge_gap,
         # ratio >= odds_ratio_threshold, AND settled_member_support < min_edge_bin_member_support.
         # CRITICAL SAFETY: strong member support (p_raw[bin] >= 0.05) → unconditional PASS.
-        # Mode ("hard"|"shadow") read from probability_edge_bin_sanity config block.
+        # probability_edge_bin_sanity is a hard gate when it fires.
         # day0 guard consistent with family-gate above.
         if not is_day0_mode:
             _eb_ok, _eb_reason, _eb_telemetry = probability_edge_bin_sanity(
@@ -5896,65 +5796,57 @@ def evaluate_candidate(
             )
             # Stamp §E telemetry onto a sentinel so it flows to all downstream decisions.
             _eb_telemetry_dict = _eb_telemetry  # always a dict, even on pass path
-            _eb_gate_mode = _eb_telemetry_dict.get("probability_sanity_mode", "hard")
             if not _eb_ok:
-                if _eb_gate_mode == "hard":
-                    # Determine specific NoTradeReason from reason code prefix
-                    _eb_reason_str = str(_eb_reason or "")
-                    if "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT
-                    elif "PROBABILITY_EDGE_BIN_UNSUPPORTED" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_EDGE_BIN_UNSUPPORTED
-                    elif "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_TAIL_SHAPE_ANOMALY_HARD
-                    else:
-                        _eb_enum = NoTradeReason.PROBABILITY_SANITY_GATE
-                    logger.warning(
-                        "[PROB_EDGE_BIN_SANITY_HARD] strategy=%s city=%s date=%s bin_idx=%s "
-                        "support=%.4f reason=%s",
-                        selected_method, city.name, target_date, bin_idx,
-                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
-                    )
-                    _eb_rej = EdgeDecision(
-                        False,
-                        edge=edge,
-                        decision_id=_decision_id(),
-                        rejection_stage="SIGNAL_QUALITY",
-                        rejection_reasons=[_eb_enum.value],
-                        selected_method=selected_method,
-                        applied_validations=[*decision_validations, "probability_edge_bin_sanity_gate"],
-                        decision_snapshot_id=snapshot_id,
-                        edge_source=edge_source,
-                        strategy_key=strategy_key,
-                        rejection_reason_enum=_eb_enum,
-                        rejection_reason_detail=_eb_reason,
-                    )
-                    if _tail_evidence is not None:
-                        _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
-                        _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
-                        _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
-                    # Stamp §E telemetry columns
-                    _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
-                    _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
-                    _eb_rej.edge_bin_idx = _eb_telemetry_dict.get("edge_bin_idx")
-                    _eb_rej.edge_bin_label = _eb_telemetry_dict.get("edge_bin_label")
-                    _eb_rej.edge_bin_p_raw = _eb_telemetry_dict.get("edge_bin_p_raw")
-                    _eb_rej.edge_bin_p_cal = _eb_telemetry_dict.get("edge_bin_p_cal")
-                    _eb_rej.edge_bin_p_market = _eb_telemetry_dict.get("edge_bin_p_market")
-                    _eb_rej.edge_bin_member_support = _eb_telemetry_dict.get("edge_bin_member_support")
-                    _eb_rej.edge_bin_odds_ratio = _eb_telemetry_dict.get("edge_bin_odds_ratio")
-                    _eb_rej.near_tail_p_cal = _eb_telemetry_dict.get("near_tail_p_cal")
-                    _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
-                    decisions.append(_eb_rej)
-                    continue
-                # shadow mode = phantom detected but NON-blocking: the
-                # PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW reason is still stamped as
-                # probability_sanity_reason telemetry below (no EdgeDecision, no
-                # continue). Dead log-only else-branch removed 2026-06-14 (gate-mass
-                # collapse); the dead enum member rides the schema-enum wave.
+                # Determine specific NoTradeReason from reason code prefix
+                _eb_reason_str = str(_eb_reason or "")
+                if "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT
+                elif "PROBABILITY_EDGE_BIN_UNSUPPORTED" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_EDGE_BIN_UNSUPPORTED
+                elif "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_TAIL_SHAPE_ANOMALY_HARD
+                else:
+                    _eb_enum = NoTradeReason.PROBABILITY_SANITY_GATE
+                logger.warning(
+                    "[PROB_EDGE_BIN_SANITY_HARD] strategy=%s city=%s date=%s bin_idx=%s "
+                    "support=%.4f reason=%s",
+                    selected_method, city.name, target_date, bin_idx,
+                    _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
+                )
+                _eb_rej = EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=[_eb_enum.value],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "probability_edge_bin_sanity_gate"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                    rejection_reason_enum=_eb_enum,
+                    rejection_reason_detail=_eb_reason,
+                )
+                if _tail_evidence is not None:
+                    _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
+                    _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
+                    _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
+                # Stamp §E telemetry columns
+                _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
+                _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
+                _eb_rej.edge_bin_idx = _eb_telemetry_dict.get("edge_bin_idx")
+                _eb_rej.edge_bin_label = _eb_telemetry_dict.get("edge_bin_label")
+                _eb_rej.edge_bin_p_raw = _eb_telemetry_dict.get("edge_bin_p_raw")
+                _eb_rej.edge_bin_p_cal = _eb_telemetry_dict.get("edge_bin_p_cal")
+                _eb_rej.edge_bin_p_market = _eb_telemetry_dict.get("edge_bin_p_market")
+                _eb_rej.edge_bin_member_support = _eb_telemetry_dict.get("edge_bin_member_support")
+                _eb_rej.edge_bin_odds_ratio = _eb_telemetry_dict.get("edge_bin_odds_ratio")
+                _eb_rej.near_tail_p_cal = _eb_telemetry_dict.get("near_tail_p_cal")
+                _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
+                decisions.append(_eb_rej)
+                continue
             # Carry telemetry dict forward so loop-at-exit can stamp it on all decisions
-            # (both rejection path above and pass-through path here reach this point
-            # only on shadow mode or pass — bind to local _edge_bin_telemetry).
+            # on pass-through decisions.
             _edge_bin_telemetry = _eb_telemetry_dict
         else:
             _edge_bin_telemetry = None
@@ -6014,23 +5906,11 @@ def evaluate_candidate(
         )
         decision_validations.append("strategy_policy")
 
-        ultra_low_price_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
+        ultra_low_price_reason = _center_buy_ultra_low_price_telemetry_reason(
+            strategy_key, edge
+        )
         if ultra_low_price_reason:
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="MARKET_FILTER",
-                rejection_reasons=[NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "center_buy_ultra_low_price_guard"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE,
-                rejection_reason_detail=ultra_low_price_reason,
-            ))
-            continue
+            decision_validations.append("center_buy_ultra_low_price_telemetry")
 
         # Anti-churn Layer 7 only. Layers 5 (is_reentry_blocked, 20-min reversal
         # time-ban) + 6 (is_token_on_cooldown, 1-hr post-fail time-ban) DELETED
@@ -6623,14 +6503,14 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            family_fallback_rank=family_fallback_rank,
-            family_fallback_candidate_count=family_fallback_candidate_count,
+            family_ranked_candidate_rank=family_ranked_candidate_rank,
+            family_ranked_candidate_count=family_ranked_candidate_count,
             family_portfolio_selected_leg_count=family_portfolio_selected_leg_count,
             family_portfolio_leg_role=family_portfolio_leg_role,
         ))
-        if _projects_exposure_during_family_fallback_sizing(
-            family_fallback_rank=family_fallback_rank,
-            family_fallback_candidate_count=family_fallback_candidate_count,
+        if _projects_exposure_during_family_ranked_sizing(
+            family_ranked_candidate_rank=family_ranked_candidate_rank,
+            family_ranked_candidate_count=family_ranked_candidate_count,
             family_portfolio_leg_role=family_portfolio_leg_role,
         ):
             projected_total_exposure_usd += size
@@ -6645,15 +6525,15 @@ def evaluate_candidate(
                 (_decisions_before_edge, len(decisions), _ebt)
             )
 
-    if _fdr_fallback or _fdr_family_size:
+    if _fdr_family_scan_unavailable or _fdr_family_size:
         from dataclasses import replace
-        decisions = [replace(d, fdr_fallback_fired=_fdr_fallback, fdr_family_size=_fdr_family_size) for d in decisions]
+        decisions = [replace(d, fdr_family_scan_unavailable=_fdr_family_scan_unavailable, fdr_family_size=_fdr_family_size) for d in decisions]
 
     # LIVE-PROB-P0 (schema-34): stamp tail-mass evidence onto ALL returned decisions
     # so probability_trace_fact columns are populated regardless of gate mode.
     # Hard-reject path already stamps the single _rej decision (evaluator.py ~4708);
-    # the `is None` guard makes this idempotent. Shadow mode fires the gate but
-    # continues to analysis — without this loop, shadow-mode decisions get None for
+    # the `is None` guard makes this idempotent. Log-only mode fires the gate but
+    # continues to analysis — without this loop, log-only decisions get None for
     # all three columns because no hard-reject EdgeDecision is returned.
     if _tail_evidence is not None:
         for _d in decisions:
@@ -6664,7 +6544,7 @@ def evaluate_candidate(
 
     # LIVE-PROB-P0 §E: stamp edge-bin telemetry onto trade decisions.
     # Hard-reject decisions are stamped inline above. Trade decisions and
-    # shadow-mode pass-through decisions are stamped here using index ranges
+    # log-only pass-through decisions are stamped here using index ranges
     # recorded at each iteration's end (trade path only reaches loop-end).
     for _start, _end, _et in _edge_iter_telemetry_list:
         for _d in decisions[_start:_end]:
@@ -6878,7 +6758,9 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             and source_role == "entry_primary"
         )
         causality_status = "OK" if training_allowed else (
-            "RUNTIME_ONLY_FALLBACK" if source_role != "entry_primary" or degradation_level != "OK" else "UNKNOWN"
+            "NON_ENTRY_FORECAST_SOURCE"
+            if source_role != "entry_primary" or degradation_level != "OK"
+            else "UNKNOWN"
         )
         authority = "VERIFIED" if degradation_level == "OK" and source_role == "entry_primary" else "UNVERIFIED"
         provenance_json = json.dumps({

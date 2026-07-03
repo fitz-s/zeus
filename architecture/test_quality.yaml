@@ -49,13 +49,13 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Config or source mutation enabling stale-book directional trading, taker FOK/FAK live, removing scheduler jobs, or adding shadow_* EDLI modules fails."
-  tests/money_path/test_day0_shadow_scope.py:
+  tests/money_path/test_edli_live_scope.py:
     category: money_path
     protects: [MP-SCH-001, MP-ECO-001]
     falsifying_proof:
       type: negative_fixture
-      description: "EDLI production has a single live scope, forecast_plus_day0. Mutating day0_shadow, forecast_only, or any unknown scope back into an admissible execution scope fails before proof build or submit."
-  tests/money_path/test_edli_live_canary.py:
+      description: "EDLI production has a single live scope, forecast_plus_day0. Mutating any unsupported scope back into an admissible execution scope fails before proof build or submit."
+  tests/money_path/test_edli_live_readiness.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
     falsifying_proof:

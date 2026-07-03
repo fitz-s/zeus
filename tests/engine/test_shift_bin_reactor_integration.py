@@ -1,26 +1,34 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-07-02
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
-#     - the close-before-open gate: a SIBLING-different-bin redecision with a live old
+#     - the close-before-open gate: a SIBLING-different-bin selection with a live old
 #       leg produces EXIT_OLD_LEG (lease EXIT_SUBMITTED) and NO new-bin entry; the old
-#       leg must be proven zero/dust before a counter-entry is admitted (ENTER_NEW_BIN),
-#     - entry-path + D1 fill-up byte-identity: for a fresh entry OR a same-token fill-up
-#       the shift-bin orchestration is a complete no-op (read_held_sibling_exposure →
-#       None → NOOP), so neither working path is altered,
+#       leg must be proven zero/dust before a counter-entry is admitted (ENTER_NEW_BIN).
+#       This applies even when the trigger is a forecast snapshot rather than an
+#       already-labelled redecision event.
+#     - true fresh-entry byte-identity: with no held family exposure, shift-bin is a
+#       complete no-op (read_held_sibling_exposure → None → NOOP), so the entry path is
+#       unaltered. Same-token held exposure belongs to D1 fill-up, not D2 shift-bin.
 #     - the OLD-leg closure proof: read_old_leg_residual_usd returns 0.0 once the old
 #       leg leaves position_current (voided/closed), and +inf on ambiguous truth so the
 #       caller never falsely enters.
 """Reactor-level integration for D2 shift-bin: close-before-open + path byte-identity."""
 from __future__ import annotations
 
+import inspect
 import sqlite3
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
+from src.events.reactor import EventSubmissionReceipt
 from src.state.schema.family_rebalance_intents_schema import ensure_table
+from src.strategy import family_rebalance as fr
 from src.strategy import fill_up_wiring as fuw
 from src.strategy import shift_bin_wiring as sbw
 
@@ -34,12 +42,26 @@ CREATE TABLE position_current (
     shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
 )
 """
+_LIVE_CAP_DDL = """
+CREATE TABLE edli_live_cap_usage (
+    usage_id TEXT, event_id TEXT, final_intent_id TEXT,
+    execution_command_id TEXT, reserved_notional_usd REAL,
+    reservation_status TEXT
+)
+"""
+_LIVE_ORDER_EVENTS_DDL = """
+CREATE TABLE edli_live_order_events (
+    aggregate_id TEXT, event_type TEXT, payload_json TEXT
+)
+"""
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(_POSITION_CURRENT_DDL)
+    conn.execute(_LIVE_CAP_DDL)
+    conn.execute(_LIVE_ORDER_EVENTS_DDL)
     ensure_table(conn)
     return conn
 
@@ -83,9 +105,101 @@ def test_old_leg_residual_ambiguous_truth_is_inf_never_enter():
 
 
 # ---------------------------------------------------------------------------
-# THE HAZARD this feature fixes: a sibling redecision must NOT open the new bin while
+# THE HAZARD this feature fixes: a sibling selection must NOT open the new bin while
 # the old leg is live. Through the wiring this is EXIT_OLD_LEG, allow_entry False.
 # ---------------------------------------------------------------------------
+def test_reactor_runs_same_family_management_for_forecast_selections_too():
+    """A forecast event with a held sibling is position management, not fresh entry."""
+
+    src = inspect.getsource(era)
+    assert "if _recapture.may_submit and allow_same_family_monitor_owned" not in src
+    assert "if _recapture.may_submit:" in src
+    assert "_shift_bin_wiring.read_held_sibling_exposure(" in src
+
+
+def test_existing_and_new_shift_paths_share_old_leg_live_predicate():
+    src = inspect.getsource(era)
+    existing = src.index("_existing_shift_lease is not None")
+    sibling = src.index("_held_sibling is not None", existing)
+
+    assert "_shift_bin_wiring.old_leg_is_live(" in src[existing:sibling]
+    assert "_shift_bin_wiring.old_leg_is_live(" in src[sibling:]
+    assert "> float(_dust_floor_usd)" not in src[existing:sibling]
+
+
+def test_existing_shift_continuation_rereads_family_pending_before_counter_entry():
+    src = inspect.getsource(era)
+    existing = src.index("if str(selected_token_id or \"\") == _existing_shift_lease.selected_token_id:")
+    record = src.index("_shift_bin_wiring.record_entry_submitted(", existing)
+
+    assert "_family_pending_entry_truth(" in src[existing:record]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_BLOCKED:" in src[existing:record]
+
+
+def test_shift_enter_new_bin_final_build_has_family_pending_reread():
+    src = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    phase_check = src.index("str(_shift_entry_lease.get(\"phase\") or \"\") == \"ENTER_NEW_BIN\"")
+    command_build = src.index("_build_live_execution_command_certificates(", phase_check)
+    pending_reason = src.index("SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:", phase_check)
+    pending_return = src.index("return dataclass_replace(", pending_reason)
+
+    assert "_family_pending_entry_truth(" in src[phase_check:command_build]
+    assert "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:" in src[phase_check:command_build]
+    assert "_abort_family_rebalance_entry_payloads_after_no_submit(" in src[phase_check:pending_return]
+
+
+def test_reactor_fails_closed_when_held_family_cannot_bind_sibling():
+    """Held-family truth with no old-leg binding must not fall through to fresh entry."""
+
+    src = inspect.getsource(era)
+    sibling_read = src.index("_shift_bin_wiring.read_held_sibling_exposure(")
+    unresolved_gate = src.index("SHIFT_BIN_NO_SUBMIT:HELD_FAMILY_UNRESOLVED", sibling_read)
+    entry_build = src.index("kelly = dataclass_replace(", sibling_read)
+
+    assert "_entry_held_position_same_family_reason(" in src[sibling_read:unresolved_gate]
+    assert unresolved_gate < entry_build
+
+
+def test_reactor_family_truth_reads_attached_chain_backed_zero_cost_quarantine():
+    """Attached chain-backed quarantine must be visible to the adapter fallback."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    conn.execute("ALTER TABLE trade.position_current ADD COLUMN chain_state TEXT")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
+        ) VALUES (
+            'munich-chain-risk', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 0.0, 0.0, 29.14, 0.0, '2026-06-30T05:00:00',
+            'entry_authority_quarantined'
+        )
+        """
+    )
+    proof = SimpleNamespace(
+        candidate=SimpleNamespace(
+            city="Munich",
+            target_date="2026-06-30",
+            metric="high",
+        )
+    )
+
+    reason = era._entry_held_position_same_family_reason(conn, proof)
+
+    assert reason is not None
+    assert reason.startswith("OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:")
+    assert "position_id=munich-chain-risk" in reason
+    assert "bin_label=30C" in reason
+
+
 def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     conn = _conn()
     _insert_held(conn, position_id="p-old", token_id="tok-A", bin_label="60-61F", cost_basis_usd=4.0)
@@ -105,6 +219,69 @@ def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     assert plan.kind == "EXIT_OLD_LEG"
     assert plan.allow_entry is False  # NO new-bin entry while old leg live
     assert plan.old_token_id == "tok-A"
+
+
+def test_day0_remaining_day_forecast_determinism_does_not_mature_exit_authority(monkeypatch):
+    payload = {
+        "metric": "high",
+        "rounded_value": 31,
+        "high_so_far": 31.0,
+        "observation_time": "2026-06-30T14:00:00+02:00",
+    }
+    family = SimpleNamespace(city="Munich", target_date="2026-06-30")
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: SimpleNamespace(
+            daypart="morning",
+            post_peak_confidence=0.0,
+            current_local_timestamp=datetime(2026, 6, 30, 14, tzinfo=timezone.utc),
+        ),
+    )
+
+    era._record_day0_remaining_day_exit_authority(
+        payload=payload,
+        family=family,
+        metric="high",
+        remaining_extremes_native=np.array([28.0, 29.0, 30.0]),
+        decision_time=datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
+    )
+
+    assert payload["_edli_day0_exit_authority_status"] == "immature"
+    assert payload["_edli_day0_exit_authority_reason"] == (
+        "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
+    )
+    assert payload["_edli_day0_bound_classification"] == "DETERMINISTIC"
+    assert payload["_edli_day0_model_bound_classification_role"] == (
+        "forecast_remaining_window_evidence_only"
+    )
+
+
+def test_day0_immature_remaining_day_blocks_shift_exit_before_lease():
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_exit_authority_status": "immature",
+        "_edli_day0_exit_authority_reason": (
+            "day0_high_extreme_not_mature:"
+            "daypart=pre_sunrise,post_peak_confidence=0.034"
+        ),
+    }
+    reason = era._day0_shift_old_leg_exit_block_reason(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        payload=payload,
+        proof=SimpleNamespace(q_source="day0_remaining_day"),
+    )
+
+    assert reason == (
+        "DAY0_IMMATURE_SHIFT_EXIT_AUTHORITY:"
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+
+    src = inspect.getsource(era)
+    sibling_read = src.index("_shift_bin_wiring.read_held_sibling_exposure(")
+    block = src.index("_day0_shift_old_leg_exit_block_reason(", sibling_read)
+    plan = src.index("_shift_bin_wiring.plan_shift_bin(", sibling_read)
+    assert block < plan
 
 
 def test_sibling_after_old_leg_closed_admits_one_entry():
@@ -186,6 +363,273 @@ def test_blocking_unowned_exposure_aborts_no_exit_no_entry():
     )
     assert plan.kind == "ABORT"
     assert plan.allow_entry is False
+
+
+def test_shift_bin_family_pending_guard_counts_third_sibling():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(4.25)
+
+
+def test_shift_bin_family_pending_truth_blocks_cancel_pending_sibling():
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT, decision_id TEXT, intent_kind TEXT, token_id TEXT,
+            state TEXT, size REAL, price REAL, updated_at TEXT, created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-cancel-pending', 'dec-cancel-pending', 'ENTRY', 'tok-C',
+            'CANCEL_PENDING', 6.0, 0.50, '2026-07-03T00:00:00+00:00',
+            '2026-07-03T00:00:00+00:00'
+        )
+        """
+    )
+
+    truth = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert truth.truth_available is True
+    assert truth.has_pending_or_unknown is True
+    assert truth.pending_usd == pytest.approx(3.0)
+    assert "family_pending_notional" in truth.sources
+    assert "venue_commands" in truth.sources
+
+    conn.execute("UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-cancel-pending'")
+    cleared = era._family_pending_entry_truth(
+        conn,
+        candidate_token_ids=("tok-A", "tok-B", "tok-C"),
+        trade_conn=conn,
+    )
+
+    assert cleared.truth_available is True
+    assert cleared.has_pending_or_unknown is False
+    assert cleared.pending_usd == pytest.approx(0.0)
+
+
+def test_shift_bin_unknown_counter_entry_keeps_family_lease_active():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    sbw.record_entry_unknown(
+        conn,
+        lease,
+        now_iso="t1",
+        new_entry_command_id="cmd-entry",
+        reason="POST_SUBMIT_UNKNOWN",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-entry"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+
+
+def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+
+    era._abort_family_rebalance_entry_payloads_after_no_submit(
+        conn,
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+        now_iso="t2",
+        reason="ACTUAL_SUBMIT_QUALITY_REJECTED",
+    )
+
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:ACTUAL_SUBMIT_QUALITY_REJECTED"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+
+def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch):
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+        shift_bin_lease_payload={
+            "intent_id": lease,
+            "phase": "ENTER_NEW_BIN",
+            "family_token_ids": ("tok-A", "tok-B", "tok-C"),
+        },
+    )
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
+    monkeypatch.setattr(era, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: receipt)
+
+    def _executor_submit(_final_intent, _command):
+        raise AssertionError("executor_submit must not run after final family pending reread")
+
+    submit = era.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=_executor_submit,
+        operator_arm=object(),
+    )
+
+    result = submit(
+        SimpleNamespace(
+            event_id="event-1",
+            causal_snapshot_id="snap-1",
+            event_type="FORECAST_SNAPSHOT_READY",
+        ),
+        datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+
+    assert result.submitted is False
+    assert result.proof_accepted is False
+    assert result.reason == "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["new_entry_command_id"] is None
+    assert row["abort_reason"] == (
+        "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:"
+        "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    )
+    stuck = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM family_rebalance_intents
+         WHERE status='ENTRY_SUBMITTED'
+           AND (new_entry_command_id IS NULL OR new_entry_command_id = '')
+        """
+    ).fetchone()[0]
+    assert stuck == 0
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+
+def test_shift_bin_submit_exception_unknown_advances_family_lease():
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+
+    terminal_result = era._fallback_submit_result_after_live_command_failure(
+        RuntimeError("venue call interrupted"),
+        phase="calling_executor_submit",
+        decision_time=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        shift_bin_lease_payload={"intent_id": lease, "phase": "ENTER_NEW_BIN"},
+    )
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-shift-entry-unknown"})
+
+    era._advance_family_rebalance_lease_after_submit(
+        trade_conn=conn,
+        no_submit_receipt=receipt,
+        command=command,
+        submit_result=terminal_result,
+        now_iso="2026-07-02T00:00:01+00:00",
+    )
+
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ENTRY_UNKNOWN"
+    assert row["new_entry_command_id"] == "cmd-shift-entry-unknown"
+    assert row["abort_reason"] == "SHIFT_BIN_ENTRY_RECONCILE_REQUIRED:POST_SUBMIT_UNKNOWN"
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 
 def test_two_concurrent_shift_events_one_lease_one_exit():

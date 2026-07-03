@@ -91,17 +91,17 @@ class TestDay0ExitGateStaleProbability:
 
     def test_fresh_prob_uses_model_not_market(self):
         """When fresh_prob_is_fresh=True, the model posterior is trusted (original behavior).
-        EV gate: best_bid(0.015) <= fresh_prob(0.02) -> HOLD (model sees more value than market).
+        EV gate: best_bid(0.60) <= fresh_prob(0.62) -> HOLD (model sees more value than market).
         """
-        pos = _make_position(p_posterior=0.02, entry_price=0.02)
+        pos = _make_position(p_posterior=0.62, entry_price=0.61)
         ctx = _make_day0_exit_context(
-            fresh_prob=0.02,
+            fresh_prob=0.62,
             fresh_prob_is_fresh=True,
-            current_market_price=0.015,
-            best_bid=0.015,
+            current_market_price=0.60,
+            best_bid=0.60,
         )
         decision = pos.evaluate_exit(ctx)
-        # Fresh model says 0.02 > market 0.015: EV gate holds
+        # Fresh model says 0.62 > market 0.60: EV gate holds
         assert not decision.should_exit, (
             f"Fresh model should veto exit when model > market, got: {decision.reason}"
         )

@@ -18,7 +18,6 @@ REQUIRED_SOURCE_EVIDENCE = (
     "live_root_read_files_verified",
 )
 REQUIRED_DATA_EVIDENCE = (
-    "replacement_shadow_schema_dry_run_passed",
     "raw_artifact_manifest_writes_verified",
     "posterior_materialization_verified",
     "materialization_seed_builder_verified",
@@ -90,7 +89,7 @@ def _patch_text(
     lines = [
         f"# {title}",
         "",
-        "Status: CURRENT_FOR_LIVE - replacement forecast shadow/veto simple-switch fact refresh",
+        "Status: CURRENT_FOR_LIVE - replacement forecast simple-switch fact refresh",
         f"Last audited: {generated_at}",
         "Max staleness: 14 days for replacement forecast simple-switch planning",
         "Authority status: not authority law; audit-bound current fact only",
@@ -109,7 +108,7 @@ def _patch_text(
             "",
             "## Guardrails",
             "",
-            "- This current-fact refresh authorizes shadow/veto readiness only.",
+            "- This current-fact refresh records audit evidence only.",
             "- It does not authorize live trade authority, Kelly increase, direction flip, settlement rewrites, calibration refit promotion, or source-route changes.",
             "",
         ]

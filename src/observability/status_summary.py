@@ -18,12 +18,14 @@ from datetime import datetime, timezone
 
 from src.config import get_mode, state_path
 from src.control.control_plane import (
+    get_entries_pause_evidence,
     get_entries_pause_reason,
     get_entries_pause_source,
     get_edge_threshold_multiplier,
     is_entries_paused,
     recommended_autosafe_commands_from_status,
     recommended_commands_from_status,
+    refresh_control_state,
     review_required_commands_from_status,
     strategy_gates,
 )
@@ -41,17 +43,14 @@ from src.state.db import (
     query_strategy_health_snapshot,
 )
 from src.state.decision_chain import query_no_trade_cases
+from src.state.lifecycle_manager import TERMINAL_STATES
 from src.state.truth_files import annotate_truth_payload, read_truth_json
 
 logger = logging.getLogger(__name__)
 
 STATUS_PATH = state_path("status_summary.json")
 LEGACY_POSITIONS_PATH = state_path("positions.json")
-_TERMINAL_LEGACY_POSITION_STATES = {
-    "settled",
-    "voided",
-    "quarantined",
-    "admin_closed",
+_LEGACY_JSON_INACTIVE_POSITION_STATES = set(TERMINAL_STATES) | {
     "closed",
     "exited",
 }
@@ -64,7 +63,7 @@ _TERMINAL_ENTRY_ORDER_STATUSES = {
     "rejected",
     "voided",
 }
-_TERMINAL_ENTRY_PHASES = {"settled", "voided", "admin_closed", "quarantined"}
+_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES)
 _TERMINAL_VENUE_ORDER_STATES = {
     "MATCHED",
     "FILLED",
@@ -182,7 +181,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             "live_action_authorized": False,
             "entry": {
                 "action": "entry",
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
                 "live_action_authorized": False,
                 "authority": "derived_operator_visibility",
@@ -195,11 +194,12 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
                     )
                 ],
                 "required_intent_components": [],
-                "blocked_components": ["execution_capability_pulse"],
+                "unavailable_components": ["execution_capability_pulse"],
             },
         }
     _refresh_current_open_entry_orders_for_status(status)
     if minimal_refresh_ok:
+        _refresh_control_status_for_pulse(status)
         _refresh_pulse_infrastructure_status(status, cycle_summary)
         status["timestamp"] = generated_at
         # Freshness-contract bridge: release-gate / EDLI-stage readiness checks
@@ -213,6 +213,32 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     else:
         _preserve_prior_status_freshness_after_pulse_failure(status, prior)
     _atomic_write_status_payload(status)
+
+
+def _refresh_control_status_for_pulse(status: dict) -> None:
+    """Refresh cheap control-plane truth on pulse writes.
+
+    ``write_cycle_pulse`` merges with the previous full status snapshot.  Control
+    overrides are live operator state, so a pulse must not preserve stale
+    entries_paused fields from that prior snapshot.
+    """
+
+    control = status.get("control")
+    if not isinstance(control, dict):
+        control = {}
+        status["control"] = control
+    try:
+        current_strategy_gates = strategy_gates()
+        control["entries_paused"] = is_entries_paused()
+        control["entries_pause_source"] = get_entries_pause_source()
+        control["entries_pause_reason"] = get_entries_pause_reason()
+        control["entries_pause_evidence"] = get_entries_pause_evidence()
+        control["edge_threshold_multiplier"] = get_edge_threshold_multiplier()
+        control["strategy_gates"] = {k: v.to_dict() for k, v in current_strategy_gates.items()}
+    except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
+        control["status"] = "control_refresh_failed"
+        control["refresh_error_type"] = type(exc).__name__
+        control["refresh_error"] = str(exc)
 
 
 def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: dict) -> None:
@@ -383,15 +409,15 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-    fallback_risk_level = str(
+    observed_risk_level = str(
         cycle.get("risk_level")
         or risk.get("level")
         or risk.get("riskguard_level")
         or ""
     )
-    if fallback_risk_level:
-        risk.setdefault("level", fallback_risk_level)
-        risk.setdefault("riskguard_level", risk.get("level", fallback_risk_level))
+    if observed_risk_level:
+        risk.setdefault("level", observed_risk_level)
+        risk.setdefault("riskguard_level", risk.get("level", observed_risk_level))
     risk["consistency_check"] = {
         "ok": not consistency_issues,
         "issues": consistency_issues,
@@ -837,7 +863,7 @@ def _is_nonterminal_legacy_position(row: dict) -> bool:
     if not (row.get("trade_id") or row.get("market_id") or row.get("condition_id")):
         return False
     state = _legacy_position_state(row)
-    return state not in _TERMINAL_LEGACY_POSITION_STATES
+    return state not in _LEGACY_JSON_INACTIVE_POSITION_STATES
 
 
 def _legacy_positions_artifact_summary(position_view: dict) -> dict:
@@ -1176,17 +1202,17 @@ def _action_capability(
     required_intent_components: list[dict] | None = None,
 ) -> dict:
     unresolved = list(required_intent_components or [])
-    blocked = [c for c in components if c.get("allowed") is False]
-    status = "blocked" if blocked else ("requires_intent" if unresolved else "ready")
+    unavailable = [c for c in components if c.get("allowed") is False]
+    status = "unavailable" if unavailable else ("requires_intent" if unresolved else "ready")
     return {
         "action": action,
         "status": status,
-        gate_key: not blocked,
+        gate_key: not unavailable,
         "live_action_authorized": False,
         "authority": "derived_operator_visibility",
         "components": components,
         "required_intent_components": unresolved,
-        "blocked_components": [str(c.get("component")) for c in blocked],
+        "unavailable_components": [str(c.get("component")) for c in unavailable],
     }
 
 
@@ -1283,6 +1309,10 @@ def _get_execution_capability_status() -> dict:
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     generated_at = datetime.now(timezone.utc).isoformat()
+    try:
+        refresh_control_state()
+    except Exception as exc:  # noqa: BLE001 - status write must surface, not crash
+        logger.error("control_state_refresh_failed_before_status_write: %s", exc, exc_info=True)
     risk_details = _get_risk_details()
     riskguard_level = _get_risk_level()
     cycle_summary_from_prior = cycle_summary is None
@@ -1300,15 +1330,19 @@ def write_status(cycle_summary: dict = None) -> None:
         if isinstance(reasons, list)
     }
     current_entries_paused = is_entries_paused()
+    current_entries_pause_reason = get_entries_pause_reason()
+    current_entries_pause_evidence = get_entries_pause_evidence()
     if cycle_summary_from_prior:
         cycle_summary = dict(cycle_summary or {})
         if current_entries_paused:
             cycle_summary["entries_paused"] = True
-            cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary["entries_pause_reason"] = current_entries_pause_reason
+            cycle_summary["entries_pause_evidence"] = current_entries_pause_evidence
             cycle_summary["entries_blocked_reason"] = "entries_paused"
         else:
             cycle_summary.pop("entries_paused", None)
             cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary.pop("entries_pause_evidence", None)
             if cycle_summary.get("entries_blocked_reason") == "entries_paused":
                 cycle_summary.pop("entries_blocked_reason", None)
     current_strategy_gates = strategy_gates()
@@ -1434,7 +1468,8 @@ def write_status(cycle_summary: dict = None) -> None:
         "control": {
             "entries_paused": current_entries_paused,
             "entries_pause_source": get_entries_pause_source(),
-            "entries_pause_reason": get_entries_pause_reason(),
+            "entries_pause_reason": current_entries_pause_reason,
+            "entries_pause_evidence": current_entries_pause_evidence,
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": {k: v.to_dict() for k, v in current_strategy_gates.items()},
             "recommended_controls": recommended_controls,
@@ -1472,7 +1507,7 @@ def write_status(cycle_summary: dict = None) -> None:
         "strategy": strategy_summary,
         "execution": {
             "fdr_family_size": int((cycle_summary or {}).get("fdr_family_size", 0)),
-            "fdr_fallback_fired": bool((cycle_summary or {}).get("fdr_fallback_fired", False)),
+            "fdr_family_scan_unavailable": bool((cycle_summary or {}).get("fdr_family_scan_unavailable", False)),
         },
         "execution_capability": _get_execution_capability_status(),
         "calibration_serving": {},
@@ -1516,7 +1551,7 @@ def write_status(cycle_summary: dict = None) -> None:
     bankroll_truth_authority = risk_bankroll_truth_authority if risk_bankroll_provenance_ok else None
     bankroll_truth_status = "present" if risk_bankroll_provenance_ok else "missing"
     bankroll_derivation = "riskguard_effective_bankroll" if risk_bankroll_provenance_ok else None
-    bankroll_fallback_source = None
+    bankroll_resolution_source = None
     bankroll_rejected_source = None
     if risk_effective_bankroll is not None and not risk_bankroll_provenance_ok:
         bankroll_rejected_source = "riskguard_unproven"
@@ -1534,7 +1569,7 @@ def write_status(cycle_summary: dict = None) -> None:
         if initial_bankroll is not None:
             bankroll_truth_source = "cycle_summary.wallet_balance_usd"
             bankroll_truth_authority = "runtime_summary"
-            bankroll_fallback_source = "cycle_summary.wallet_balance_usd"
+            bankroll_resolution_source = "cycle_summary.wallet_balance_usd"
     if initial_bankroll is None:
         # Removed 2026-05-04: previously fell back to retired config-literal
         # capital. Now query the on-chain wallet via bankroll_provider;
@@ -1550,9 +1585,9 @@ def write_status(cycle_summary: dict = None) -> None:
             initial_bankroll = round(float(_record.value_usd), 2)
             bankroll_truth_source = str(getattr(_record, "source", None) or "polymarket_wallet")
             bankroll_truth_authority = str(getattr(_record, "authority", None) or "canonical")
-            bankroll_fallback_source = "bankroll_provider"
+            bankroll_resolution_source = "bankroll_provider"
         else:
-            bankroll_fallback_source = "bankroll_provider_unavailable"
+            bankroll_resolution_source = "bankroll_provider_unavailable"
     if effective_bankroll is None:
         if initial_bankroll is not None:
             # Definition A: status bankroll preserves wallet-equity identity.
@@ -1788,11 +1823,11 @@ def write_status(cycle_summary: dict = None) -> None:
     compatibility_inputs: dict[str, object] = {}
     if current_regime_started_at:
         compatibility_inputs["strategy_tracker_current_regime_started_at"] = current_regime_started_at
-    if bankroll_fallback_source is not None:
+    if bankroll_resolution_source is not None:
         # Removed 2026-05-04: the previous config-cap fallback label is gone.
         # Live truth now flows from bankroll_provider.current(); when it returns None the field stays
         # null and DATA_DEGRADED surfaces upstream — no config-literal smuggle.
-        compatibility_inputs["bankroll_fallback_source"] = bankroll_fallback_source
+        compatibility_inputs["bankroll_resolution_source"] = bankroll_resolution_source
     if bankroll_rejected_source is not None:
         compatibility_inputs["bankroll_rejected_source"] = bankroll_rejected_source
     if compatibility_inputs:

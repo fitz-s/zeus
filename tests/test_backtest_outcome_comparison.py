@@ -200,7 +200,7 @@ def test_replay_fidelity_counts_orphan_runtime_trade_id_subjects(tmp_path, monke
     assert result["lane_readiness"]["trade_history_audit"]["trade_history_subjects"] == 1
 
 
-def test_backtest_rows_have_diagnostic_non_promotion_authority(tmp_path, monkeypatch):
+def test_backtest_rows_have_offline_no_promotion_authority(tmp_path, monkeypatch):
     trade, trade_db, world_db, backtest_db = _init_trade_world(tmp_path)
     _insert_position_and_outcome(trade)
     trade.close()
@@ -211,7 +211,7 @@ def test_backtest_rows_have_diagnostic_non_promotion_authority(tmp_path, monkeyp
     conn = get_connection(backtest_db)
     row = conn.execute("SELECT authority_scope FROM backtest_outcome_comparison").fetchone()
     conn.close()
-    assert row["authority_scope"] == "diagnostic_non_promotion"
+    assert row["authority_scope"] == "offline_no_promotion"
 
 
 def test_new_lanes_write_to_zeus_backtest_not_replay_results(tmp_path, monkeypatch):

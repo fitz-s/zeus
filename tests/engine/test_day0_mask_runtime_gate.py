@@ -221,3 +221,55 @@ def test_tokyo_local_midnight_low_event_updates_probability_before_trade_gates()
     assert proof["family"]["19"] == pytest.approx(0.25)
     assert proof["family"]["20"] == pytest.approx(0.75)
     assert proof["family"]["21"] == 0.0
+
+
+def test_day0_no_bootstrap_uses_absorbing_complement_for_impossible_bins():
+    """Day0 entry may buy NO when the observed extreme makes a bin impossible.
+
+    The live seam first applies the absorbing Day0 mask in YES space. For NO
+    economics the executable claim is the complement of that same post-mask
+    probability. A bin removed by the hard fact has P_yes=0 and P_no=1; it must
+    not be turned into a synthetic no-edge.
+    """
+    import src.engine.evaluator as ev
+
+    bins = [
+        SimpleNamespace(low=19, high=19, label="19"),
+        SimpleNamespace(low=20, high=20, label="20"),
+        SimpleNamespace(low=21, high=21, label="21"),
+        SimpleNamespace(low=22, high=22, label="22"),
+    ]
+    analysis = SimpleNamespace(
+        bins=bins,
+        p_posterior=np.array([0.10, 0.30, 0.40, 0.20]),
+        _bootstrap_cache={},
+        p_market=np.array([0.20, 0.20, 0.20, 0.20]),
+    )
+    analysis.buy_no_market_price = lambda _idx: 0.50
+    candidate = SimpleNamespace(
+        edli_event_context={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "event_id": "tokyo-low-no-complement",
+            "payload": {
+                "city": "Tokyo",
+                "target_date": "2026-06-18",
+                "metric": "low",
+                "rounded_value": 20.0,
+                "live_authority_status": "live",
+            },
+            "causal_snapshot_id": "",
+        }
+    )
+
+    ev._apply_edli_live_family_before_selection(
+        candidate=candidate, analysis=analysis, decision_snapshot_id=""
+    )
+
+    dead_bin_edge, _, dead_bin_p = analysis._bootstrap_bin_no(2, 100)
+    live_bin_edge, _, live_bin_p = analysis._bootstrap_bin_no(1, 100)
+
+    assert analysis.p_posterior[2] == 0.0
+    assert dead_bin_edge == pytest.approx(0.50)
+    assert dead_bin_p == 0.0
+    assert live_bin_edge == pytest.approx(-0.25)
+    assert live_bin_p == 1.0

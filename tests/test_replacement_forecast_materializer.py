@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-20
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-06-20
+# Last reused/audited: 2026-07-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-07-01
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -38,7 +38,11 @@ from src.data.replacement_forecast_materializer import (
 import src.data.replacement_forecast_materializer as materializer_mod
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
-from src.state.schema.v2_schema import apply_canonical_schema
+from src.state.schema.v2_schema import (
+    _ensure_forecast_posteriors_runtime_layer_compatibility,
+    apply_canonical_schema,
+)
+from src.state.source_run_repo import write_source_run
 
 UTC = timezone.utc
 _DEFAULT_PRECISION_GUARD = object()
@@ -76,6 +80,51 @@ def _conn() -> sqlite3.Connection:
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
     return conn
+
+
+def _ensure_source_run_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL,
+            origin_mode TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_issue_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            fetch_started_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            valid_time_start TEXT,
+            valid_time_end TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
+            dataset_id TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            expected_steps_json TEXT NOT NULL DEFAULT '[]',
+            observed_steps_json TEXT NOT NULL DEFAULT '[]',
+            expected_count INTEGER,
+            observed_count INTEGER,
+            completeness_status TEXT NOT NULL,
+            partial_run INTEGER NOT NULL DEFAULT 0,
+            raw_payload_hash TEXT,
+            manifest_hash TEXT,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
 
 
 def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalDayAnchor:
@@ -324,6 +373,42 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
     ) is False
 
 
+def test_forecast_posteriors_runtime_layer_migration_does_not_write_when_already_live() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            runtime_layer TEXT NOT NULL DEFAULT 'live'
+                CHECK (runtime_layer IN ('live')),
+            q_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
+        (LIVE_RUNTIME_LAYER, "{}"),
+    )
+
+    traced: list[str] = []
+    conn.set_trace_callback(lambda sql: traced.append(sql))
+    _ensure_forecast_posteriors_runtime_layer(conn)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
+    conn.set_trace_callback(None)
+
+    forecast_posterior_mutations = [
+        sql.strip().upper()
+        for sql in traced
+        if "FORECAST_POSTERIORS" in sql.upper()
+        and (
+            sql.lstrip().upper().startswith("DELETE")
+            or sql.lstrip().upper().startswith("UPDATE")
+        )
+    ]
+    assert forecast_posterior_mutations == []
+
+
 def test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation_view() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -369,11 +454,11 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
         """
         CREATE TABLE raw_forecast_artifacts (
             artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED'))
         );
         INSERT INTO raw_forecast_artifacts (artifact_id, trade_authority_status)
-        VALUES (1, 'SHADOW_ONLY');
+        VALUES (1, 'BLOCKED');
 
         CREATE TABLE deterministic_forecast_anchors (
             anchor_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,8 +479,8 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
             interpolation_method TEXT,
             contributing_times_json TEXT NOT NULL DEFAULT '[]',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -419,15 +504,15 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
             '2026-06-17T12:08:19+00:00',
             1,
             'ecmwf_ifs9',
-            'SHADOW_ONLY',
+            'BLOCKED',
             'anchor-hash'
         );
 
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED', 'BLOCKED'))
         );
         """
     )
@@ -448,8 +533,8 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
         (1, LIVE_RUNTIME_LAYER),
     )
 
-    assert raw_status == "SHADOW_ONLY"
-    assert anchor_status == "SHADOW_ONLY"
+    assert raw_status == "BLOCKED"
+    assert anchor_status == "BLOCKED"
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -515,6 +600,49 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
 
 
+def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _conn()
+    _ensure_source_run_table(conn)
+    _install_live_fusion(monkeypatch)
+    late_possession = _dt(4, 5)
+    for source_run_id, source_id, track in (
+        ("b0-run", "ecmwf_open_data", "mx2t3_high"),
+        ("om9-run", "openmeteo_ecmwf_ifs9", "localday_high"),
+    ):
+        write_source_run(
+            conn,
+            source_run_id=source_run_id,
+            source_id=source_id,
+            track=track,
+            release_calendar_key=f"{source_id}:{track}",
+            source_cycle_time=_dt(0),
+            source_available_at=_dt(2),
+            fetch_finished_at=late_possession,
+            captured_at=late_possession,
+            imported_at=late_possession,
+            status="SUCCESS",
+            completeness_status="COMPLETE",
+            city_id="Shanghai",
+            city_timezone="Asia/Shanghai",
+            target_local_date=date(2026, 6, 7),
+            temperature_metric="high",
+            data_version="forecast_v2",
+        )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(computed_at=_dt(4), expires_at=_dt(6)),
+    )
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT source_available_at, computed_at FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    assert row["source_available_at"] == late_possession.isoformat()
+    assert row["computed_at"] == late_possession.isoformat()
+
+
 def test_materializer_blocks_day0_without_observed_extreme() -> None:
     conn = _conn()
 
@@ -571,7 +699,7 @@ def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_source="same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=2,
     )
@@ -583,12 +711,45 @@ def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
 
 
+def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        computed_at=datetime(2026, 6, 7, 17, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        day0_observed_extreme_c=32.0,
+        day0_observed_extreme_source="durable_observation_instants",
+        day0_observed_extreme_observation_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC).isoformat(),
+        day0_observed_extreme_sample_count=24,
+    )
+    partial_anchor = replace(
+        _anchor_with_local_hours(hours=range(14, 24)),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+    )
+    partial_request = replace(request, openmeteo_anchor=partial_anchor)
+
+    result = materialize_replacement_forecast_live(conn, partial_request)
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 32.0
+    assert provenance["day0_conditioning"]["sample_count"] == 24
+    assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
+
+
 def test_materializer_day0_blocks_om9_missing_future_hours_after_observed_extreme() -> None:
     request = _request(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_source="same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=2,
     )

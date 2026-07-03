@@ -4,7 +4,7 @@
 **Current code path:** `src/strategy`
 **Authority status:** Dense module reference for edge selection, fusion, FDR, correlation control, and sizing support.
 
-> **Strategy of record (2026-06-09):** the live q this module consumes is built by the **replacement chain**, not by `market_fusion.py`. Per-model walk-forward EB de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion (`fuse_bayes_precision_posterior`) → settlement-preimage bin q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`); live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`. Authority `docs/authority/replacement_final_form_2026_06_09.md`; canonical chain in root `AGENTS.md`. This module's `market_fusion.py` (`compute_posterior` runs `model_only_v1` — NO market-prior blend live) is **baseline diagnostics only since 2026-06-12** (single-q-authority cut, commit 479cb34446: the `min(...)` LCB-cap join is deleted; baseline carried as `baseline_q_lcb_reference` receipt provenance; regime law `docs/authority/regime_unification_2026-06-12.md` U1); FDR/correlation/Kelly here still gate the live edge.
+> **Strategy of record (2026-06-09):** the live q this module consumes is built by the **replacement chain**, not by `market_fusion.py`. Per-model walk-forward EB de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, lambda=n/(n+8)) -> T2 Bayesian precision fusion (`fuse_bayes_precision_posterior`) -> settlement-preimage bin q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`); live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`. Authority `docs/authority/replacement_final_form_2026_06_09.md`; canonical chain in root `AGENTS.md`. This module's `market_fusion.py` (`compute_posterior` runs `model_only_v1` - NO market-prior blend live) is comparison-only since 2026-06-12 (single-q-authority cut, commit 479cb34446: the `min(...)` LCB-cap join is deleted; comparison carried as `comparison_q_lcb_reference` receipt provenance; regime law `docs/authority/regime_unification_2026-06-12.md` U1); FDR/correlation/Kelly here still gate the live edge.
 
 ## 1. Module purpose
 Convert calibrated predictive information and market context into a portfolio of tradable opportunities that respect multiple-testing, correlation, and capital-allocation constraints.
@@ -62,7 +62,6 @@ Derived but economically central. Strategy code must stay downstream of contract
 | `correlation.py` | Cross-market dependence control. |
 | `risk_limits.py / oracle_penalty.py / selection_family.py` | Strategy-side constraints and grouping. |
 | `benchmark_suite.py / data_lake.py` | R3 A1 evidence-only benchmark metrics, replay-corpus accessor, and diagnostic/simulated/read-only-live evidence gate. Promotion requires explicit promotion-grade economics evidence. |
-| `candidates/` | R3 A1 non-executable strategy candidate stubs for future benchmark registration. |
 
 ## 10. Relevant tests
 - tests/test_alpha_target_coherence.py
@@ -79,7 +78,7 @@ Derived but economically central. Strategy code must stay downstream of contract
 
 ## 12. Negative constraints
 - Read-only live evaluation is supporting evidence; it must not place orders, activate credentials, mutate production DB/state artifacts, or authorize CLOB cutover.
-- Strategy candidate stubs are not executable alpha.
+- Blocked strategy registry entries are not executable alpha.
 - Do not let strategy modules reach into execution/state to patch economic truth directly.
 - Do not treat narrow historical strategy wins/losses as universal law.
 

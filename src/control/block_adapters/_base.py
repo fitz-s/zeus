@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
     from src.control.entries_block_registry import Block, BlockCategory, BlockStage
@@ -21,64 +20,37 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class RegistryDeps:
-    """Runtime dependencies injected into all 13 adapters.
+    """Runtime dependencies injected into entry-block registry adapters.
 
     Constructed by ``EntriesBlockRegistry.from_runtime(deps)`` using values
-    available at the cycle_runner discovery short-circuit call site.  Each
-    field corresponds to one or more GATE_AUDIT.yaml probe sources.
+    available at the cycle_runner entry-control call site.
     """
-
-    state_dir: Path
-    """PROJECT_ROOT/state — used by file-based gates (1, 2, 12)."""
 
     db_connection_factory: Callable[[], sqlite3.Connection]
-    """Lazy factory for a fresh sqlite3.Connection to zeus.db.
-    Gates 3, 4, 5 use it to read control_overrides / control state.
-    """
+    """Lazy factory for a fresh sqlite3.Connection to zeus.db."""
 
     risk_state_db_connection_factory: Callable[[], sqlite3.Connection]
-    """Lazy factory for a fresh sqlite3.Connection to risk_state.db.
-    Gates 6, 7, 8 use it.
-    """
-
-    riskguard_module: ModuleType
-    """src.riskguard.riskguard module reference.
-    Adapters call ``deps.riskguard_module._trailing_loss_reference(...)``
-    and ``deps.riskguard_module.get_current_level()`` directly so that
-    monkeypatching in tests works without patching the module string.
-    """
+    """Lazy factory for a fresh sqlite3.Connection to risk_state.db."""
 
     heartbeat_module: ModuleType
-    """src.control.heartbeat_supervisor module reference.
-    Gate 9: ``deps.heartbeat_module.summary()['entry']['allow_submit']``.
-    """
+    """src.control.heartbeat_supervisor module reference."""
 
     ws_gap_guard_module: ModuleType
-    """src.control.ws_gap_guard module reference.
-    Gate 10: ``deps.ws_gap_guard_module.summary()['entry']['allow_submit']``.
-    """
-
-    rollout_gate_module: ModuleType
-    """src.control.entry_forecast_rollout module reference.
-    Gate 11: ``deps.rollout_gate_module.evaluate_entry_forecast_rollout_gate(...)``.
-    """
-
-    env: Mapping[str, str]
-    """os.environ snapshot — for gate 13 (ZEUS_ENTRY_FORECAST_ROLLOUT_GATE)."""
+    """src.control.ws_gap_guard module reference."""
 
 
 class BlockAdapter(Protocol):
-    """Each adapter probes ONE gate and returns a Block.
+    """Each adapter probes one runtime entry-blocking surface and returns a Block.
 
-    Adapter rules (from REGISTRY_DESIGN.md):
+    Adapter rules:
     - Pure read: adapters never write state.
-    - Fail-closed: exception → Block(state=UNKNOWN).
+    - Exceptions become Block(state=UNKNOWN) so the snapshot remains visible.
     - Cheap: each probe must be < 50ms.
-    - Single source: one adapter per gate id.
+    - Single source: no retired or informational-only probes.
     """
 
     id: int
-    """Matches GATE_AUDIT.yaml id (1-13)."""
+    """Stable runtime blocker id."""
 
     name: str
     """Stable kebab/snake_case identifier."""

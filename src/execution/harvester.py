@@ -34,7 +34,6 @@ from src.data.market_scanner import _match_city, _parse_temp_range, infer_temper
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
     SettlementRecord,
-    query_legacy_settlement_records,
     store_settlement_records,
 )
 from src.state.db import (
@@ -64,6 +63,7 @@ from src.state.portfolio import (
     save_portfolio,
     void_position,
 )
+from src.state.lifecycle_manager import TERMINAL_STATES
 from src.state.strategy_tracker import get_tracker, save_tracker
 from src.observability.counters import increment as _cnt_inc
 
@@ -168,7 +168,7 @@ def _canonical_phase_before_for_settlement(pos) -> str:
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
-_TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
+_TERMINAL_PHASES = frozenset(TERMINAL_STATES)
 _HARVESTER_STAGE2_TRADE_TABLES = (
     "position_events",
     "position_current",
@@ -718,7 +718,7 @@ def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
         raw_authority = row[1] if len(row) > 1 else None
         position_id = row[0] if row else "?"
 
-        # F3 (docs/findings_2026_05_28.md §F3, 2026-05-28): distinguish
+        # F3 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3, 2026-05-28): distinguish
         # unmigrated NULL (backfill not yet run) from classified
         # legacy_unknown (backfill ran but no evidence found).
         if raw_authority is None:
@@ -2010,60 +2010,19 @@ def _snapshot_contexts_for_market(
             context["partial_context_resolution"] = bool(dropped_rows)
         return contexts, dropped_rows
 
-    legacy_rows: list[dict] = []
-    if authoritative_rows and authoritative_rows[0].get("source") != "decision_log":
-        legacy_rows = query_legacy_settlement_records(
-            trade_conn,
-            limit=200,
-            city=city,
-            target_date=target_date,
-        )
-        contexts, dropped_rows = _snapshot_contexts_from_rows(trade_conn, shared_conn, legacy_rows)
-        if contexts:
-            for context in contexts:
-                context["partial_context_resolution"] = bool(dropped_rows)
-            return contexts, dropped_rows
-
     fallback_reason = "no_durable_settlement_snapshot"
     if stage_events and not authoritative_rows:
         fallback_reason = "durable_rows_malformed"
     elif authoritative_rows:
         fallback_reason = "authoritative_rows_missing_snapshot_context"
-    elif legacy_rows:
-        fallback_reason = "legacy_rows_missing_snapshot_context"
-
-    snapshot_refs: list[tuple[str, str]] = []
-    for pos in portfolio.positions:
-        if pos.city == city and pos.target_date == target_date and pos.decision_snapshot_id:
-            metric = str(getattr(pos, "temperature_metric", "") or "")
-            ref = (pos.decision_snapshot_id, metric)
-            if ref not in snapshot_refs:
-                snapshot_refs.append(ref)
-
-    fallback_contexts: list[dict] = []
-    for snapshot_id, temperature_metric in snapshot_refs:
-        context = get_snapshot_context(
-            shared_conn,
-            snapshot_id,
-            expected_city=city,
-            expected_target_date=target_date,
-            expected_temperature_metric=temperature_metric or None,
-        )
-        if context is None:
-            continue
-        blocked_reason = str(context.get("learning_blocked_reason") or "")
-        fallback_contexts.append({
-            **context,
-            "decision_snapshot_id": snapshot_id,
-            "source": "portfolio_open_fallback",
-            "authority_level": "working_state_fallback",
-            "is_degraded": True,
-            "degraded_reason": "; ".join(
-                reason for reason in (fallback_reason, blocked_reason) if reason
-            ),
-            "learning_snapshot_ready": False,
-        })
-    return fallback_contexts, dropped_rows
+    dropped_rows.append(
+        {
+            "city": city,
+            "target_date": target_date,
+            "reason": fallback_reason,
+        }
+    )
+    return [], dropped_rows
 
 
 def _snapshot_contexts_from_rows(trade_conn, shared_conn, rows: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -2193,17 +2152,7 @@ def harvest_settlement(
         _emit_learning_write_blocked("missing_forecast_issue_time")
         return 0
     if bias_corrected is None:
-        try:
-            from src.config import settings
-            # T0-3: renamed from settings.bias_correction_enabled (legacy baseline
-            # chain) to disambiguate from edli.edli_bias_correction_enabled. Pure
-            # rename — semantics UNCHANGED. OPEN QUESTION (report T0-3 residual, low
-            # urgency): this settlement-attribution harvest may belong on the EDLI
-            # flag (the live chain) rather than the baseline flag; needs a semantic
-            # trace before changing. Not changed here.
-            bias_corrected = settings.baseline_bias_correction_enabled
-        except Exception:
-            bias_corrected = False
+        bias_corrected = False
     if p_raw_vector and not forecast_model_id:
         raise ValueError(
             "forecast_model_id is required when harvesting calibration pairs"

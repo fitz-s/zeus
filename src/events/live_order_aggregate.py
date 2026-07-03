@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
+from src.decision.family_decision_engine import (
+    entry_price_floor_decision,
+    native_curve_side_for_direction,
+    roi_frontier_useful_values,
+)
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
+from src.events.day0_authority import (
+    Day0AuthorityError,
+    assert_live_day0_probability_authority,
+    assert_live_day0_payload_authority,
+    assert_live_day0_qkernel_guard_authority,
+)
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
+
+_DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 
 
 PRE_SUBMIT_REQUIRED_FIELDS = (
@@ -28,6 +42,15 @@ PRE_SUBMIT_REQUIRED_FIELDS = (
     "current_best_bid",
     "current_best_ask",
     "limit_price",
+    "size",
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "min_entry_price",
+    "min_expected_profit_usd",
+    "min_submit_edge_density",
+    "expected_edge_source_certificate_hash",
+    "cost_basis_source_certificate_hash",
     "would_cross_book",
     "tick_size",
     "tick_aligned",
@@ -74,6 +97,7 @@ PROFIT_AUDIT_TRIGGER_EVENTS = {
     "UserTradeObserved",
     "Reconciled",
     "CapTransitioned",
+    "OrderLifecycleProjected",
 }
 
 
@@ -263,11 +287,24 @@ class LiveOrderAggregateLedger:
             if event_type == "SubmitUnknown":
                 current_state = EVENT_STATE[event_type]
                 pending_reconcile = True
-            elif event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
-                current_state = "PENDING_RECONCILE"
-                pending_reconcile = True
+            elif event_type == "CapTransitioned":
+                to_status = str(payload.get("to_status") or "")
+                if to_status == "PENDING_RECONCILE":
+                    current_state = "PENDING_RECONCILE"
+                    pending_reconcile = True
+                elif to_status == "CONSUMED":
+                    # CONSUMED is capital-ledger state, not order lifecycle state.
+                    # A successful submit remains a live/acked order until venue
+                    # facts or user-channel events prove a lifecycle transition.
+                    if current_state == "UNKNOWN":
+                        current_state = "VENUE_SUBMIT_ACKED"
+                else:
+                    current_state = EVENT_STATE[event_type]
             elif event_type == "Reconciled":
                 current_state = EVENT_STATE[event_type]
+                pending_reconcile = bool(payload.get("pending_reconcile", False))
+            elif event_type == "OrderLifecycleProjected":
+                current_state = str(payload.get("order_lifecycle_state") or EVENT_STATE[event_type])
                 pending_reconcile = bool(payload.get("pending_reconcile", False))
             else:
                 current_state = EVENT_STATE[event_type]
@@ -416,12 +453,21 @@ class LiveOrderAggregateLedger:
         if event_type == "VenueSubmitAttempted":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             self._require_command_binding(event_type, payload, command_row)
-            if self._latest_row_of_type(aggregate_id, "VenueSubmitAttempted") is not None:
-                raise LiveOrderAggregateError("VenueSubmitAttempted already exists for aggregate")
+            if self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+            ) is not None:
+                raise LiveOrderAggregateError("VenueSubmitAttempted already exists for current command")
             return
         if event_type == "VenueSubmitAcknowledged":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
-            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+                event_type,
+            )
             self._require_command_binding(event_type, payload, command_row)
             if not str(payload.get("venue_order_id") or "").strip():
                 raise LiveOrderAggregateError("VenueSubmitAcknowledged requires venue_order_id")
@@ -429,14 +475,24 @@ class LiveOrderAggregateLedger:
         if event_type == "SubmitRejected":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             if not _is_pre_submit_rejection_payload(payload):
-                self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+                self._latest_row_of_type_after(
+                    aggregate_id,
+                    "VenueSubmitAttempted",
+                    int(command_row["event_sequence"]),
+                    event_type,
+                )
             self._require_command_binding(event_type, payload, command_row)
             if not str(payload.get("reason_code") or payload.get("reject_reason") or "").strip():
                 raise LiveOrderAggregateError("SubmitRejected requires reason_code")
             return
         if event_type == "SubmitUnknown":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
-            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+                event_type,
+            )
             self._require_command_binding(event_type, payload, command_row)
             return
         if event_type in {"UserOrderObserved", "UserTradeObserved"}:
@@ -461,13 +517,39 @@ class LiveOrderAggregateLedger:
                 raise LiveOrderAggregateError("CapTransitioned requires execution_receipt_hash")
             to_status = str(payload.get("to_status") or "")
             reason = str(payload.get("transition_reason") or payload.get("reason_code") or "")
-            if to_status == "PENDING_RECONCILE" and self._latest_row_of_type(aggregate_id, "SubmitUnknown") is None:
+            command_sequence = int(command_row["event_sequence"])
+            if to_status == "PENDING_RECONCILE" and self._latest_row_of_type_after(
+                aggregate_id,
+                "SubmitUnknown",
+                command_sequence,
+            ) is None:
                 raise LiveOrderAggregateError("CapTransitioned PENDING_RECONCILE requires SubmitUnknown")
-            if to_status == "CONSUMED" and self._latest_row_of_type(aggregate_id, "VenueSubmitAcknowledged") is None:
+            if to_status == "CONSUMED" and self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAcknowledged",
+                command_sequence,
+            ) is None:
                 raise LiveOrderAggregateError("CapTransitioned CONSUMED requires VenueSubmitAcknowledged")
             if to_status == "RELEASED" and reason != "SUBMIT_DISABLED":
-                if self._latest_row_of_type(aggregate_id, "SubmitRejected") is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
+                if self._latest_row_of_type_after(
+                    aggregate_id,
+                    "SubmitRejected",
+                    command_sequence,
+                ) is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
                     raise LiveOrderAggregateError("CapTransitioned RELEASED requires SubmitRejected or Reconciled")
+            return
+        if event_type == "OrderLifecycleProjected":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            lifecycle_state = str(payload.get("order_lifecycle_state") or "")
+            if lifecycle_state != "TERMINAL_NO_FILL":
+                raise LiveOrderAggregateError("OrderLifecycleProjected requires TERMINAL_NO_FILL lifecycle state")
+            if payload.get("exposure_created") is not False:
+                raise LiveOrderAggregateError("OrderLifecycleProjected TERMINAL_NO_FILL requires exposure_created=false")
+            if not str(payload.get("venue_order_id") or "").strip():
+                raise LiveOrderAggregateError("OrderLifecycleProjected requires venue_order_id")
+            if self._latest_row_of_type(aggregate_id, "UserTradeObserved") is not None:
+                raise LiveOrderAggregateError("OrderLifecycleProjected cannot terminal-no-fill after UserTradeObserved")
             return
 
     def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:
@@ -481,6 +563,31 @@ class LiveOrderAggregateLedger:
             """,
             (aggregate_id, event_type),
         ).fetchone()
+
+    def _latest_row_of_type_after(
+        self,
+        aggregate_id: str,
+        event_type: str,
+        min_event_sequence: int,
+        requiring_event_type: str | None = None,
+    ) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_type = ?
+              AND event_sequence > ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type, min_event_sequence),
+        ).fetchone()
+        if row is None and requiring_event_type is not None:
+            raise LiveOrderAggregateError(
+                f"{requiring_event_type} requires preceding {event_type}"
+            )
+        return row
 
     def _require_latest_row_of_type(self, aggregate_id: str, required_type: str, event_type: str) -> sqlite3.Row:
         row = self._latest_row_of_type(aggregate_id, required_type)
@@ -688,7 +795,58 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     _positive_number(payload.get("min_order_size"), "min_order_size")
     _non_negative_number(payload.get("current_best_bid"), "current_best_bid")
     _non_negative_number(payload.get("current_best_ask"), "current_best_ask")
-    _non_negative_number(payload.get("limit_price"), "limit_price")
+    limit_price = _positive_number(payload.get("limit_price"), "limit_price")
+    q_live = _probability_number(payload.get("q_live"), "q_live")
+    q_lcb = _probability_number(payload.get("q_lcb_5pct"), "q_lcb_5pct")
+    if q_lcb > q_live:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires q_lcb_5pct <= q_live")
+    expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
+    size = _positive_number(payload.get("size"), "size")
+    min_entry_price = _non_negative_number(
+        payload.get("min_entry_price"), "min_entry_price"
+    )
+    min_expected_profit_usd = _non_negative_number(
+        payload.get("min_expected_profit_usd"), "min_expected_profit_usd"
+    )
+    min_submit_edge_density = _non_negative_number(
+        payload.get("min_submit_edge_density"), "min_submit_edge_density"
+    )
+    economics = payload.get("qkernel_execution_economics")
+    floor_decision = entry_price_floor_decision(
+        strategy_key=payload.get("strategy_key"),
+        direction=payload.get("direction"),
+        declared_min_entry_price=min_entry_price,
+        selection_authority_applied=payload.get("selection_authority_applied"),
+        economics=economics if isinstance(economics, Mapping) else None,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        limit_price=limit_price,
+    )
+    live_min_entry_price = floor_decision.live_min_entry_price
+    effective_min_entry_price = floor_decision.effective_min_entry_price
+    if (
+        min_entry_price + 1e-12 < live_min_entry_price
+        and not floor_decision.qkernel_low_price_floor_authorized
+    ):
+        raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
+    if limit_price + 1e-12 < effective_min_entry_price:
+        raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
+    if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
+    if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires cost_basis_source_certificate_hash")
+    submit_edge = q_lcb - limit_price
+    if submit_edge <= 0.0:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires positive submit q_lcb-minus-limit")
+    if expected_edge > submit_edge + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds submit q_lcb-minus-limit")
+    submit_expected_profit_usd = submit_edge * size
+    if submit_expected_profit_usd + 1e-9 < min_expected_profit_usd:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
+    submit_edge_density = submit_edge / limit_price
+    if submit_edge_density + 1e-9 < min_submit_edge_density:
+        raise LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
+    _validate_pre_submit_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
     # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
     # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
     # Explicit post_only=False signals taker intent; missing/None → fail-closed as maker.
@@ -707,6 +865,157 @@ def _positive_number(value: Any, name: str) -> float:
     if number <= 0:
         raise LiveOrderAggregateError(f"PreSubmitRevalidated requires positive {name}")
     return number
+
+
+def _probability_number(value: Any, name: str) -> float:
+    number = _non_negative_number(value, name)
+    if number > 1:
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires probability {name}")
+    return number
+
+
+def _validate_pre_submit_probability_authority(
+    payload: dict[str, Any],
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == _DAY0_EVENT_TYPE:
+        _validate_day0_submit_observation_authority(payload, q_lcb=q_lcb)
+        _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+        return
+    _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lcb: float) -> None:
+    try:
+        assert_live_day0_payload_authority(payload)
+    except Day0AuthorityError as exc:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated day0 observation authority required:"
+            + str(exc)
+        ) from None
+    try:
+        assert_live_day0_probability_authority(
+            payload,
+            direction=payload.get("direction"),
+            condition_id=payload.get("condition_id"),
+            q_live=payload.get("q_live"),
+            q_lcb=q_lcb,
+        )
+    except Day0AuthorityError as exc:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated day0 remaining-window probability authority required:"
+            + str(exc)
+        ) from None
+
+
+def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:
+    economics = payload.get("qkernel_execution_economics")
+    if economics in (None, ""):
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires object qkernel_execution_economics")
+    if str(payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel selection authority")
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel source must be qkernel_spine")
+    route_id = str(economics.get("route_id") or "").upper()
+    route_type = str(economics.get("route_type") or "").lower()
+    if route_type != "direct" and not route_id.startswith("DIRECT_"):
+        return
+    if economics.get("direction_law_ok") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel direction_law_ok must be true")
+    if economics.get("coherence_allows") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel coherence_allows must be true")
+    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
+    if not selection_guard_basis:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_basis missing")
+    if selection_guard_basis == "SIDE_NOT_ARMED":
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_basis blocks side")
+    if economics.get("selection_guard_abstained") is not False:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_abstained must be false")
+    if str(payload.get("event_type") or "").strip() == _DAY0_EVENT_TYPE:
+        try:
+            assert_live_day0_qkernel_guard_authority(
+                economics,
+                probability_payload=payload,
+            )
+        except Day0AuthorityError as exc:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated day0 qkernel guard authority required:"
+                + str(exc)
+            ) from None
+    selection_guard_q_safe = _positive_number(
+        economics.get("selection_guard_q_safe"),
+        "qkernel_execution_economics.selection_guard_q_safe",
+    )
+    if selection_guard_q_safe > 1.0:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel selection_guard_q_safe requires probability"
+        )
+    route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
+    native_side = native_curve_side_for_direction(str(payload.get("direction") or ""))
+    qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
+    if qkernel_side and native_side is not None and qkernel_side != native_side:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel side must match submit direction")
+    payoff_q_point = _probability_number(economics.get("payoff_q_point"), "qkernel_execution_economics.payoff_q_point")
+    payoff_q_lcb = _probability_number(economics.get("payoff_q_lcb"), "qkernel_execution_economics.payoff_q_lcb")
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point mismatches submit q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
+    cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
+    edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
+    delta_u_at_min = _positive_number(
+        economics.get("delta_u_at_min"),
+        "qkernel_execution_economics.delta_u_at_min",
+    )
+    optimal_stake_usd = _positive_number(
+        economics.get("optimal_stake_usd"),
+        "qkernel_execution_economics.optimal_stake_usd",
+    )
+    optimal_delta_u = _positive_number(
+        economics.get("optimal_delta_u"),
+        "qkernel_execution_economics.optimal_delta_u",
+    )
+    _ = optimal_delta_u
+    false_edge_rate = _positive_number(
+        economics.get("false_edge_rate"),
+        "qkernel_execution_economics.false_edge_rate",
+    )
+    if false_edge_rate > 1.0:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel false_edge_rate requires probability"
+        )
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if false_edge_rate > max_false_edge_rate:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel false_edge_rate blocks"
+        )
+    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff edge inconsistent")
+    limit_price = _positive_number(payload.get("limit_price"), "limit_price")
+    if limit_price > cost + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated submit price worse than qkernel cost")
+    expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
+    if expected_edge > edge_lcb + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
+    if not roi_frontier_useful_values(
+        side=qkernel_side,
+        cost=cost,
+        payoff_q_lcb=payoff_q_lcb,
+        edge_lcb=edge_lcb,
+        stake=optimal_stake_usd,
+        delta_u_at_min=delta_u_at_min,
+    ):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel roi frontier not useful")
 
 
 def _non_negative_number(value: Any, name: str) -> float:

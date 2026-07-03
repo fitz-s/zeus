@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
 # Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
@@ -31,6 +31,7 @@ from src.data.day0_observation_reader import (
     COVERAGE_NONE,
     COVERAGE_OK,
     Day0ObservedExtrema,
+    read_day0_observation_context_from_instants,
     read_day0_observed_extrema,
 )
 
@@ -118,7 +119,7 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
         "observation_field": None,
         "training_allowed": 1,
         "causality_status": "OK",
-        "source_role": None,
+        "source_role": "historical_hourly",
     }
     defaults.update(kwargs)
     cols = list(defaults.keys())
@@ -128,6 +129,129 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
         [defaults[c] for c in cols],
     )
     conn.commit()
+
+
+def test_reader_rejects_hko_reaudit_rows_until_runtime_monitoring_role():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_hour=7.0,
+        local_timestamp="2026-06-26T07:00:00+08:00",
+        utc_timestamp="2026-06-25T23:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_current=27.0,
+        running_max=27.0,
+        running_min=27.0,
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="REQUIRES_SOURCE_REAUDIT",
+        source_role="coverage_fill_evidence",
+        station_id="HKO",
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 6, 26, 1, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.coverage_status == COVERAGE_NONE
+    assert out.row_count == 0
+
+
+def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_hour=7.0,
+        local_timestamp="2026-06-26T07:00:00+08:00",
+        utc_timestamp="2026-06-25T23:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_current=27.0,
+        running_max=27.0,
+        running_min=27.0,
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="OK",
+        source_role="runtime_monitoring",
+        station_id="HKO",
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 6, 26, 1, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.coverage_status == COVERAGE_LOW
+    assert out.row_count == 1
+    assert out.low_so_far == 27.0
+
+
+def test_context_reader_builds_executable_wu_context_without_temp_current():
+    conn = _make_conn()
+    for hour, running_max, running_min in (
+        (0, 14.0, 11.0),
+        (1, 15.0, 10.0),
+        (2, 13.0, 12.0),
+        (3, 12.0, 12.0),
+        (4, 11.0, 11.0),
+        (5, 10.0, 10.0),
+    ):
+        _insert(
+            conn,
+            city="Buenos Aires",
+            target_date="2026-07-01",
+            source="wu_icao_history",
+            timezone_name="America/Argentina/Buenos_Aires",
+            local_hour=float(hour),
+            local_timestamp=f"2026-07-01T{hour:02d}:00:00-03:00",
+            utc_timestamp=f"2026-07-01T{hour + 3:02d}:00:00+00:00",
+            running_max=running_max,
+            running_min=running_min,
+            temp_current=None,
+            station_id="SAEZ",
+            authority="VERIFIED",
+            training_allowed=1,
+            causality_status="OK",
+            source_role="historical_hourly",
+        )
+
+    class CityLike:
+        name = "Buenos Aires"
+        timezone = "America/Argentina/Buenos_Aires"
+        settlement_unit = "C"
+        settlement_source_type = "wu_icao"
+        wu_station = "SAEZ"
+
+    obs = read_day0_observation_context_from_instants(
+        conn,
+        city=CityLike(),
+        target_date="2026-07-01",
+        decision_time_utc=datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert obs is not None
+    assert obs.source == "wu_icao_history"
+    assert obs.station_id == "SAEZ"
+    assert obs.coverage_status == COVERAGE_OK
+    assert obs.high_so_far == 15.0
+    assert obs.low_so_far == 10.0
+    assert obs.current_temp == 10.0
 
 
 # ---------------------------------------------------------------------------

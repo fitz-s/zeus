@@ -235,7 +235,7 @@ def fit_cells(
             "authority": AUTHORITY,
             "version": "sel_v1",
             "posterior_version": posterior_version,
-            "armed_sides": ["NO"],
+            "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),
             "max_settled_at": max_settled or None,
             "n_rows": len(rows),
@@ -279,6 +279,24 @@ def _project_monotone(cells: dict[str, dict]) -> dict[str, dict]:
             out[k]["wins_raw"] = int(cells[k].get("wins", round(cells[k]["hit_rate"] * cells[k]["n"])))
             out[k]["hit_rate"] = float(y)  # the projected (served) rate
     return out
+
+
+def _armed_sides_from_cells(cells: dict[str, dict], *, min_n: int) -> list[str]:
+    """Declare live side scope only where persisted cells have enough settlement support."""
+
+    armed: set[str] = set()
+    for key, cell in cells.items():
+        side = str(key).split("|", 1)[0].upper()
+        if side not in {"YES", "NO"}:
+            continue
+        support = cell.get("n_selected", cell.get("n", 0))
+        try:
+            n = int(support or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n >= int(min_n):
+            armed.add(side)
+    return sorted(armed)
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +447,7 @@ def fit_eb_cells(
             "version": "sel_eb_v2",
             "schema": "eb_v2",
             "posterior_version": posterior_version,
-            "armed_sides": ["NO"],
+            "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),
             "tau": float(tau),
             "max_settled_at": max_settled or None,
@@ -441,7 +459,7 @@ def fit_eb_cells(
             "lower_bound": "BetaInvCDF(0.05, tau*p0+w_s, tau*(1-p0)+n_s-w_s) persisted (no runtime scipy)",
             "selection_policy_version": "pre_selection_calibrator_q_lcb_price_gate_v1",
             "source_query_hash": qhash,
-            "note": "STEP-1: no current-regime would-admit receipts -> selected=executed (fallback); shadow-log to accrue would-admit.",
+            "note": "STEP-1: no current-regime would-admit receipts -> selected=executed (fallback); audit-log to accrue would-admit.",
         },
         "cells": cells,
     }

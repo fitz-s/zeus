@@ -210,12 +210,61 @@ def _one_minus_snippet_findings(source: str) -> list[str]:
     return _one_minus_findings(ast.parse(source), label="<snippet>")
 
 
-def test_live_probability_code_does_not_construct_complements_with_one_minus_x():
+def _negative_operand(node: ast.AST) -> ast.AST | None:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return node.operand
+    if isinstance(node, ast.Call) and len(node.args) == 1:
+        func = node.func
+        func_name = ""
+        if isinstance(func, ast.Name):
+            func_name = func.id
+        elif isinstance(func, ast.Attribute):
+            func_name = func.attr
+        if func_name == "negative":
+            return node.args[0]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        if _is_negative_one_like(node.left):
+            return node.right
+        if _is_negative_one_like(node.right):
+            return node.left
+    return None
+
+
+def _yes_q_lcb_complement_findings(tree: ast.AST, *, label: str) -> list[str]:
+    findings: list[str] = []
+    for node in ast.walk(tree):
+        subtrahend: ast.AST | None = None
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, ast.Sub) and _is_one_like(node.left):
+                subtrahend = node.right
+            elif isinstance(node.op, ast.Add):
+                if _is_one_like(node.left):
+                    subtrahend = _negative_operand(node.right)
+                elif _is_one_like(node.right):
+                    subtrahend = _negative_operand(node.left)
+        elif _is_subtract_call(node):
+            subtrahend = node.args[1]
+        elif _is_additive_complement_call(node):
+            left, right = node.args[0], node.args[1]
+            subtrahend = _negative_operand(right) if _is_one_like(left) else _negative_operand(left)
+        elif _is_sum_complement_call(node):
+            arg = node.args[0]
+            if isinstance(arg, (ast.Tuple, ast.List)) and len(arg.elts) == 2:
+                left, right = arg.elts
+                subtrahend = _negative_operand(right) if _is_one_like(left) else _negative_operand(left)
+        if subtrahend is not None and _subtrahend_is_yes_q_lcb(subtrahend):
+            findings.append(f"{label}:{node.lineno}: {ast.unparse(node)}")
+    return findings
+
+
+def test_live_probability_code_does_not_construct_no_bound_from_yes_q_lcb_complement():
     findings: list[str] = []
     for relative_path in LIVE_PROBABILITY_PATHS:
-        findings.extend(_one_minus_expressions(relative_path))
+        path = ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        findings.extend(_yes_q_lcb_complement_findings(tree, label=relative_path))
 
-    assert not findings, "\n".join(findings)
+    assert not findings, "overconfident 1 - q_lcb_yes NO bound found:\n" + "\n".join(findings)
 
 
 # ── FOCUSED decision-core ban: 1 - q_lcb_yes is forbidden; 1 - q_ucb_yes is allowed ──
@@ -294,3 +343,23 @@ def f(x):
 """
     findings = _one_minus_snippet_findings(source)
     assert len(findings) == 20, "\n".join(findings)
+
+
+def test_yes_q_lcb_guard_rejects_variants_but_allows_point_and_ucb_complements():
+    source = """
+from decimal import Decimal
+import operator
+import numpy as np
+
+def f(q_yes, q_ucb_yes, q_lcb_yes):
+    return [
+        1 - q_yes,
+        1 - q_ucb_yes,
+        1 - q_lcb_yes,
+        Decimal("1") - float(q_lcb_yes),
+        operator.sub(1, q_lcb_yes),
+        np.add(1, np.negative(q_lcb_yes)),
+    ]
+"""
+    findings = _yes_q_lcb_complement_findings(ast.parse(source), label="<snippet>")
+    assert len(findings) == 4, "\n".join(findings)

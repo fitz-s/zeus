@@ -5,7 +5,8 @@
 # silently returned a stale cache, making freshness invisible to every
 # downstream caller. It now exposes:
 #   - ``MarketSnapshot`` dataclass with an ``authority`` literal:
-#     ``VERIFIED`` | ``STALE`` | ``EMPTY_FALLBACK`` | ``NEVER_FETCHED``.
+#     ``VERIFIED`` | ``STALE`` | ``FETCH_FAILED_NO_CACHE`` |
+#     ``KEYWORD_DISCOVERY_UNVERIFIED`` | ``NEVER_FETCHED``.
 #   - ``_get_active_events_snapshot()`` returning MarketSnapshot.
 #   - ``get_last_scan_authority()`` module helper for callers that
 #     cannot yet migrate to the snapshot API.
@@ -15,5 +16,5 @@
 # src/engine/monitor_refresh.py) remain untouched during the refactor.
 # Once Dual-Track stabilises, those callers SHOULD branch on
 # ``get_last_scan_authority()`` or switch to the snapshot API to
-# fail-closed on ``STALE`` and ``EMPTY_FALLBACK`` before emitting new
+# fail-closed on non-``VERIFIED`` authority before emitting new
 # BUY/SELL signals. See audit bug B017 for the full rationale.

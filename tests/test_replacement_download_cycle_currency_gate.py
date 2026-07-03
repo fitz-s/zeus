@@ -59,6 +59,7 @@ class _PlanStub:
     ready: bool = True
     missing_aifs_manifest_count: int = 0
     missing_openmeteo_manifest_count: int = 0
+    rows: tuple = ()
     payload: dict = field(default_factory=lambda: {"status": "CURRENT_TARGETS_COVERED"})
 
     def as_dict(self) -> dict:
@@ -79,6 +80,55 @@ def _make_db(tmp_path: Path, cycles_by_source: dict[str, str]) -> Path:
     conn.commit()
     conn.close()
     return db
+
+
+def test_anchor_ladder_skips_single_runs_when_source_clock_says_not_public(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    request = build_anchor_request(
+        latitude=33.63,
+        longitude=-84.44,
+        run="2026-06-25T12:00:00+00:00",
+        timezone_name="UTC",
+    )
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: False)
+
+    def _single_runs_should_not_be_called(*_args, **_kwargs):
+        raise AssertionError("single-runs fetch should be skipped before publication")
+
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        _single_runs_should_not_be_called,
+    )
+
+    def _meta_refuses(*_args, **_kwargs):
+        raise ValueError("provider declares an older run")
+
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        _meta_refuses,
+    )
+    monkeypatch.setattr(
+        dl,
+        "_try_bucket_rung_three",
+        lambda **_kwargs: (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"run_authority": "bucket_partial_run_test"},
+        ),
+    )
+
+    payload, provenance = dl._resolve_anchor_payload(
+        request=request,
+        city="Atlanta",
+        target_date="2026-06-25",
+        timezone_name="UTC",
+    )
+
+    assert payload == {"hourly": {"time": [], "temperature_2m": []}}
+    assert provenance["run_authority"] == "bucket_partial_run_test"
 
 
 def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
@@ -257,6 +307,32 @@ def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypa
     assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
     assert len(calls) == 1
     assert calls[0].get("include_covered") is True
+
+
+def test_direct_current_target_downloader_scopes_plan_to_requested_cycle(tmp_path, monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    seen: list[dict] = []
+
+    def _plan_builder(_db, *args, **kwargs):
+        seen.append(dict(kwargs))
+        return _PlanStub(ready=False, rows=())
+
+    monkeypatch.setattr(dl, "build_replacement_forecast_current_target_plan", _plan_builder)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+    )
+
+    assert report["target_count"] == 0
+    assert seen[0]["required_openmeteo_source_cycle_time"] == AVAILABLE_CYCLE
 
 
 def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:

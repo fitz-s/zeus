@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect run-pinned Open-Meteo ECMWF IFS 9km deterministic anchor requests.
 # Reuse: Run before changing Open-Meteo ECMWF IFS 9km anchor capture or manifest wiring.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked-candidate integration.
 """Open-Meteo ECMWF IFS 9km anchor request tests."""
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def test_anchor_request_uses_single_runs_api_and_explicit_run() -> None:
     assert metadata["source_id"] == SOURCE_ID
     assert metadata["product_id"] == PRODUCT_ID
     assert metadata["role"] == "soft_spatial_anchor"
-    assert metadata["trade_authority_status"] == "SHADOW_ONLY"
+    assert metadata["trade_authority_status"] == "BLOCKED"
     assert metadata["training_allowed"] is False
 
 
@@ -219,7 +219,7 @@ def test_anchor_response_extracts_localday_high_low_from_hourly_json() -> None:
     assert anchor.sample_count == 3
     assert [item.hour for item in anchor.contributing_local_times] == [0, 12, 23]
     assert anchor.contributing_valid_times_utc[0].hour == 16
-    assert anchor.trade_authority_status == "SHADOW_ONLY"
+    assert anchor.trade_authority_status == "BLOCKED"
     assert anchor.training_allowed is False
 
 

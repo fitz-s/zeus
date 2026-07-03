@@ -1,10 +1,10 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-07-02
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
 #   filter chain direction_law_ok -> coherence_allows -> (edge_lcb>0 & optimal_delta_u>0)
-#   -> selected = max robust utility density; the no_trade_reason + receipt_hash on every
+#   -> selected = max total robust utility; the no_trade_reason + receipt_hash on every
 #   exit) and the Stage 8 block lines 1166-1184 (the scalar robust_trade_score is
 #   telemetry only — it CANNOT select). Reconciled against
 #   docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md (GREENFIELD — the engine
@@ -15,11 +15,10 @@
 Spec-named tests fail if the corrected transformation is reverted to the broken
 behavior the spec replaces:
 
-  * ``test_decide_filters_direction_then_coherence_then_edge_then_utility_density`` — the
+  * ``test_decide_filters_direction_then_coherence_then_edge_then_total_utility`` — the
     full candidate filter chain runs in the spec ORDER (direction_law_ok ->
     coherence_allows -> edge_lcb>0 & optimal_delta_u>0) and the survivor is selected by
-    robust utility density, NOT by the scalar ``q - price`` trade score or capital-heavy
-    total ΔU alone.
+    total robust utility, NOT by the scalar ``q - price`` trade score or density alone.
 
   * ``test_no_trade_reason_present_when_no_candidate_passes`` — when nothing survives the
     filter chain, ``decide`` returns a ``FamilyDecision`` with ``selected=None``, a non-None
@@ -39,8 +38,10 @@ behavior the spec replaces:
 """
 from __future__ import annotations
 
+import inspect
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
@@ -60,12 +61,14 @@ from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import (
     NO_TRADE_NO_DIRECTION_LAW,
+    NO_TRADE_NO_MIN_ORDER_UTILITY,
     NO_TRADE_NO_POSITIVE_EDGE,
+    NO_TRADE_NO_POSITIVE_UTILITY,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
-    NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
     FamilyDecision,
     FamilyDecisionEngine,
+    PortfolioCandidateDecision,
     direction_law_ok,
     forecast_bin_id,
 )
@@ -139,6 +142,25 @@ def _isolate_qlcb_reliability_artifact(monkeypatch, tmp_path):
     guard_mod.reset_reliability_cache()
     yield
     guard_mod.reset_reliability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _selection_calibrator_identity(monkeypatch):
+    """Keep qkernel tests independent from generated live selection artifacts."""
+
+    def _identity(**kwargs):
+        raw = float(kwargs["raw_side_prob"])
+        return SimpleNamespace(
+            q_safe=raw,
+            trade=True,
+            abstained=False,
+            cell_key="test|IDENTITY",
+            L_g=float("nan"),
+            n_g=0,
+            basis="TEST_IDENTITY",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _identity)
 
 
 def _resolution(metric: str = "high") -> EventResolution:
@@ -482,22 +504,19 @@ def test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it():
     no_b27 = build_candidate_route(
         candidate_id="n27", instrument=_inst("NO", "b27"), route_cost=_rc("NO", "b27"), omega=space
     )
-    # Structural direction-law YES is clean only on the forecast bin; non-forecast YES needs
-    # the selector's side-aware empirical OOF license before it can trade.
+    # Direction law proves the native side is tradable; it no longer hard-codes the
+    # rounded forecast bin as the only YES that may carry live alpha.
     assert direction_law_ok(yes_b25, forecast_bin=fbin) is True
-    # NO is legal ONLY off the forecast bin (NO direction unchanged).
-    assert direction_law_ok(no_b25, forecast_bin=fbin) is False
+    assert direction_law_ok(no_b25, forecast_bin=fbin) is True
     assert direction_law_ok(no_b27, forecast_bin=fbin) is True
-    # A non-modal YES is not structurally direction-law-clean.
-    assert direction_law_ok(yes_b27, forecast_bin=fbin) is False
+    assert direction_law_ok(yes_b27, forecast_bin=fbin) is True
 
 
-def test_buy_yes_structural_direction_law_does_not_use_point_q():
-    """Direction-law status is structural; empirical licensing lives in the selector.
+def test_buy_yes_direction_law_does_not_hard_gate_on_rounded_mu_bin():
+    """Direction-law status is a native-side proof, not a forecast-bin veto.
 
-    RED-on-revert: re-introducing a direct ``point_q >= floor`` branch into
-    ``direction_law_ok`` flips the non-forecast assertions below to True and bypasses the
-    side-aware OOF reliability license.
+    RED-on-revert: reintroducing ``YES only on rounded mu`` makes every non-forecast
+    YES false here and recreates the live Shanghai/buy-yes starvation failure.
     """
     fbin = "b25"
 
@@ -509,14 +528,14 @@ def test_buy_yes_structural_direction_law_does_not_use_point_q():
             omega=_outcome_space(_case()),
         )
 
-    # The forecast bin YES is structurally clean.
+    # All native YES bins are allowed to reach the actual alpha gates. Bad bins die on
+    # q/payoff/edge/DeltaU/coherence, not on the rounded center heuristic.
     assert direction_law_ok(yes_on("b25"), forecast_bin=fbin) is True
-    # Non-forecast YES remains structurally non-clean; selector-level OOF evidence can license it.
-    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is True
 
 
 # Small helpers for the primitive check above.
@@ -559,6 +578,20 @@ def _hand_decision(
     delta_u_at_min: float,
     robust_trade_score: float,
     optimal_stake_usd: Decimal = Decimal("5"),
+    direction_law_ok: bool = True,
+    coherence_allows: bool = True,
+    q_lcb_guard_basis: str = "",
+    q_lcb_guard_abstained: bool = False,
+    q_lcb_guard_cell_key: str = "",
+    selection_guard_basis: str = "",
+    selection_guard_abstained: bool = False,
+    selection_guard_cell_key: str = "",
+    selection_guard_n: int = 0,
+    selection_guard_q_safe: Optional[float] = None,
+    payoff_q_lcb: Optional[float] = None,
+    chosen_stake_cost: Optional[float] = None,
+    chosen_stake_edge_lcb: Optional[float] = None,
+    chosen_stake_point_ev: Optional[float] = None,
 ) -> CandidateDecision:
     """A hand-built CandidateDecision (direction-law-legal + coherent) for the _select test."""
     economics = CandidateEconomics(
@@ -571,13 +604,34 @@ def _hand_decision(
         q_dot_payoff=0.5,
         cost=route.route_cost.avg_cost,
         route_id=route.route_cost.route_id,
+        payoff_q_lcb=payoff_q_lcb,
+        chosen_stake_cost=(
+            ExecutionPrice(
+                chosen_stake_cost,
+                price_type="fee_adjusted",
+                fee_deducted=True,
+                currency="probability_units",
+            )
+            if chosen_stake_cost is not None
+            else None
+        ),
+        chosen_stake_edge_lcb=chosen_stake_edge_lcb,
+        chosen_stake_point_ev=chosen_stake_point_ev,
     )
     return CandidateDecision(
         route=route,
         economics=economics,
-        direction_law_ok=True,
-        coherence_allows=True,
+        direction_law_ok=direction_law_ok,
+        coherence_allows=coherence_allows,
         robust_trade_score=robust_trade_score,
+        q_lcb_guard_basis=q_lcb_guard_basis,
+        q_lcb_guard_abstained=q_lcb_guard_abstained,
+        q_lcb_guard_cell_key=q_lcb_guard_cell_key,
+        selection_guard_basis=selection_guard_basis,
+        selection_guard_abstained=selection_guard_abstained,
+        selection_guard_cell_key=selection_guard_cell_key,
+        selection_guard_n=selection_guard_n,
+        selection_guard_q_safe=selection_guard_q_safe,
     )
 
 
@@ -607,22 +661,20 @@ def _hand_joint_q_and_band(space: OutcomeSpace, q_by_bin: Mapping[str, float]) -
 
 
 # ===========================================================================
-# SPEC RED-on-revert #1: filter chain order + utility-density selection (not the scalar).
+# SPEC RED-on-revert #1: filter chain order + total-utility selection (not the scalar).
 # ===========================================================================
 
-def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(monkeypatch):
-    """The survivor is selected by robust utility density over the filter chain, NOT scalar score.
+def test_decide_filters_direction_then_coherence_then_edge_then_total_utility(monkeypatch):
+    """The survivor is selected by robust utility over the filter chain, NOT scalar score.
 
-    Build a family centered on b25 (the forecast/modal bin) with a DEEP, tight market whose
-    YES midpoints AGREE with the model q (coherence does NOT block anything). The candidate
-    set is the direction-law-legal YES_25 plus the direction-law-legal NO candidates on every
-    OTHER bin (a NO_i is legal iff i is not the forecast bin). Each candidate is priced so its
-    vector edge is positive but its robust utility density differs.
+    Build a family centered on b25 with a DEEP, tight market whose YES midpoints AGREE
+    with the model q (coherence does NOT block anything). Native YES/NO routes may all
+    reach the vector economics gates. Each candidate is priced so its vector edge is
+    positive but its robust utility density differs.
 
-    The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key,
-    and total ΔU alone is not enough either when it only wins by tying up more capital. The
-    engine selects by ``optimal_delta_u / optimal_stake_usd`` over candidates that already pass
-    direction/coherence/edge/ΔU gates.
+    The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key.
+    The engine selects by total ``optimal_delta_u`` over candidates that already pass
+    direction/coherence/edge/ΔU gates; utility density is only a tie-breaker.
     """
     case = _case()
     space = _outcome_space(case)
@@ -652,9 +704,8 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     matrix = _matrix(space)
     exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
 
-    # Sizing candidates: a YES candidate per executable bin priced at the (cheap) market YES
-    # ask, so the sizing cost matches the route cost. YES_25 (the forecast bin) is the only
-    # direction-law-legal YES; the others are enumerated but direction-law-filtered out.
+    # Sizing candidates: a YES candidate per executable bin priced at the (cheap) market
+    # YES ask, so the sizing cost matches the route cost.
     route_set = build_negrisk_route_set(fb, shares=Decimal("100"), enable_negrisk_routes=False)
     sizing: dict[tuple[str, str], NativeSideCandidate] = {}
     for b in space.bins:
@@ -688,8 +739,7 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     assert decision.selected is not None
     assert decision.receipt_hash and len(decision.receipt_hash) == 64
 
-    # The selected candidate is the direction-law-legal YES on the forecast bin b25 — the only
-    # candidate that survives direction_law_ok (YES) + coherence + positive edge + positive ΔU.
+    # The selected candidate survived native side proof + coherence + positive edge + positive ΔU.
     selected_decision = next(
         d for d in decision.candidate_decisions
         if d.economics.candidate_id == decision.selected.candidate_id
@@ -702,9 +752,9 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     assert selected_decision.economics.edge_lcb > 0.0
     assert selected_decision.economics.optimal_delta_u > 0.0
 
-    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM utility density among the
+    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM total robust utility among the
     # candidates that passed the full filter chain (direction-law-legal, coherent, executable,
-    # positive edge, positive ΔU). This is the utility-density contract.
+    # positive edge, positive ΔU). This is the live total-utility contract.
     passing = [
         d
         for d in decision.candidate_decisions
@@ -715,72 +765,61 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         and d.economics.optimal_delta_u > 0.0
     ]
     assert passing
-    selected_density = float(decision.selected.optimal_delta_u) / max(
-        float(decision.selected.optimal_stake_usd), 1e-9
-    )
-    assert selected_density == pytest.approx(
-        max(
-            float(d.economics.optimal_delta_u) / max(float(d.economics.optimal_stake_usd), 1e-9)
-            for d in passing
-        )
+    assert float(decision.selected.optimal_delta_u) == pytest.approx(
+        max(float(d.economics.optimal_delta_u) for d in passing)
     )
 
-    # MODAL-ONLY YES (2026-06-23 revert): a non-modal YES is direction-law-ILLEGAL regardless of
-    # its point-q. b24 is an adjacent ring bin (well-massed, ~0.22) but it is NOT the forecast
-    # (modal) bin, so its YES is rejected by the direction law — buy_yes only on the predicted bin.
+    # Non-forecast YES reaches the same vector economics gates. If it has no
+    # positive utility it will still fail there, but the rounded center is not a
+    # hard direction veto.
     yes_b24 = [d for d in decision.candidate_decisions if d.route.side == "YES" and d.route.bin_id == "b24"]
-    assert yes_b24 and yes_b24[0].direction_law_ok is False, (
-        "non-modal YES (b24) must be direction-law-illegal after the modal-only revert, "
-        "even with ample point-q"
-    )
+    assert yes_b24 and yes_b24[0].direction_law_ok is True
 
 
-def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
-    """The engine's selection key is utility density, NOT scalar score.
+def test_select_total_delta_u_objective_uses_utility_not_scalar_trade_score(monkeypatch):
+    """The explicit total-utility objective is robust utility, NOT scalar score.
 
     This is the isolated RED-on-revert for the selection KEY. We hand-build two passing
     candidate decisions (both direction-law-legal, coherent, executable, positive edge,
     positive ΔU) where one has a STRICTLY HIGHER scalar ``robust_trade_score`` but lower
-    robust utility density. The engine's ``_select`` must choose the density winner.
+    total robust utility. The engine's ``_select`` must choose the robust-utility winner.
     """
     case = _case()
     space = _outcome_space(case)
-    # Two hand-built candidate routes on direction-law-legal sides (NO on non-forecast bins).
+    # Two hand-built candidate routes on valid native NO sides.
     route_lo_scalar_hi_du = _hand_route(space, side="NO", bin_id="b24", cost=0.20)
     route_hi_scalar_lo_du = _hand_route(space, side="NO", bin_id="b22", cost=0.05)
 
-    # The density winner: lower scalar trade score, higher utility per staked dollar.
+    # The robust-utility winner: lower scalar trade score, higher total DeltaU.
     win = _hand_decision(route_lo_scalar_hi_du, edge_lcb=0.10, optimal_delta_u=0.50,
                          delta_u_at_min=0.01, robust_trade_score=0.30,
-                         optimal_stake_usd=Decimal("10"))
-    # The scalar winner: HIGHER scalar trade score, lower density (a scalar-argmax
+                         optimal_stake_usd=Decimal("100"))
+    # The scalar winner: HIGHER scalar trade score, lower total DeltaU (a scalar-argmax
     # reversion would pick this one).
     lose = _hand_decision(route_hi_scalar_lo_du, edge_lcb=0.20, optimal_delta_u=0.20,
                           delta_u_at_min=0.01, robust_trade_score=0.90,
-                          optimal_stake_usd=Decimal("100"))
+                          optimal_stake_usd=Decimal("5"))
 
     engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+        selection_objective="total_delta_u",
     )
     selected, reason = engine._select([win, lose])
 
     assert reason is None
     assert selected is not None
-    # The selection is the density winner, NOT the scalar-argmax loser.
+    # The selection is the total-utility winner, NOT the scalar-argmax loser.
     assert selected.route.bin_id == "b24"
     assert selected.economics.optimal_delta_u == pytest.approx(0.50)
     # Prove the trap: the LOSER had the strictly higher scalar but was NOT selected.
     assert lose.robust_trade_score > win.robust_trade_score
-    assert (
-        float(selected.economics.optimal_delta_u) / float(selected.economics.optimal_stake_usd)
-        > float(lose.economics.optimal_delta_u) / float(lose.economics.optimal_stake_usd)
-    )
+    assert float(selected.economics.optimal_delta_u) > float(lose.economics.optimal_delta_u)
 
 
-def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monkeypatch):
-    """A high-capital low-density route must not beat a lower-capital high-density route."""
+def test_select_prefers_roi_frontier_by_default(monkeypatch):
+    """Live default is confidence-weighted ROI, so strong cheap YES can beat larger NO."""
     case = _case()
     space = _outcome_space(case)
     high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -795,7 +834,7 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     )
     low_cost = _hand_decision(
         low_cost_route,
-        edge_lcb=0.08,
+        edge_lcb=0.38,
         optimal_delta_u=0.05,
         delta_u_at_min=0.01,
         robust_trade_score=0.10,
@@ -811,6 +850,516 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
 
     assert reason is None
     assert selected is low_cost
+
+
+def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
+    """A high-confidence cheap YES is not rejected just because its raw stake is small."""
+    case = _case()
+    space = _outcome_space(case)
+    high_confidence_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.01),
+        edge_lcb=0.56,
+        optimal_delta_u=0.0037257573362340303,
+        delta_u_at_min=0.00031653668040189115,
+        robust_trade_score=0.56,
+        optimal_stake_usd=Decimal("2.197675453300476"),
+        payoff_q_lcb=0.57,
+    )
+    larger_notional_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.80),
+        edge_lcb=0.08,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.08,
+        optimal_stake_usd=Decimal("100"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([larger_notional_no, high_confidence_yes])
+
+    assert high_confidence_yes.economics.optimal_stake_usd < Decimal("5")
+    assert engine._roi_frontier_useful(high_confidence_yes) is True
+    assert reason is None
+    assert selected is high_confidence_yes
+
+
+def test_select_roi_frontier_rejects_six_cent_yes_with_barely_positive_safe_q(monkeypatch):
+    """A 6c YES needs more than a barely-positive q_lcb edge to avoid tail punts."""
+    case = _case()
+    space = _outcome_space(case)
+    barely_positive_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.06),
+        edge_lcb=0.01770,
+        optimal_delta_u=0.000189,
+        delta_u_at_min=0.000079,
+        robust_trade_score=0.01770,
+        optimal_stake_usd=Decimal("1.559569057373046875"),
+        payoff_q_lcb=0.07770,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([barely_positive_yes])
+
+    assert engine._profit_lcb_usd(barely_positive_yes) > 0.25
+    assert engine._payoff_q_lcb(barely_positive_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.06,
+    )
+    assert engine._roi_frontier_useful(barely_positive_yes) is False
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
+    """A cheap center YES remains live when its q_lcb clears the center-YES quality floor."""
+    case = _case()
+    space = _outcome_space(case)
+    strong_center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.07),
+        edge_lcb=0.51,
+        optimal_delta_u=0.0025,
+        delta_u_at_min=0.0002,
+        robust_trade_score=0.51,
+        optimal_stake_usd=Decimal("2.50"),
+        payoff_q_lcb=0.58,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([strong_center_yes])
+
+    assert engine._payoff_q_lcb(strong_center_yes) >= fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.07,
+    )
+    assert engine._roi_frontier_useful(strong_center_yes) is True
+    assert reason is None
+    assert selected is strong_center_yes
+
+
+def test_select_roi_frontier_rejects_buenos_aires_low_quality_tail_yes(monkeypatch):
+    """BA live incident: q_lcb below center-YES quality floor is not a family optimum."""
+    case = _case()
+    space = _outcome_space(case)
+    ba_tail_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.041),
+        edge_lcb=0.041246376484684766,
+        optimal_delta_u=0.003,
+        delta_u_at_min=0.0002,
+        robust_trade_score=1.42,
+        optimal_stake_usd=Decimal("23.68994700639801"),
+        payoff_q_lcb=0.0990451308919892,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([ba_tail_yes])
+
+    assert engine._payoff_q_lcb(ba_tail_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.041,
+    )
+    assert engine._roi_frontier_useful(ba_tail_yes) is False
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
+    """High raw edge/price is not enough when Kelly lower-bound confidence is tiny."""
+    case = _case()
+    space = _outcome_space(case)
+    strong_no_route = _hand_route(space, side="NO", bin_id="b24", cost=0.74)
+    cheap_tail_route = _hand_route(space, side="YES", bin_id="b25", cost=0.01)
+    strong_no = _hand_decision(
+        strong_no_route,
+        edge_lcb=0.156,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("100"),
+    )
+    cheap_tail = _hand_decision(
+        cheap_tail_route,
+        edge_lcb=0.0024,
+        optimal_delta_u=0.05,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("100"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([strong_no, cheap_tail])
+
+    assert reason is None
+    assert engine._edge_roi_lcb(cheap_tail) > engine._edge_roi_lcb(strong_no)
+    assert engine._robust_kelly_growth_density(strong_no) > engine._robust_kelly_growth_density(cheap_tail)
+    assert selected is strong_no
+
+
+def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
+    """A tiny high-ratio but low-confidence candidate must not become a filler live order."""
+    case = _case()
+    space = _outcome_space(case)
+    dust_route = _hand_route(space, side="YES", bin_id="b25", cost=0.005)
+    dust = _hand_decision(
+        dust_route,
+        edge_lcb=0.005,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("1.50"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([dust])
+
+    assert engine._payoff_q_lcb(dust) < fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_rejects_low_price_yes_tail_without_strong_safe_q(monkeypatch):
+    """Kuala Lumpur live shape: a 3-4c tail YES needs more than thin positive edge."""
+    case = _case()
+    space = _outcome_space(case)
+    kl_tail = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.04001526925923045),
+        edge_lcb=0.020510409830349664,
+        optimal_delta_u=0.0006333828915951036,
+        delta_u_at_min=0.00009152233738979263,
+        robust_trade_score=0.08180248510788457,
+        optimal_stake_usd=Decimal("1.4412832709285736083984375"),
+        payoff_q_lcb=0.06052567908958011,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([kl_tail])
+
+    assert engine._payoff_q_lcb(kl_tail) < fde_mod.roi_frontier_min_payoff_q_lcb(
+        side="YES",
+        cost=0.04001526925923045,
+    )
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):
+    """A route that is cheap only at scalar admission cannot survive live selection."""
+
+    case = _case()
+    space = _outcome_space(case)
+    stale_top_of_book = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.01),
+        edge_lcb=0.20,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("25"),
+        chosen_stake_cost=0.50,
+        chosen_stake_edge_lcb=-0.29,
+        chosen_stake_point_ev=-0.10,
+        payoff_q_lcb=0.21,
+    )
+    honest_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.35),
+        edge_lcb=0.21,
+        optimal_delta_u=0.06,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.21,
+        optimal_stake_usd=Decimal("25"),
+        payoff_q_lcb=0.56,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([stale_top_of_book, honest_no])
+
+    assert engine._selection_edge_lcb(stale_top_of_book) < 0.0
+    assert selected is honest_no
+    assert reason is None
+
+
+def test_select_roi_frontier_allows_positive_utility_candidate_below_old_roi_hurdle(monkeypatch):
+    """Karachi/Shenzhen shape: real lower-bound profit + min-order utility is not dust."""
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="YES", bin_id="b25", cost=0.14)
+    candidate = _hand_decision(
+        route,
+        edge_lcb=0.0100720692012259,
+        optimal_delta_u=0.000288,
+        delta_u_at_min=0.000045,
+        robust_trade_score=0.0100720692012259,
+        optimal_stake_usd=Decimal("5.64889651611328125"),
+        payoff_q_lcb=0.150072069201226,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([candidate])
+
+    assert engine._profit_lcb_usd(candidate) >= 0.25
+    assert engine._payoff_q_lcb(candidate) >= fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+    assert selected is candidate
+    assert reason is None
+
+
+def test_select_roi_frontier_allows_live_positive_profit_candidate_below_old_direct_roi_hurdle(monkeypatch):
+    """Live 2026-06-30 shape: positive LCB profit must reach the ROI frontier.
+
+    Regression: the selector returned NO_ROI_FRONTIER_USEFUL_CANDIDATE for a candidate with
+    positive edge_lcb, positive DeltaU, positive min-order DeltaU, q_lcb around 0.779, and
+    about $2.13 lower-bound profit solely because an extra 5% direct-ROI hard hurdle failed.
+    ROI/growth density rank the frontier; they must not be a second arbitrary no-order gate.
+    """
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="NO", bin_id="b25", cost=0.76)
+    candidate = _hand_decision(
+        route,
+        edge_lcb=0.01877,
+        optimal_delta_u=0.000983,
+        delta_u_at_min=0.000083,
+        robust_trade_score=0.01877,
+        optimal_stake_usd=Decimal("86.2839573930664062500"),
+        payoff_q_lcb=0.77877,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([candidate])
+
+    assert 0.0 < engine._edge_roi_lcb(candidate) < 0.05
+    assert engine._profit_lcb_usd(candidate) >= 2.0
+    assert engine._payoff_q_lcb(candidate) >= fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+    assert selected is candidate
+    assert reason is None
+
+
+def test_select_reports_positive_edge_but_no_positive_utility():
+    """Positive edge with zero robust DeltaU is not a no-edge market."""
+    case = _case()
+    space = _outcome_space(case)
+    candidate = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.12),
+        edge_lcb=0.04,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.04,
+        optimal_stake_usd=Decimal("0"),
+        payoff_q_lcb=0.16,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([candidate])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_UTILITY
+
+
+def test_select_reports_positive_utility_but_min_order_not_viable():
+    """A theoretical utility winner that fails min-order DeltaU is its own gate."""
+    case = _case()
+    space = _outcome_space(case)
+    candidate = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.12),
+        edge_lcb=0.04,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.04,
+        optimal_stake_usd=Decimal("10"),
+        payoff_q_lcb=0.16,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([candidate])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_MIN_ORDER_UTILITY
+
+
+def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
+    """Tokyo-class regression: an abstained OOF cell must zero economics, not direction."""
+    case = _case(metric="low")
+    space = _outcome_space(case)
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.20),
+        edge_lcb=-0.01,
+        optimal_delta_u=0.0,
+        delta_u_at_min=-0.01,
+        robust_trade_score=0.0,
+        direction_law_ok=True,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_cell_key="low|L2_3|YES|modal|qb2|coarse_global",
+    )
+    nonmodal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b24", cost=0.005),
+        edge_lcb=-0.005,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.13,
+        direction_law_ok=True,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=True,
+        q_lcb_guard_cell_key="low|L2_3|YES|nonmodal|qb2|coarse_global",
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([modal_yes, nonmodal_yes])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_EDGE
+    assert nonmodal_yes.direction_law_ok is True
+    assert engine._direction_admitted(nonmodal_yes) is True
+
+
+def test_day0_finite_boundary_yes_keeps_remaining_day_q_lcb(monkeypatch):
+    """Day0 finite-bin YES uses remaining-window qLCB, not a hard-fact override."""
+
+    case = _case()
+    space = _outcome_space(case)
+    obs = Day0ObservationState(
+        observed=True,
+        station_id=STATION,
+        source="wu_icao",
+        samples_count=8,
+        latest_observed_at_utc=_CAPTURED,
+        observed_high_native=25.0,
+        observed_low_native=None,
+        observed_extreme_native=25.0,
+        raw_observation_hash="day0-observed-boundary",
+    )
+    model_set = _model_set([24.9, 25.0, 25.1], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, obs, has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    assert pd.day0.active is True
+    assert forecast_bin_id(jq) == "b25"
+
+    def _offline_qlcb_guard_must_not_run(**_kwargs):
+        raise AssertionError("forecast OOF q_lcb guard must not run for active Day0")
+
+    def _selection_guard_must_not_run(**_kwargs):
+        raise AssertionError("forecast selection calibrator must not run for active Day0")
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _offline_qlcb_guard_must_not_run)
+    monkeypatch.setattr(
+        fde_mod, "apply_selection_calibrator", _selection_guard_must_not_run
+    )
+
+    def factory(bin_id: str) -> MarketBook:
+        fair = min(max(jq.q_by_bin_id.get(bin_id, 0.0), 0.02), 0.98)
+        ya = _tick(max(fair * 0.55, 0.002))
+        yb = _tick(max(ya - 0.01, 0.001))
+        return _market_book(
+            bin_id,
+            yes_bid=yb,
+            yes_ask=ya,
+            no_bid=_tick(1 - ya),
+            no_ask=_tick(1 - yb),
+            size=5000.0,
+        )
+
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    route_set = build_negrisk_route_set(
+        fb, shares=Decimal("100"), enable_negrisk_routes=False
+    )
+    sizing: dict[tuple[str, str], NativeSideCandidate] = {}
+    for b in space.bins:
+        if not b.executable:
+            continue
+        route = route_set.direct_yes.get(b.bin_id)
+        if route is None or not route.executable:
+            continue
+        q_point = float(jq.q_by_bin_id[b.bin_id])
+        sizing[(b.bin_id, "YES")] = _yes_sizing(
+            space,
+            b.bin_id,
+            q_point=q_point,
+            q_lcb=max(q_point - 0.03, 0.0),
+            price=str(round(float(route.avg_cost.value), 3)),
+        )
+
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=obs, family_book=fb)
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.selected is not None
+    selected_decision = next(
+        d
+        for d in decision.candidate_decisions
+        if d.route.side == "YES" and d.route.bin_id == "b25"
+    )
+    assert decision.selected.candidate_id == selected_decision.economics.candidate_id
+    assert selected_decision.route.side == "YES"
+    assert selected_decision.route.bin_id == "b25"
+    assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert selected_decision.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert selected_decision.selection_guard_n == 0
+    assert selected_decision.selection_guard_cell_key == "day0_remaining_day_q_lcb"
+    assert selected_decision.selection_guard_q_safe == pytest.approx(
+        selected_decision.economics.payoff_q_lcb
+    )
+    assert 0.0 < selected_decision.economics.payoff_q_lcb < 1.0
+    assert selected_decision.economics.edge_lcb > 0.0
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
@@ -882,6 +1431,94 @@ def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
     assert selected is selected_no
 
 
+def test_modal_yes_missing_empirical_authority_is_candidate_local_not_family_veto():
+    """A weak modal YES does not get re-expressed, but it also cannot veto live selection.
+
+    Shanghai/Munich class failure: the modal YES has positive point value but its
+    empirical guard is missing/thin. That candidate remains blocked by its own
+    economics/guards, while a separate executable live candidate must still flow
+    through selection rather than a family-level no-trade alias.
+    """
+
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.02,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("20"),
+    )
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=-0.27,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("0"),
+        selection_guard_basis="ACTIVE_MISSING_CELL",
+        selection_guard_abstained=True,
+        selection_guard_n=0,
+        selection_guard_q_safe=0.0,
+        chosen_stake_point_ev=0.53,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([selected_no, modal_yes])
+
+    assert selected is selected_no
+    assert reason is None
+    assert modal_yes.selection_guard_basis == "ACTIVE_MISSING_CELL"
+    assert modal_yes.selection_guard_abstained is True
+
+
+def test_modal_yes_guard_receipt_does_not_block_independent_no():
+    """Modal-YES guard evidence is receipt context, not a family-level NO ban."""
+
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.02,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("20"),
+    )
+    licensed_modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.01,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.28,
+        optimal_stake_usd=Decimal("5"),
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_n=80,
+        selection_guard_q_safe=0.28,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([selected_no, licensed_modal_yes])
+
+    assert selected is selected_no
+    assert reason is None
+
+
+def test_modal_yes_family_veto_alias_is_not_live_contract():
+    assert not hasattr(fde_mod, "NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING")
+    assert not hasattr(FamilyDecisionEngine, "_apply_modal_yes_empirical_authority_invariant")
+
+
 def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
     """Shanghai correction: choose the cheaper center YES for the same upside.
 
@@ -937,8 +1574,52 @@ def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
     )
 
 
-def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
-    """The terminal total-utility objective only applies when explicitly requested."""
+def test_center_yes_dominance_uses_full_outcome_space_not_scored_subset_adjacency():
+    """Missing executable routes must not compress non-adjacent NOs into adjacent bins."""
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b23", cost=0.79),
+        edge_lcb=0.11,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("5"),
+    )
+    sibling_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b27", cost=0.80),
+        edge_lcb=0.10,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.80,
+        optimal_stake_usd=Decimal("5"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.53,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes, sibling_no],
+        forecast_bin="b25",
+        outcome_bin_ids=[b.bin_id for b in space.bins],
+    )
+
+    assert selected is selected_no
+
+
+def test_select_utility_density_objective_is_explicit_non_default(monkeypatch):
+    """The density-first objective only applies when explicitly requested."""
     case = _case()
     space = _outcome_space(case)
     high_total_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -953,7 +1634,7 @@ def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
     )
     high_density = _hand_decision(
         high_density_route,
-        edge_lcb=0.08,
+        edge_lcb=0.38,
         optimal_delta_u=0.05,
         delta_u_at_min=0.01,
         robust_trade_score=0.10,
@@ -965,20 +1646,29 @@ def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
-    terminal_engine = FamilyDecisionEngine(
+    total_engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
         selection_objective="total_delta_u",
     )
+    density_engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+        selection_objective="utility_density",
+    )
 
     default_selected, default_reason = default_engine._select([high_total, high_density])
-    terminal_selected, terminal_reason = terminal_engine._select([high_total, high_density])
+    total_selected, total_reason = total_engine._select([high_total, high_density])
+    density_selected, density_reason = density_engine._select([high_total, high_density])
 
     assert default_reason is None
-    assert terminal_reason is None
+    assert total_reason is None
+    assert density_reason is None
     assert default_selected is high_density
-    assert terminal_selected is high_total
+    assert total_selected is high_total
+    assert density_selected is high_density
 
 
 def test_select_rejects_unknown_selection_objective():
@@ -1041,7 +1731,7 @@ def test_adjacent_no_pair_comparator_does_not_block_capital_efficient_center_yes
 
 
 def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(monkeypatch):
-    """If a non-executable portfolio is superior, the engine has evidence to refuse a weaker leg."""
+    """If a non-executable portfolio is superior, the engine records that evidence."""
     case = _case()
     space = _outcome_space(case)
     joint_q, band = _hand_joint_q_and_band(
@@ -1092,6 +1782,103 @@ def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(
     assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
 
 
+def test_adjacent_no_pair_dominance_is_telemetry_until_portfolio_executor_exists():
+    """A hypothetical better multi-leg route must not veto an executable live leg."""
+
+    source = inspect.getsource(FamilyDecisionEngine.decide)
+
+    assert "portfolio_comparisons = self._portfolio_comparisons" in source
+    assert "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
+    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
+
+
+def test_portfolio_dominance_receipt_does_not_no_trade_selected_live_leg(monkeypatch):
+    """Even a dominating non-executable portfolio is telemetry, not submit authority."""
+
+    case = _case()
+    space = _outcome_space(case)
+    model_set = _model_set([24.6, 25.0, 25.4], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+
+    def factory(bin_id: str) -> MarketBook:
+        fair = min(max(jq.q_by_bin_id.get(bin_id, 0.0), 0.02), 0.98)
+        ya = _tick(max(fair * 0.5, 0.002))
+        yb = _tick(max(ya - 0.01, 0.001))
+        return _market_book(
+            bin_id,
+            yes_bid=yb,
+            yes_ask=ya,
+            no_bid=_tick(1 - ya),
+            no_ask=_tick(1 - yb),
+            size=5000.0,
+        )
+
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    route_set = build_negrisk_route_set(fb, shares=Decimal("100"), enable_negrisk_routes=False)
+    sizing: dict[tuple[str, str], NativeSideCandidate] = {}
+    for b in space.bins:
+        if not b.executable:
+            continue
+        t = b.bin_id
+        yr = route_set.direct_yes.get(t)
+        if yr is not None and yr.executable:
+            qb = jq.q_by_bin_id[t]
+            sizing[(t, "YES")] = _yes_sizing(
+                space,
+                t,
+                q_point=float(qb),
+                q_lcb=max(float(qb) - 0.03, 0.0),
+                price=str(round(float(yr.avg_cost.value), 3)),
+            )
+
+    forced_comparison = PortfolioCandidateDecision(
+        portfolio_type="ADJACENT_NO_PAIR",
+        reference_bin_id="b25",
+        leg_candidate_ids=("left", "right"),
+        leg_route_ids=("left-route", "right-route"),
+        payoff_vector_hash="forced",
+        point_ev=1.0,
+        edge_lcb=1.0,
+        q_dot_payoff=1.5,
+        cost_sum=0.1,
+        edge_lcb_density=10.0,
+        point_ev_density=10.0,
+        selected_candidate_id="selected",
+        selected_edge_lcb_density=0.1,
+        selected_point_ev_density=0.1,
+        dominates_selected=True,
+    )
+
+    monkeypatch.setattr(
+        FamilyDecisionEngine,
+        "_portfolio_comparisons",
+        lambda self, **kwargs: (forced_comparison,),
+    )
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=_no_obs(), family_book=fb)
+
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=exposure,
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.no_trade_reason is None
+    assert decision.selected is not None
+    assert decision.portfolio_comparisons == (forced_comparison,)
+    assert decision.portfolio_comparisons[0].dominates_selected is True
+
+
 # ===========================================================================
 # SPEC RED-on-revert #2: no_trade_reason present when no candidate passes.
 # ===========================================================================
@@ -1100,8 +1887,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     """When nothing survives the chain, decide returns a no-trade FamilyDecision (not None).
 
     Build a family where EVERY route is priced so expensive that no candidate has a positive
-    robust edge/ΔU (the direction-law-legal YES on the forecast bin is priced ABOVE its fair
-    value, and the legal NOs likewise). The filter chain empties, so ``decide`` returns a
+    robust edge/DeltaU. The filter chain empties, so ``decide`` returns a
     FamilyDecision with ``selected=None``, a non-None ``no_trade_reason``, and a receipt_hash.
     RED-on-revert: a reversion returning None / omitting the reason would break this contract.
     """
@@ -1115,7 +1901,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     q25 = jq.q_by_bin_id["b25"]
 
     # Coherent deep market (YES mids at model q) so coherence does NOT block — the no-trade
-    # is purely the empty positive-edge set. Prices snap to the 0.001 tick grid.
+    # is purely the empty positive-utility set. Prices snap to the 0.001 tick grid.
     def factory(bin_id: str) -> MarketBook:
         qm = jq.q_by_bin_id.get(bin_id, 0.0)
         mid = min(max(qm, 0.02), 0.98)
@@ -1144,7 +1930,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     assert isinstance(decision, FamilyDecision)
     assert decision.selected is None
     assert decision.no_trade_reason is not None
-    assert decision.no_trade_reason == NO_TRADE_NO_POSITIVE_EDGE, decision.no_trade_reason
+    assert decision.no_trade_reason == NO_TRADE_NO_POSITIVE_UTILITY, decision.no_trade_reason
     assert decision.receipt_hash and len(decision.receipt_hash) == 64
     # The candidates are still recorded (the no-trade is auditable), and none was selected.
     assert len(decision.candidates) > 0
@@ -1287,7 +2073,7 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
     assert y.economics.edge_lcb > 0.0, (
         "YES_25 must have a positive raw edge so the test proves coherence (not edge) blocks it"
     )
-    assert y.direction_law_ok is True  # it IS the forecast bin -> direction-law-legal
+    assert y.direction_law_ok is True
     assert y.coherence_allows is False  # but coherence blocks it (offending bin)
 
     # And the no-trade reason (if a no-trade) names the coherence block as the emptying gate
@@ -1308,8 +2094,8 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
     OOF support after sparse-bucket pooling, but the coherence layer used to accept only the
     exact ``OOF_WILSON_95`` basis. That left a model-superiority receipt stranded below the
     market-coherence gate and structurally favored NO routes. The pooled basis may license
-    only a direction-law-legal modal YES with positive guarded edge/Delta-U; it does not
-    bypass the modal-only-YES constraint tested below.
+    only a valid native side with positive guarded edge/Delta-U; it does not bypass
+    q/payoff economics.
     """
 
     from src.decision.qlcb_reliability_guard import GuardVerdict
@@ -1407,61 +2193,29 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
 
 
 # ===========================================================================
-# SPEC RED-on-revert #4: direction-law override requires side-aware OOF evidence.
+# SPEC RED-on-revert #4: rounded-mu direction heuristics cannot block economic alpha.
 # ===========================================================================
 
-def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
-    """A candidate cannot bypass direction law on edge alone.
+def test_nonforecast_yes_and_modal_no_are_live_selectable_on_vector_economics():
+    """Positive vector economics, not rounded-mu bin identity, control live admission.
 
-    The prior relaxation admitted only one side with edge_lcb>0 when an OOF guard
-    licensed them, while a positive-edge YES with the same guard burden still died at
-    direction-law admission. That recreated an all-NO live bias. The override now requires
-    an active, non-abstaining side-aware OOF verdict for the exact claim, and applies that
-    burden symmetrically to YES and NO.
+    RED-on-revert: restoring the old rule (YES only on rounded forecast bin; NO only away
+    from it) rejects both hand-built candidates below before the edge/DeltaU gate. That is
+    the live buy-YES starvation / Shanghai-class failure: the selector refuses profitable
+    Arrow-Debreu payoffs because the served center rounded somewhere else.
     """
     case = _case()
     space = _outcome_space(case)
-    # The modal bin for members tightly around 25C is b25 (confirmed by
-    # test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it).
-    # A NO on b25 is direction-law-ILLEGAL (d.direction_law_ok = False) but must be
-    # admitted when edge_lcb > 0.0 (the favorite-longshot relaxation).
     modal_bin_id = "b25"
 
-    # Build a NO-on-modal route: side="NO", bin_id=b25, cost=0.72 (a realistic
-    # favorite-NO ask; the favorite-NO loses edge at cost>=0.79 per settlement evidence).
     no_on_modal_route = _hand_route(space, side="NO", bin_id=modal_bin_id, cost=0.72)
-
-    # Build the economics: edge_lcb=0.08 (>0 so the relaxation fires AND the edge gate
-    # passes), delta_u_at_min=0.001 (>0 so live_candidate_passes passes the ΔU-at-min
-    # check), optimal_delta_u=0.05 (>0 so the ΔU gate passes).
-    no_on_modal_economics = CandidateEconomics(
-        candidate_id=no_on_modal_route.candidate_id,
-        point_ev=0.09,          # edge_lcb + small spread
+    no_on_modal_cand = _hand_decision(
+        route=no_on_modal_route,
         edge_lcb=0.08,
-        delta_u_at_min=0.001,
-        optimal_stake_usd=Decimal("5"),
         optimal_delta_u=0.05,
-        q_dot_payoff=0.22,      # model q_no = 1 - q_modal ~ 0.22 (plausible for b25 favorite)
-        cost=no_on_modal_route.route_cost.avg_cost,
-        route_id=no_on_modal_route.route_cost.route_id,
-    )
-    # direction_law_ok=False — this is the key: NO-on-modal is direction-law-ILLEGAL.
-    no_on_modal_cand = CandidateDecision(
-        route=no_on_modal_route,
-        economics=no_on_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
+        delta_u_at_min=0.001,
         robust_trade_score=0.08,
-    )
-    licensed_no_on_modal_cand = CandidateDecision(
-        route=no_on_modal_route,
-        economics=no_on_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
-        robust_trade_score=0.08,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="high|L1|NO|modal|qb7",
+        direction_law_ok=direction_law_ok(no_on_modal_route, forecast_bin=modal_bin_id),
     )
 
     engine = FamilyDecisionEngine(
@@ -1471,75 +2225,29 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
     )
 
     selected, reason = engine._select([no_on_modal_cand])
-    assert selected is None
-    assert reason == NO_TRADE_NO_DIRECTION_LAW
-
-    selected, reason = engine._select([licensed_no_on_modal_cand])
+    assert selected is no_on_modal_cand
     assert reason is None
-    assert selected is not None
-    assert selected.route.side == "NO"
-    assert selected.route.bin_id == modal_bin_id
-    # The critical invariant: admitted DESPITE direction_law_ok being False only because an
-    # active side-aware OOF verdict licensed the NO complement claim.
-    assert selected.direction_law_ok is False, (
-        "expected direction_law_ok=False on the selected candidate — the test proves the "
-        "admission is via the side-aware OOF license, not bare direction-law legality"
-    )
 
-    # ---- Confirm the same license burden applies to YES ------------------------
-    # A YES-on-non-modal (direction_law_ok=False, side="YES") with edge_lcb>0 must
-    # NOT be admitted on edge alone, but must be admitted when the exact YES cell has
-    # active OOF_WILSON_95 evidence. This is the live-log failure mode where YES
-    # candidates had positive edge/Delta-U but were stamped dlok=0 adm=0.
     non_modal_bin_id = "b24"
     yes_on_non_modal_route = _hand_route(space, side="YES", bin_id=non_modal_bin_id, cost=0.30)
-    yes_on_non_modal_economics = CandidateEconomics(
-        candidate_id=yes_on_non_modal_route.candidate_id,
-        point_ev=0.11,
-        edge_lcb=0.10,          # positive edge — but the ban holds
+    yes_on_non_modal_cand = _hand_decision(
+        yes_on_non_modal_route,
+        edge_lcb=0.10,
+        optimal_delta_u=0.06,
         delta_u_at_min=0.001,
-        optimal_stake_usd=Decimal("5"),
-        optimal_delta_u=0.05,
-        q_dot_payoff=0.40,
-        cost=yes_on_non_modal_route.route_cost.avg_cost,
-        route_id=yes_on_non_modal_route.route_cost.route_id,
-    )
-    yes_on_non_modal_cand = CandidateDecision(
-        route=yes_on_non_modal_route,
-        economics=yes_on_non_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
         robust_trade_score=0.10,
-    )
-    licensed_yes_on_non_modal_cand = CandidateDecision(
-        route=yes_on_non_modal_route,
-        economics=yes_on_non_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
-        robust_trade_score=0.10,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="high|L1|YES|nonmodal|qb7",
+        direction_law_ok=direction_law_ok(yes_on_non_modal_route, forecast_bin=modal_bin_id),
     )
 
     selected2, reason2 = engine._select([yes_on_non_modal_cand])
-    assert selected2 is None, (
-        "YES-on-non-modal (direction_law_ok=False, side='YES') must NOT be admitted "
-        "from bare positive edge alone"
-    )
-    assert reason2 == NO_TRADE_NO_DIRECTION_LAW, (
-        f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
-    )
+    assert selected2 is yes_on_non_modal_cand
+    assert reason2 is None
 
-    selected3, reason3 = engine._select([licensed_yes_on_non_modal_cand])
+    selected3, reason3 = engine._select([no_on_modal_cand, yes_on_non_modal_cand])
+    assert selected3 is yes_on_non_modal_cand
     assert reason3 is None
-    assert selected3 is not None
-    assert selected3.route.side == "YES"
-    assert selected3.route.bin_id == non_modal_bin_id
-    assert selected3.direction_law_ok is False, (
-        "expected direction_law_ok=False on the selected candidate — the test proves the "
-        "admission is via the side-aware YES OOF license, not bare direction-law legality"
-    )
+    assert engine._direction_admitted(yes_on_non_modal_cand) is True
+    assert engine._direction_admitted(no_on_modal_cand) is True
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
@@ -1623,6 +2331,7 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
         q_dot_payoff=0.50,
         cost=route.route_cost.avg_cost,
         route_id=route.route_cost.route_id,
+        payoff_q_lcb=0.50,
     )
     candidate = CandidateDecision(
         route=route,
@@ -1676,7 +2385,7 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
     guarded_economics = guarded[0].economics
     assert guarded[0].q_lcb_guard_basis == "OOF_WILSON_95"
     assert guarded[0].q_lcb_guard_abstained is False
-    assert guarded_economics.edge_lcb == pytest.approx(0.19)
+    assert 0.0 < guarded_economics.edge_lcb < economics.edge_lcb
     assert guarded_economics.delta_u_at_min > 0.0
     assert guarded_economics.optimal_delta_u > 0.0
     assert guarded_economics.optimal_stake_usd > Decimal("0")
@@ -1684,4 +2393,247 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
     selected, reason = engine._select(guarded)
     assert reason is None
     assert selected is not None
-    assert selected.economics.edge_lcb == pytest.approx(0.19)
+    assert selected.economics.edge_lcb == pytest.approx(guarded_economics.edge_lcb)
+
+
+def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
+    """Selection-aware guard feeds qkernel economics before choosing the ROI frontier."""
+
+    case = _case()
+    space = _outcome_space(case)
+    toxic_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.10,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.50,
+        optimal_stake_usd=Decimal("20"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.08,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    def _selection_verdict(**kwargs):
+        side = kwargs["side"]
+        if side == "NO":
+            return SimpleNamespace(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key="NO|L1|nonmodal|0.85",
+                L_g=0.0,
+                n_g=12,
+                basis="EB_THIN_SELECTED",
+            )
+        return SimpleNamespace(
+            q_safe=0.35,
+            trade=True,
+            abstained=False,
+            cell_key="YES|L1|modal|pb10",
+            L_g=0.35,
+            n_g=80,
+            basis="SELECTION_BETA_95",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(toxic_no, center_yes),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(space, "b24", q_point=0.85, q_lcb=0.84, price="0.79"),
+            ("b25", "YES"): _yes_sizing(space, "b25", q_point=0.50, q_lcb=0.35, price="0.27"),
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    blocked_no = next(d for d in guarded if d.route.side == "NO")
+    passed_yes = next(d for d in guarded if d.route.side == "YES")
+    assert blocked_no.selection_guard_basis == "EB_THIN_SELECTED"
+    assert blocked_no.selection_guard_abstained is True
+    assert blocked_no.economics.edge_lcb < 0.0
+    assert blocked_no.economics.optimal_delta_u <= 0.0
+    assert passed_yes.selection_guard_basis == "SELECTION_BETA_95"
+
+    selected, reason = engine._select(guarded)
+    assert reason is None
+    assert selected is passed_yes
+
+
+@pytest.mark.parametrize("selection_basis", ["SIDE_NOT_ARMED", "ACTIVE_MISSING_CELL", "ACTIVE_THIN_CELL", "EB_THIN_SELECTED"])
+def test_selection_calibrator_blocks_unarmed_tail_yes_but_not_modal_yes(monkeypatch, selection_basis):
+    """Selection-bias evidence must not create a closed loop that starves modal YES.
+
+    Nonmodal YES tails still require selected-side evidence. The modal YES leg is
+    the center-buy route already guarded by qkernel payoff bounds, OOF reliability,
+    coherence, and the live strategy price floor, so lack of a selected-bias cell
+    must not force it to non-positive edge before selection.
+    """
+
+    case = _case()
+    space = _outcome_space(case)
+    tail_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b24", cost=0.03),
+        edge_lcb=0.07,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.05,
+        optimal_delta_u=0.06,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.08,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    def _selection_verdict(**kwargs):
+        return SimpleNamespace(
+            q_safe=0.0,
+            trade=False,
+            abstained=True,
+            cell_key=f"{kwargs['side']}|SIDE_NOT_ARMED",
+            L_g=0.0,
+            n_g=0,
+            basis=selection_basis,
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(tail_yes, modal_yes),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "YES"): _yes_sizing(space, "b24", q_point=0.20, q_lcb=0.10, price="0.03"),
+            ("b25", "YES"): _yes_sizing(space, "b25", q_point=0.50, q_lcb=0.35, price="0.27"),
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    blocked_tail = next(d for d in guarded if d.route.bin_id == "b24")
+    passed_modal = next(d for d in guarded if d.route.bin_id == "b25")
+    assert blocked_tail.selection_guard_basis == selection_basis
+    assert blocked_tail.selection_guard_abstained is True
+    assert blocked_tail.selection_guard_n == 0
+    assert blocked_tail.selection_guard_q_safe == pytest.approx(0.0)
+    assert blocked_tail.economics.edge_lcb < 0.0
+    assert blocked_tail.economics.optimal_delta_u <= 0.0
+    assert passed_modal.selection_guard_basis == "MODAL_YES_QKERNEL_OOF_GUARD"
+    assert passed_modal.selection_guard_abstained is False
+    assert passed_modal.selection_guard_cell_key.startswith(f"{selection_basis}:")
+    assert passed_modal.selection_guard_q_safe == pytest.approx(0.32)
+    assert passed_modal.economics.edge_lcb > 0.0
+    assert passed_modal.economics.optimal_delta_u > 0.0
+
+    selected, reason = engine._select(guarded)
+    assert reason is None
+    assert selected is passed_modal
+
+
+def test_selection_calibrator_deflation_recomputes_qkernel_stake(monkeypatch):
+    """A licensed selection bound lowers payoff_q_lcb and recomputes ROI inputs."""
+
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="NO", bin_id="b24", cost=0.40)
+    economics = CandidateEconomics(
+        candidate_id=route.candidate_id,
+        point_ev=0.30,
+        edge_lcb=0.25,
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("25"),
+        optimal_delta_u=0.15,
+        q_dot_payoff=0.70,
+        cost=route.route_cost.avg_cost,
+        route_id=route.route_cost.route_id,
+        payoff_q_lcb=0.65,
+    )
+    candidate = CandidateDecision(
+        route=route,
+        economics=economics,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.20,
+    )
+
+    def _licensed_selection(**kwargs):
+        assert kwargs["raw_side_prob"] == pytest.approx(0.70)
+        assert kwargs["admission_margin"] == pytest.approx(0.40)
+        return SimpleNamespace(
+            q_safe=0.50,
+            trade=True,
+            abstained=False,
+            cell_key="NO|L1|nonmodal|0.70",
+            L_g=0.50,
+            n_g=80,
+            basis="SELECTION_EB_BETA",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _licensed_selection)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(candidate,),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(space, "b24", q_point=0.70, q_lcb=0.65, price="0.40")
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    guarded_candidate = guarded[0]
+    assert guarded_candidate.selection_guard_basis == "SELECTION_EB_BETA"
+    assert guarded_candidate.selection_guard_abstained is False
+    assert guarded_candidate.selection_guard_n == 80
+    assert guarded_candidate.selection_guard_q_safe == pytest.approx(0.50)
+    assert guarded_candidate.economics.payoff_q_lcb == pytest.approx(0.50)
+    assert guarded_candidate.economics.edge_lcb == pytest.approx(0.10)
+    assert guarded_candidate.economics.optimal_stake_usd != Decimal("25")

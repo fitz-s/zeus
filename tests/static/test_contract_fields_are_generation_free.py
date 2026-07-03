@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 6: Dataclass field name scan on Position (portfolio.py).
 xfail(strict=False): signal_version, calibration_version, pricing_semantics_version,

@@ -17,8 +17,11 @@ relationship (provider in -> bounded stake / typed fault out), not a unit shim.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from src.contracts.execution_price import ExecutionPrice
 from src.events.reactor import _is_transient_money_path_reason
 
 # Reuse the proven receipt-sizing harness + fixtures.
@@ -43,8 +46,141 @@ def _isolate_edli_settings(monkeypatch):
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
-    feature_flags["qkernel_spine_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import qkernel_spine_bridge
+
+    def _qkernel_proofs(*, family, snapshot_rows, **_kwargs):
+        candidate = family.candidates[0]
+        row = dict(snapshot_rows[0])
+        bin_id = str(candidate.condition_id)
+        qkernel_economics = {
+            "source": "qkernel_spine",
+            "candidate_id": f"DIRECT_YES:{bin_id}",
+            "route_id": f"DIRECT_YES:{bin_id}@proof",
+            "side": "YES",
+            "bin_id": bin_id,
+            "payoff_q_point": 0.95,
+            "payoff_q_lcb": 0.90,
+            "q_dot_payoff": 0.95,
+            "edge_lcb": 0.50,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "14.0",
+            "optimal_delta_u": 0.02,
+            "cost": 0.40,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "free_cash_bound_q_lcb",
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_cell_key": "free_cash_bound_selection",
+            "selection_guard_n": 80,
+            "selection_guard_q_safe": 0.90,
+        }
+        return (
+            adapter._CandidateProof(
+                candidate=candidate,
+                token_id=candidate.yes_token_id,
+                direction="buy_yes",
+                row=row,
+                executable_snapshot_id=str(row["snapshot_id"]),
+                execution_price=ExecutionPrice(
+                    0.40,
+                    "ask",
+                    fee_deducted=True,
+                    currency="probability_units",
+                ),
+                q_posterior=0.95,
+                q_lcb_5pct=0.90,
+                c_cost_95pct=0.40,
+                p_fill_lcb=0.90,
+                trade_score=1.0,
+                p_value=0.01,
+                passed_prefilter=True,
+                native_quote_available=True,
+                p_cal_vector_hash="cal-hash",
+                p_live_vector_hash="live-hash",
+                q_source="qkernel_spine",
+                selection_authority_applied="qkernel_spine",
+                qkernel_execution_economics=qkernel_economics,
+            ),
+        )
+
+    monkeypatch.setattr(adapter, "_generate_candidate_proofs", _qkernel_proofs)
+    monkeypatch.setattr(
+        adapter,
+        "_record_qkernel_selection_family_facts",
+        lambda *_args, **_kwargs: {"status": "written", "families": 1, "hypotheses": 1},
+    )
+    monkeypatch.setattr(
+        adapter,
+        "evaluate_fdr_full_family",
+        lambda *, family_id, all_hypothesis_ids, selected_hypothesis_ids, **_kwargs: SimpleNamespace(
+            passed=True,
+            fdr_family_id=family_id,
+            attempted_hypotheses=len(tuple(all_hypothesis_ids)),
+            selected_hypotheses=tuple(selected_hypothesis_ids),
+            selected_post_fdr=tuple(selected_hypothesis_ids),
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_evaluate_submit_recapture_for_selected",
+        lambda *, free_cash_usd=None, **_kwargs: (
+            adapter.SubmitRecaptureDecision(
+                state=adapter.CandidateLifecycleState.READY_TO_SUBMIT,
+                may_submit=True,
+                detail="free_cash_test_recapture_allowed",
+            ),
+            min(14.0, float(free_cash_usd)) if free_cash_usd is not None else 14.0,
+            ExecutionPrice(
+                0.40,
+                "ask",
+                fee_deducted=True,
+                currency="probability_units",
+            ),
+        ),
+    )
+    monkeypatch.setattr(adapter._shift_bin_wiring, "active_shift_lease_for_family", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_spine_enabled", lambda: True)
+    def _decide_family_via_spine(**kwargs):
+        proof = kwargs["proofs"][0]
+        economics_payload = dict(proof.qkernel_execution_economics)
+        bin_id = str(economics_payload["bin_id"])
+        side = str(economics_payload["side"])
+        economics = SimpleNamespace(**economics_payload)
+        decision = SimpleNamespace(
+            decision_id="free-cash-qkernel-decision",
+            receipt_hash="free-cash-qkernel-receipt",
+            selected=SimpleNamespace(candidate_id=economics_payload["candidate_id"]),
+            omega=SimpleNamespace(
+                bins=(SimpleNamespace(bin_id=bin_id, label="80-82"),)
+            ),
+            candidate_decisions=(
+                SimpleNamespace(
+                    route=SimpleNamespace(side=side, bin_id=bin_id),
+                    economics=economics,
+                ),
+            ),
+            economics_by_key={(bin_id, side): economics_payload},
+        )
+        return SimpleNamespace(
+            selected_proof=proof,
+            no_trade_reason=None,
+            decision=decision,
+        )
+
+    monkeypatch.setattr(qkernel_spine_bridge, "decide_family_via_spine", _decide_family_via_spine)
+    monkeypatch.setattr(
+        qkernel_spine_bridge,
+        "qkernel_candidate_economics_by_bin_side",
+        lambda decision: getattr(decision, "economics_by_key", {}),
+    )
 
 
 def test_free_cash_provider_binds_stake_to_free_cash():

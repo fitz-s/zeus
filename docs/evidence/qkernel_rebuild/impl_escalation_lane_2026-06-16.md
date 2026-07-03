@@ -43,7 +43,7 @@ Chosen because it is the SMALLER, safer blast radius:
 - The clause is evaluated FIRST and INDEPENDENT of `day0_is_tradeable` (the report:
   "tier 0 regardless of `day0_is_tradeable`, since this is a confirmed-armed cross
   with proven settlement edge, not a shadow"). It coexists with the existing day0
-  Tier-0 clause; under the live `day0_shadow` scope, Tier 0 contains ONLY escalation
+  Tier-0 clause; under the live `retired_day0_no_submit_scope` scope, Tier 0 contains ONLY escalation
   events.
 
 The `_city_round=0` variant was rejected because it would modify the ROW_NUMBER
@@ -158,7 +158,7 @@ tests/execution/test_maker_rest_escalation.py ............ 11 passed
 tests/execution/test_escalation_redecision_emit.py .......  5 passed
 tests/events/test_fetch_pending_escalation_cross_lane.py .  2 passed
 tests/events/test_fetch_pending_city_fairness.py ......... 11 passed (incl. 2026-06-11 fairness law)
-tests/events/test_fetch_pending_day0_shadow_priority.py ..  5 passed
+tests/events/test_fetch_pending_retired_day0_no_submit_scope_priority.py ..  5 passed
 tests/events/test_fetch_pending_timeliness.py ...........
 tests/events/test_fair_lane_interleave.py / test_event_store_idempotency.py ...
   -> consolidated spec suite: 54 passed

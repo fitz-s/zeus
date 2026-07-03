@@ -54,6 +54,31 @@ _PROVENANCE = {
 }
 
 
+def _qkernel_economics_for(payload: dict) -> dict:
+    side = "NO" if str(payload.get("direction") or "").endswith("_no") else "YES"
+    q_lcb = float(payload.get("q_lcb_5pct", 0.60))
+    limit_price = float(payload.get("limit_price", 0.40))
+    return {
+        "source": "qkernel_spine",
+        "route_id": f"DIRECT_{side}:bin-1@proof",
+        "route_type": "direct",
+        "side": side,
+        "payoff_q_point": payload.get("q_live", 0.70),
+        "payoff_q_lcb": q_lcb,
+        "cost": limit_price,
+        "edge_lcb": q_lcb - limit_price,
+        "optimal_delta_u": 0.01,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": 10.0,
+        "false_edge_rate": 0.02,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": q_lcb,
+    }
+
+
 def _maker_pre_submit(**overrides) -> dict:
     """Valid MAKER pre-submit payload (post_only=True, GTC, would_cross_book=False by default)."""
     payload = {
@@ -74,6 +99,16 @@ def _maker_pre_submit(**overrides) -> dict:
         "current_best_bid": 0.39,
         "current_best_ask": 0.41,
         "limit_price": 0.40,
+        "size": 12.0,
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.60,
+        "expected_edge": 0.10,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -87,6 +122,7 @@ def _maker_pre_submit(**overrides) -> dict:
         **_PROVENANCE,
     }
     payload.update(overrides)
+    payload.setdefault("qkernel_execution_economics", _qkernel_economics_for(payload))
     return payload
 
 
@@ -114,6 +150,16 @@ def _taker_pre_submit(**overrides) -> dict:
         "current_best_bid": 0.60,
         "current_best_ask": 0.61,
         "limit_price": 0.61,
+        "size": 12.0,
+        "q_live": 0.75,
+        "q_lcb_5pct": 0.70,
+        "expected_edge": 0.09,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
         "would_cross_book": True,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -128,6 +174,7 @@ def _taker_pre_submit(**overrides) -> dict:
         **_PROVENANCE,
     }
     payload.update(overrides)
+    payload.setdefault("qkernel_execution_economics", _qkernel_economics_for(payload))
     return payload
 
 
@@ -267,4 +314,58 @@ class TestLayer2VerifyPreSubmitForCommand:
     def test_none_post_only_crossing_raises_fail_closed(self):
         ps = _taker_pre_submit(post_only=None, would_cross_book=True)
         with pytest.raises(CertificateVerificationError, match="would_cross_book"):
+            self._call(ps)
+
+    def test_negative_submit_edge_raises(self):
+        ps = _maker_pre_submit(q_live=0.70, q_lcb_5pct=0.60, limit_price=0.61)
+        with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
+            self._call(ps)
+
+    def test_below_live_win_rate_floor_raises(self):
+        ps = _maker_pre_submit(
+            q_live=0.24833093804728934,
+            q_lcb_5pct=0.0990451308919892,
+            limit_price=0.041,
+            expected_edge=0.0580451308919892,
+        )
+        with pytest.raises(CertificateVerificationError, match="ADMISSION_WIN_RATE_FLOOR"):
+            self._call(ps)
+
+    def test_micro_edge_density_raises(self):
+        ps = _maker_pre_submit(
+            direction="buy_no",
+            token_id="no-1",
+            q_live=0.986261171798223,
+            q_lcb_5pct=0.986261171798223,
+            limit_price=0.98,
+            size=200.0,
+            expected_edge=0.005,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.02,
+        )
+        with pytest.raises(CertificateVerificationError, match="submit edge density"):
+            self._call(ps)
+
+    def test_qkernel_direct_payoff_probability_mismatch_raises(self):
+        ps = _maker_pre_submit(
+            direction="buy_no",
+            token_id="no-1",
+            q_live=0.999,
+            q_lcb_5pct=0.990,
+            limit_price=0.95,
+            size=30.0,
+            expected_edge=0.030,
+            min_submit_edge_density=0.0,
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics={
+                "route_id": "DIRECT_NO:b24@proof",
+                "side": "NO",
+                "payoff_q_point": 0.999,
+                "payoff_q_lcb": 0.998678563135879,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.990,
+            },
+        )
+        with pytest.raises(CertificateVerificationError, match="payoff_q_lcb mismatches"):
             self._call(ps)

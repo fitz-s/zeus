@@ -1,6 +1,6 @@
 # Statistical calibration addendum — 2026-06-13
 
-Status: AUTHORITY EXTENSION of `statistical_calibration_authority_2026-06-12.txt`.
+Status: ACTIVE — authority extension of `statistical_calibration_authority_2026-06-12.txt`.
 Sources (three independent derivations, cross-validated by convergence):
 1. **Consult-2** (GPT Pro, no-Zeus-context): era-mixture fitting, two-stage
    contamination, correlated-bin multiplicity, maker/taker. Raw answer archived at

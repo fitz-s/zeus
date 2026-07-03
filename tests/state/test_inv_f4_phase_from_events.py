@@ -1,6 +1,6 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §F4
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4
 """Acceptance tests: F4 — canonical phase from typed event inputs, not runtime strings.
 
 F4 invariant: canonical phase recorded in position_current is determined exclusively
@@ -230,7 +230,7 @@ def test_no_canonical_builder_calls_phase_for_runtime_position_in_money_path() -
         f"F4 violation: the following builders call runtime-string phase functions "
         f"inside their body (violating explicit phase_after contract): "
         f"{violations}. "
-        f"See docs/findings_2026_05_28.md §F4."
+        f"See docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4."
     )
 
 

@@ -68,7 +68,14 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "book_hash_transitions",
     "decision_integrity_quarantine",  # PR-E 2026-05-22: trade-class quarantine
     "execution_fact",
+    "execution_feasibility_evidence",
+    "execution_feasibility_latest",
+    "executable_market_snapshot_invalidations",
+    "executable_market_snapshot_latest",
     "executable_market_snapshots",
+    # W0.2 2026-07-02: blind-window metric transition log (ensure_table wired
+    # into init_schema_trade_only via market_channel_connectivity_schema.py).
+    "market_channel_connectivity_events",
     "position_current",
     "position_events",
     "position_lots",
@@ -92,6 +99,25 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     # to trade_class. Live writer (harvester log_settlement_event) writes to trade_conn;
     # 18 rows on zeus_trades.db confirmed by probe-ownership.md.
     "outcome_fact",
+    # PR-S4b completion 2026-07-01: 13 heritage tables created by init_schema_pre_pr_s4b
+    # but never migrated into _TRADE_CLASS_DDL. Row-probe: data lives 100% on
+    # zeus_trades.db (market_price_history 622k, token_price_log 121k, decision_log 19k,
+    # provenance_envelope_events 23k, ...); the world.db copies are 0-row legacy_archived
+    # ghosts (drop-after-2026-08-09). Registry converged them to trade_class and their
+    # exact live DDL is now in _TRADE_CLASS_DDL, so init_schema_trade_only creates them.
+    "collateral_ledger_snapshots",
+    "collateral_reservations",
+    "decision_log",
+    "exchange_reconcile_findings",
+    "exit_mutex_holdings",
+    "market_price_history",
+    "opportunity_fact",
+    "provenance_envelope_events",
+    "risk_actions",
+    "strategy_health",
+    "token_price_log",
+    "token_suppression",
+    "token_suppression_history",
 })
 
 # ---------------------------------------------------------------------------
@@ -464,6 +490,12 @@ class TestA8NoCrossDbWriteTransaction:
             # data_coverage WRITES, forecasts_conn for DataTable.OBSERVATIONS SELECT only.
             # Fixed in PR #116 review (bot ID 3246232548): pass forecasts_conn to HoleScanner.
             "src/ingest_main.py::_k2_hole_scanner_tick",
+            # substrate_observer_daemon.main(): SEQUENTIAL per-DB boot preflight, satisfies (b)
+            # — world_conn is read-only (ATTACH forecasts + SELECT opportunity_event_processing
+            # probe, no write). _forecast_conn ensure_forecast_runtime_indexes+commit and
+            # _trade_conn probe each run in their OWN try/finally and are CLOSED before the next
+            # opens; no single logical op writes across two live connections. Verified 2026-07-01.
+            "src/ingest/substrate_observer_daemon.py::main",
         }
 
         violations: list[str] = []

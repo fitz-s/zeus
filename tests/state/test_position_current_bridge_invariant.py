@@ -579,6 +579,83 @@ class TestUpdateTradeLifecycleBridgeEnforcement:
         ).fetchone()
         assert row is not None
 
+    def test_update_lifecycle_repairs_existing_zero_size_bridge(self):
+        """Existing audit bridge rows with size_usd=0 must be repaired from
+        canonical position economics on the next lifecycle sync.
+
+        The bridge remains audit-only: unrecoverable analytics stay untouched.
+        """
+        from src.state.db import update_trade_lifecycle
+
+        conn = self._make_full_db()
+        position_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO trade_decisions
+            (market_id, bin_label, direction, size_usd, price, timestamp,
+             p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+             status, runtime_trade_id, env)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "mkt-helsinki",
+                "Will the highest temperature in Helsinki be 19C?",
+                "buy_no",
+                0.0,
+                0.65,
+                "2026-06-30T20:54:59+00:00",
+                0.0,
+                0.8067,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "entered",
+                position_id,
+                "live",
+            ),
+        )
+        conn.commit()
+
+        class Pos:
+            trade_id = position_id
+            state = "entered"
+            day0_entered_at = ""
+            entered_at = "2026-06-30T20:54:59+00:00"
+            order_posted_at = "2026-06-30T20:49:06+00:00"
+            entry_price = 0.65
+            chain_avg_price = 0.65
+            effective_cost_basis_usd = 2.3205
+            chain_cost_basis_usd = 2.3205
+            cost_basis_usd = 2.3205
+            size_usd = 2.3205
+            effective_shares = 3.57
+            chain_shares = 3.57
+            shares = 3.57
+            entry_order_id = "order-helsinki"
+            order_id = "order-helsinki"
+            order_status = "filled"
+            chain_state = "synced"
+            fill_quality = None
+
+        update_trade_lifecycle(conn=conn, pos=Pos())
+
+        row = conn.execute(
+            """
+            SELECT size_usd, price, edge, kelly_fraction, chain_state, order_status_text
+            FROM trade_decisions
+            WHERE runtime_trade_id=?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["size_usd"] == pytest.approx(2.3205)
+        assert row["price"] == pytest.approx(0.65)
+        assert row["edge"] == pytest.approx(0.0)
+        assert row["kelly_fraction"] == pytest.approx(0.0)
+        assert row["chain_state"] == "synced"
+        assert row["order_status_text"] == "filled"
+
     def test_update_lifecycle_raises_when_synthesizer_also_fails(self):
         """When synthesizer cannot reconstruct bridge, BridgeAbsentError raised.
 

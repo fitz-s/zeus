@@ -1,6 +1,6 @@
 # Created: 2026-06-02
 # Last reused or audited: 2026-06-02
-# Authority basis: docs/operations/FORECAST_COLD_ROOT_UNIVERSAL_2026-06-02.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/FORECAST_COLD_ROOT_UNIVERSAL_2026-06-02.md
 #   grid→point representativeness offset loader + reactor hook.
 #   Per-(city,season) offset applied to ENS member maxes BEFORE p_raw.
 #   Flag-gated: edli.edli_grid_representativeness_correction_enabled (default OFF).

@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import logging
-from enum import Enum
+from enum import Enum  # noqa: F401 — retained for any sibling enums / back-compat
 
 from src.architecture.decorators import capability, protects
+from src.contracts.canonical_lifecycle import PositionPhase
+from src.state.canonical_projections import derive_position_phase
 
 logger = logging.getLogger(__name__)
 
 
-class LifecyclePhase(str, Enum):
-    PENDING_ENTRY = "pending_entry"
-    ACTIVE = "active"
-    DAY0_WINDOW = "day0_window"
-    PENDING_EXIT = "pending_exit"
-    ECONOMICALLY_CLOSED = "economically_closed"
-    SETTLED = "settled"
-    VOIDED = "voided"
-    QUARANTINED = "quarantined"
-    ADMIN_CLOSED = "admin_closed"
-    UNKNOWN = "unknown"
+# A5 unification (2026-06-29): LifecyclePhase IS the canonical PositionPhase — one
+# enum, not two. Members + values are identical; LifecyclePhase is retained as the
+# name used across lifecycle_manager + its consumers.
+LifecyclePhase = PositionPhase
 
 
 PENDING_EXIT_RUNTIME_STATES = frozenset(
@@ -142,12 +137,20 @@ def coerce_lifecycle_phase(value: LifecyclePhase | str | None) -> LifecyclePhase
     return LifecyclePhase(normalized)
 
 
-def phase_for_runtime_position(
+def _legacy_runtime_phase_dispatch(
     *,
     state: object,
     exit_state: object = "",
     chain_state: object = "",
 ) -> LifecyclePhase:
+    """FROZEN behavioral oracle — the original single-state-string phase dispatcher.
+
+    Retained ONLY as the equivalence reference that pins the authority-aware reducer
+    (derive_runtime_position_phase) to the battle-tested live phase semantics
+    (tests/test_a5_phase_equivalence.py). NOT called at runtime — the runtime authority
+    is phase_for_runtime_position, which now delegates to the reducer. Do not edit this
+    body: if phase semantics must change, change the reducer and update both together so
+    the antibody keeps proving they agree."""
     normalized_state = _normalized_state(state)
     normalized_exit_state = _normalized_state(exit_state)
     normalized_chain_state = _normalized_state(chain_state)
@@ -177,11 +180,73 @@ def phase_for_runtime_position(
         return LifecyclePhase.DAY0_WINDOW
     if normalized_state in {"entered", "holding"}:
         return LifecyclePhase.ACTIVE
-    logger.warning(
-        "unmapped runtime position state %r — returning UNKNOWN phase",
-        normalized_state,
-    )
     return LifecyclePhase.UNKNOWN
+
+
+def phase_for_runtime_position(
+    *,
+    state: object,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> LifecyclePhase:
+    """Canonical runtime phase projection (A5).
+
+    A5 CUTOVER (consult 6a42bc3d): delegates to the authority-aware reducer
+    (derive_position_phase via derive_runtime_position_phase), proven byte-identical to
+    the frozen legacy dispatcher over the full runtime domain
+    (tests/test_a5_phase_equivalence.py). The authority-aware reducer is now the single
+    phase-decision authority; a chain-quarantine fallback no longer re-quarantines an
+    economically_closed / pending_exit position. The legacy elif dispatcher survives only
+    as the equivalence oracle in _legacy_runtime_phase_dispatch."""
+    phase = derive_runtime_position_phase(
+        state=state, exit_state=exit_state, chain_state=chain_state
+    )
+    if phase is LifecyclePhase.UNKNOWN:
+        logger.warning(
+            "unmapped runtime position state %r — returning UNKNOWN phase",
+            _normalized_state(state),
+        )
+    return phase
+
+
+def derive_runtime_position_phase(
+    *,
+    state: object,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> LifecyclePhase:
+    """Authority-aware bridge from the runtime (state, exit_state, chain_state) triple
+    to the canonical derive_position_phase. Maps the primary `state` to EXPLICIT A5
+    facts and chain/exit to FALLBACK facts, replicating phase_for_runtime_position's
+    authority model. Proven byte-identical to phase_for_runtime_position over the full
+    runtime domain (tests/test_a5_phase_equivalence.py).
+
+    NOT yet wired into any writer: the canonical runtime projection remains
+    phase_for_runtime_position until the A5 cutover. This is the proven-equivalent
+    reducer the cutover will switch to (it eliminates the stranding bug where a chain-
+    quarantine flag would re-quarantine an economically_closed / pending_exit position).
+    """
+    normalized_state = _normalized_state(state)
+    normalized_exit_state = _normalized_state(exit_state)
+    normalized_chain_state = _normalized_state(chain_state)
+    return derive_position_phase(
+        has_admin_close=(normalized_state == "admin_closed"),
+        is_voided=(normalized_state == "voided"),
+        has_settlement=(normalized_state == "settled"),
+        has_economic_close=(normalized_state == "economically_closed"),
+        has_explicit_quarantine=(normalized_state == "quarantined"),
+        has_explicit_pending_exit=(normalized_state == "pending_exit"),
+        has_chain_quarantine_fallback=(
+            normalized_chain_state in {"quarantined", "quarantine_expired"}
+        ),
+        has_exit_fallback=(
+            normalized_exit_state in PENDING_EXIT_RUNTIME_STATES
+            or normalized_chain_state == "exit_pending_missing"
+        ),
+        has_positive_exposure=(normalized_state in {"entered", "holding", "day0_window"}),
+        in_day0_window=(normalized_state == "day0_window"),
+        has_entry_intent=(normalized_state == "pending_tracked"),
+    )
 
 
 def fold_lifecycle_phase(
@@ -219,6 +284,16 @@ def enter_pending_exit_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    normalized_chain_state = _normalized_state(chain_state)
+    if (
+        current_phase == LifecyclePhase.QUARANTINED
+        and normalized_chain_state
+        in {
+            "entry_authority_quarantined",
+            "chain_absent_confirmed_position_unattributed",
+        }
+    ):
+        return LifecyclePhase.PENDING_EXIT.value
     # Idempotency: positions that have already advanced past PENDING_EXIT
     # (economically_closed via market resolution, terminal phases, etc.) cannot
     # legally transition back to PENDING_EXIT — there is no remaining inventory
@@ -234,10 +309,7 @@ def enter_pending_exit_runtime_state(
     # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
     # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
     # must be layered explicitly here as the originally-observed crash case.
-    if (
-        current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
-        or is_terminal_state(current_phase)
-    ):
+    if current_phase == LifecyclePhase.ECONOMICALLY_CLOSED or is_terminal_state(current_phase):
         return current_phase.value
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value

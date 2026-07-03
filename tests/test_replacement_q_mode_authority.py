@@ -104,7 +104,7 @@ def test_fusion_override_raises_blocks_live_posterior(monkeypatch) -> None:
 
 def test_fused_q_build_raises_blocks_live_posterior(monkeypatch) -> None:
     """The fused-q construction itself raises (bin_probability_settlement boom) -> mode ==
-    FUSED_Q_BUILD_FAILED (DISTINCT from flag-off SOFT_ANCHOR_FALLBACK), gate rejects."""
+    FUSED_Q_BUILD_FAILED (DISTINCT from flag-off fused-center-only mode), gate rejects."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)

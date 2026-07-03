@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-06-21; last_reused=2026-06-21
+# Lifecycle: created=2026-06-20; last_reviewed=2026-07-03; last_reused=2026-07-03
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-06-21
+# Last reused or audited: 2026-07-03
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -99,6 +100,18 @@ def _seed_position_current(conn: sqlite3.Connection, position: Position) -> None
     proj = build_position_current_projection(position)
     upsert_position_current(conn, proj)
     conn.commit()
+
+
+def _executable_snapshot_context(*, bid: str = "0.50", ask: str = "0.52") -> dict[str, object]:
+    return {
+        "executable_snapshot_id": "snapshot-test-1",
+        "executable_snapshot_hash": "snapshot-hash-test-1",
+        "executable_snapshot_min_tick_size": "0.01",
+        "executable_snapshot_min_order_size": "0.01",
+        "executable_snapshot_neg_risk": False,
+        "executable_snapshot_orderbook_top_bid": bid,
+        "executable_snapshot_orderbook_top_ask": ask,
+    }
 
 
 def _rpc_returning(balance_int: int):
@@ -557,6 +570,116 @@ class TestDay0StaticClosedBehavioral:
             "terminal MARKET_CLOSED stamp (post-eval)"
         )
 
+    def test_venue_closed_still_records_day0_hard_fact(self, monkeypatch):
+        """Venue closed blocks sell submission, not settlement-observation truth."""
+
+        import logging as _logging
+        from datetime import datetime, timezone
+
+        from src.engine import cycle_runtime
+
+        conn = _db()
+        pos = _make_position(
+            trade_id="day0-venue-closed-hard-fact",
+            state="day0_window",
+            chain_state="synced",
+            direction="buy_no",
+            condition_id=_CONDITION_ID,
+            market_id=_CONDITION_ID,
+            no_token_id=_ASSET_ID,
+            token_id="yes-token",
+            p_posterior=0.8,
+            entry_price=0.77,
+        )
+        _seed_position_current(conn, pos)
+        portfolio = _portfolio(pos)
+
+        class ClosedClob:
+            def get_clob_market_info(self, condition_id):
+                return {"closed": True, "accepting_orders": False}
+
+            def get_best_bid_ask(self, token_id):  # pragma: no cover - must not be reached
+                raise AssertionError("closed hard-fact monitor should not need a quote")
+
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None, world_conn=None, **kwargs: SimpleNamespace(
+                action="EXIT_DEAD_BIN",
+                reason="observed high entered held NO bin",
+                source="durable_observation_instants",
+            ),
+        )
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn_, pos_, *, deps, **kwargs: True,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+            def add_exit(self, *a, **k):
+                pass
+
+        deps = type(
+            "Deps",
+            (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult",
+                    (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_venue_closed_hard_fact"),
+                "cities_by_name": {
+                    "London": type("City", (), {"timezone": "Europe/London"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 20, 6, 0, tzinfo=timezone.utc)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            ClosedClob(),
+            portfolio,
+            Artifact(),
+            type("Tracker", (), {"record_exit": lambda self, position: None})(),
+            summary,
+            deps=deps,
+            exit_order_submit_enabled=False,
+        )
+
+        assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
+        assert summary.get("day0_hard_fact_closed_market_monitors", 0) == 1
+        assert summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) == 1
+        assert results and results[0].fresh_prob == pytest.approx(0.0)
+        assert "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED" in results[0].exit_reason
+        assert pos.last_monitor_prob == pytest.approx(0.0)
+        assert pos.last_monitor_prob_is_fresh is True
+        assert pos.last_monitor_market_price is None
+        assert pos.last_monitor_market_price_is_fresh is False
+        hold_event = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND caused_by = 'market_closed_hold_to_settlement'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (pos.trade_id,),
+        ).fetchone()
+        assert hold_event is not None
+        assert json.loads(hold_event["payload_json"])["semantic_event"] == (
+            "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+        )
+
 
 # ---------------------------------------------------------------------------
 # FIX 2d — canonical EXIT_ORDER_POSTED from the spine emitter
@@ -586,7 +709,7 @@ class TestCanonicalExitOrderPostedProvenance:
         with patch("src.execution.exit_lifecycle.place_sell_order", return_value=placed), \
              patch(
                  "src.execution.exit_lifecycle._latest_or_capture_exit_snapshot_context",
-                 return_value={},
+                 return_value=_executable_snapshot_context(bid="0.50", ask="0.52"),
              ), \
              patch(
                  "src.execution.exit_lifecycle.check_sell_collateral",
@@ -632,6 +755,74 @@ class TestCanonicalExitOrderPostedProvenance:
             "canonical EXIT_ORDER_POSTED must carry source_module="
             "src.execution.exit_lifecycle (not command_recovery)"
         )
+
+    def test_exit_intent_writes_decision_evidence_payload(self):
+        pos = _make_position(state="day0_window", exit_state="")
+        conn = _db()
+        _seed_position_current(conn, pos)
+
+        exit_context = ExitContext(
+            current_market_price=0.5,
+            current_market_price_is_fresh=True,
+            best_bid=0.48,
+            best_ask=0.52,
+            fresh_prob=0.4,
+            fresh_prob_is_fresh=True,
+            market_vig=0.04,
+            hours_to_settlement=0.5,
+            position_state="day0_window",
+            day0_active=True,
+            exit_reason="SETTLEMENT_IMMINENT",
+        )
+        exit_intent = build_exit_intent(pos, exit_context)
+        placed = {"orderID": "ord-exit-intent-1", "status": "placed", "price": 0.48, "shares": 10.0}
+
+        with patch("src.execution.exit_lifecycle.place_sell_order", return_value=placed), \
+             patch(
+                 "src.execution.exit_lifecycle._latest_or_capture_exit_snapshot_context",
+                 return_value=_executable_snapshot_context(bid="0.48", ask="0.52"),
+             ), \
+             patch(
+                 "src.execution.exit_lifecycle.check_sell_collateral",
+                 return_value=(True, ""),
+             ), \
+             patch(
+                 "src.execution.exit_lifecycle._refresh_exit_collateral_snapshot_for_submit",
+                 return_value=None,
+             ):
+            execute_exit(
+                portfolio=_portfolio(pos),
+                position=pos,
+                exit_context=exit_context,
+                clob=None,
+                conn=conn,
+                exit_intent=exit_intent,
+            )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (pos.trade_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert payload["exit_intent_reason"] == "SETTLEMENT_IMMINENT"
+        assert payload["exit_intent_current_market_price"] == pytest.approx(0.5)
+        assert payload["exit_intent_best_bid"] == pytest.approx(0.48)
+        assert payload["exit_intent_best_ask"] == pytest.approx(0.52)
+        assert payload["exit_intent_market_vig"] == pytest.approx(0.04)
+        assert payload["exit_intent_fresh_prob"] == pytest.approx(0.4)
+        assert payload["exit_intent_fresh_prob_is_fresh"] is True
+        assert payload["exit_intent_hours_to_settlement"] == pytest.approx(0.5)
+        assert payload["exit_intent_position_state"] == "day0_window"
+        assert payload["exit_intent_day0_active"] is True
 
 
 # ---------------------------------------------------------------------------

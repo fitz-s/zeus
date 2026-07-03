@@ -167,6 +167,8 @@ def write_regret_decomposition(
     decision_event_id: str,
     components: RegretComponents,
     *,
+    strategy_id: str,
+    cohort_tag: str = "",
     conn: sqlite3.Connection,
     computed_at: Optional[datetime] = None,
 ) -> int:
@@ -184,14 +186,16 @@ def write_regret_decomposition(
     cursor = conn.execute(
         """
         INSERT INTO regret_decompositions (
-            experiment_id, decision_event_id,
+            experiment_id, strategy_id, cohort_tag, decision_event_id,
             forecast_error_usd, observation_error_usd, quote_error_usd,
             non_fill_error_usd, fee_error_usd, timing_error_usd,
             settlement_ambiguity_error_usd, total_regret_usd, computed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             experiment_id,
+            strategy_id,
+            cohort_tag,
             decision_event_id,
             components.forecast_error_usd,
             components.observation_error_usd,

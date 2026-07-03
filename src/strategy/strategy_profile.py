@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence) + Phase 3 T2 (2026-05-21): _classify_via_registry SCAFFOLD per 04_PHASE_3_SHOULDER.md §2 T2.
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence).
 """StrategyProfile registry — single source of per-strategy authority.
 
 What this module replaces
@@ -63,13 +63,12 @@ REGISTRY_PATH: Path = REPO_ROOT / "architecture" / "strategy_profile_registry.ya
 
 _VALID_LIVE_STATUSES: frozenset[str] = frozenset({
     "live",        # boot-OK + runtime-OK
-    "shadow",      # boot-OK + runtime-blocked (decisions logged for promotion)
     "blocked",     # boot-rejected + runtime-blocked
     "deprecated",  # synonym for blocked, kept for grep history
 })
 
 
-_VALID_METRIC_SUPPORTS: frozenset[str] = frozenset({"live", "shadow", "blocked"})
+_VALID_METRIC_SUPPORTS: frozenset[str] = frozenset({"live", "blocked"})
 
 
 # ── exceptions ─────────────────────────────────────────────────────── #
@@ -110,7 +109,6 @@ class StrategyProfile:
     metric_support: dict[str, str]
     kelly_default_multiplier: float
     kelly_phase_overrides: dict[str, float]
-    min_shadow_decisions: int
     min_settled_decisions: int
     promotion_evidence_ref: Optional[str]
     # Phase 6 T1: evidence ladder fields
@@ -120,6 +118,7 @@ class StrategyProfile:
     min_entry_price: float = 0.05
     min_strategy_notional_usd: float = 1.0
     min_expected_profit_usd: float = 0.05
+    min_submit_edge_density: float = 0.02
     allow_ultra_low_tail: bool = False
     partial_source_run_allowed: bool = True
     complete_required_for_tail_orders: bool = True
@@ -143,10 +142,8 @@ class StrategyProfile:
     def is_boot_allowed(self) -> bool:
         """True iff the daemon may have this strategy enabled at boot.
 
-        Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``. Boot
-        status is broader than runtime: shadow strategies boot (collect
-        decision logs for promotion evidence) but never enter."""
-        return self.live_status in {"live", "shadow"}
+        Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``."""
+        return self.live_status == "live"
 
     def is_phase_allowed(self, market_phase: str) -> bool:
         """True iff the strategy is semantically valid in this market phase.
@@ -179,7 +176,7 @@ class StrategyProfile:
 
     def metric_is_live(self, temperature_metric: str) -> bool:
         """True iff entries on this metric reach the live order book.
-        ``shadow`` and ``blocked`` both return False."""
+        ``blocked`` returns False."""
         return self.metric_support.get(temperature_metric) == "live"
 
 
@@ -291,7 +288,6 @@ _REQUIRED_FIELDS = {
     "metric_support",
     "kelly_default_multiplier",
     "kelly_phase_overrides",
-    "min_shadow_decisions",
     "min_settled_decisions",
     "promotion_evidence_ref",
 }
@@ -300,6 +296,7 @@ _OPTIONAL_FIELDS = {
     "min_entry_price",
     "min_strategy_notional_usd",
     "min_expected_profit_usd",
+    "min_submit_edge_density",
     "allow_ultra_low_tail",
     "partial_source_run_allowed",
     "complete_required_for_tail_orders",
@@ -361,6 +358,11 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         raw.get("min_expected_profit_usd", 0.05),
         key=key,
         field_name="min_expected_profit_usd",
+    )
+    min_submit_edge_density = _coerce_nonnegative_float(
+        raw.get("min_submit_edge_density", 0.02),
+        key=key,
+        field_name="min_submit_edge_density",
     )
     allow_ultra_low_tail = raw.get("allow_ultra_low_tail", False)
     if not isinstance(allow_ultra_low_tail, bool):
@@ -451,7 +453,6 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         metric_support=_coerce_metric_support(raw["metric_support"], key=key),
         kelly_default_multiplier=float(kelly_default),
         kelly_phase_overrides=_coerce_phase_overrides(raw["kelly_phase_overrides"], key=key),
-        min_shadow_decisions=int(raw["min_shadow_decisions"]),
         min_settled_decisions=int(raw["min_settled_decisions"]),
         promotion_evidence_ref=(
             None if raw["promotion_evidence_ref"] in (None, "null", "")
@@ -463,6 +464,7 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         min_entry_price=min_entry_price,
         min_strategy_notional_usd=min_strategy_notional_usd,
         min_expected_profit_usd=min_expected_profit_usd,
+        min_submit_edge_density=min_submit_edge_density,
         allow_ultra_low_tail=allow_ultra_low_tail,
         partial_source_run_allowed=partial_source_run_allowed,
         complete_required_for_tail_orders=complete_required_for_tail_orders,
@@ -533,8 +535,7 @@ def all_profiles() -> dict[str, StrategyProfile]:
 def live_safe_keys() -> frozenset[str]:
     """Strategies allowed at daemon boot — replaces
     ``LIVE_SAFE_STRATEGIES`` in control_plane. Includes every strategy
-    with ``live_status in {live, shadow}`` (shadow strategies boot to
-    collect decision logs but never enter)."""
+    with ``live_status == live``."""
     return frozenset(
         k for k, p in _ensure_loaded().items() if p.is_boot_allowed()
     )
@@ -562,6 +563,23 @@ def live_allowed_keys(*, conn=None) -> frozenset[str]:
             )
         )
     )
+
+
+def historical_attribution_keys() -> frozenset[str]:
+    """Retired strategy keys that remain reportable for settled-history slices.
+
+    These keys are not boot-safe and cannot place live orders.  They stay visible
+    only so attribution, realized-edge, and reaction-latency reports can explain
+    historical rows whose strategy_key was valid when the position was opened.
+    """
+
+    return frozenset({"shoulder_sell"})
+
+
+def reportable_strategy_keys() -> frozenset[str]:
+    """Strategy keys visible in read-only attribution/reporting projections."""
+
+    return live_safe_keys() | historical_attribution_keys()
 
 
 def cycle_axis_dispatch_inverse() -> dict[str, frozenset[str]]:
@@ -601,8 +619,7 @@ def allowed_discovery_modes_inverse() -> dict[str, frozenset[str]]:
     whose family legitimately spans two discovery modes (e.g. ``opening_inertia``
     over both ``opening_hunt`` and ``imminent_open_capture``) but owns dispatch
     in only one was phase-mismatched in the other; and strategies with
-    ``cycle_axis_dispatch_mode: null`` (e.g. shadow ``day0_nowcast_entry``,
-    allowed in ``day0_capture``) were excluded from every mode's allowed set.
+    ``cycle_axis_dispatch_mode: null`` were excluded from every mode's allowed set.
 
     Strategies with an empty ``allowed_discovery_modes`` (blocked) contribute
     nothing, matching the prior fail-closed posture for blocked strategies.
@@ -627,82 +644,6 @@ def kelly_default_multiplier(strategy_key: str) -> float:
         return 0.0
     return profile.kelly_default_multiplier
 
-
-
-# ── Phase 3 T2 — registry-driven shoulder classifier ─────────────── #
-
-# Type alias: Optional[ShoulderStrategyVNext] — avoids circular import at
-# module level (ShoulderStrategyVNext imports NoTradeReason + WeatherRegimeTag;
-# lazy import inside function body is the safe pattern).
-# Deviation from dispatch literal "ClassificationResult": ClassificationResult
-# is defined here as an alias so dispatch signature works and v3 callsite shape
-# aligns (Optional[ShoulderStrategyVNext] is the concrete type).
-ClassificationResult = object  # Runtime: Optional["ShoulderStrategyVNext"]; see body.
-
-
-def _classify_via_registry(strategy_id: str, context) -> "ClassificationResult":
-    """Registry-driven shoulder classification helper (canonical home per plan §2 T2 m2).
-
-    Replaces hardcoded shoulder branches at evaluator.py L1462/L1478/L1494
-    and cycle_runner.py L456. Called ONLY for shoulder paths; cycle-axis
-    short-circuits (settlement_capture / opening_inertia / imminent_open_capture)
-    ARE UNCHANGED per AR1.
-
-    Args:
-        strategy_id: Strategy key from the profile registry (e.g. "shoulder_sell").
-        context:     EdgeContext or equivalent carrier; provides edge, candidate,
-                     market_phase, conn fields for classify_shoulder_candidate.
-
-    Returns:
-        ClassificationResult = Optional[ShoulderStrategyVNext]:
-          - ShoulderStrategyVNext instance if candidate passes all gates.
-          - None if strategy is unknown, blocked, or context is insufficient.
-
-    Fail-closed: ProfileNotFound (unknown strategy_id) returns None.
-
-    T2 thin (Pattern B): returns ShoulderStrategyVNext with all probabilistic
-    fields = nan and no_trade_reason = SHOULDER_NO_TRADE_GATE when topology
-    matches. Probabilistic fields wired in T3+.
-    """
-    # Fail-closed: unknown strategy → None (no entry, no risk).
-    profile = try_get(strategy_id)
-    if profile is None:
-        return None
-
-    # Live-status gate: blocked strategies (including refuted shoulder_sell) must not
-    # classify any edges. Empty allowed_bin_topology is a subset of everything so
-    # it does not implicitly block; this explicit gate does.
-    if profile.live_status == "blocked":
-        return None
-
-    # Profile gate — only pure-shoulder strategies (open_shoulder topology ONLY)
-    # route through this classifier. Strategies that allow mixed topologies
-    # (e.g. opening_inertia allows point + finite_range + open_shoulder) use
-    # their own classification path; routing them here would misclassify.
-    # Also blocks strategies with empty allowed_bin_topology.
-    if not profile.allowed_bin_topology:
-        return None
-    if not (profile.allowed_bin_topology <= frozenset({"open_shoulder"})):
-        return None
-
-    edge = getattr(context, "edge", None)
-    if edge is None:
-        return None
-
-    # Topology gate — only open-shoulder buy_no edges route to shoulder classifier.
-    if not (getattr(edge, "direction", None) == "buy_no" and
-            getattr(getattr(edge, "bin", None), "is_shoulder", False)):
-        return None
-
-    # Lazy import avoids circular dependency: shoulder_strategy_vnext imports
-    # NoTradeReason + WeatherRegimeTag; this module imports strategy_profile.
-    from src.contracts.shoulder_strategy_vnext import classify_shoulder_candidate
-
-    candidate = getattr(context, "candidate", None)
-    market_phase = getattr(context, "market_phase", None)
-    conn = getattr(context, "conn", None)
-
-    return classify_shoulder_candidate(edge, candidate, market_phase, conn)
 
 
 # ── test helper ────────────────────────────────────────────────────── #

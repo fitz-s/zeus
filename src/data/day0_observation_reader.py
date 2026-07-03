@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
 
@@ -41,6 +41,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Optional, Sequence
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,17 @@ _EXTREMA_SQL = """
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
       AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
 """
 
 _CURRENT_TEMP_SQL = """
@@ -141,8 +153,42 @@ _CURRENT_TEMP_SQL = """
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
       AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
       AND temp_current IS NOT NULL
     ORDER BY utc_timestamp DESC
+    LIMIT 1
+"""
+
+_LATEST_CONTEXT_SQL = """
+    SELECT temp_current, running_max, running_min, station_id, temp_unit, imported_at, source_role
+    FROM observation_instants
+    WHERE city = ?
+      AND target_date = ?
+      AND source = ?
+      AND datetime(utc_timestamp) <= datetime(?)
+      AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
+    ORDER BY datetime(utc_timestamp) DESC, datetime(imported_at) DESC, id DESC
     LIMIT 1
 """
 
@@ -283,3 +329,179 @@ def read_day0_observed_extrema(
         last_observation_time_utc=last_observation_time_utc,
         provenance=provenance,
     )
+
+
+def source_priority_for_city(city: object) -> tuple[str, ...]:
+    """Return settlement-source-specific priority for executable Day0 observations."""
+
+    source_type = str(getattr(city, "settlement_source_type", "") or "wu_icao").strip()
+    station = str(getattr(city, "wu_station", "") or "").strip().lower()
+    if source_type == "hko":
+        return ("hko_hourly_accumulator",)
+    if source_type == "noaa":
+        if station:
+            return (f"ogimet_metar_{station}",)
+        return tuple(src for src in _DEFAULT_SOURCE_PRIORITY if src.startswith("ogimet_metar_"))
+    if source_type == "wu_icao":
+        return ("wu_icao_history",)
+    return _DEFAULT_SOURCE_PRIORITY
+
+
+def read_day0_observation_context_from_instants(
+    conn: sqlite3.Connection,
+    *,
+    city: object,
+    target_date: str,
+    decision_time_utc: datetime,
+    source_priority: Sequence[str] | None = None,
+):
+    """Build the executable Day0 observation context from canonical observation_instants.
+
+    This is the shared live source for entry and monitor when the settlement-grade
+    observed-so-far surface is already materialized locally. The WU/ICAO and
+    Ogimet writers store the authoritative running extrema but generally do not
+    store an exact ``temp_current``; current temperature is diagnostic for the
+    high/low settlement math, so this adapter supplies a finite latest-hour
+    diagnostic value only to satisfy the typed context contract.
+    """
+
+    from src.data.observation_client import Day0ObservationContext
+
+    city_name = str(getattr(city, "name", "") or "")
+    timezone_name = str(getattr(city, "timezone", "") or "")
+    unit = str(getattr(city, "settlement_unit", "") or "C")
+    if not city_name or not timezone_name:
+        return None
+    priority = tuple(source_priority or source_priority_for_city(city))
+    result = read_day0_observed_extrema(
+        conn,
+        city=city_name,
+        target_date=str(target_date),
+        timezone_name=timezone_name,
+        decision_time_utc=decision_time_utc,
+        source_priority=priority,
+    )
+    if result.coverage_status == COVERAGE_NONE or result.chosen_source is None:
+        return None
+    if result.high_so_far is None or result.low_so_far is None:
+        return None
+    observation_time = result.last_observation_time_utc
+    if not observation_time:
+        return None
+
+    decision_str = (
+        decision_time_utc.astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    )
+    auth_ph = _auth_placeholders()
+    latest_sql = _LATEST_CONTEXT_SQL.format(auth_placeholders=auth_ph)
+    try:
+        latest = conn.execute(
+            latest_sql,
+            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        latest = conn.execute(
+            """
+            SELECT temp_current, running_max, running_min, source_role
+            FROM observation_instants
+            WHERE city = ?
+              AND target_date = ?
+              AND source = ?
+              AND datetime(utc_timestamp) <= datetime(?)
+              AND authority IN ({auth_placeholders})
+              AND COALESCE(causality_status, '') = 'OK'
+              AND (
+                    (
+                        COALESCE(source_role, '') = 'historical_hourly'
+                        AND COALESCE(training_allowed, 0) = 1
+                    )
+                    OR (
+                        COALESCE(source_role, '') = 'runtime_monitoring'
+                        AND COALESCE(training_allowed, 0) = 0
+                    )
+              )
+            ORDER BY datetime(utc_timestamp) DESC
+            LIMIT 1
+            """.format(auth_placeholders=auth_ph),
+            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+        ).fetchone()
+    latest_current = latest_hi = latest_low = None
+    station_id = ""
+    observed_unit = unit
+    available_at = result.decision_time_utc
+    latest_source_role = ""
+    if latest is not None:
+        latest_current = latest[0]
+        latest_hi = latest[1]
+        latest_low = latest[2]
+        if len(latest) > 3:
+            if len(latest) == 4:
+                latest_source_role = str(latest[3] or "").strip()
+            else:
+                station_id = str(latest[3] or "").strip().upper()
+        if len(latest) > 4:
+            observed_unit = str(latest[4] or unit or "C")
+        if len(latest) > 5:
+            available_at = str(latest[5] or result.decision_time_utc)
+        if len(latest) > 6:
+            latest_source_role = str(latest[6] or "").strip()
+
+    if (
+        latest_source_role == "runtime_monitoring"
+        and _finite_float(latest_current) is None
+    ):
+        current_temp = float("nan")
+    else:
+        current_temp = _diagnostic_current_temp(
+            latest_current,
+            latest_hi,
+            latest_low,
+            fallback_high=result.high_so_far,
+            fallback_low=result.low_so_far,
+        )
+    return Day0ObservationContext(
+        current_temp=current_temp,
+        high_so_far=float(result.high_so_far),
+        low_so_far=float(result.low_so_far),
+        source=str(result.chosen_source),
+        observation_time=str(observation_time),
+        unit=observed_unit,
+        station_id=station_id,
+        sample_count=int(result.row_count),
+        last_sample_time=str(observation_time),
+        coverage_status=str(result.coverage_status),
+        observation_available_at=available_at,
+        provider_reported_time="canonical_observation_instants",
+    )
+
+
+def _diagnostic_current_temp(
+    current_temp: object,
+    latest_high: object,
+    latest_low: object,
+    *,
+    fallback_high: object,
+    fallback_low: object,
+) -> float:
+    for value in (current_temp,):
+        parsed = _finite_float(value)
+        if parsed is not None:
+            return parsed
+    latest_hi = _finite_float(latest_high)
+    latest_lo = _finite_float(latest_low)
+    if latest_hi is not None and latest_lo is not None:
+        return (latest_hi + latest_lo) / 2.0
+    for value in (latest_hi, latest_lo, fallback_high, fallback_low):
+        parsed = _finite_float(value)
+        if parsed is not None:
+            return parsed
+    return float("nan")
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isfinite(parsed) else None

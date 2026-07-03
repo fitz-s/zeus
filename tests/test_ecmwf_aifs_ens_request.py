@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect AIFS ENS OpenData request contract for sampled-2t replacement shadow extraction.
+# Purpose: Protect AIFS ENS OpenData request contract for sampled-2t replacement blocked candidate extraction.
 # Reuse: Run before changing AIFS ENS OpenData request parameters or artifact capture metadata.
-# Authority basis: ECMWF OpenData AIFS ENS sampled-2t shadow integration; not B0 calibration authority.
+# Authority basis: ECMWF OpenData AIFS ENS sampled-2t blocked-candidate integration; not B0 calibration authority.
 """AIFS ENS OpenData request contract tests."""
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def test_aifs_ens_request_uses_aifs_ens_model_and_sampled_2t_steps(tmp_path) -> 
     assert request.source_cycle_time == datetime(2026, 6, 6, 6, tzinfo=timezone.utc)
 
 
-def test_aifs_ens_request_metadata_is_shadow_only_and_product_isolated(tmp_path) -> None:
+def test_aifs_ens_request_metadata_is_blocked_only_and_product_isolated(tmp_path) -> None:
     request = build_aifs_ens_open_data_request(
         forecast_date=date(2026, 6, 6),
         cycle_hour=0,
@@ -62,7 +62,7 @@ def test_aifs_ens_request_metadata_is_shadow_only_and_product_isolated(tmp_path)
     assert metadata["class"] == "ai"
     assert metadata["model"] == "aifs-ens"
     assert metadata["measurement_policy"] == "sampled_2t_6h_local_calendar_day"
-    assert metadata["trade_authority_status"] == "SHADOW_ONLY"
+    assert metadata["trade_authority_status"] == "BLOCKED"
     assert metadata["training_allowed"] is False
     assert request.high_data_version == HIGH_DATA_VERSION
     assert request.low_data_version == LOW_DATA_VERSION
@@ -83,7 +83,7 @@ def test_aifs_ens_request_rejects_wrong_cycle_steps_or_authority(tmp_path) -> No
         )
 
     request = build_aifs_ens_open_data_request(forecast_date="2026-06-06", cycle_hour=0, target_path=tmp_path / "aifs.grib2")
-    with pytest.raises(ValueError, match="shadow-only"):
+    with pytest.raises(ValueError, match="blocked"):
         type(request)(
             forecast_date=request.forecast_date,
             cycle_hour=request.cycle_hour,

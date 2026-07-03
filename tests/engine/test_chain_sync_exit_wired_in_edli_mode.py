@@ -13,7 +13,7 @@
 ROOT that this test guards against (Blocker #56):
   - run_chain_sync + execute_monitoring_phase were only reachable through
     CycleRunner.run_cycle(), registered only under live_execution_mode=="legacy_cron".
-  - Daemon runs edli_shadow_no_submit → block skipped → chain_shares NULL (101/101),
+  - Daemon runs an EDLI event-driven mode → block skipped → chain_shares NULL (101/101),
     7 exit_pending_missing stuck, 1 Shanghai settled-but-active.
 
 This is a RELATIONSHIP test: it boots the scheduler (same path as the real daemon)
@@ -56,6 +56,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
     monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_write_loaded_sha_state", lambda _sha: None)
     monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
     monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
     monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
@@ -64,8 +65,13 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
     monkeypatch.setattr(main, "_assert_edli_stage_readiness", lambda _cfg: None)
+    monkeypatch.setattr(main, "_ensure_day0_identity_platt_fit_at_boot", lambda: None)
     monkeypatch.setattr(main, "_edli_boot_fill_bridge_recovery", lambda: None)
     monkeypatch.setattr(main, "_edli_boot_settlement_redeem_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_command_recovery_once", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_invalid_pending_entry_authority_cancel_once", lambda: None)
+    monkeypatch.setattr(main, "assert_calibration_pin_shape_is_dict", lambda _cfg: None)
+    monkeypatch.setattr(main, "assert_frozen_as_of_not_stale", lambda _cfg, **_kw: None)
     # _startup_wallet_check is called as _startup_wallet_check(bankroll_record=...) at the
     # current boot site, so the stub must accept arbitrary args/kwargs (pre-existing harness
     # drift: a no-arg lambda raised TypeError before the scheduler was ever built).
@@ -158,7 +164,7 @@ def test_exit_monitor_registered_in_edli_live(monkeypatch):
     job_ids = {job.id for job in scheduler.jobs}
     assert "exit_monitor" in job_ids, (
         "exit_monitor (the exit-SUBMIT phase that STAYS in P1 after the P4 chain-sync lift) "
-        "must be registered under edli_shadow_no_submit so exit monitoring runs in EDLI mode"
+        "must be registered under edli_live so exit monitoring runs in EDLI mode"
     )
     # And the bundled chain-sync job id must be GONE from the order daemon (chain-sync lifted).
     assert "chain_sync_and_exit_monitor" not in job_ids, (

@@ -31,7 +31,7 @@ USAGE
         --forecasts-db state/zeus-forecasts.db \
         --family full_transport_v1 \
         --metric high \
-        --out docs/operations/ROW_REPRODUCIBILITY_AUDIT_2026-05-27.csv
+        --out docs/archive/2026-Q2/operations_historical/ROW_REPRODUCIBILITY_AUDIT_2026-05-27.csv
 """
 from __future__ import annotations
 

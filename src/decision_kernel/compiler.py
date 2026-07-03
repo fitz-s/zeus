@@ -102,6 +102,73 @@ class NoSubmitCompileResult:
 class DecisionCompiler:
     """Compile typed no-submit authority evidence into a certificate DAG."""
 
+    def compile_authority_graph(
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        mode: Literal["LIVE"] = "LIVE",
+        proof_bundle: NoSubmitProofBundle | None = None,
+    ) -> NoSubmitCompileResult:
+        """Compile the authority parent graph without a no-submit decision leaf.
+
+        Live execution consumes the same typed proof bundle as the no-submit
+        compiler, but the parents of Actionable/FinalIntent must be LIVE-mode
+        certificates. This method verifies the same bundle consistency and emits
+        only the reusable authority graph in the requested live mode.
+        """
+
+        decision_time = _utc(decision_time)
+        if mode != "LIVE":
+            return self._rejected(
+                event,
+                decision_time=decision_time,
+                mode=mode,
+                stage="CLOCK_MODE",
+                reason_code="LIVE_AUTHORITY_GRAPH_REQUIRES_LIVE_MODE",
+            )
+        event_clock = self._event_clock(event)
+        if event_clock.persisted_at > decision_time:
+            return self._rejected(
+                event,
+                decision_time=decision_time,
+                mode=mode,
+                stage="CLOCK_MODE",
+                reason_code="EVENT_PERSISTED_AFTER_DECISION_TIME",
+                reason_detail=f"persisted_at={event_clock.persisted_at.isoformat()}",
+            )
+        if proof_bundle is None:
+            return self._rejected(
+                event,
+                decision_time=decision_time,
+                mode=mode,
+                stage="LIVE_AUTHORITY_GRAPH",
+                reason_code="NO_SUBMIT_PROOF_BUNDLE_REQUIRED",
+                reason_detail="Compiler requires typed authority evidence, not a receipt projection.",
+            )
+        try:
+            _validate_no_submit_parent_consistency(
+                event,
+                proof_bundle,
+                decision_time=decision_time,
+            )
+            certificates = self._base_authority_certificates(
+                event,
+                decision_time=decision_time,
+                proof_bundle=proof_bundle,
+                mode=mode,
+            )
+        except (CertificateVerificationError, ValueError) as exc:
+            return self._rejected(
+                event,
+                decision_time=decision_time,
+                mode=mode,
+                stage="LIVE_AUTHORITY_GRAPH",
+                reason_code="LIVE_AUTHORITY_GRAPH_REJECTED",
+                reason_detail=str(exc),
+            )
+        return NoSubmitCompileResult("VERIFIED", None, certificates, ())
+
     def compile_no_submit(
         self,
         event: OpportunityEvent,
@@ -139,51 +206,32 @@ class DecisionCompiler:
                 reason_detail="Compiler requires typed authority evidence, not a receipt projection.",
             )
 
-        clock = self._clock_certificate(event, decision_time=decision_time)
-        causal = build_certificate(
-            certificate_type=claims.CAUSAL_EVENT,
-            semantic_key=f"event:{event.event_id}",
-            claim_type="causal_event",
-            mode="NO_SUBMIT",
+        base_parents = self._base_authority_certificates(
+            event,
             decision_time=decision_time,
-            payload={
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "entity_key": event.entity_key,
-                "source": event.source,
-                "observed_at": event.observed_at,
-                "available_at": event.available_at,
-                "received_at": event.received_at,
-                "created_at": event.created_at,
-                "causal_snapshot_id": event.causal_snapshot_id,
-                "payload_hash": event.payload_hash,
-            },
-            authority_id="zeus.events.opportunity_event",
-            authority_version="v1",
-            algorithm_id="decision_kernel.causal_event",
-            algorithm_version="v1",
-            parent_edges=(edge("clock_mode", clock),),
-            parent_certificates=(clock,),
-            source_available_at=event_clock.source_available_at,
-            agent_received_at=event_clock.agent_received_at,
-            persisted_at=event_clock.persisted_at,
+            proof_bundle=proof_bundle,
+            mode="NO_SUBMIT",
         )
-        source_truth = self._authority_certificate(event, decision_time, proof_bundle.source_truth, (clock, causal))
-        topology = self._authority_certificate(event, decision_time, proof_bundle.market_topology, (source_truth,))
-        family = self._authority_certificate(event, decision_time, proof_bundle.family_closure, (topology,))
-        forecast = self._authority_certificate(event, decision_time, proof_bundle.forecast_authority, (source_truth, family))
-        calibration = self._authority_certificate(event, decision_time, proof_bundle.calibration, (forecast,))
-        model_config = self._authority_certificate(event, decision_time, proof_bundle.model_config, (forecast, calibration))
-        belief = self._authority_certificate(event, decision_time, proof_bundle.belief, (forecast, calibration, model_config, family))
-        executable = self._authority_certificate(event, decision_time, proof_bundle.executable_snapshot, (topology,))
-        quote = self._authority_certificate(event, decision_time, proof_bundle.quote_feasibility, (topology, executable))
-        cost = self._authority_certificate(event, decision_time, proof_bundle.cost_model, (quote,))
-        pre_trade = self._authority_certificate(event, decision_time, proof_bundle.pre_trade_evidence, (belief, quote, cost, source_truth))
-        candidate = self._authority_certificate(event, decision_time, proof_bundle.candidate_evidence, (pre_trade, family))
-        protocol = self._authority_certificate(event, decision_time, proof_bundle.testing_protocol, (family, candidate))
-        fdr = self._authority_certificate(event, decision_time, proof_bundle.fdr, (protocol, candidate))
-        kelly = self._authority_certificate(event, decision_time, proof_bundle.kelly_dry_run, (belief, quote, cost))
-        risk = self._authority_certificate(event, decision_time, proof_bundle.risk_level, (candidate,))
+        (
+            clock,
+            causal,
+            source_truth,
+            topology,
+            family,
+            forecast,
+            calibration,
+            model_config,
+            belief,
+            executable,
+            quote,
+            cost,
+            pre_trade,
+            candidate,
+            protocol,
+            fdr,
+            kelly,
+            risk,
+        ) = base_parents
         no_submit_mode = build_certificate(
             certificate_type=claims.NO_SUBMIT_MODE,
             semantic_key=f"no_submit_mode:{event.event_id}:{proof_bundle.final_intent_id}",
@@ -302,15 +350,96 @@ class DecisionCompiler:
             persisted_at=_parse_dt(event.created_at),
         )
 
-    def _clock_certificate(self, event: OpportunityEvent, *, decision_time: datetime) -> DecisionCertificate:
+    def _base_authority_certificates(
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        proof_bundle: NoSubmitProofBundle,
+        mode: Literal["LIVE", "NO_SUBMIT"],
+    ) -> tuple[DecisionCertificate, ...]:
+        event_clock = self._event_clock(event)
+        clock = self._clock_certificate(event, decision_time=decision_time, mode=mode)
+        causal = build_certificate(
+            certificate_type=claims.CAUSAL_EVENT,
+            semantic_key=f"event:{event.event_id}",
+            claim_type="causal_event",
+            mode=mode,
+            decision_time=decision_time,
+            payload={
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "entity_key": event.entity_key,
+                "source": event.source,
+                "observed_at": event.observed_at,
+                "available_at": event.available_at,
+                "received_at": event.received_at,
+                "created_at": event.created_at,
+                "causal_snapshot_id": event.causal_snapshot_id,
+                "payload_hash": event.payload_hash,
+            },
+            authority_id="zeus.events.opportunity_event",
+            authority_version="v1",
+            algorithm_id="decision_kernel.causal_event",
+            algorithm_version="v1",
+            parent_edges=(edge("clock_mode", clock),),
+            parent_certificates=(clock,),
+            source_available_at=event_clock.source_available_at,
+            agent_received_at=event_clock.agent_received_at,
+            persisted_at=event_clock.persisted_at,
+        )
+        source_truth = self._authority_certificate(event, decision_time, proof_bundle.source_truth, (clock, causal), mode=mode)
+        topology = self._authority_certificate(event, decision_time, proof_bundle.market_topology, (source_truth,), mode=mode)
+        family = self._authority_certificate(event, decision_time, proof_bundle.family_closure, (topology,), mode=mode)
+        forecast = self._authority_certificate(event, decision_time, proof_bundle.forecast_authority, (source_truth, family), mode=mode)
+        calibration = self._authority_certificate(event, decision_time, proof_bundle.calibration, (forecast,), mode=mode)
+        model_config = self._authority_certificate(event, decision_time, proof_bundle.model_config, (forecast, calibration), mode=mode)
+        belief = self._authority_certificate(event, decision_time, proof_bundle.belief, (forecast, calibration, model_config, family), mode=mode)
+        executable = self._authority_certificate(event, decision_time, proof_bundle.executable_snapshot, (topology,), mode=mode)
+        quote = self._authority_certificate(event, decision_time, proof_bundle.quote_feasibility, (topology, executable), mode=mode)
+        cost = self._authority_certificate(event, decision_time, proof_bundle.cost_model, (quote,), mode=mode)
+        pre_trade = self._authority_certificate(event, decision_time, proof_bundle.pre_trade_evidence, (belief, quote, cost, source_truth), mode=mode)
+        candidate = self._authority_certificate(event, decision_time, proof_bundle.candidate_evidence, (pre_trade, family), mode=mode)
+        protocol = self._authority_certificate(event, decision_time, proof_bundle.testing_protocol, (family, candidate), mode=mode)
+        fdr = self._authority_certificate(event, decision_time, proof_bundle.fdr, (protocol, candidate), mode=mode)
+        kelly = self._authority_certificate(event, decision_time, proof_bundle.kelly_dry_run, (belief, quote, cost), mode=mode)
+        risk = self._authority_certificate(event, decision_time, proof_bundle.risk_level, (candidate,), mode=mode)
+        return (
+            clock,
+            causal,
+            source_truth,
+            topology,
+            family,
+            forecast,
+            calibration,
+            model_config,
+            belief,
+            executable,
+            quote,
+            cost,
+            pre_trade,
+            candidate,
+            protocol,
+            fdr,
+            kelly,
+            risk,
+        )
+
+    def _clock_certificate(
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        mode: Literal["LIVE", "NO_SUBMIT"] = "NO_SUBMIT",
+    ) -> DecisionCertificate:
         return build_certificate(
             certificate_type=claims.CLOCK_MODE,
             semantic_key=f"clock:{event.event_id}:{decision_time.isoformat()}",
             claim_type="clock_mode",
-            mode="NO_SUBMIT",
+            mode=mode,
             decision_time=decision_time,
             payload={
-                "mode": "NO_SUBMIT",
+                "mode": mode,
                 "decision_time": decision_time,
                 "clock_source": "reactor_decision_time",
                 "agent_runtime_id": "edli_event_reactor",
@@ -331,12 +460,14 @@ class DecisionCompiler:
         decision_time: datetime,
         evidence: AuthorityEvidence,
         parents: tuple[DecisionCertificate, ...],
+        *,
+        mode: Literal["LIVE", "NO_SUBMIT"] = "NO_SUBMIT",
     ) -> DecisionCertificate:
         return build_certificate(
             certificate_type=evidence.certificate_type,
             semantic_key=f"{evidence.semantic_suffix}:{event.event_id}:{evidence.payload.get('identity', '')}",
             claim_type=evidence.claim_type,
-            mode="NO_SUBMIT",
+            mode=mode,
             decision_time=decision_time,
             payload=evidence.payload,
             authority_id=evidence.authority_id,

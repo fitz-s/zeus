@@ -156,7 +156,8 @@ def _infer_strategy_from_signature(sig: AttributionSignature) -> str | None:
     if sig.discovery_mode is None and sig.label_strategy in {"settlement_capture", "opening_inertia"}:
         return None
 
-    # Clauses 3-4: only the two live/shadow update quadrants are classifiable.
+    # Clauses 3-4: only the two update quadrants with enough persisted evidence
+    # are classifiable.
     if sig.bin_topology == "open_shoulder":
         if sig.direction == "buy_no":
             return "shoulder_sell"

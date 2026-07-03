@@ -1,9 +1,9 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
-# Authority basis: docs/findings_2026_05_28.md §F3 (F3 — Legacy NULL fill_authority backfill)
+# Authority basis: docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3 (F3 — Legacy NULL fill_authority backfill)
 """F3 antibody invariants: deterministic fill_authority backfill + harvester gate distinction.
 
-Finding F3 (P1/P2, docs/findings_2026_05_28.md §F3): migration added fill_authority as
+Finding F3 (P1/P2, docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3): migration added fill_authority as
 a nullable additive column; legacy rows stay NULL until backfill runs. The harvester
 gates training on NULL (fail-closed) but previously treated NULL and legacy_unknown
 identically — masking whether backfill had run at all.

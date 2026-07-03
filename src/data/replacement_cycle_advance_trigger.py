@@ -43,6 +43,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
 from src.data.replacement_forecast_readiness import SOURCE_ID
 
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
@@ -234,17 +236,28 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
         required_chain_cols = {"chain_state", "chain_shares", "chain_cost_basis_usd"}
         if not required_chain_cols.issubset(cols):
             return set()
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        chain_placeholders = ",".join("?" for _ in chain_state_values)
         rows = conn_trades.execute(
-            """
+            f"""
             SELECT DISTINCT city, target_date, temperature_metric
             FROM position_current
-            WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
-              AND COALESCE(chain_state, '') = 'synced'
+            WHERE (
+                    (
+                        COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
+                    )
+                    OR (
+                        COALESCE(phase, '') = 'quarantined'
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
+                    )
+                  )
               AND COALESCE(chain_shares, 0) > 0
               AND COALESCE(chain_cost_basis_usd, 0) > 0
               AND city IS NOT NULL AND target_date IS NOT NULL
               AND temperature_metric IS NOT NULL
-            """
+            """,
+            (*chain_state_values, *chain_state_values),
         ).fetchall()
     except Exception as exc:  # noqa: BLE001
         # FINDING 2 / MEDIUM (external review 2026-06-12): a held-family read FAILURE silently
@@ -620,7 +633,7 @@ def enqueue_cycle_advance_reseeds(
         report["freshest_materializable_cycle"] = freshest.isoformat()
 
         # PRIORITY ORDER: HELD families first (tier i), then nearest-target-first (mirrors the
-        # seed-budget K-decision — far-date shadow scopes must not starve the tradeable day0/day1
+        # seed-budget K-decision — far-date non-tradeable scopes must not starve the tradeable day0/day1
         # money scopes of the per-tick enqueue budget). A single sort key encodes both tiers.
         def _priority_key(r) -> tuple:
             scope = (str(r.city), str(r.target_date), str(r.temperature_metric))

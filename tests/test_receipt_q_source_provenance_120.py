@@ -77,6 +77,7 @@ def test_non_qkernel_receipt_omits_qkernel_execution_economics():
 def test_qkernel_selection_authority_records_economics_without_rewriting_q_source():
     cert = {
         "edge_lcb": 0.077,
+        "payoff_q_point": 0.74,
         "payoff_q_lcb": 0.73,
         "candidate_id": "DIRECT_YES:bin-1:route",
     }
@@ -104,13 +105,13 @@ def test_replacement_forecast_receipt_tag_is_hash_stable_when_absent_and_recorde
         _receipt_json(
             _receipt(
                 replacement_forecast={
-                    "status": "SHADOW_VETO_ONLY",
+                    "status": "BLOCKED",
                     "reason": "REPLACEMENT_FORECAST_ALLOWED",
                 }
             )
         )
     )
-    assert tagged["replacement_forecast"]["status"] == "SHADOW_VETO_ONLY"
+    assert tagged["replacement_forecast"]["status"] == "BLOCKED"
 
 
 def test_q_source_maze_value_recorded():

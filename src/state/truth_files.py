@@ -1,15 +1,14 @@
-"""Runtime truth-file helpers and legacy-state deprecation tooling."""
+"""Runtime truth-file helpers."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import get_mode, legacy_state_path, runtime_state_path
+from src.config import get_mode, runtime_state_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +27,6 @@ LEGACY_STATE_FILES = (
 _LOW_LANE_FILES: frozenset[str] = frozenset(
     f for f in LEGACY_STATE_FILES if "platt_models_low" in f or "calibration_pairs_low" in f
 )
-LEGACY_ARCHIVE_DIR = legacy_state_path("legacy_state_archive")
-
-
 def current_runtime_state() -> str:
     return get_mode()
 
@@ -155,56 +151,6 @@ def read_runtime_truth_json(filename: str) -> tuple[dict[str, Any], dict[str, An
             f"runtime truth file {path} must be tagged runtime_state='live', got {runtime_state!r}"
         )
     return data, truth
-
-
-def legacy_tombstone_payload(
-    filename: str,
-    *,
-    archived_to: str | None = None,
-) -> dict[str, Any]:
-    legacy_path = legacy_state_path(filename)
-    return {
-        "error": (
-            f"{filename} is deprecated and must not be used as current truth. "
-            "Use the live runtime state file instead."
-        ),
-        "truth": {
-            **build_truth_metadata(
-                legacy_path,
-                runtime_state="deprecated",
-                deprecated=True,
-                archived_to=archived_to,
-            ),
-            "replacement_path": str(runtime_state_path(filename)),
-        },
-    }
-
-
-def ensure_legacy_state_tombstone(filename: str) -> dict[str, Any]:
-    path = legacy_state_path(filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    archived_to = None
-
-    if path.exists():
-        try:
-            current = json.loads(path.read_text())
-        except Exception:
-            current = None
-        if isinstance(current, dict) and current.get("truth", {}).get("deprecated") is True:
-            return {"path": str(path), "archived": False, "already_tombstoned": True}
-
-        LEGACY_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        archived_path = LEGACY_ARCHIVE_DIR / f"{filename}.{stamp}"
-        os.replace(path, archived_path)
-        archived_to = str(archived_path)
-
-    path.write_text(json.dumps(legacy_tombstone_payload(filename, archived_to=archived_to), indent=2))
-    return {"path": str(path), "archived": archived_to is not None, "archived_to": archived_to}
-
-
-def deprecate_legacy_truth_files() -> list[dict[str, Any]]:
-    return [ensure_legacy_state_tombstone(filename) for filename in LEGACY_STATE_FILES]
 
 
 def backfill_runtime_truth_metadata(filename: str) -> dict[str, Any]:

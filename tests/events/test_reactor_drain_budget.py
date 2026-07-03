@@ -41,7 +41,7 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     return conn, EventStore(conn)
 
 
-def _reactor(store, *, refresher=None, held_family_provider=None):
+def _reactor(store, *, refresher=None, held_family_provider=None, day0_hourly_refresher=None):
     return OpportunityEventReactor(
         store,
         source_truth_gate=lambda _e: True,
@@ -52,6 +52,7 @@ def _reactor(store, *, refresher=None, held_family_provider=None):
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
         family_snapshot_refresher=refresher,
+        day0_hourly_refresher=day0_hourly_refresher,
         held_family_provider=held_family_provider,
     )
 
@@ -193,6 +194,46 @@ def test_held_position_family_never_budget_starved(monkeypatch):
     deferred = {c for c, _d, _m in reactor._pending_snapshot_refreshes}
     assert deferred.isdisjoint(held_cities)
     assert res.drained_truncated == len(reactor._pending_snapshot_refreshes)
+
+
+def test_day0_hourly_drain_precedes_snapshot_under_shared_budget(monkeypatch):
+    """Day0 carrier repair must not wait behind executable-snapshot I/O."""
+
+    conn, store = _store()
+    monkeypatch.setenv("ZEUS_REACTOR_DRAIN_BUDGET_SECONDS", "5")
+    clock = {"t": 0.0}
+    monkeypatch.setattr("src.events.reactor.time.monotonic", lambda: clock["t"])
+
+    order: list[tuple[str, str]] = []
+
+    def _snapshot_refresher(*, city, target_date, metric, **_kw):
+        order.append(("snapshot", city))
+        clock["t"] += 100.0
+        return True
+
+    def _day0_refresher(*, city, target_date, metric, **_kw):
+        order.append(("day0-hourly", city))
+        clock["t"] += 100.0
+        return True
+
+    reactor = _reactor(
+        store,
+        refresher=_snapshot_refresher,
+        day0_hourly_refresher=_day0_refresher,
+    )
+    reactor._pending_snapshot_refreshes = [
+        ("StaleBook", "2026-07-02", "high"),
+        ("SecondStaleBook", "2026-07-02", "high"),
+    ]
+    reactor._pending_day0_hourly_refreshes = [("Hong Kong", "2026-07-02", "high")]
+    reactor._pending_cycle_advances = []
+
+    res = ReactorResult()
+    reactor._drain_substrate_refreshes(result=res)
+
+    assert order[0] == ("day0-hourly", "Hong Kong")
+    assert res.day0_hourly_refreshes == 1
+    assert res.snapshot_refreshes >= 1
 
 
 def test_failsoft_preserved_under_budget_one_warning_no_raise(monkeypatch, caplog):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-12
 # Last reused or audited: 2026-06-12
-# Authority basis: docs/operations/day0_multiangle_critique_2026-06-12.md §(3)
+# Authority basis: docs/archive/2026-Q2/operations_historical/day0_multiangle_critique_2026-06-12.md §(3)
 #   ("the one thing most likely to cause the next real-money day0 loss that
 #   nobody has named yet" = fast-lane daily-extreme UNDERCAPTURE) + Blind spot D
 #   ("final settlement audit is more important than timestamp-matched feed

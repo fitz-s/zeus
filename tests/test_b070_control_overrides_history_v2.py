@@ -239,6 +239,65 @@ class TestExpire:
         # because the latest row's effective_until (13:00) is before now (14:00)
         assert state["entries_paused"] is False
 
+    def test_query_state_merges_active_risk_action_strategy_gate(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:opening_inertia', 'opening_inertia', 'gate', 'true',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'brier_degraded(level=YELLOW,brier=0.28,sample=45)',
+                'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(conn, now="2026-04-17T14:00:00+00:00")
+
+        assert state["status"] == "ok"
+        gate = state["strategy_gates"]["opening_inertia"]
+        assert gate["enabled"] is False
+        assert gate["reason_code"] == "riskguard_action"
+        assert gate["gated_by"] == "auto:riskguard"
+        assert gate["reason_snapshot"]["action_id"] == "riskguard:gate:opening_inertia"
+
+    def test_manual_strategy_override_takes_precedence_over_risk_action(self):
+        conn = _memory_conn()
+        upsert_control_override(
+            conn,
+            override_id="operator:strategy:opening_inertia",
+            target_type="strategy",
+            target_key="opening_inertia",
+            action_type="gate",
+            value="false",
+            issued_by="control_plane",
+            issued_at="2026-04-17T13:00:00+00:00",
+            reason="operator explicitly re-enabled after review",
+            precedence=100,
+        )
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:opening_inertia', 'opening_inertia', 'gate', 'true',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'brier_degraded', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(conn, now="2026-04-17T14:00:00+00:00")
+
+        gate = state["strategy_gates"]["opening_inertia"]
+        assert gate["enabled"] is True
+        assert gate["reason_code"] == "operator_override"
+        assert gate["gated_by"] == "control_plane"
+
 
 class TestAppendOnlyEnforcement:
     def test_update_raises(self):

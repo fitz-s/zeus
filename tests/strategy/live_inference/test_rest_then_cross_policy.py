@@ -1,17 +1,16 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest,
 #   shadow-gate collapse, double-submit-safety + first-rest-default acceptance tests)
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: taker-only execution root cause) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM measurement).
 """K4.0 REST-THEN-CROSS policy relationship tests (written RED-FIRST).
 
-The design failure being killed: one-shot maker-XOR-taker EV comparison with a
-p_fill_maker=0.10 GUESS handicapped the maker lane ~10x, so all 6 live fills
-were FOK crosses paying 4.0% of notional to spread. The true option structure
-is REST-THEN-CROSS: post post_only GTC at the maker limit with a measured
-escalation deadline; cross only at the deadline after the edge re-certifies,
-or immediately in the declared exception lanes.
+The design failure being killed: both one-shot forced taker and one-shot forced
+maker are wrong. The live option structure is mode-consistent: cross only when
+the fresh taker clears the conservative q/q_exec bound, fee/spread guards, and a
+material EV advantage over maker; otherwise post post_only GTC with the measured
+escalation deadline and re-certify before any later cross.
 
 ANTIBODY (the operator-named relationship): no taker cross may be chosen while
 an unexpired same-family maker rest exists.
@@ -27,6 +26,7 @@ from src.strategy.live_inference.mode_consistent_ev import (
     POLICY_HOLD_REST_IN_PROGRESS,
     POLICY_MAKER_TAKER_FORBIDDEN,
     POLICY_REST_DEFAULT,
+    POLICY_TAKER_EDGE_CLEARS_BOUND,
     POLICY_TAKER_ESCALATED_AFTER_REST,
     POLICY_TAKER_EVENT_END_NEAR,
     POLICY_TAKER_FLEETING_EDGE,
@@ -36,11 +36,10 @@ from src.strategy.live_inference.mode_consistent_ev import (
     select_rest_then_cross_mode,
 )
 
-# A healthy wide two-sided book of the class the operator flagged (Karachi-like):
-# certified edge ~5c on a 8c-wide 0.58/0.66 book — under the OLD one-shot EV the
-# taker always won here; under REST-THEN-CROSS this MUST rest.
+# A healthy two-sided book where the taker leg clears q_lcb but does not beat
+# the maker leg by the mode hysteresis margin. This should rest.
 HEALTHY = dict(
-    q_lcb=0.71,
+    q_lcb=0.673,
     taker_all_in_cost=0.665,
     p_fill_taker=1.0,
     best_bid=0.58,
@@ -57,8 +56,8 @@ def _decide(**overrides):
 
 
 class TestRestDefault:
-    def test_healthy_wide_book_rests_as_maker(self):
-        """The Karachi-class fill: REST, never immediate cross."""
+    def test_healthy_book_without_material_taker_advantage_rests_as_maker(self):
+        """A fresh candidate rests when taker does not materially beat maker."""
         decision = _decide(minutes_to_event_end=20 * 60.0)
         assert decision.chosen_mode == "MAKER"
         assert decision.policy == POLICY_REST_DEFAULT
@@ -67,13 +66,15 @@ class TestRestDefault:
         )
         assert decision.ev_maker is not None and decision.ev_maker > 0.0
 
-    def test_rest_default_even_when_taker_ev_higher(self):
-        """The policy overrides the one-shot EV comparison: a healthy non-fleeting
-        edge rests even where EV_taker > EV_maker (that comparison was the disease)."""
-        decision = _decide(minutes_to_event_end=20 * 60.0)
-        # ev provenance still recorded for the settlement loop:
-        assert decision.ev_taker is not None
-        assert decision.chosen_mode == "MAKER"
+    def test_fresh_taker_crosses_when_materially_superior_after_costs(self):
+        """Taker is lawful when q/q_exec, spread, fee, and EV-margin all clear."""
+        decision = _decide(q_lcb=0.82, minutes_to_event_end=20 * 60.0)
+        assert decision.ev_taker is not None and decision.ev_maker is not None
+        assert decision.ev_taker >= decision.ev_maker * (
+            1.0 + decision.taker_over_maker_margin
+        )
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
 
     def test_measured_fill_prior_is_used_not_the_guess(self):
         decision = _decide(minutes_to_event_end=20 * 60.0)
@@ -176,17 +177,16 @@ class TestExceptionLanes:
         assert decision.chosen_mode == "MAKER"
 
     def test_fleeting_edge_crosses_only_near_event_end(self):
-        # OPERATOR DIRECTIVE 2026-06-11 (Denver first fill: lane 2 crossed a
-        # 5-cent spread 26h before settlement, paying $0.43 mark-to-mid). A big
-        # edge FAR from the event end is STRUCTURAL, not fleeting -> REST.
+        # A big edge far from event end is not the special fleeting lane, but it
+        # may still cross through the ordinary fresh-book EV superiority lane.
         far = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             + 0.01,
             minutes_to_event_end=20 * 60.0,
         )
-        assert far.chosen_mode == "MAKER"
-        assert far.policy == POLICY_REST_DEFAULT
+        assert far.chosen_mode == "TAKER"
+        assert far.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
         # Inside the near-end window (>= the 180m unconditional floor, < 360m)
         # the lane still crosses on a huge edge.
         near = _decide(
@@ -197,14 +197,16 @@ class TestExceptionLanes:
         )
         assert near.chosen_mode == "TAKER"
         assert near.policy == POLICY_TAKER_FLEETING_EDGE
-        # Unknown horizon is conservative: REST.
+        # Unknown horizon is not enough to invoke the fleeting lane, but the
+        # ordinary EV-superiority lane can still cross when the book is strong.
         unknown = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             + 0.01,
             minutes_to_event_end=None,
         )
-        assert unknown.chosen_mode == "MAKER"
+        assert unknown.chosen_mode == "TAKER"
+        assert unknown.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
         # Nesting relation: the fleeting window sits ABOVE the unconditional
         # event-end floor, else lane 5 is dead code.
         from src.strategy.live_inference.mode_consistent_ev import (
@@ -213,15 +215,15 @@ class TestExceptionLanes:
         )
         assert TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END > _floor
 
-    def test_sub_fleeting_edge_rests(self):
+    def test_sub_fleeting_edge_can_still_cross_when_ev_superior(self):
         decision = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             - 0.02,
             minutes_to_event_end=20 * 60.0,
         )
-        assert decision.chosen_mode == "MAKER"
-        assert decision.policy == POLICY_REST_DEFAULT
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
 
     def test_bidless_book_rests_at_ask_minus_tick(self):
         """No bid: the spread guard already forbids crossing (unmeasurable book)
@@ -407,14 +409,8 @@ class TestDoubleSubmitSafetyPreserved:
         assert decision.chosen_ev == float("-inf")  # NO new order while a live rest exists
 
 
-class TestTakerQualityShadowGateCollapsed:
-    """SHADOW-GATE COLLAPSE (operator law = NO CAPS, 2026-06-20). A taker that
-    passes the conservative after-cost law (fresh ask + fee <= q_lcb, i.e.
-    taker_edge >= 0 — the same FIX-B bound) must NOT be aborted by the extra
-    0.03 / 0.05 / 1.20 / 0.60 thresholds. They are demoted to TELEMETRY: the
-    proof passes on the conservative surplus; the legacy thresholds still travel
-    on the receipt but no longer gate.
-    """
+class TestTakerQualityLiveGate:
+    """Taker submit requires surplus plus live quality margins."""
 
     def _proof(self, *, q_lcb, ask):
         from src.engine.event_reactor_adapter import (
@@ -435,26 +431,31 @@ class TestTakerQualityShadowGateCollapsed:
             fresh_best_ask=ask,
         )
 
-    def test_positive_surplus_below_legacy_thresholds_passes(self):
-        """edge in [0, 0.03): conservative surplus positive but BELOW the 0.03
-        legacy edge cap. On the unfixed tree passed=False (aborts the cross). After
-        the fix passed=True with legacy_threshold_pass=False recorded as telemetry."""
+    def test_positive_surplus_below_live_thresholds_fails_closed(self):
+        """A taker with tiny positive surplus is not enough for live-money submit."""
         proof = self._proof(q_lcb=0.52, ask=0.49)  # edge ~0.0175 in [0, 0.03)
         assert proof is not None
         assert float(proof["taker_fee_adjusted_edge"]) >= 0.0
         assert float(proof["taker_fee_adjusted_edge"]) < float(
             proof["min_taker_fee_adjusted_edge"]
         )
-        assert proof["passed"] is True
-        # The legacy cap is recorded as telemetry only (it did NOT gate).
+        assert proof["passed"] is False
+        assert proof["reason"] == "taker_quality_threshold_not_met"
         assert proof["legacy_threshold_pass"] is False
-        assert proof["passed_basis"] == "conservative_after_cost_surplus_nonnegative"
+        assert proof["passed_basis"] == "conservative_after_cost_plus_taker_and_strategy_quality_floors"
 
     def test_negative_surplus_still_fails_closed(self):
         """The conservative law is NEVER loosened: ask + fee > q_lcb (negative
         after-cost edge) still fails closed — only the EXTRA cap was removed."""
-        proof = self._proof(q_lcb=0.50, ask=0.55)  # edge clearly negative
+        # q_lcb must clear LIVE_DIRECTION_WIN_RATE_FLOOR (0.51,
+        # src/strategy/live_inference/live_admission.py) — a separate, earlier
+        # gate in _build_event_bound_taker_quality_proof — or the function
+        # short-circuits there and returns the placeholder
+        # taker_fee_adjusted_edge="0" used by every early-return branch,
+        # never reaching the after-cost edge computation this test targets.
+        proof = self._proof(q_lcb=0.55, ask=0.65)  # edge clearly negative
         assert proof is not None
+        assert proof["reason"] == "negative_conservative_after_cost_surplus"
         assert float(proof["taker_fee_adjusted_edge"]) < 0.0
         assert proof["passed"] is False
 

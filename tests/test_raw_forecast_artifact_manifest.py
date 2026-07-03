@@ -38,7 +38,7 @@ def test_read_manifest_drops_retired_trade_authority_status(tmp_path) -> None:
     path = tmp_path / "manifest.json"
     write_manifest(_manifest(tmp_path), path)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["trade_authority_status"] = "SHADOW_ONLY"
+    payload["trade_authority_status"] = "BLOCKED"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = read_manifest(path)

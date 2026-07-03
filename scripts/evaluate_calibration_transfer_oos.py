@@ -9,9 +9,9 @@
 # The validated_calibration_transfers table is a Phase B upgrade path only.  At launch Zeus uses the
 # legacy static-mapping path (ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED flag OFF).  The cron entry
 # should NOT be added until Phase B is activated (~2-4 weeks post-launch, once ECMWF calibration_pairs
-# rows have accumulated).  Authority: docs/operations/LIVE_LAUNCH_HANDOFF.md §A.4 and §B.3;
-# docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.  Flipping the flag prematurely silently falls to
-# SHADOW_ONLY because no validated_calibration_transfers rows exist for the ECMWF target_source_id.
+# rows have accumulated).  Authority: docs/archive/2026-Q2/operations_historical/LIVE_LAUNCH_HANDOFF.md §A.4 and §B.3;
+# docs/archive/2026-Q2/operations_historical/PLIST_UPDATE_FOR_RELOCK.md §1.5.  Flipping the flag prematurely silently falls to
+# BLOCKED because no validated_calibration_transfers rows exist for the ECMWF target_source_id.
 """OOS evaluator: writes ``validated_calibration_transfers`` rows.
 
 Phase X.2 of the calibration-transfer evidence pipeline.  Iterates all

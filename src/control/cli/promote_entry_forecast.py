@@ -15,9 +15,8 @@ Subcommands:
                      write it via :func:`write_promotion_evidence`.
 * ``flip-mode``    — validate a rollout-mode transition and print the env-var
                      change + ``launchctl kickstart`` command. Never execs.
-* ``unarm``        — print or apply the rollback steps (rewrite
-                     ``state/cutover_guard.json`` to ``NORMAL`` and restore the
-                     ``state/auto_pause_failclosed.tombstone``).
+* ``unarm``        — print or apply rollback by rewriting
+                     ``state/cutover_guard.json`` to ``NORMAL``.
 
 Invocable both as a module and as a script::
 
@@ -75,10 +74,9 @@ ARM_SCRIPT = "scripts/arm_live_mode.sh"
 OPERATOR_APPROVAL_PATTERN = re.compile(r"^OPS-\d{4}-\d{2}-\d{2}-")
 
 ALLOWED_TRANSITIONS = {
-    "shadow": {"shadow", "canary"},
-    "canary": {"shadow", "canary", "live"},
-    "live": {"shadow", "canary", "live"},
-    "blocked": {"shadow", "canary", "live", "blocked"},
+    "canary": {"blocked", "canary", "live"},
+    "live": {"blocked", "canary", "live"},
+    "blocked": {"blocked", "canary", "live"},
 }
 
 
@@ -314,7 +312,6 @@ def cmd_flip_mode(args: argparse.Namespace) -> int:
 
 
 CUTOVER_GUARD_FILENAME = "cutover_guard.json"
-TOMBSTONE_FILENAME = "auto_pause_failclosed.tombstone"
 
 
 def _atomic_write_text(path: Path, payload: str) -> None:
@@ -334,24 +331,21 @@ def _atomic_write_text(path: Path, payload: str) -> None:
 
 def cmd_unarm(args: argparse.Namespace) -> int:
     cutover_path = state_path(CUTOVER_GUARD_FILENAME) if not args.cutover_path else Path(args.cutover_path)
-    tombstone_path = state_path(TOMBSTONE_FILENAME) if not args.tombstone_path else Path(args.tombstone_path)
 
-    print("=== unarm (rollback to NORMAL/shadow) ===")
+    print("=== unarm (rollback to NORMAL/blocked) ===")
     print(f"  cutover_guard      : {cutover_path}")
-    print(f"  tombstone          : {tombstone_path}")
     print()
 
     print("=== planned actions ===")
     print(f"  1. rewrite {cutover_path} state -> 'NORMAL' (atomic, preserve history)")
-    print(f"  2. touch   {tombstone_path}  (restore fail-closed sentinel)")
-    print(f"  3. export {ROLLOUT_MODE_ENV}=shadow")
-    print(f"  4. # also update config/settings.json -> entry_forecast.rollout_mode = 'shadow'")
-    print(f"  5. launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
+    print(f"  2. export {ROLLOUT_MODE_ENV}=blocked")
+    print(f"  3. # also update config/settings.json -> entry_forecast.rollout_mode = 'blocked'")
+    print(f"  4. launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
     print()
 
     if not args.commit:
-        print("DRY-RUN: not modifying any files. Re-run with --commit to apply steps 1+2.")
-        print("Steps 3-5 are NEVER auto-applied; copy/paste manually.")
+        print("DRY-RUN: not modifying any files. Re-run with --commit to apply step 1.")
+        print("Steps 2-4 are NEVER auto-applied; copy/paste manually.")
         return 0
 
     # Step 1: rewrite cutover_guard.json with NORMAL state, preserving transitions.
@@ -399,13 +393,8 @@ def cmd_unarm(args: argparse.Namespace) -> int:
     _atomic_write_text(cutover_path, json.dumps(new_payload, indent=2, sort_keys=True) + "\n")
     print(f"WROTE {cutover_path} (state=NORMAL)")
 
-    # Step 2: restore tombstone (touch).
-    tombstone_path.parent.mkdir(parents=True, exist_ok=True)
-    tombstone_path.touch()
-    print(f"TOUCHED {tombstone_path}")
-
     print()
-    print("Steps 3-5 (env + launchctl) NOT executed. Run manually.")
+    print("Steps 2-4 (env + launchctl) NOT executed. Run manually.")
     return 0
 
 
@@ -449,18 +438,17 @@ def build_parser() -> argparse.ArgumentParser:
         "flip-mode",
         help="Validate a rollout-mode transition; print env + launchctl command (no exec).",
     )
-    p_flip.add_argument("target_mode", choices=["shadow", "canary", "live"])
+    p_flip.add_argument("target_mode", choices=["blocked", "canary", "live"])
     p_flip.add_argument("--force", action="store_true", help="bypass transition / decision checks")
     p_flip.add_argument("--evidence-path", default=None, help="override evidence JSON path")
     p_flip.set_defaults(func=cmd_flip_mode)
 
     # unarm
     p_unarm = sub.add_parser(
-        "unarm", help="Print or apply rollback (cutover_guard NORMAL + restore tombstone)."
+        "unarm", help="Print or apply rollback (cutover_guard NORMAL)."
     )
     p_unarm.add_argument("--commit", action="store_true", help="actually rewrite state files")
     p_unarm.add_argument("--cutover-path", default=None)
-    p_unarm.add_argument("--tombstone-path", default=None)
     p_unarm.set_defaults(func=cmd_unarm)
 
     return parser

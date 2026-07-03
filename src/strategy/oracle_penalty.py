@@ -230,7 +230,7 @@ def summarize_oracle_posterior(
     n: int,
     mismatches: int,
     metric: str = "",
-    source_role: str = "oracle_shadow_snapshot",
+    source_role: str = "",
     last_date: str = "",
     city: str = "",
 ) -> OracleInfo:
@@ -339,8 +339,6 @@ def _info_from_record(
             prev_multiplier=_prev_multiplier_cache.get((city, metric), 1.0),
         )
 
-    # Use evidence-based age (keyed to last_observed_date for snapshot records)
-    # rather than artifact file mtime.  This is the §4 staleness-laundering fix.
     effective_age_hours = _evidence_age_hours_for_record(record)
     status = _classify_oracle_evidence(
         mismatches=mismatches,
@@ -502,41 +500,8 @@ def _artifact_age_hours() -> Optional[float]:
 
 
 def _evidence_age_hours_for_record(record: _RawRecord) -> Optional[float]:
-    """Compute evidence age for a single record.
-
-    For snapshot-sourced records (``oracle_shadow_snapshot`` source_role),
-    the bridge regenerates ``oracle_error_rates.json`` daily even when no new
-    snapshots arrive — resetting the file mtime and making ``_artifact_age_hours()``
-    report the record as fresh even when the underlying evidence is months old.
-    This is the staleness-laundering defect (§4, oracle shadow outage report
-    2026-06-09): the STALE classification never fires for such cities.
-
-    Fix: for snapshot-sourced records, derive age from ``last_observed_date``
-    (already written by the bridge — the latest settlement target_date that
-    produced a comparison for this record).  Canonical-sourced records use the
-    standard artifact mtime, because canonical evidence is gathered from the
-    live DB daily and the file age accurately reflects evidence currency.
-    """
-    source_role = str(record.get("source_role", "")).strip().lower()
-    if source_role != "oracle_shadow_snapshot":
-        return _artifact_age_hours()
-
-    last_observed = record.get("last_observed_date")
-    if not last_observed:
-        # No date in record; fall back to file mtime (conservative — treats
-        # the record as no staler than the file itself).
-        return _artifact_age_hours()
-
-    try:
-        from datetime import date as _date
-        d = _date.fromisoformat(str(last_observed).strip()[:10])
-        # Use end-of-day (23:59 UTC) to avoid over-counting age when the
-        # snapshot was captured at 10:00 UTC on that date.
-        evidence_ts = datetime(d.year, d.month, d.day, 23, 59, tzinfo=timezone.utc).timestamp()
-        now = datetime.now(timezone.utc).timestamp()
-        return max(0.0, (now - evidence_ts) / 3600.0)
-    except (ValueError, TypeError):
-        return _artifact_age_hours()
+    """Compute evidence age for a single record."""
+    return _artifact_age_hours()
 
 
 def get_oracle_info(city_name: str, temperature_metric: str = "high") -> OracleInfo:

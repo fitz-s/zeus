@@ -113,6 +113,38 @@ def test_forecast_event_compiles_to_no_submit_decision_certificate():
     }
 
 
+def test_live_authority_graph_uses_live_parent_modes_without_no_submit_leaf():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    result = DecisionCompiler().compile_authority_graph(
+        event,
+        decision_time=decision_time,
+        mode="LIVE",
+        proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            receipt,
+            decision_time=decision_time,
+        ),
+    )
+
+    assert result.status == "VERIFIED"
+    assert result.no_submit_certificate is None
+    assert result.certificates
+    assert {cert.header.mode for cert in result.certificates} == {"LIVE"}
+    assert claims.NO_SUBMIT_DECISION not in {
+        cert.certificate_type for cert in result.certificates
+    }
+    assert {cert.certificate_type for cert in result.certificates} >= {
+        claims.CLOCK_MODE,
+        claims.CAUSAL_EVENT,
+        claims.FORECAST_AUTHORITY,
+        claims.EXECUTABLE_SNAPSHOT,
+        claims.QUOTE_FEASIBILITY,
+        claims.COST_MODEL,
+    }
+
+
 def test_redecision_event_compiles_to_no_submit_decision_certificate():
     event = _event(event_type="EDLI_REDECISION_PENDING")
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)

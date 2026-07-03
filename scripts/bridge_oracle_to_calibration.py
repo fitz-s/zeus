@@ -5,13 +5,13 @@
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2; 2026-05-21 live oracle-penalty P0 wiring repair.
 """Bridge oracle evidence to calibration data.
 
-Compares canonical verified observations and oracle-time WU/HKO shadow snapshots
+Compares canonical verified observations and oracle-time WU/HKO snapshots
 against PM settlement values, then updates ``data/oracle_error_rates.json`` with
 fresh per-city error rates.
 
 This script is the ONLY writer to oracle_error_rates.json and the ONLY
-reader of oracle shadow snapshots. It bridges canonical observation truth plus
-the shadow storage layer to the evaluator's oracle penalty system.
+reader of oracle-time snapshots. It bridges canonical observation truth plus
+the oracle-time snapshot storage layer to the evaluator's oracle penalty system.
 
 Usage:
     .venv/bin/python scripts/bridge_oracle_to_calibration.py [--dry-run]
@@ -19,7 +19,7 @@ Usage:
 Architecture:
     settlements + world.observation_instants / world.daily_observation_revisions
                                       →  canonical daily settlement values
-    oracle_snapshot_listener.py  →  raw/oracle_shadow_snapshots/{city}/{date}.json
+    oracle_snapshot_listener.py  →  raw/oracle_time_snapshots/{city}/{date}.json
                                            ↓
     bridge_oracle_to_calibration.py  →  data/oracle_error_rates.json
                                            ↓
@@ -103,7 +103,7 @@ def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str, str], di
 
 
 def _load_snapshots() -> dict[str, dict[str, dict]]:
-    """Load all shadow snapshots, keyed by city → date → snapshot."""
+    """Load all oracle-time snapshots, keyed by city → date → snapshot."""
     result: dict[str, dict[str, dict]] = defaultdict(dict)
     snapshot_dir = oracle_snapshot_dir()
     if not snapshot_dir.exists():
@@ -181,7 +181,7 @@ def _snapshot_settlement_value(city_name: str, snap: dict, settle: dict, snap_hi
 
     snap_val = float(snap_high)
     if settle["unit"] == "C" and snap.get("source") == "wu_icao_history":
-        # WU shadow snapshots store daily_high_f. Convert the physical value
+        # WU oracle-time snapshots store daily_high_f. Convert the physical value
         # to Celsius, then let SettlementSemantics choose WMO vs oracle rules.
         snap_val = (snap_val - 32.0) * 5.0 / 9.0
 
@@ -219,7 +219,7 @@ def _canonical_observation_daily_metric(
 ) -> dict | None:
     """Read the canonical verified daily metric from ``world.observation_instants``.
 
-    The old bridge treated sparse shadow snapshots as the authority surface,
+    The old bridge treated sparse oracle-time snapshots as the authority surface,
     which made normal cities look ``INSUFFICIENT_SAMPLE`` even when the K1 DBs
     already held many verified settlement/observation days. This helper uses
     the current canonical ``world.observation_instants`` table first and keeps the existing
@@ -484,7 +484,7 @@ def bridge(dry_run: bool = False) -> dict:
 
         snapshots = _load_snapshots()
         if not snapshots:
-            logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
+            logger.info("No oracle-time snapshots found in %s", oracle_snapshot_dir())
             logger.info("Falling back to canonical observation_instants evidence")
 
         # Coverage check helper (closure over conn — must be inside with block)
@@ -647,7 +647,7 @@ def bridge(dry_run: bool = False) -> dict:
                         "snapshot_error_rate": 0.0,
                         "snapshot_mismatch_dates": [],
                         "snapshot_dates": [],
-                        "source_role": "oracle_shadow_snapshot",
+                        "source_role": "oracle_time_snapshot",
                         "temperature_metric": "high",
                     },
                 )
@@ -662,7 +662,7 @@ def bridge(dry_run: bool = False) -> dict:
                 stats["snapshot_mismatch_dates"].extend(mismatch_dates)
                 stats["snapshot_dates"].extend(dates_compared)
                 if stats.get("source_role") != "canonical_observation_instants_v2":
-                    stats["source_role"] = "oracle_shadow_snapshot"
+                    stats["source_role"] = "oracle_time_snapshot"
                 logger.info(
                     "%s: %d/%d match, %d skipped (error=%.1f%%)",
                     city_name, matches, total, skipped_low_coverage, error_rate * 100,
@@ -707,7 +707,7 @@ def bridge(dry_run: bool = False) -> dict:
         # Merge results into existing oracle error rates.
         # S2 R4 P10B: write nested {city: {high: {...}, low: {...}}} shape.
         # Canonical observation evidence is metric-specific and covers both
-        # HIGH and LOW; shadow snapshots remain HIGH-only fallback evidence.
+        # HIGH and LOW; oracle-time snapshots remain HIGH-only fallback evidence.
         from src.strategy.oracle_penalty import summarize_oracle_posterior
 
         for (city_name, metric), snap_stats in city_stats.items():
@@ -759,7 +759,7 @@ def bridge(dry_run: bool = False) -> dict:
                 n=n,
                 mismatches=m,
                 metric=metric,
-                source_role=snap_stats.get("source_role", "oracle_shadow_snapshot"),
+                source_role=snap_stats.get("source_role", "oracle_time_snapshot"),
                 last_date=city_entry[metric]["last_observed_date"] or "",
                 city=city_name,
             )

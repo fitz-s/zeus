@@ -96,7 +96,7 @@ def shoulder_cluster_cap_rejection(
         return None
     if conn is None:
         logger.warning(
-            "shoulder_cluster_cap skipped without DB conn (paper/shadow path): "
+            "shoulder_cluster_cap skipped without DB conn (non-live path): "
             "cluster=%s side=%s proposed_notional=%.4f",
             context.cluster_id,
             context.side,

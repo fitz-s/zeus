@@ -1,16 +1,16 @@
-Must READ root `AGENTS.md` and follow rules there
+Read root `AGENTS.md` first — its Boot Digest locates the law; it is not the law.
 
-Zeus-specific Code Review Graph rule: follow root AGENTS.md and topology_doctor before graph tools. Use code-review-graph only after topology routing for source/test/script impact analysis. Do not let graph-first instructions bypass planning-lock, manifests, source_rationale, test_topology, script_manifest, route receipts, authority order, canonical truth rules, or K1 DB split (zeus-world/zeus-forecasts/zeus_trades).
+## Finding things
+Names and errors → `rg`. Edges, callers, blast radius → codegraph / code-review-graph; grep goes silently blind on indirect and dynamic calls. Fuzzy concepts → semantic search. Then Read the exact file — search output is a lead, never a verdict. topology_doctor gates governance; it finds no code. No graph shortcut bypasses planning-lock, registries, authority order, or the K1 DB split.
 
-## Review behavior
+## Touching things
+Money-path, ingest, calibration, settlement, deploy, `scripts/*`, `tests/*`: run `.claude/skills/provenance-audit` before trusting what is already there.
 
-For review tasks (PR review, `/review`, ultrareview, manual review session): follow root `REVIEW.md` and `docs/review/code_review.md`. Prioritize runtime-risk surfaces (Tier 0: `src/execution/**`, `src/venue/**`, `src/contracts/{settlement_semantics,execution_price,venue_submission_envelope,fx_classification}.py`, truth-owning `src/state/**`, `src/riskguard/**`, `src/control/**`, `src/supervisor_api/**`, migrations) before docs, generated files, prompt archives, or style. Ensure cross-DB writes adhere to INV-37 (ATTACH+SAVEPOINT, never independent connections). For large PRs, state reviewed and unreviewed surfaces explicitly; empty findings + partial coverage is not a clean pass.
+## Reviewing things
+`REVIEW.md` leads; Tier 0 runtime-risk before docs and style. Cross-DB writes satisfy INV-37. Say what you reviewed and what you did not — empty findings over partial coverage is not a pass.
 
-## Zeus tier overlay
+## Sizing things
+Locate work runs on haiku — find only: file:line and verbatim, never execute, never verdicts. Sonnet and above only when the finding needs cross-module reasoning.
 
-Zeus's module count is large enough that grep-based locate work runs
-even after `topology_doctor.py --navigation` resolution. **Grep
-location work in Zeus defaults to haiku, not opus** — Zeus-specific
-override of the universal MODEL_TIERING.md heuristic. Use sonnet+ only
-when the locate output requires cross-module semantic reasoning, not
-just "find file:line by symbol". Dispatch haiku this model is underused and underestimated, but to find only, not execute ever.
+## Lasting things
+Long tasks live on disk (notepad priority context or `docs/operations/current/plans/*`): goal, decisions, files, tests, next action, rollback point. A fresh session resumes from disk and git alone.

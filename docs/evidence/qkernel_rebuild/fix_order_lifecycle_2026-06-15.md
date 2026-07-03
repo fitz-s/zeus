@@ -4,7 +4,7 @@
 - Last reused or audited: 2026-06-15
 - Authority basis: independent ChatGPT-Pro code review of the live no-fills problem,
   confirmed against live state. Conservative-entry law + K4.0 REST-THEN-CROSS doctrine
-  (`docs/operations/consolidated_systemic_overhaul_2026-06-11.md`), operator directive
+  (`docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md`), operator directive
   2026-06-11 (no forced cross above q_lcb; no new caps/haircuts/throttles).
 - Scope: build + test in the isolated worktree only. NOT committed to live, NOT deployed.
 
@@ -201,7 +201,7 @@ New / rewritten tests (all pass):
   (5 tests): Chengdu ask-above-q_lcb stays maker on escalation and near event-end (never a
   0.73 cross); a fresh all-in clearing q_lcb crosses on escalation and near event-end; a
   one-sided book whose only cross exceeds q_lcb → no trade.
-- `tests/money_path/test_edli_live_canary.py` Fix A suite:
+- `tests/money_path/test_edli_live_readiness.py` Fix A suite:
   `test_fixA_active_live_order_suppresses_new_submit` (OPEN → suppressed, no price-improve
   escape), `test_fixA_terminal_cancel_releases_lock_for_rebid` (TERMINAL unfilled cancel →
   re-bid allowed at the same price), `test_fixA_unknown_indeterminate_state_fails_closed_suppresses`
@@ -219,7 +219,7 @@ New / rewritten tests (all pass):
 Targeted suites (all pass, 0 new failures):
 
 - `tests/strategy/live_inference/test_rest_then_cross_policy.py` — 23 passed (18 prior + 5 new).
-- `tests/money_path/test_edli_live_canary.py` — 55 passed (50 prior + 5 new payload-variant tests).
+- `tests/money_path/test_edli_live_readiness.py` — 55 passed (50 prior + 5 new payload-variant tests).
 - `tests/strategy/live_inference/` (full) — all passed.
 - `tests/engine/test_rest_then_cross_adapter_seam.py`, `test_final_submit_mode_authority.py`,
   `test_mode_flip_and_recapture_semantics.py` — all passed.
@@ -249,7 +249,7 @@ available in this environment.
   live-order-state lock + back-compat alias; cert-build and selector call sites repointed.
 - `src/strategy/live_inference/mode_consistent_ev.py` — Fix B: q_lcb-cap admissibility gate
   on every cross lane in `select_rest_then_cross_mode`.
-- `tests/money_path/test_edli_live_canary.py` — Fix A tests (active/terminal/unknown/no-prior;
+- `tests/money_path/test_edli_live_readiness.py` — Fix A tests (active/terminal/unknown/no-prior;
   rewrote the retired price-improvement test).
 - `tests/strategy/live_inference/test_rest_then_cross_policy.py` — Fix B q_lcb-cap tests.
 
@@ -272,7 +272,7 @@ variants.  Full canary suite: 78 passed (23 Fix B + 55 Fix A, including the 5 ne
 
 ## Reviewer risk
 
-The two `test_edli_live_canary.py` tests that previously pinned the retired
+The two `test_edli_live_readiness.py` tests that previously pinned the retired
 historical-command + 0.02-price-improvement semantics were REWRITTEN to assert the corrected
 live-order-state behavior (terminal prior order no longer blocks a same-price re-decision).
 This is an intentional behavior change at the heart of Fix A, not a test-hack: the old

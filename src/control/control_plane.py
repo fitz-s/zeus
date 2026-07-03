@@ -18,6 +18,7 @@ from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
     get_world_connection,
+    get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
 )
@@ -39,7 +40,7 @@ TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 # G6 antibody (2026-04-26): typed boot/catalog allowlist of strategies that
 # may be enabled when the live-only daemon starts. Post-A4 (PLAN.md §A4 +
 # Bug review §E) this is derived from the StrategyProfile registry —
-# strategies with live_status in {"live", "shadow"}. The pre-A4 hardcoded
+# strategies with live_status == "live". The pre-A4 hardcoded
 # frozenset diverged from _LIVE_ALLOWED_STRATEGIES (shoulder_sell was in
 # LIVE_SAFE but not _LIVE_ALLOWED); resolving the divergence in a single
 # source is the §A4 cutover invariant.
@@ -164,6 +165,9 @@ def _refresh_entries_pause_from_durable_state() -> dict:
         _control_state["entries_paused"] = bool(durable_state.get("entries_paused", False))
         _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
         _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
+        _control_state["entries_pause_issued_at"] = durable_state.get("entries_pause_issued_at")
+        _control_state["entries_pause_effective_until"] = durable_state.get("entries_pause_effective_until")
+        _control_state["entries_pause_issued_by"] = durable_state.get("entries_pause_issued_by")
         _control_state["durable_override_status"] = durable_state.get("status", "unknown")
     return durable_state
 
@@ -182,6 +186,19 @@ def get_entries_pause_reason() -> str | None:
     return _control_state.get("entries_pause_reason")
 
 
+def get_entries_pause_evidence() -> dict:
+    """Return the active durable entry-pause row metadata for operator visibility."""
+
+    _refresh_entries_pause_from_durable_state()
+    return {
+        "issued_at": _control_state.get("entries_pause_issued_at"),
+        "effective_until": _control_state.get("entries_pause_effective_until"),
+        "issued_by": _control_state.get("entries_pause_issued_by"),
+        "source": _control_state.get("entries_pause_source"),
+        "reason": _control_state.get("entries_pause_reason"),
+    }
+
+
 
 def alert_auto_pause(reason_code: str) -> None:
     """Emit a structured log warning when entries are auto-paused by exception."""
@@ -189,22 +206,6 @@ def alert_auto_pause(reason_code: str) -> None:
         "auto_pause_entries",
         extra={"reason_code": reason_code},
     )
-
-
-def _auto_pause_tombstone_path():
-    return state_path("auto_pause_failclosed.tombstone")
-
-
-def _clear_auto_pause_tombstone() -> None:
-    """Clear the fail-closed tombstone after an explicit operator resume."""
-    import os
-    try:
-        os.remove(_auto_pause_tombstone_path())
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.error("Failed to clear auto-pause tombstone on resume: %s", exc)
-
 
 
 AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
@@ -331,7 +332,7 @@ def pause_entries(
     # Persist so a daemon restart does not silently lose the pause.
     try:
         conn = get_world_connection()
-        # PRECEDENCE-1 (2026-05-18): refuse to shadow an indefinite operator freeze.
+        # PRECEDENCE-1 (2026-05-18): refuse to weaken an indefinite operator freeze.
         # Only system_auto_pause callers honor this; operator/control_plane callers
         # come through _apply_command, not here, so operator authority is absolute.
         if issued_by == "system_auto_pause" and _has_active_control_plane_override(conn, now_iso=now_iso):
@@ -407,7 +408,6 @@ def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
         )
-        _clear_auto_pause_tombstone()
         expire_control_override(
             conn,
             override_id="control_plane:global:edge_threshold_multiplier",
@@ -528,7 +528,7 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_world_connection()
+        conn = get_world_connection_with_trades_required()
         durable_state = query_control_override_state(conn)
         _refresh_live_allowed_strategy_cache(conn)
     except Exception:
@@ -564,6 +564,9 @@ def refresh_control_state() -> None:
     _control_state["entries_paused"] = entries_paused
     _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
     _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
+    _control_state["entries_pause_issued_at"] = durable_state.get("entries_pause_issued_at")
+    _control_state["entries_pause_effective_until"] = durable_state.get("entries_pause_effective_until")
+    _control_state["entries_pause_issued_by"] = durable_state.get("entries_pause_issued_by")
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
     _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
@@ -647,7 +650,6 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 override_id="control_plane:global:entries_paused",
                 expired_at=issued_at,
             )
-            _clear_auto_pause_tombstone()
             expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",

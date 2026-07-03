@@ -11,9 +11,9 @@ What REMAINS load-bearing and is preserved:
     ``edli_live_cap_usage`` UNIQUE index + the existing-row return below. A
     re-reserve of the same event returns the same row; it never creates a second
     reservation, so a live order can never be double-submitted.
-  - Reserved-notional drift detection: a second reserve for the same event with a
-    different reserved notional (or final_intent_id / execution_command_id) raises
-    ``LiveCapError`` rather than silently overwriting.
+  - Reserved-notional drift detection while a row is still RESERVED or CONSUMED.
+    A RELEASED row is pre-venue/no-side-effect truth and may be re-opened by a
+    fresh redecision of the same event.
   - The LIVE_CAP certificate record that chains the execution-command cert.
 
 The ledger records the (uncapped) Kelly notional; it caps NOTHING.
@@ -27,6 +27,13 @@ from datetime import datetime, timezone
 
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
+
+# Runtime scope for the exactly-once live execution reservation. The older
+# ``tiny_live_canary`` / ``live_canary`` scopes remain readable only as
+# compatibility aliases for already-durable rows; new live receipts must not
+# serialize canary language.
+LIVE_EXECUTION_RESERVATION_SCOPE = "live_execution_reservation"
+LEGACY_LIVE_RESERVATION_SCOPES = ("tiny_live_canary", "live_canary")
 
 # Inert provenance constants written into the durable row so the legacy schema's
 # CHECK (max_orders_per_day > 0) / (max_notional_usd >= 0) constraints are still
@@ -88,9 +95,11 @@ class LiveCapLedger:
         """Record an exactly-once reservation of the Kelly-sized notional.
 
         This caps NOTHING. It records the requested (Kelly) notional, dedupes by
-        ``(event_id, cap_scope)`` so the same event reserves at most once, and
-        raises on reserved-notional drift. The only rejection is the basic sanity
-        floor: a non-positive notional (a real order can never be <= 0).
+        ``(event_id, cap_scope)`` while a reservation is active/consumed, and
+        raises on reserved-notional drift unless the prior row was RELEASED.
+        RELEASED means no live side effect owns the reservation anymore, so a
+        fresh redecision can re-open the same usage id with fresh sizing. The only
+        rejection is the basic sanity floor: a non-positive notional.
         """
         requested = float(requested_notional_usd)
         if requested <= 0:
@@ -106,12 +115,59 @@ class LiveCapLedger:
             """,
             (event_id, cap_scope),
         ).fetchone()
+        if existing is None and cap_scope == LIVE_EXECUTION_RESERVATION_SCOPE:
+            legacy_placeholders = ",".join("?" for _ in LEGACY_LIVE_RESERVATION_SCOPES)
+            existing = self.conn.execute(
+                f"""
+                SELECT *
+                FROM edli_live_cap_usage
+                WHERE event_id = ?
+                  AND cap_scope IN ({legacy_placeholders})
+                  AND reservation_status IN ('RESERVED', 'CONSUMED')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (event_id, *LEGACY_LIVE_RESERVATION_SCOPES),
+            ).fetchone()
         if existing is not None:
-            # Exactly-once: a re-reserve of the same event returns the SAME row.
-            # Drift guard: a changed reserved notional / final_intent_id /
-            # execution_command_id for the same event is a defect, not a silent
-            # overwrite.
+            # Exactly-once while live: a re-reserve of the same active event
+            # returns the SAME row. Drift guard: a changed reserved notional /
+            # final_intent_id / execution_command_id for an active or consumed row
+            # is a defect, not a silent overwrite.
             reservation = _reservation_from_row(existing)
+            if reservation.reservation_status.upper() == "RELEASED":
+                self.conn.execute(
+                    """
+                    UPDATE edli_live_cap_usage
+                    SET decision_time = ?,
+                        max_notional_usd = ?,
+                        reserved_notional_usd = ?,
+                        reservation_status = 'RESERVED',
+                        final_intent_id = ?,
+                        execution_command_id = ?,
+                        created_at = ?
+                    WHERE usage_id = ?
+                    """,
+                    (
+                        decision_text,
+                        requested,
+                        requested,
+                        final_intent_id,
+                        execution_command_id,
+                        created_at,
+                        reservation.usage_id,
+                    ),
+                )
+                return LiveCapReservation(
+                    usage_id=reservation.usage_id,
+                    event_id=event_id,
+                    decision_time=decision_time,
+                    cap_scope=cap_scope,
+                    reserved_notional_usd=requested,
+                    reservation_status="RESERVED",
+                    final_intent_id=final_intent_id,
+                    execution_command_id=execution_command_id,
+                )
             if (
                 reservation.reserved_notional_usd != requested
                 or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)

@@ -6,7 +6,7 @@
 Proving tests for the Phase D structural-blocker enforcers.
 
 Referenced by architecture/topology_enforcement.yaml as `proving_test` for:
-  - stdlib_shadowing_gate
+  - stdlib_name_collision_gate
   - source_rationale_delta_gate
   - db_table_delta_gate
   - high_risk_surface_no_context_pack
@@ -37,33 +37,33 @@ def _run(script: str, *args: str, cwd: Path = REPO_ROOT) -> subprocess.Completed
 
 
 # ---------------------------------------------------------------------------
-# stdlib_shadowing_gate
+# stdlib_name_collision_gate
 # ---------------------------------------------------------------------------
 
 
-def test_stdlib_shadowing_passes_on_clean_repo():
-    r = _run("check_stdlib_shadowing.py")
+def test_stdlib_name_collision_passes_on_clean_repo():
+    r = _run("check_stdlib_name_collisions.py")
     assert r.returncode == 0
     assert "OK" in r.stdout
 
 
-def test_stdlib_shadowing_detects_synthetic_violation(tmp_path: Path):
+def test_stdlib_name_collision_detects_synthetic_violation(tmp_path: Path):
     pkg = tmp_path / "scripts" / "fake_pkg"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
-    (pkg / "dataclasses.py").write_text("# shadows stdlib\n")
-    r = _run("check_stdlib_shadowing.py", "--repo-root", str(tmp_path))
+    (pkg / "dataclasses.py").write_text("# collides with stdlib\n")
+    r = _run("check_stdlib_name_collisions.py", "--repo-root", str(tmp_path))
     assert r.returncode == 1
     assert "dataclasses" in r.stdout
-    assert "shadows stdlib" in r.stdout
+    assert "collides with stdlib" in r.stdout
 
 
-def test_stdlib_shadowing_silent_on_non_shadowing_name(tmp_path: Path):
+def test_stdlib_name_collision_silent_on_non_collision_name(tmp_path: Path):
     pkg = tmp_path / "scripts" / "fake_pkg"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "topology_models.py").write_text("# safe\n")
-    r = _run("check_stdlib_shadowing.py", "--repo-root", str(tmp_path))
+    r = _run("check_stdlib_name_collisions.py", "--repo-root", str(tmp_path))
     assert r.returncode == 0
 
 

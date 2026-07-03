@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from src.contracts.canonical_lifecycle import VenueOrderStatus, VenueTradeStatus
 from src.contracts.semantic_types import LifecycleState
 from src.state.lifecycle_manager import (
     enter_filled_entry_runtime_state,
@@ -38,11 +39,15 @@ from src.state.portfolio import (
 
 logger = logging.getLogger(__name__)
 
-FILL_STATUSES = frozenset({"CONFIRMED"})
-OPTIMISTIC_FILL_STATUSES = frozenset({"MATCHED", "MINED", "FILLED"})
-PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"})
-TRADE_FILL_ECONOMICS_STATUSES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
-CANCEL_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
+# Venue-fill classifications tied to the canonical VenueTradeStatus / VenueOrderStatus
+# enums (single source). Identical values; raw synonyms (FILLED, PARTIAL,
+# PARTIALLY_FILLED, CANCELLED/CANCELED, OPEN, ACCEPTED, RESTING) are folded at ingress
+# by canonical_lifecycle normalizers and retained here only during the migration.
+FILL_STATUSES = frozenset({VenueTradeStatus.CONFIRMED.value})
+OPTIMISTIC_FILL_STATUSES = frozenset({VenueTradeStatus.MATCHED.value, VenueTradeStatus.MINED.value, "FILLED"})
+PARTIAL_FILL_STATUSES = frozenset({VenueOrderStatus.PARTIALLY_MATCHED.value, "PARTIAL", "PARTIALLY_FILLED"})
+TRADE_FILL_ECONOMICS_STATUSES = frozenset({VenueTradeStatus.MATCHED.value, VenueTradeStatus.MINED.value, VenueTradeStatus.CONFIRMED.value})
+CANCEL_STATUSES = frozenset({VenueOrderStatus.EXPIRED.value, "CANCELLED", "CANCELED", "REJECTED"})
 # Resting-open statuses: a post_only/GTC maker order that has reached the venue
 # and is RESTING on the book (not yet filled). These must land a LIVE
 # venue_order_facts row linked by command_id so resting fills/partials/cancels

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ from src.contracts.fx_classification import (
     require_fx_classification,
 )
 from src.contracts.slippage_bps import SlippageBps
-from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent
+from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent, FinalExecutionIntent
 from src.execution.wrap_unwrap_commands import (
     WrapUnwrapState,
     confirm_command,
@@ -332,6 +333,149 @@ def _exec_snapshot_kwargs(
         "executable_snapshot_min_order_size": Decimal(min_order_size),
         "executable_snapshot_neg_risk": False,
     }
+
+
+def _final_buy_intent(
+    conn,
+    *,
+    token_id: str = YES_TOKEN,
+    submitted_shares: str = "10.00",
+    final_limit_price: str = "0.50",
+    min_tick_size: str = "0.01",
+    min_order_size: str = "0.01",
+) -> FinalExecutionIntent:
+    """Current (a4707d1be) live entry contract: execute_intent/ExecutionIntent is
+    LEGACY_EXECUTION_INTENT_LIVE_BLOCKED under get_mode()=='live'; live entry
+    submission goes through FinalExecutionIntent + execute_final_intent. Shape
+    mirrors tests/test_executor_command_split.py's
+    test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps and
+    tests/test_executor.py's _final_execution_intent -- placeholder q_live/
+    q_lcb_5pct/etc are not the subject under test here (collateral preflight
+    is) and are bypassed the same way ExecutionIntent's economics were, via
+    the _entry_economics_component monkeypatch each caller already installs.
+    submitted_shares is taken verbatim by execute_final_intent
+    (_final_intent_submit_shares) -- no internal re-quantization -- so a
+    caller wanting a specific quantized share count (e.g. 30.04) passes it
+    directly, matching what the legacy ExecutionIntent-based test asserted
+    the venue received.
+    """
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot_id = f"snap-final-{token_id}-{min_tick_size}-{min_order_size}"
+    captured_at = datetime(2026, 4, 27, tzinfo=timezone.utc)
+    price = Decimal(final_limit_price)
+    top_ask = price
+    top_bid = max(Decimal("0.01"), top_ask - Decimal("0.01"))
+    if get_snapshot(conn, snapshot_id) is None:
+        insert_snapshot(
+            conn,
+            ExecutableMarketSnapshot(
+                snapshot_id=snapshot_id,
+                gamma_market_id="gamma-test",
+                event_id="event-test",
+                event_slug="event-test",
+                condition_id="condition-test",
+                question_id="question-test",
+                yes_token_id=token_id,
+                no_token_id=f"{token_id}-no",
+                selected_outcome_token_id=token_id,
+                outcome_label="YES",
+                enable_orderbook=True,
+                active=True,
+                closed=False,
+                accepting_orders=True,
+                market_start_at=None,
+                market_end_at=None,
+                market_close_at=None,
+                sports_start_at=None,
+                min_tick_size=Decimal(min_tick_size),
+                min_order_size=Decimal(min_order_size),
+                fee_details={
+                    "source": "test",
+                    "token_id": token_id,
+                    "fee_rate_fraction": 0.0,
+                    "fee_rate_bps": 0.0,
+                    "fee_rate_source_field": "fee_rate_fraction",
+                    "fee_rate_raw_unit": "fraction",
+                },
+                token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+                rfqe=None,
+                neg_risk=False,
+                orderbook_top_bid=top_bid,
+                orderbook_top_ask=top_ask,
+                # order_policy=limit_may_take_conservative requires actual
+                # depth (not "{}") or pre-venue validation fails closed with
+                # PreVenueSubmitError: "executable depth validation failed: EMPTY_BOOK".
+                orderbook_depth_jsonb=json.dumps(
+                    {
+                        "bids": [{"price": str(top_bid), "size": "100"}],
+                        "asks": [{"price": str(top_ask), "size": "100"}],
+                    }
+                ),
+                raw_gamma_payload_hash="a" * 64,
+                raw_clob_market_info_hash="b" * 64,
+                raw_orderbook_hash="c" * 64,
+                authority_tier="CLOB",
+                captured_at=captured_at,
+                freshness_deadline=captured_at + timedelta(days=365),
+            ),
+        )
+    # _final_intent_snapshot_metadata requires snapshot_hash to match the
+    # STORED snapshot's own computed executable_snapshot_hash exactly -- an
+    # arbitrary placeholder ("a" * 64) fails closed with
+    # "snapshot_hash does not match executable snapshot".
+    snapshot = get_snapshot(conn, snapshot_id)
+    assert snapshot is not None
+    return FinalExecutionIntent(
+        hypothesis_id=f"hyp-{token_id}",
+        selected_token_id=token_id,
+        direction="buy_yes",
+        size_kind="shares",
+        size_value=Decimal(submitted_shares),
+        submitted_shares=Decimal(submitted_shares),
+        final_limit_price=Decimal(final_limit_price),
+        expected_fill_price_before_fee=Decimal(final_limit_price),
+        fee_adjusted_execution_price=Decimal(final_limit_price),
+        order_policy="limit_may_take_conservative",
+        order_type="FOK",
+        post_only=False,
+        cancel_after=datetime.now(timezone.utc) + timedelta(minutes=5),
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot.executable_snapshot_hash,
+        cost_basis_id="cost_basis:" + ("b" * 16),
+        cost_basis_hash="b" * 64,
+        max_slippage_bps=Decimal("200"),
+        tick_size=Decimal(min_tick_size),
+        min_order_size=Decimal(min_order_size),
+        fee_rate=Decimal("0"),
+        neg_risk=False,
+        event_id="event-test",
+        resolution_window="2026-04-27",
+        correlation_key="z4:2026-04-27",
+        decision_source_context=_decision_source_context(),
+        q_live=0.99,
+        q_lcb_5pct=0.95,
+        expected_edge=0.07,
+        min_entry_price=0.05,
+        min_expected_profit_usd=0.05,
+        min_submit_edge_density=0.02,
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.99,
+            "payoff_q_lcb": 0.95,
+            "cost": float(final_limit_price),
+            "edge_lcb": 0.70,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
+        },
+    )
 
 
 def _snapshot(
@@ -806,6 +950,39 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
 
     class ClientShouldNotBeConstructed:
         def __init__(self, *args, **kwargs):  # pragma: no cover - assertion tripwire
@@ -813,26 +990,73 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientShouldNotBeConstructed)
     try:
-        with pytest.raises(CollateralInsufficient, match="pusd_insufficient"):
-            _live_order("z4-buy-block", _buy_intent(size_usd=10.0), 20.0, conn=conn, decision_id="z4-buy")
+        # Contract since a6f47aa4a (2026-06-28, provenance-verified live fix,
+        # predates this rebuild base): _live_order no longer lets
+        # CollateralInsufficient escape -- it is caught internally and
+        # converted to a rejected OrderResult (executor.py's pre-command
+        # branch: no venue command exists yet, so no SUBMIT_REJECTED
+        # journaling either, just a rollback + warning log).
+        result = _live_order("z4-buy-block", _buy_intent(size_usd=10.0), 20.0, conn=conn, decision_id="z4-buy")
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert "pusd_insufficient" in (result.reason or "")
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         configure_global_ledger(None)
 
 
 def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypatch):
-    from src.execution.executor import execute_intent
+    from src.execution.executor import execute_final_intent
     from src.state.collateral_ledger import configure_global_ledger
     from src.state.db import init_schema
 
     init_schema(conn)
     ledger = CollateralLedger(conn)
-    # target_size_usd is exactly 10 pUSD, but BUY quantization at 0.333 submits
-    # 30.04 shares, i.e. 10.003320 pUSD. A target-sized balance must fail closed.
+    # target_size_usd is exactly 10 pUSD, but BUY quantization at 0.50 submits
+    # 20.02 shares, i.e. 10.01 pUSD. A target-sized balance must fail closed.
+    # (was 30.04 shares @ 0.333 = 10.003320 under the pre-a4707d1be model;
+    # venue_submit_amount_precision_error's current immediate-BUY maker/taker
+    # decimal-precision check -- new in a4707d1be -- rejects that exact
+    # combination before ever reaching collateral preflight, so the specific
+    # numbers changed; the theme -- quantized notional exceeds a target-sized
+    # balance -- is unchanged.)
     ledger.set_snapshot(_snapshot(pusd=10_000_000, pusd_allowance=10_000_000, ctf={YES_TOKEN: 100}))
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
 
     class ClientShouldNotBeConstructed:
         def __init__(self, *args, **kwargs):  # pragma: no cover - assertion tripwire
@@ -840,20 +1064,30 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientShouldNotBeConstructed)
     try:
-        with pytest.raises(CollateralInsufficient, match="pusd_insufficient"):
-            execute_intent(
-                _buy_intent(size_usd=10.0, limit_price=0.333),
-                edge_vwmp=0.333,
-                label="z4-quantized-notional",
-                conn=conn,
-                decision_id="z4-quantized-notional",
-            )
+        # Contract since a4707d1be (2026-05-21, "harden side-effect and risk
+        # boundaries" #271, provenance-verified, predates this rebuild base):
+        # execute_intent/ExecutionIntent is LEGACY_EXECUTION_INTENT_LIVE_BLOCKED
+        # under get_mode()=='live' (hardcoded live-only now, src/config.py).
+        # Live entry submission goes through FinalExecutionIntent +
+        # execute_final_intent instead; both still funnel through the SAME
+        # _live_order collateral preflight this test exercises. The quantized
+        # share count is supplied directly as submitted_shares --
+        # execute_final_intent takes it verbatim, no internal re-quantization.
+        final_intent = _final_buy_intent(
+            conn, submitted_shares="20.02", final_limit_price="0.50", min_tick_size="0.01",
+        )
+        result = execute_final_intent(
+            final_intent, conn=conn, decision_id="z4-quantized-notional",
+        )
+        assert result.status == "rejected"
+        assert "pusd_insufficient" in (result.reason or "")
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         configure_global_ledger(None)
 
 
 def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeypatch):
+    from src.execution import executor as executor_module
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
     from src.state.db import init_schema
@@ -864,6 +1098,15 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor_module,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda conn, *, token_id, shares: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "test_noop_refresh",
+        },
+    )
 
     class ClientShouldNotBeConstructed:
         def __init__(self, *args, **kwargs):  # pragma: no cover - assertion tripwire
@@ -885,6 +1128,60 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
         configure_global_ledger(None)
 
 
+def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkeypatch):
+    from src.execution import executor as executor_module
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import configure_global_ledger
+    from src.state.db import init_schema
+
+    init_schema(conn)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 0}))
+    configure_global_ledger(ledger)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+
+    def refresh_exit_collateral(conn, *, token_id, shares):
+        assert token_id == YES_TOKEN
+        assert shares == pytest.approx(5.0)
+        ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 5}))
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "refreshed_before_exit_submit",
+            "token_id": token_id,
+        }
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            return _fake_submit_result(self.bound_envelope, order_id="exit-refresh-order-1", success=True)
+
+    monkeypatch.setattr(executor_module, "_refresh_exit_collateral_snapshot_for_submit", refresh_exit_collateral)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    intent = create_exit_order_intent(
+        trade_id="z4-sell-refresh-before-preflight",
+        token_id=YES_TOKEN,
+        shares=5.0,
+        current_price=0.50,
+        best_bid=0.49,
+        **_exec_snapshot_kwargs(conn, token_id=YES_TOKEN),
+    )
+    try:
+        result = execute_exit_order(
+            intent,
+            conn=conn,
+            decision_id="z4-sell-refresh-before-preflight",
+        )
+        assert result.status == "pending"
+        assert "pre_submit_collateral_reservation_failed" not in (result.reason or "")
+        assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
+    finally:
+        configure_global_ledger(None)
+
+
 
 def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     from src.execution.executor import _live_order
@@ -897,6 +1194,39 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
 
     class FakeClient:
         def v2_preflight(self):
@@ -930,7 +1260,7 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
 
 
 def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
-    from src.execution.executor import execute_intent
+    from src.execution.executor import execute_final_intent
     from src.state.collateral_ledger import configure_global_ledger
     from src.state.db import init_schema
 
@@ -940,6 +1270,39 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
 
     class FakeClient:
         def v2_preflight(self):
@@ -949,25 +1312,25 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
             self.bound_envelope = envelope
 
         def place_limit_order(self, **kwargs):
-            assert kwargs["size"] == 30.04
-            assert kwargs["price"] == 0.333
+            assert kwargs["size"] == 20.02
+            assert kwargs["price"] == 0.50
             return _fake_submit_result(self.bound_envelope, order_id="entry-order-quantized", success=True)
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     try:
-        result = execute_intent(
-            _buy_intent(
-                size_usd=10.0,
-                limit_price=0.333,
-                **_exec_snapshot_kwargs(conn, min_tick_size="0.001"),
-            ),
-            edge_vwmp=0.333,
-            label="z4-buy-reserve-quantized",
-            conn=conn,
-            decision_id="z4-buy-reserve-quantized",
+        # Same a4707d1be migration and quantized-values rationale as
+        # test_executor_buy_preflight_uses_quantized_submitted_notional above
+        # (execute_intent/ExecutionIntent -> execute_final_intent/FinalExecutionIntent;
+        # 30.04 shares @ 0.333 -> 20.02 shares @ 0.50 to clear the new
+        # immediate-BUY maker/taker decimal-precision gate).
+        final_intent = _final_buy_intent(
+            conn, submitted_shares="20.02", final_limit_price="0.50", min_tick_size="0.01",
+        )
+        result = execute_final_intent(
+            final_intent, conn=conn, decision_id="z4-buy-reserve-quantized",
         )
         assert result.status == "pending"
-        assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_003_320
+        assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_010_000
     finally:
         configure_global_ledger(None)
 
@@ -984,6 +1347,39 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
     real_append_event = venue_command_repo.append_event
 
     def append_event_fails_for_terminal(conn, *, command_id, event_type, occurred_at, payload=None):
@@ -1023,13 +1419,28 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
             conn=conn,
             decision_id="z4-buy-terminal-append-fails",
         )
-        assert result.status == "rejected"
+        # Contract since a4707d1be (2026-05-21, "harden side-effect and risk
+        # boundaries" #271, provenance-verified, predates this rebuild base):
+        # when the SDK call itself succeeds (venue side effect may have
+        # happened) but the SUBMIT_REJECTED journaling append then fails, the
+        # command can no longer be honestly reported "rejected" -- the venue
+        # truth is unconfirmed. _mark_post_submit_persistence_failure rolls
+        # back the failed append and durably writes REVIEW_REQUIRED instead
+        # (a recovery-owned quasi-terminal state, not TERMINAL_STATES), and
+        # _live_order returns status="unknown_side_effect".
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
+        # The theme this test's name asserts: collateral release requires a
+        # SUCCESSFUL terminal append. REVIEW_REQUIRED is not in
+        # TERMINAL_STATES, so no release/conversion path fired -- the pUSD
+        # reservation committed at command-persistence time is still intact.
         assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_000_000
         row = conn.execute(
             "SELECT state FROM venue_commands WHERE position_id = ?",
             ("z4-buy-terminal-append-fails",),
         ).fetchone()
-        assert row[0] == "SUBMITTING"
+        assert row[0] == "REVIEW_REQUIRED"
     finally:
         configure_global_ledger(None)
 
@@ -1088,6 +1499,39 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        # Not the subject under test (collateral preflight is); same idiom as
+        # the cutover/heartbeat bypasses above and tests/test_unknown_side_effect.py.
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            # ENTRY SUBMIT_REQUESTED validation (venue_command_repo._validate_entry_submit_payload)
+            # requires a populated details dict for this component -- placeholder values, matching
+            # the established minimal-payload convention (tests/test_venue_command_repo.py's
+            # _valid_execution_capability_payload). Collateral preflight is the subject under test,
+            # not economics; validation here is presence-only, never checked against these values.
+            "details": {
+                "q_live": 0.7, "q_lcb_5pct": 0.6, "expected_edge": 0.1, "min_entry_price": 0.01,
+                "limit_price": 0.5, "submit_edge": 0.1, "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01, "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01, "shares": 10.0, "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
     real_append_event = venue_command_repo.append_event
 
     def append_event_fails_for_terminal(conn, *, command_id, event_type, occurred_at, payload=None):
@@ -1130,13 +1574,20 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
             conn=conn,
             decision_id="z4-sell-terminal-append-fails",
         )
-        assert result.status == "rejected"
+        # Same a4707d1be contract as the buy-side sibling test above: SDK
+        # succeeded, SUBMIT_REJECTED journaling failed -> REVIEW_REQUIRED +
+        # status="unknown_side_effect", never a false "rejected".
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
+        # Theme preserved: no successful terminal append -> no release. The
+        # CTF reservation committed at command-persistence time is intact.
         assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
         row = conn.execute(
             "SELECT state FROM venue_commands WHERE position_id = ?",
             ("z4-sell-terminal-append-fails",),
         ).fetchone()
-        assert row[0] == "SUBMITTING"
+        assert row[0] == "REVIEW_REQUIRED"
     finally:
         configure_global_ledger(None)
 
@@ -1208,3 +1659,558 @@ def test_v2_adapter_redeem_forbidden_without_sdk_contact(monkeypatch):
 
     with pytest.raises(RedeemSubmissionAbandonedError, match="REDEEM_SUBMISSION_FORBIDDEN"):
         adapter.redeem("condition-1")
+
+
+# ---------------------------------------------------------------------------
+# SCH-W1.1-CAS-LEDGER: CAS reservation ledger, convert-on-fill, type-aware A4
+# identity acceptance tests.
+# ---------------------------------------------------------------------------
+
+
+def _insert_test_command(
+    conn,
+    command_id: str,
+    *,
+    # NOTE: intent_kind defaults to "EXIT" (not "ENTRY") even for BUY-side
+    # fixtures in this section — _validate_entry_submit_payload requires a
+    # full execution_capability/entry_economics proof payload for
+    # ENTRY+SUBMIT_REQUESTED that is orthogonal to what these collateral-seam
+    # tests exercise. intent_kind does not affect reservation/conversion
+    # logic (which reads reservation_type, size, price — not intent_kind).
+    intent_kind: str = "EXIT",
+    side: str = "BUY",
+    size: float = 10.0,
+    price: float = 0.5,
+    token_id: str = YES_TOKEN,
+) -> None:
+    """Minimal direct venue_commands row for collateral-ledger unit tests.
+
+    Bypasses insert_command's U1/U2 snapshot+envelope gates (no FK enforcement
+    on those two columns per the DDL) so tests can focus on the collateral
+    seam without standing up executable-market-snapshot/envelope fixtures.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_CREATED', ?, ?)
+        """,
+        (
+            command_id, f"snap-{command_id}", f"env-{command_id}", f"pos-{command_id}",
+            f"dec-{command_id}", f"idem-{command_id}", intent_kind, "z4-market",
+            token_id, side, size, price, now, now,
+        ),
+    )
+
+
+def _walk_to_acked(conn, command_id: str) -> None:
+    from src.state.venue_command_repo import append_event
+
+    now = datetime.now(timezone.utc).isoformat()
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=now,
+        payload={
+            "execution_capability": {
+                "allowed": True,
+                "components": [
+                    {"component": "entry_economics", "allowed": True},
+                    {"component": "entry_actionable_certificate", "allowed": True},
+                ],
+            }
+        },
+    )
+    append_event(conn, command_id=command_id, event_type="SUBMIT_ACKED", occurred_at=now)
+
+
+class _RaisingConn:
+    """Minimal conn stand-in exposing only .execute(), for unit-testing the
+    trigger-IntegrityError -> CollateralInsufficient mapping without racing."""
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.IntegrityError("CHECK constraint failed: COLLATERAL_OVERRESERVE")
+
+
+def test_cas_insert_pusd_reservation_maps_trigger_integrity_error_to_collateral_insufficient():
+    """Critic ruling 7b: RAISE(ABORT,'COLLATERAL_OVERRESERVE') (IntegrityError)
+    must never leak past the ledger API as a raw sqlite3 exception."""
+    with pytest.raises(CollateralInsufficient, match="pusd_insufficient_trigger"):
+        CollateralLedger._cas_insert_pusd_reservation(
+            _RaisingConn(), "cmd-x", 1_000_000, datetime.now(timezone.utc).isoformat()
+        )
+
+
+def test_cas_trigger_raises_on_raw_bypass_insert(conn):
+    """Belt-and-braces: the AFTER INSERT trigger independently enforces
+    non-overreserve even for a write path that bypasses the guarded CAS
+    WHERE clause (defense in depth for a future/other writer)."""
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=5_000_000))
+
+    with pytest.raises(sqlite3.IntegrityError, match="COLLATERAL_OVERRESERVE"):
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations
+              (command_id, reservation_type, token_id, amount, converted_amount, created_at)
+            VALUES (?, 'PUSD_BUY', NULL, ?, 0, ?)
+            """,
+            ("bypass-cmd", 10_000_000, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def test_cas_reserve_pusd_for_buy_blocks_second_racer_via_cas_not_preflight(conn):
+    """The CAS INSERT itself — not just buy_preflight — is the enforcement
+    authority: directly exercising the CAS bypassing preflight proves the
+    guarded statement alone closes the over-reserve window."""
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=10_000_000))
+    now = datetime.now(timezone.utc).isoformat()
+
+    CollateralLedger._cas_insert_pusd_reservation(conn, "cmd-a", 6_000_000, now)
+    with pytest.raises(CollateralInsufficient, match="pusd_insufficient_cas"):
+        CollateralLedger._cas_insert_pusd_reservation(conn, "cmd-b", 6_000_000, now)
+
+    total = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    assert total == 6_000_000
+
+
+@pytest.mark.parametrize("mode", ["memory", "caller_conn_file", "db_path"])
+def test_cas_reserve_correct_under_all_three_connection_modes(tmp_path, mode):
+    """tests_required: 'three connection modes: CAS correct under in-memory,
+    caller-owned-conn (insert_command-first pattern), and db_path modes.'"""
+    if mode == "memory":
+        raw = sqlite3.connect(":memory:")
+        raw.row_factory = sqlite3.Row
+        init_collateral_schema(raw)
+        ledger = CollateralLedger(raw)
+    elif mode == "caller_conn_file":
+        db_path = tmp_path / "caller.db"
+        raw = sqlite3.connect(db_path)
+        raw.row_factory = sqlite3.Row
+        init_collateral_schema(raw)
+        ledger = CollateralLedger(raw)
+    else:
+        db_path = tmp_path / "owned.db"
+        setup_conn = sqlite3.connect(db_path)
+        init_collateral_schema(setup_conn)
+        setup_conn.commit()
+        setup_conn.close()
+        ledger = CollateralLedger(db_path=db_path)
+
+    ledger.set_snapshot(_snapshot(pusd=10_000_000))
+    ledger.reserve_pusd_for_buy("cmd-a", 6_000_000)
+    with pytest.raises(CollateralInsufficient):
+        ledger.reserve_pusd_for_buy("cmd-b", 6_000_000)
+
+    assert ledger.snapshot().reserved_pusd_for_buys_micro == 6_000_000
+    ledger.close()
+
+
+def test_convert_reservation_on_fill_converts_filled_portion_and_releases_remainder(conn):
+    """PUSD_BUY FILLED with a partial cumulative fill: the filled fraction
+    converts to an unsettled OUTGOING_DEDUCTION row; the remainder releases.
+    Derivation uses MAX(matched_size) over the fact stream (critic ruling 1)."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-convert-fill"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-convert-fill",
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="4",
+        matched_size="6",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="a" * 64,
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="vo-convert-fill",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="b" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="FILL_CONFIRMED", occurred_at=now.isoformat())
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at, release_reason "
+        "FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000  # amount is immutable
+    assert row[1] == 5_000_000  # fully matched (10/10) -> fully converted
+    assert row[2] is not None
+    assert row[3] == "CONVERTED_ON_FILL"
+
+    unsettled = conn.execute(
+        "SELECT direction, reservation_type, token_id, amount_micro, settled_at "
+        "FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert tuple(unsettled) == ("OUTGOING_DEDUCTION", "PUSD_BUY", None, 5_000_000, None)
+
+    # spendable does NOT increase at conversion time (still reduced by the
+    # unsettled OUTGOING_DEDUCTION even though released_at is now set).
+    assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
+    spendable = 100_000_000 - 0 - 5_000_000
+    assert spendable == 95_000_000
+
+
+def test_convert_reservation_on_fill_idempotent_on_replayed_terminal_event(conn):
+    """Single idempotent terminal write guarded by WHERE released_at IS NULL:
+    a re-delivered terminal dispatch call is a safe no-op, never double-inserts
+    into collateral_unsettled_proceeds."""
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import convert_reservation_on_fill
+    from src.state.venue_command_repo import append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-idempotent-terminal"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-idem",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="c" * 64,
+    )
+
+    assert convert_reservation_on_fill(conn, command_id, "FILLED") is True
+    assert convert_reservation_on_fill(conn, command_id, "FILLED") is False
+
+    unsettled_count = conn.execute(
+        "SELECT COUNT(*) FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    assert unsettled_count == 1
+    converted_amount = conn.execute(
+        "SELECT converted_amount FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    assert converted_amount == 5_000_000
+
+
+def test_partial_then_cancel_converts_filled_releases_remainder(conn):
+    """tests_required: partial-then-cancel — matched>0 then CANCELLED: the
+    filled-notional portion converts, the unfilled remainder releases, ONE
+    idempotent terminal write."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-partial-cancel"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-partial-cancel",
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="6",
+        matched_size="4",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="d" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED", occurred_at=now.isoformat())
+    append_event(conn, command_id=command_id, event_type="CANCEL_REQUESTED", occurred_at=now.isoformat())
+    append_event(conn, command_id=command_id, event_type="CANCEL_ACKED", occurred_at=now.isoformat())
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at, release_reason "
+        "FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000
+    assert row[1] == 2_000_000  # floor(5_000_000 * 4/10)
+    assert row[2] is not None
+    assert row[3] == "CONVERTED_ON_FILL"
+
+    unsettled = conn.execute(
+        "SELECT amount_micro FROM collateral_unsettled_proceeds WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert unsettled[0] == 2_000_000
+
+    state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()[0]
+    assert state == "CANCELLED"
+
+
+def test_type_aware_identity_ctf_sell_proceeds_never_reduce_spendable_pusd(conn):
+    """CTF_SELL proceeds are INCOMING, recorded as INCOMING_PROCEEDS, and
+    tracked for the identity but never part of spendable_pusd while unsettled
+    — never uniform subtraction."""
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-sell-fill"
+    _insert_test_command(
+        conn, command_id, intent_kind="EXIT", side="SELL", size=10.0, price=0.6, token_id=YES_TOKEN
+    )
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, ctf={YES_TOKEN: 10}))
+    ledger.reserve_tokens_for_sell(command_id, YES_TOKEN, 10)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    append_order_fact(
+        conn,
+        venue_order_id="vo-sell-fill",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="10",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="e" * 64,
+    )
+    append_event(conn, command_id=command_id, event_type="FILL_CONFIRMED", occurred_at=now.isoformat())
+
+    unsettled = conn.execute(
+        "SELECT direction, reservation_type, token_id, amount_micro FROM collateral_unsettled_proceeds "
+        "WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert unsettled[0] == "INCOMING_PROCEEDS"
+    assert unsettled[1] == "CTF_SELL"
+    assert unsettled[2] == YES_TOKEN
+    assert unsettled[3] == 6_000_000  # 10 shares * 0.6 price * 1e6
+
+    # spendable_pusd formula excludes INCOMING_PROCEEDS entirely.
+    live_buy = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
+        "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL"
+    ).fetchone()[0]
+    unsettled_outgoing = conn.execute(
+        "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
+        "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL"
+    ).fetchone()[0]
+    spendable_pusd = 50_000_000 - live_buy - unsettled_outgoing
+    assert spendable_pusd == 50_000_000  # unaffected by the sell proceeds
+
+    # CTF token reservation itself released (tokens left the wallet, sold).
+    assert ledger.snapshot().reserved_tokens_for_sells == {}
+
+
+def test_clearing_settles_matured_unsettled_rows_inside_refresh_transaction(conn):
+    """Settlement-coordinated clearing (critic ruling 4): a balance snapshot
+    captured after converted_at + CLOCK_SKEW settles the row inside the same
+    write transaction as the new snapshot insert."""
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS
+
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds
+          (command_id, direction, reservation_type, token_id, amount_micro, created_at)
+        VALUES ('cmd-clear', 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, 3_000_000, ?)
+        """,
+        (old_time.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = CollateralLedger(conn)
+    fresh_time = old_time + timedelta(seconds=COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS + 30)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, captured_at=fresh_time))
+
+    row = conn.execute(
+        "SELECT settled_at, settle_reason FROM collateral_unsettled_proceeds WHERE command_id = 'cmd-clear'"
+    ).fetchone()
+    assert row[0] is not None
+    assert row[1] == "BALANCE_REFRESH_OBSERVED"
+
+
+def test_clearing_does_not_settle_row_within_clock_skew_tolerance(conn):
+    """Rows younger than converted_at + CLOCK_SKEW must NOT settle yet — the
+    venue has not had the chance to reflect the deduction."""
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=2)
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds
+          (command_id, direction, reservation_type, token_id, amount_micro, created_at)
+        VALUES ('cmd-too-fresh', 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, 3_000_000, ?)
+        """,
+        (old_time.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=50_000_000, captured_at=datetime.now(timezone.utc)))
+
+    row = conn.execute(
+        "SELECT settled_at FROM collateral_unsettled_proceeds WHERE command_id = 'cmd-too-fresh'"
+    ).fetchone()
+    assert row[0] is None
+
+
+def test_idempotent_derivation_replay_duplicate_partial_fact_stream(conn):
+    """tests_required: replay the same PARTIALLY_MATCHED fact stream (WS +
+    reconcile + recovery duplicates) — derived live remaining invariant under
+    replay; ZERO ledger writes on partial facts."""
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import _max_matched_size
+    from src.state.venue_command_repo import append_order_fact
+
+    init_schema(conn)
+    command_id = "cmd-replay-partial"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    _walk_to_acked(conn, command_id)
+
+    now = datetime.now(timezone.utc)
+    for source in ("WS_USER", "REST", "OPERATOR"):  # WS + reconcile + recovery duplicate delivery
+        append_order_fact(
+            conn,
+            venue_order_id="vo-replay",
+            command_id=command_id,
+            state="PARTIALLY_MATCHED",
+            remaining_size="4",
+            matched_size="6",
+            source=source,
+            observed_at=now,
+            raw_payload_hash=hashlib.sha256(source.encode()).hexdigest(),
+        )
+
+    assert _max_matched_size(conn, command_id) == Decimal("6")
+
+    row = conn.execute(
+        "SELECT amount, converted_amount, released_at FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row[0] == 5_000_000
+    assert row[1] == 0
+    assert row[2] is None
+    unsettled_count = conn.execute("SELECT COUNT(*) FROM collateral_unsettled_proceeds").fetchone()[0]
+    assert unsettled_count == 0
+
+
+def test_cas_concurrent_reserve_stress_zero_overreserve(tmp_path):
+    """CONCURRENCY PROOF (acceptance, LIVE topology per critic ruling 6): each
+    of >=20 threads on its OWN connection performs a command-row INSERT
+    (write lock) THEN the CAS reserve on the SAME conn, against one shared
+    bounded balance. Zero over-reserve at any commit point; every contended
+    failure surfaces as CollateralInsufficient, NEVER OperationalError.
+    """
+    import threading
+
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "cas_stress.db"
+    setup_conn = sqlite3.connect(db_path)
+    setup_conn.row_factory = sqlite3.Row
+    init_schema(setup_conn)
+    init_collateral_schema(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    ledger_seed = CollateralLedger(db_path=db_path)
+    ledger_seed.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger_seed.close()
+
+    n_threads = 25
+    reserve_amount = 5_000_000  # exactly 20 of 25 can succeed against 100M
+
+    results: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        conn_t = sqlite3.connect(db_path, timeout=30)
+        conn_t.row_factory = sqlite3.Row
+        conn_t.execute("PRAGMA journal_mode=WAL")
+        conn_t.execute("PRAGMA busy_timeout=30000")
+        command_id = f"stress-cmd-{i}"
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn_t.execute(
+                """
+                INSERT INTO venue_commands (
+                    command_id, snapshot_id, envelope_id, position_id, decision_id,
+                    idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                    state, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'INTENT_CREATED',?,?)
+                """,
+                (
+                    command_id, f"snap-{i}", f"env-{i}", f"pos-{i}", f"dec-{i}", f"idem-{i}",
+                    "ENTRY", "z4-market", YES_TOKEN, "BUY", 10.0, 0.5, now, now,
+                ),
+            )
+            try:
+                CollateralLedger._cas_insert_pusd_reservation(conn_t, command_id, reserve_amount, now)
+                conn_t.commit()
+                with lock:
+                    results.append(("ok", command_id))
+            except CollateralInsufficient:
+                conn_t.rollback()
+                with lock:
+                    results.append(("insufficient", command_id))
+        except Exception as exc:  # noqa: BLE001 — captured for the assertion below
+            with lock:
+                errors.append((type(exc).__name__, str(exc)))
+        finally:
+            conn_t.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"non-CollateralInsufficient errors under contention: {errors}"
+    ok_count = sum(1 for outcome, _ in results if outcome == "ok")
+    insufficient_count = sum(1 for outcome, _ in results if outcome == "insufficient")
+    assert ok_count + insufficient_count == n_threads
+    assert ok_count == 20, f"expected exactly 20 successes (100M/5M), got {ok_count}"
+
+    verify_conn = sqlite3.connect(db_path)
+    total_reserved = verify_conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    live_count = verify_conn.execute(
+        "SELECT COUNT(*) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0]
+    verify_conn.close()
+    assert total_reserved == ok_count * reserve_amount
+    assert total_reserved <= 100_000_000
+    assert live_count == ok_count

@@ -9,8 +9,9 @@ Modules at the seam:
   A = src.engine.event_reactor_adapter._build_no_submit_proof_bundle_from_adapter_evidence
       (PRODUCES the QUOTE_FEASIBILITY AuthorityEvidence from a selected_snapshot_row).
   B = src.engine.event_reactor_adapter._passive_maker_context_from_authorities
-      (CONSUMES quote_feasibility_cert.payload["best_bid"/"best_ask"]; raises
-       QUOTE_FEASIBILITY_BID_ASK_REQUIRED when either is empty).
+      (CONSUMES quote_feasibility_cert.payload["best_bid"/"best_ask"]; permits a
+       one-sided maker book but raises QUOTE_FEASIBILITY_BID_ASK_REQUIRED when
+       both sides are empty).
 
 The live halt (2026-05-31):
   Every EDLI live-canary candidate rejected at the LAST pre-venue gate with
@@ -23,7 +24,7 @@ The live halt (2026-05-31):
 Cross-module property under test:
   A selected_snapshot_row carrying orderbook_top_bid / orderbook_top_ask (captured by the
   real production capture path) must flow through A into a QUOTE_FEASIBILITY cert whose
-  payload has non-empty best_bid/best_ask, so B accepts it and returns a passive-maker
+  payload has executable book authority, so B accepts it and returns a passive-maker
   context (no QUOTE_FEASIBILITY_BID_ASK_REQUIRED).
 
 Causal/freshness safety: the bid/ask are read from the SAME selected_snapshot_row from which
@@ -160,7 +161,7 @@ def _selected_row(conn) -> dict:
     )
     event = SimpleNamespace(event_id="evt-qf", causal_snapshot_id="csid")
     rows = _latest_snapshot_rows_for_event_family(
-        conn, event, condition_ids=(condition_id,), fresh_at=NOW
+        conn, event, condition_ids=(condition_id,), fresh_at=datetime.now(timezone.utc)
     )
     row = _selected_snapshot_row_for_event(
         rows, {"condition_id": condition_id, "token_id": yes_token}
@@ -263,8 +264,27 @@ def test_selected_snapshot_top_of_book_flows_into_passive_maker_context(conn):
     assert context["quote_age_ms"] >= 0
 
 
+def test_one_sided_ask_book_flows_into_passive_maker_context(conn):
+    """Thin maker books may be one-sided; an executable ask still prices a BUY rest."""
+    row = _selected_row(conn)
+    payload = _production_quote_feasibility_payload(row)
+    payload["best_bid"] = None
+
+    context = _passive_maker_context_from_authorities(
+        actionable=_actionable_cert(),
+        quote_feasibility_cert=_quote_feasibility_cert(payload=payload),
+        executable_snapshot_cert=_executable_snapshot_cert(),
+        decision_time=NOW,
+    )
+
+    assert context["best_bid"] is None
+    assert context["best_ask"] == pytest.approx(float(TOP_ASK))
+    assert context["spread_usd"] == pytest.approx(0.0)
+    assert context["spread_observed"] is False
+
+
 def test_pre_fix_payload_without_bid_ask_is_rejected(conn):
-    """Sed-break antibody: the pre-fix payload (no best_bid/best_ask keys) MUST raise.
+    """Sed-break antibody: a payload with no book side at all MUST raise.
 
     This pins that reverting the producer change re-opens
     EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED.

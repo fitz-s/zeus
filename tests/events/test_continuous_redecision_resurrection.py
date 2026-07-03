@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-29
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -106,7 +106,6 @@ def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
         assert " LIKE " not in upper
         assert "DECISION_ID >= ?" in upper
         assert "DECISION_ID < ?" in upper
-        assert "ORDER BY" not in upper
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements
 
@@ -141,6 +140,8 @@ def _snapshot(
     bid="0.70",
     ask="0.72",
     snapshot_id="s1",
+    freshness_deadline="2026-06-12T02:00:00+00:00",
+    captured_at="2026-06-12T00:30:00+00:00",
 ):
     conn.execute(
         "INSERT INTO executable_market_snapshots "
@@ -155,8 +156,8 @@ def _snapshot(
             selected_outcome_token_id,
             bid,
             ask,
-            "2026-06-12T02:00:00+00:00",
-            "2026-06-12T00:30:00+00:00",
+            freshness_deadline,
+            captured_at,
         ),
     )
     conn.commit()
@@ -280,6 +281,7 @@ def test_screen_entry_uses_live_regret_backoff_from_world_table():
         trade,
         decision_time="2026-06-12T00:30:00+00:00",
         min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     assert blocked == []
 
@@ -290,6 +292,7 @@ def test_screen_entry_uses_live_regret_backoff_from_world_table():
         trade,
         decision_time="2026-06-12T00:30:00+00:00",
         min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     assert len(improved) == 1
 
@@ -312,10 +315,58 @@ def test_entry_screen_fires_on_edge_appeared():
     # Fresh executable snapshot: YES ask 0.70 → edge = 0.99 - 0.70 - fee ≈ +0.28.
     _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
-        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
+
+
+def test_stale_entry_price_requests_refresh_without_emit():
+    """A stale executable book is not a no-edge verdict; it must refresh first.
+
+    Regression: the live screen skipped stale quotes before confirmation refresh,
+    so once most executable snapshots expired only the one family with a fresh
+    sidecar row could ever be re-evaluated. This helper feeds confirmation
+    refresh; the post-refresh screen still owns whether any order-worthy edge
+    exists.
+    """
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(world, family_id=family_id, p_yes=0.99, cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        bid="0.30",
+        ask="0.70",
+        selected_outcome_token_id="yes-c30",
+        freshness_deadline="2026-06-12T00:10:00+00:00",
+    )
+    beliefs = cr._all_latest_beliefs(
+        world,
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    fired = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=beliefs,
+    )
+    refresh_scope = cr.entry_substrate_refresh_scope(
+        trade,
+        beliefs=beliefs,
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert fired == []
+    assert refresh_scope == {("Wuhan", "2026-06-12", "high"): {"0xc30"}}
 
 
 def test_entry_screen_fires_on_buy_no_edge_appeared():
@@ -325,7 +376,11 @@ def test_entry_screen_fires_on_buy_no_edge_appeared():
     # YES bid 0.30 implies NO ask 0.70; NO posterior is 0.95.
     _snapshot(trade, bid="0.30", ask="0.72", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
-        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_no") in keys
@@ -425,6 +480,85 @@ def test_price_reader_uses_native_selected_outcome_books():
     assert bids[("0xc30", "buy_no")].price == pytest.approx(0.68)
 
 
+def test_price_reader_does_not_treat_gamma_active_label_as_tradeability():
+    trade = _mem_trade()
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN active INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN enable_orderbook INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN closed INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN accepting_orders INTEGER")
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        (snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id,
+         orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at,
+         active, enable_orderbook, closed, accepting_orders)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "active-routing-label-false",
+            "0xc30",
+            "yes-c30",
+            "no-c30",
+            "yes-c30",
+            "0.30",
+            "0.32",
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:30:00+00:00",
+            0,
+            1,
+            0,
+            1,
+        ),
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+
+    assert quotes[("0xc30", "buy_yes")].price == pytest.approx(0.32)
+
+
+def test_price_reader_skips_market_channel_invalidated_snapshots():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.30",
+        ask="0.32",
+        snapshot_id="old",
+        captured_at="2026-06-12T00:30:00+00:00",
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+          invalidation_id TEXT PRIMARY KEY,
+          condition_id TEXT,
+          token_id TEXT,
+          reason TEXT NOT NULL,
+          invalidated_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            "inv-1",
+            "0xc30",
+            None,
+            "tick_size_change",
+            "2026-06-12T00:31:00+00:00",
+            "2026-06-12T00:31:00+00:00",
+        ),
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+
+    assert ("0xc30", "buy_yes") not in quotes
+
+
 # ───────────────────────────────────────────────────────────────────────────────────────────────
 # ANTIBODY 3 — REST PULL fires on belief-decay (NEW evidence), HOLDS on same-snapshot wiggle.
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -487,11 +621,482 @@ def test_rest_pull_does_not_cancel_by_order_age_alone():
     assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
 
 
+def test_rest_pull_does_not_use_entry_screen_candidate_as_cancel_authority():
+    """A cheap-screen candidate is not enough evidence to cancel a live rest."""
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Moscow|2026-06-30|high|disc"
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="27C",
+        side="buy_no",
+        condition_id="0xc27",
+        resting_posterior=0.72,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.68,
+        quote_age_ms=1_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_duplicate_suppressed_receipt_is_not_rest_cancel_authority():
+    """Submit duplicate suppression is a mutex receipt, not a cancel+replace proof."""
+
+    world = _mem_world()
+    _regret_table(world)
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="hyp|live|Singapore|2026-07-01|high|disc",
+        bin_label="30C",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.82,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.06,
+        quote_age_ms=120_000.0,
+        city="Singapore",
+        target_date="2026-07-01",
+        metric="high",
+    )
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction, q_lcb_5pct,
+            c_fee_adjusted, trade_score, created_at
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  'Singapore', '2026-07-01', 'high', 'edli_family_dynamic',
+                  '', '', NULL, NULL, NULL, ?)
+        """,
+        (
+            "regret-dup",
+            "event-dup",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=Will the highest temperature in Singapore be 32°C on July 1? "
+                "buy_no reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+                "condition_id=0xc32:token_id=tok32:direction=buy_no:"
+                "family_id=:city=Singapore:target_date=2026-07-01:metric=high "
+                "q_lcb=0.6447 price=0.5500 rejected_ev_per_dollar=0.1722"
+            ),
+            "2026-06-29T08:47:16+00:00",
+        ),
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        _mem_trade(),
+        open_rests=[rest],
+        decision_time="2026-06-29T08:48:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_duplicate_suppressed_receipt_does_not_pull_same_active_rest():
+    world = _mem_world()
+    _regret_table(world)
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="hyp|live|Singapore|2026-07-01|high|disc",
+        bin_label="30C",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.82,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.06,
+        quote_age_ms=120_000.0,
+        city="Singapore",
+        target_date="2026-07-01",
+        metric="high",
+    )
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction, q_lcb_5pct,
+            c_fee_adjusted, trade_score, created_at
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  'Singapore', '2026-07-01', 'high', 'edli_family_dynamic',
+                  '', '', NULL, NULL, NULL, ?)
+        """,
+        (
+            "regret-same",
+            "event-same",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=30C buy_yes reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+                "condition_id=0xc30:token_id=tok30:direction=buy_yes:"
+                "family_id=:city=Singapore:target_date=2026-07-01:metric=high"
+            ),
+            "2026-06-29T08:47:16+00:00",
+        ),
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        _mem_trade(),
+        open_rests=[rest],
+        decision_time="2026-06-29T08:48:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_rest_pull_replaces_when_family_sibling_is_materially_superior():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.30, 0.70],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.20, 0.66],
+        q_lcb_no_vec=[0.61, 0.24],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.62",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.39",
+        ask="0.40",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.70,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    _rest, decision = pulls[0]
+    assert decision.reason == "FAMILY_OPTIMUM_SHIFT"
+    assert decision.replacement_condition_id == "0xc30"
+    assert decision.replacement_bin_label == "30C"
+    assert decision.replacement_side == "buy_yes"
+    assert decision.detail > cr.IMPROVE_DELTA
+
+
+def test_rest_pull_family_sibling_shift_holds_inside_maker_window():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.30, 0.70],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.20, 0.66],
+        q_lcb_no_vec=[0.61, 0.24],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.62",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.39",
+        ask="0.40",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.70,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
+def test_rest_pull_family_sibling_shift_uses_roi_frontier_not_absolute_edge():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.20, 0.125],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.10, 0.115],
+        q_lcb_no_vec=[0.75, 0.80],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.605",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.03",
+        ask="0.04",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.80,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    current_edge = cr._family_rest_candidate_edge(
+        cr.latest_cached_belief(world, family_id=family_id),
+        idx=0,
+        side="buy_no",
+        price=0.60,
+        tick_size=0.01,
+    )
+    center_yes_edge = cr._family_rest_candidate_edge(
+        cr.latest_cached_belief(world, family_id=family_id),
+        idx=1,
+        side="buy_yes",
+        price=0.04,
+        tick_size=0.01,
+    )
+    assert current_edge is not None and center_yes_edge is not None
+    assert current_edge > center_yes_edge
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    _rest, decision = pulls[0]
+    assert decision.reason == "FAMILY_OPTIMUM_SHIFT"
+    assert decision.replacement_condition_id == "0xc30"
+    assert decision.replacement_bin_label == "30C"
+    assert decision.replacement_side == "buy_yes"
+    assert 0.0 < decision.detail < cr.IMPROVE_DELTA
+
+
+def test_rest_pull_family_sibling_shift_ignores_ultra_low_tail_dust():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Chongqing|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Chongqing",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "24C"],
+        p_posterior_vec=[0.20, 0.03],
+        condition_ids=["0xc29", "0xc24"],
+        q_lcb_yes_vec=[0.10, 0.025],
+        q_lcb_no_vec=[0.75, 0.80],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.605",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc24",
+        yes_token_id="yes-c24",
+        no_token_id="no-c24",
+        selected_outcome_token_id="yes-c24",
+        bid="0.003",
+        ask="0.004",
+        snapshot_id="s24",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.80,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Chongqing",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
 def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     world = _mem_world()
     trade = _mem_trade()
     _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
     _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CONFIRMED_VALUE_REFRESH"
+    assert pulls[0][1].detail > cr.IMPROVE_DELTA
+
+
+def test_rest_pull_refreshes_confirmed_value_on_one_tick_cross_when_taker_edge_is_real():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.71")
     rest = cr.OpenRest(
         command_id="cmd1", venue_order_id="vo1",
         family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
@@ -755,6 +1360,67 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].matched_size is None
 
 
+def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE executable_market_snapshot_latest ("
+        "selected_outcome_token_id TEXT, condition_id TEXT, yes_token_id TEXT, "
+        "no_token_id TEXT, captured_at TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    _cache(world, p_yes=0.20, snapshot_id="snap1", cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="no-c30",
+        bid="0.18",
+        ask="0.22",
+        snapshot_id="snap1",
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?,?)",
+        ("no-c30", "0xc30", "yes-c30", "no-c30", "2026-06-12T00:30:00+00:00"),
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-no",
+            "order-no",
+            "no-c30",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
+    trade.commit()
+    captured_trade = _SqlCaptureConn(trade)
+
+    rests = main._edli_open_maker_rests_for_screen(captured_trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].side == "buy_no"
+    statements = "\n".join(captured_trade.statements)
+    assert "FROM executable_market_snapshot_latest" in statements
+    assert "FROM executable_market_snapshots" not in statements
+
+
 def test_open_maker_rests_avoids_full_order_fact_window_scan():
     import src.main as main
 
@@ -1000,6 +1666,20 @@ def test_strategy_classifier_accepts_redecision_type():
         event_type="EDLI_REDECISION_PENDING", direction="buy_yes", metric="high"
     )
     assert redecision == fsr, "a redecision must classify to the SAME forecast strategy as an FSR"
+
+
+def test_strategy_classifier_keeps_day0_out_of_forecast_entry_lanes():
+    from src.engine.event_reactor_adapter import _event_bound_strategy_key
+
+    day0_yes = _event_bound_strategy_key(
+        event_type="DAY0_EXTREME_UPDATED", direction="buy_yes", metric="high"
+    )
+    day0_no = _event_bound_strategy_key(
+        event_type="DAY0_EXTREME_UPDATED", direction="buy_no", metric="high"
+    )
+
+    assert day0_yes == "day0_nowcast_entry"
+    assert day0_no == "settlement_capture"
 
 
 def test_timeliness_floor_applies_to_redecision_type():

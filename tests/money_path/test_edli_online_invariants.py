@@ -18,7 +18,7 @@
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
 #                    display-only, never a decision/arm input — operator Rule-4 antibody)
 #                  + 2026-06-09 STALE_LAW re-pin: operator ARMED the live canary
-#                    (live_execution_mode=edli_live_canary, real_order_submit_enabled=
+#                    (live_execution_mode=edli_live_readiness, real_order_submit_enabled=
 #                    True, taker_fok_fak_live_enabled=True, market_channel_ingestor_
 #                    enabled=True). Authority: config note keys edli.
 #                    _edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
@@ -28,8 +28,10 @@
 #                    unchanged and still enforce that submission stays gated.
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -39,9 +41,18 @@ import pytest
 import src.data.substrate_observer as substrate_observer
 
 
+def _edli_settings() -> dict:
+    from src.config import settings
+
+    return settings._data["edli"]
+
+
+def _test_git_sha() -> str:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+
 def test_edli_online_config_defaults_inert_under_legacy_cron():
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
     # STALE_LAW re-pin 2026-06-09: the operator ARMED the live canary. Authority:
     # config note keys edli._edli_live_scope_note_2026_06_09 (operator directive
     # 2026-06-09 "全部打开 ... 把这些 gate 都删了": the shadow-only gate that blocked
@@ -107,7 +118,7 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
     # Order size is governed SOLELY by structural fractional-Kelly sizing. Assert
     # the cap is GONE at every layer (config, ledger API, source), and that the
     # exactly-once reservation knobs are NOT replaced by any new dollar/count cap.
-    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    edli = _edli_settings()
     for forbidden_key in (
         "tiny_live_max_notional_usd",
         "tiny_live_max_orders_per_day",
@@ -145,12 +156,11 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
 
 
 def test_day0_scope_admits_day0_with_market_channel_armed():
-    # STALE_LAW re-pin 2026-06-09 (was test_day0_shadow_scope_..._keeps_market_channel_disabled).
+    # STALE_LAW re-pin 2026-06-09 (was the live-scope market-channel-disabled check).
     # Authority: edli._edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
     # (operator "全部打开"). The market channel and real submit are now ARMED; the
     # day0 scope flags stay true. Pin armed-canary config truth.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
 
     assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
@@ -170,8 +180,7 @@ def test_pr_scope_document_matches_settings_flags():
     # dead config<->spec equality on the now-flipped safety flags is removed; the
     # spec doc is intentionally NOT edited (frozen PR package). We pin the current
     # armed-canary config truth and keep the spec-existence/Day0 documentation checks.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
     real_submit = edli["real_order_submit_enabled"]
@@ -196,8 +205,7 @@ def test_edli_online_invariants_market_channel_and_submit_are_armed():
     # STALE_LAW re-pin 2026-06-09 (was ..._do_not_claim_market_channel_deployed_when_disabled).
     # Operator armed the live canary; market channel + real submit are ON. Authority:
     # edli._mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09.
-    settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli"]
+    edli = _edli_settings()
 
     assert edli["market_channel_ingestor_enabled"] is True
     real_submit = edli["real_order_submit_enabled"]
@@ -233,6 +241,14 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
     assert "decision_time=process_pending_decision_time" in source
     assert "_edli_positive_int_or_unbounded" in source
+    live_adapter_call = source[
+        source.index("event_bound_live_adapter_from_trade_conn(") :
+        source.index(
+            "replacement_forecast_runtime_flags=replacement_forecast_runtime_flags",
+            source.index("event_bound_live_adapter_from_trade_conn("),
+        )
+    ]
+    assert "live_cap_conn=conn" not in live_adapter_call
     # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle —
     # and its scheduler-health fill-authority string "user_channel_or_reconcile_only" —
     # was lifted out of src.main into src.ingest.price_channel_ingest. The reactor (which
@@ -355,6 +371,111 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert bool(settings_copy["edli"]["real_order_submit_enabled"]) is True
 
 
+def _w43_edli_updates(**overrides) -> dict:
+    """Shared minimal edli_live update set for the W4.3 scan-cadence tests (mirrors
+    test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron's
+    known-boots-clean base)."""
+    return {
+        "enabled": True,
+        "live_execution_mode": "edli_live",
+        "reactor_mode": "live",
+        "event_writer_enabled": True,
+        "forecast_snapshot_trigger_enabled": True,
+        "day0_extreme_trigger_enabled": False,
+        "day0_hard_fact_live_enabled": False,
+        "market_channel_ingestor_enabled": True,
+        "edli_user_channel_reconcile_enabled": True,
+        "real_order_submit_enabled": True,
+        **overrides,
+    }
+
+
+def test_edli_event_reactor_scan_interval_defaults_to_unchanged_60s(monkeypatch, tmp_path):
+    """W4.3 zero-behavior-change proof. process_pending (src/events/reactor.py:907) is the
+    SOLE consumer of the opportunity_events queue (no wake-on-write path exists anywhere in
+    src/ -- grepped) so every event lane's decision latency is gated by this job's poll
+    interval, not just a cold-start/outage backstop. ORCHESTRATOR ruling shape (b): the
+    cadence is NOT demoted in this packet, only a config knob lands. This proves the knob's
+    default reproduces the pre-W4.3 minutes=1 schedule byte-for-byte (60s)."""
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(**_stage_evidence_updates(tmp_path)),
+    )
+
+    reactor_job = next(job for job in scheduler.jobs if job.id == "edli_event_reactor")
+    assert reactor_job.trigger == "interval"
+    assert reactor_job.kwargs.get("seconds") == 60
+    assert "minutes" not in reactor_job.kwargs
+    # W4.3 ships the knob in settings.example.json pinned to 60 (shape-b:
+    # knob-only, cadence unchanged). The invariant is the VALUE, not the key's
+    # absence: an example default other than 60 would silently demote the A2
+    # detection floor for fresh deployments.
+    assert settings_copy["edli"].get("reactor_scan_interval_seconds", 60) == 60
+
+
+def test_edli_event_reactor_scan_interval_honors_config_override(monkeypatch, tmp_path):
+    """The W4.3 config knob (edli.reactor_scan_interval_seconds) is wired end-to-end so a
+    future cadence change is an explicit config edit, not a code change -- proves the knob
+    itself works even though this packet does not flip the default (an actual slowdown is an
+    E5-adjacent operator decision per the liveness analysis in main.py's job-registration
+    comment, not a side-effect of this packet)."""
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    reactor_job = next(job for job in scheduler.jobs if job.id == "edli_event_reactor")
+    assert reactor_job.kwargs.get("seconds") == 300
+    assert settings_copy["edli"]["reactor_scan_interval_seconds"] == 300
+
+
+def test_cascade_liveness_contract_no_false_alarm_at_demoted_reactor_cadence(monkeypatch, tmp_path):
+    """Gate-parameterization proof (ORCHESTRATOR ruling): main._assert_cascade_liveness_contract
+    (the boot-time source of truth mirrored by tests/test_cascade_liveness_contract.py) is a
+    job-ID presence check with no cadence coupling. Confirmed by calling the REAL (un-mocked)
+    function against a scheduler built at a demoted reactor cadence and proving it does not
+    fail-closed."""
+    import src.main as main
+
+    scheduler, _ = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    # No exception == no false alarm. The boot harness monkeypatches this call out during
+    # main() (so these fixtures don't need the full contract-YAML wiring); calling the real
+    # function directly here proves it stays cadence-blind by construction (P4 fix,
+    # tests/test_cascade_liveness_contract.py:196) even at a demoted reactor interval.
+    main._assert_cascade_liveness_contract(scheduler)
+
+
+def test_heartbeat_status_pulse_cadence_independent_of_reactor_scan_interval(monkeypatch, tmp_path):
+    """The stage_status_summary freshness gate (15-min window,
+    tests/test_edli_stage_status_summary_freshness.py) is fed by write_cycle_pulse, which
+    fires from BOTH the reactor cycle (main.py:4964) AND the independent heartbeat job
+    (main.py:1594-1595, id="heartbeat", unconditional seconds=60 -- registered outside the
+    `if live_execution_mode in EDLI_EVENT_DRIVEN_MODES` block). This proves the heartbeat
+    job's own interval does not read the W4.3 reactor-cadence knob, so a future reactor scan
+    demotion cannot widen the status_summary staleness window past its independently-pulsed
+    60s floor -- the freshness gate has no false-alarm exposure to this packet's knob."""
+    scheduler, _ = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _w43_edli_updates(
+            reactor_scan_interval_seconds=300,
+            **_stage_evidence_updates(tmp_path),
+        ),
+    )
+
+    heartbeat_job = next(job for job in scheduler.jobs if job.id == "heartbeat")
+    assert heartbeat_job.kwargs.get("seconds") == 60
+
+
 def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl():
     """PROCESS-TOPOLOGY REFACTOR P2 (system_decomposition_plan §8 Step 1): the substrate
     warmer was LIFTED to the P2 substrate-observer daemon, so its TTL-fit invariant moves
@@ -374,19 +495,19 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl():
     )
 
 
-def test_shadow_no_submit_mode_is_not_a_live_startup_mode(monkeypatch, tmp_path):
+def test_unknown_mode_is_not_a_live_startup_mode(monkeypatch, tmp_path):
     # Post-P3 (system_decomposition_plan §8 Step 3) this test pins the LIFT: with the WS
     # ingestor enabled, the ORDER DAEMON must NOT host the user-channel/reconcile cycle —
     # that producer now lives in the P3 price-channel-ingest process. (Renamed from
     # ..._registers_reconcile_job, which encoded the pre-lift in-process topology.)
     monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
-    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_shadow_no_submit"):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:unsupported_live_mode_a"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_shadow_no_submit",
-                "reactor_mode": "live_no_submit",
+                "live_execution_mode": "unsupported_live_mode_a",
+                "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "day0_extreme_trigger_enabled": False,
@@ -477,12 +598,12 @@ def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
             },
         )
 
-    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_submit_disabled_bridge"):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:unsupported_live_mode_b"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_submit_disabled_bridge",
+                "live_execution_mode": "unsupported_live_mode_b",
                 "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
@@ -492,13 +613,13 @@ def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
             },
         )
 
-    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_shadow_no_submit"):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:unsupported_live_mode_c"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_shadow_no_submit",
-                "reactor_mode": "submit_disabled_live_bridge",
+                "live_execution_mode": "unsupported_live_mode_c",
+                "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "real_order_submit_enabled": False,
@@ -521,14 +642,14 @@ def test_live_execution_mode_rejects_ambiguous_edli_event_driven_mode(monkeypatc
         )
 
 
-def test_submit_disabled_bridge_is_not_a_live_startup_mode(monkeypatch):
-    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_submit_disabled_bridge"):
+def test_unknown_submit_mode_is_not_a_live_startup_mode(monkeypatch):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:unsupported_live_mode_d"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_submit_disabled_bridge",
-                "reactor_mode": "submit_disabled_live_bridge",
+                "live_execution_mode": "unsupported_live_mode_d",
+                "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "market_channel_ingestor_enabled": False,
@@ -591,7 +712,7 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="EDLI_LIVE_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
-            _edli_live_canary_updates(
+            _edli_live_readiness_updates(
                 edli_stage_loaded_sha_file=str(tmp_path / "missing-loaded-sha.json"),
                 edli_stage_source_health_json=str(tmp_path / "missing-source-health.json"),
                 edli_stage_status_json=str(tmp_path / "missing-status-summary.json"),
@@ -600,7 +721,7 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
         )
 
 
-def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
     # Wave-2 item 5: canary collapsed into edli_live. On a clean DB with no stage-file
     # blockers, edli_live readiness PASSes with full live allowance (the canary
     # qualifying-event WAITING semantics + scaleout=False are dead). The canary artifact
@@ -619,10 +740,10 @@ def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_pat
     assert report.scaleout_allowed is True
 
 
-def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeypatch, tmp_path):
+def test_edli_live_readiness_with_stage_evidence_waits_for_qualifying_event(monkeypatch, tmp_path):
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
-        _edli_live_canary_updates(**_stage_evidence_updates(tmp_path)),
+        _edli_live_readiness_updates(**_stage_evidence_updates(tmp_path)),
     )
 
     job_ids = {job.id for job in scheduler.jobs}
@@ -637,10 +758,10 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
 
 
-def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
+def test_edli_live_readiness_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
-        _edli_live_canary_updates(
+        _edli_live_readiness_updates(
             **_stage_evidence_updates(tmp_path),
             edli_arm_gate_artifact_required=True,
             edli_arm_gate_artifact_path=str(tmp_path / "promotion-arm-not-yet-created.json"),
@@ -666,7 +787,7 @@ def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_pa
 
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
-        _edli_live_canary_updates(
+        _edli_live_readiness_updates(
             **_stage_evidence_updates(tmp_path),
             edli_emos_sole_calibrator_enabled=True,
         ),
@@ -677,7 +798,7 @@ def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_pa
     assert settings_copy["edli"]["edli_emos_sole_calibrator_enabled"] is True
 
 
-def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
+def test_edli_live_readiness_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
     import src.main as main
 
     calls: list[str] = []
@@ -696,7 +817,7 @@ def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs
     monkeypatch.setattr(main, "_assert_edli_stage_readiness", _fake_readiness)
     _run_main_with_fake_scheduler(
         monkeypatch,
-        _edli_live_canary_updates(),
+        _edli_live_readiness_updates(),
         scheduler_calls=calls,
     )
 
@@ -707,7 +828,7 @@ def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs
     assert calls.index("readiness") < min(edli_job_indices)
 
 
-def test_edli_live_canary_boot_readiness_failure_blocks_edli_job_registration(monkeypatch):
+def test_edli_live_readiness_boot_readiness_failure_blocks_edli_job_registration(monkeypatch):
     import src.main as main
 
     calls: list[str] = []
@@ -720,14 +841,14 @@ def test_edli_live_canary_boot_readiness_failure_blocks_edli_job_registration(mo
     with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
-            _edli_live_canary_updates(),
+            _edli_live_readiness_updates(),
             scheduler_calls=calls,
         )
 
     assert calls == ["readiness"]
 
 
-def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_blocks_unresolved_unknown(monkeypatch, tmp_path):
     import src.main as main
 
     db_path = tmp_path / "world.db"
@@ -752,7 +873,7 @@ def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch,
     assert any(reason.startswith("EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN") for reason in report.reasons)
 
 
-def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_blocks_open_cap_reservation(monkeypatch, tmp_path):
     import src.main as main
     from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_live_cap_table
 
@@ -780,7 +901,7 @@ def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatc
     assert any(reason.startswith("EDLI_STAGE_LIVE_CAP_RESERVED") for reason in report.reasons)
 
 
-def test_edli_live_canary_stage_readiness_fails_closed_on_missing_projection(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_fails_closed_on_missing_projection(monkeypatch, tmp_path):
     import src.main as main
 
     db_path = tmp_path / "world.db"
@@ -796,7 +917,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_projection(mon
     assert any(reason.startswith("EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED") for reason in report.reasons)
 
 
-def test_edli_live_canary_stage_readiness_fails_closed_on_missing_cap_usage(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_fails_closed_on_missing_cap_usage(monkeypatch, tmp_path):
     import src.main as main
     from src.state.schema.edli_live_order_events_schema import ensure_tables as ensure_live_order_tables
 
@@ -813,7 +934,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_cap_usage(monk
     assert any(reason.startswith("EDLI_STAGE_OPEN_CAP_QUERY_FAILED") for reason in report.reasons)
 
 
-def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_path):
+def test_edli_live_readiness_stage_readiness_blocks_stale_source(monkeypatch, tmp_path):
     import src.main as main
 
     db_path = tmp_path / "world.db"
@@ -832,19 +953,46 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
     assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
 
 
-def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monkeypatch, tmp_path):
+def test_edli_live_readiness_tolerates_small_source_health_clock_skew(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path).close()
+    source = tmp_path / "source_health.json"
+    source.write_text(
+        json.dumps(
+            {
+                "generated_at": (
+                    datetime.now(timezone.utc) + timedelta(seconds=1)
+                ).isoformat()
+            }
+        )
+    )
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(
+        stage="edli_live",
+        source_health_json=str(source),
+        max_age_seconds=1,
+    )
+
+    assert report.status == "PASS"
+
+
+def test_edli_live_readiness_boot_defers_self_written_status_summary_staleness(monkeypatch, tmp_path):
     import src.main as main
 
     db_path = tmp_path / "world.db"
     _init_stage_world_db(db_path).close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
-    monkeypatch.setitem(main._BOOT_STATE, "sha", "abc123")
+    sha = _test_git_sha()
+    monkeypatch.setitem(main._BOOT_STATE, "sha", sha)
     loaded = tmp_path / "loaded_sha.json"
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = datetime.now(timezone.utc)
     promotion = tmp_path / "promotion.json"
-    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    loaded.write_text(json.dumps({"loaded_sha": sha}))
     source.write_text(json.dumps({"generated_at": now.isoformat()}))
     status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
     promotion.write_text(json.dumps({"ok": True}))
@@ -868,7 +1016,7 @@ def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monk
     assert any(reason.startswith("EDLI_STAGE_STATUS_SUMMARY_STALE") for reason in report.reasons)
 
 
-def _edli_live_canary_updates(**overrides):
+def _edli_live_readiness_updates(**overrides):
     # Wave-2 item 5: canary collapsed into edli_live. This helper now produces an
     # edli_live config (deleted keys live_canary_enabled / taker_fok_fak_live_enabled
     # are not emitted). Name retained for call-site stability.
@@ -907,7 +1055,7 @@ def _edli_live_updates(**overrides):
         "edli_live_promotion_artifact_required": True,
         "edli_live_max_unresolved_unknowns": 0,
         "edli_live_min_realized_edge_bps": 0,
-        # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_canary_updates.
+        # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_readiness_updates.
         "mainstream_agreement_enforce_on_submit": True,
         "mainstream_agreement_reference_enabled": True,
     }
@@ -953,7 +1101,7 @@ def test_edli_live_promotion_and_arm_gate_artifacts_no_longer_required(monkeypat
 
 def test_edli_live_artifact_gate_settings_keys_are_deleted():
     """Antibody: the promotion/arm-gate REQUIREMENT toggles are removed from config."""
-    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    edli = _edli_settings()
     assert "edli_live_promotion_artifact_required" not in edli
     assert "edli_arm_gate_artifact_required" not in edli
     assert "edli_live_min_canary_count" not in edli
@@ -1011,7 +1159,8 @@ def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatc
             self.closed = True
 
     fake_conn = FakeConn()
-    monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setattr("src.data.dual_run_lock.acquire_lock", lambda _name: contextlib.nullcontext(True))
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(market_scanner, "find_weather_markets", lambda **_kwargs: [])
     monkeypatch.setattr(
@@ -1019,6 +1168,9 @@ def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatc
         "refresh_executable_market_substrate_snapshots",
         lambda conn, **_kwargs: {"attempted": 0, "inserted": 0},
     )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     monkeypatch.setattr(db, "get_trade_connection", lambda *args, **kwargs: fake_conn)
     # P2: force STALE substrate so the producer-local staleness gate falls through to the
     # CLOB-construction path this test asserts on.
@@ -1090,12 +1242,14 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
-    monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": _test_git_sha(), "ts": None})
+    monkeypatch.setattr(main, "_write_loaded_sha_state", lambda _sha: None)
     monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
     monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
     monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
     monkeypatch.setattr(main, "_startup_data_health_check", lambda _conn: None)
     monkeypatch.setattr(main, "_startup_freshness_check", lambda: None)
+    monkeypatch.setattr(main, "_startup_required_sidecar_head_check", lambda **_kwargs: None)
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
     monkeypatch.setattr(main, "_startup_wallet_check", lambda clob=None, bankroll_record=None: None)
@@ -1111,6 +1265,11 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     # test_boot_guard_pin_shape.py.
     monkeypatch.setattr(main, "assert_calibration_pin_shape_is_dict", lambda _cfg: None)
     monkeypatch.setattr(main, "assert_frozen_as_of_not_stale", lambda _cfg, **_kw: None)
+    monkeypatch.setattr(main, "_ensure_day0_identity_platt_fit_at_boot", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_fill_bridge_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_settlement_redeem_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_command_recovery_once", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_invalid_pending_entry_authority_cancel_once", lambda: None)
     monkeypatch.setattr(main, "_assert_cascade_liveness_contract", lambda _scheduler: None)
     monkeypatch.setattr(main, "init_schema_trade_only", lambda _conn: None)
     monkeypatch.setenv("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "0")
@@ -1165,7 +1324,7 @@ def _stage_evidence_updates(tmp_path):
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = "2026-05-26T12:00:00+00:00"
-    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    loaded.write_text(json.dumps({"loaded_sha": _test_git_sha()}))
     source.write_text(json.dumps({"generated_at": now}))
     status.write_text(json.dumps({"generated_at": now}))
     return {
@@ -1396,7 +1555,14 @@ def _pre_submit_payload_for_promotion(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "size": 10.0,
         "q_live": 0.45,
+        "q_lcb_5pct": 0.44,
+        "expected_edge": 0.02,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.01,
         "expected_cost_basis": 0.421,
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,
@@ -1425,6 +1591,25 @@ def _pre_submit_payload_for_promotion(**overrides):
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
         "expected_edge_source_certificate_hash": "actionable-hash-1",
         "cost_basis_source_certificate_hash": "cost-hash-1",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.45,
+            "payoff_q_lcb": 0.44,
+            "cost": 0.42,
+            "edge_lcb": 0.02,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.44,
+        },
     }
     payload.update(overrides)
     return payload

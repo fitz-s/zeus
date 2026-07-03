@@ -558,7 +558,7 @@ def _canonical_projection() -> dict:
         "fill_authority": None,
         "recovery_authority": None,
         "chain_shares": None,
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics columns. NULL for non-rescue pending entries.
         "chain_avg_price": None,
         "chain_cost_basis_usd": None,
@@ -944,81 +944,6 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
-def test_apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events():
-    from src.state.db import apply_architecture_kernel_schema, init_schema
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-
-    apply_architecture_kernel_schema(conn)
-
-    legacy_columns = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
-    }
-    canonical_columns = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
-    }
-
-    assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
-    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(
-        canonical_columns
-    )
-    conn.close()
-
-
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
-def test_canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers():
-    from src.state.db import (
-        apply_architecture_kernel_schema,
-        log_position_event,
-        query_position_events,
-        query_settlement_events,
-    )
-
-    class _Pos:
-        trade_id = "legacy-rt-1"
-        state = "active"
-        env = "legacy_env"
-        city = "NYC"
-        target_date = "2026-04-03"
-        market_id = "mkt-1"
-        bin_label = "39-40°F"
-        direction = "buy_yes"
-        strategy = "center_buy"
-        edge_source = "center_buy"
-        decision_snapshot_id = "snap-1"
-        order_id = ""
-        entry_order_id = ""
-        last_exit_order_id = ""
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
-
-    for fn, args in (
-        (log_position_event, ("POSITION_SETTLED", _Pos())),
-        (query_position_events, ("legacy-rt-1",)),
-        (query_settlement_events, tuple()),
-    ):
-        try:
-            fn(conn, *args)
-        except RuntimeError as exc:
-            assert (
-                "not runtime-ready until a later migration/cutover packet lands"
-                in str(exc)
-            )
-        else:
-            raise AssertionError(
-                f"expected {fn.__name__} to reject canonical bootstrap DB"
-            )
-
-    conn.close()
-
-
 def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_tests():
     forbidden_hits: list[str] = []
     for path in ROOT.rglob("*.py"):
@@ -1217,209 +1142,6 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(
     payload = json.loads(run.stdout)
     assert payload["status"] == "ok"
     assert payload["canonical"]["open_positions"] == 0
-
-
-@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
-def test_open_position_canonical_backfill_seeds_legacy_positions_and_advances_parity(
-    tmp_path,
-):
-    from src.state.db import init_schema
-
-    db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-legacy.json"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    conn.close()
-
-    pos1 = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos1.update(
-        {
-            "trade_id": "legacy-open-1",
-            "strategy_key": "opening_inertia",
-            "strategy": "opening_inertia",
-            "edge_source": "opening_inertia",
-            "discovery_mode": "opening_hunt",
-            "env": "legacy_env",
-        }
-    )
-    pos2 = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos2.update(
-        {
-            "trade_id": "legacy-open-2",
-            "market_id": "mkt-2",
-            "bin_label": "41-42°F",
-            "strategy_key": "opening_inertia",
-            "strategy": "opening_inertia",
-            "edge_source": "opening_inertia",
-            "discovery_mode": "opening_hunt",
-            "env": "legacy_env",
-        }
-    )
-    legacy_path.write_text(json.dumps({"positions": [pos1, pos2]}))
-
-    run = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
-            "--db",
-            str(db_path),
-            "--positions",
-            str(legacy_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "ZEUS_MODE": "legacy_env"},
-    )
-
-    assert run.returncode == 0
-    payload = json.loads(run.stdout)
-    assert payload["status"] == "seeded"
-    assert payload["seeded_count"] == 2
-    assert sorted(payload["seeded_trade_ids"]) == ["legacy-open-1", "legacy-open-2"]
-
-    parity = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "replay_parity.py"),
-            "--db",
-            str(db_path),
-            "--legacy-export",
-            str(legacy_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert parity.returncode == 0
-    parity_payload = json.loads(parity.stdout)
-    assert parity_payload["status"] == "ok"
-    assert parity_payload["canonical"]["open_positions"] == 2
-    assert parity_payload["legacy_exports"][0]["comparison"]["status"] == "match"
-
-
-@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
-def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-legacy.json"
-    sqlite3.connect(str(db_path)).close()
-    legacy_path.write_text(
-        json.dumps(
-            {
-                "positions": [
-                    asdict(_runtime_position(state="entered", chain_state="unknown"))
-                ]
-            }
-        )
-    )
-
-    run = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
-            "--db",
-            str(db_path),
-            "--positions",
-            str(legacy_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "ZEUS_MODE": "legacy_env"},
-    )
-
-    assert run.returncode == 0
-    payload = json.loads(run.stdout)
-    assert payload["status"] == "skipped_missing_canonical_tables"
-    assert "position_events" in payload["missing_tables"]
-    assert "position_current" in payload["missing_tables"]
-
-
-@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
-def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_positions(
-    tmp_path,
-):
-    from src.state.db import init_schema
-
-    db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-legacy.json"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    conn.close()
-
-    pos = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos.update(
-        {
-            "trade_id": "legacy-open-1",
-            "strategy_key": "opening_inertia",
-            "strategy": "opening_inertia",
-            "edge_source": "opening_inertia",
-            "discovery_mode": "opening_hunt",
-            "env": "legacy_env",
-        }
-    )
-    legacy_path.write_text(json.dumps({"positions": [pos]}))
-
-    command = [
-        sys.executable,
-        str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
-        "--db",
-        str(db_path),
-        "--positions",
-        str(legacy_path),
-    ]
-    env = {**os.environ, "ZEUS_MODE": "legacy_env"}
-    first = subprocess.run(
-        command, capture_output=True, text=True, check=False, env=env
-    )
-    second = subprocess.run(
-        command, capture_output=True, text=True, check=False, env=env
-    )
-
-    assert first.returncode == 0
-    assert second.returncode == 0
-    first_payload = json.loads(first.stdout)
-    second_payload = json.loads(second.stdout)
-    assert first_payload["status"] == "seeded"
-    assert first_payload["seeded_count"] == 1
-    assert second_payload["status"] == "seeded_empty"
-    assert second_payload["skipped_existing_count"] == 1
-
-
-@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
-def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions():
-    from src.state.db import (
-        apply_architecture_kernel_schema,
-        backfill_open_legacy_positions,
-    )
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
-
-    pending_exit = _runtime_position(
-        state="pending_exit",
-        exit_state="sell_pending",
-        chain_state="exit_pending_missing",
-    )
-    pending_exit.env = "legacy_env"
-    pending_exit.strategy_key = "opening_inertia"
-    pending_exit.strategy = "opening_inertia"
-    pending_exit.edge_source = "opening_inertia"
-    pending_exit.discovery_mode = "opening_hunt"
-
-    with pytest.raises(
-        ValueError,
-        match="entry canonical builder only supports pending/active entry states",
-    ):
-        backfill_open_legacy_positions(conn, [pending_exit])
-
-    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
-    conn.close()
 
 
 def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
@@ -2399,7 +2121,6 @@ def test_log_execution_report_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_trade_entry
 
@@ -2424,7 +2145,6 @@ def test_log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_execution_report_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_execution_report
 
@@ -2518,7 +2238,6 @@ def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_settlement_event
 
@@ -2546,7 +2265,6 @@ def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_ev
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -2569,7 +2287,6 @@ def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db()
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_reconciled_entry_event
 
@@ -2599,7 +2316,6 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_posit
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -2617,7 +2333,6 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -2751,7 +2466,6 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
@@ -2776,7 +2490,7 @@ def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db
 
     assert stats["rescued_pending"] == 1
     events = query_position_events(conn, "rt-pos-1")
-    assert any(event["event_type"] == "POSITION_LIFECYCLE_UPDATED" for event in events)
+    assert events == []
     conn.close()
 
 
@@ -2838,7 +2552,6 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation(
     monkeypatch,
 ):
@@ -2866,19 +2579,14 @@ def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before
 
     monkeypatch.setattr("src.state.db.update_trade_lifecycle", _boom)
 
-    try:
-        reconcile(portfolio, chain_positions, conn=conn)
-    except RuntimeError as exc:
-        assert "legacy reconciliation lifecycle sync failed" in str(exc)
-    else:
-        raise AssertionError("expected legacy sync failure to surface explicitly")
+    stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert stats["rescued_pending"] == 1
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
     assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation(
     monkeypatch,
 ):
@@ -2910,21 +2618,14 @@ def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_befor
 
     monkeypatch.setattr("src.state.db.log_reconciled_entry_event", _boom)
 
-    try:
-        reconcile(portfolio, chain_positions, conn=conn)
-    except RuntimeError as exc:
-        assert "legacy-event-failed" in str(exc)
-    else:
-        raise AssertionError(
-            "expected legacy rescue event failure to surface explicitly"
-        )
+    stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert stats["rescued_pending"] == 1
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
     assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
@@ -2941,7 +2642,6 @@ def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_sch
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -3175,7 +2875,6 @@ def test_reconciliation_restores_synced_state_when_chain_economics_already_match
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
@@ -3200,9 +2899,14 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert stats["updated"] == 1
-    assert portfolio.positions[0].shares == 22.0
-    assert query_position_events(conn, "rt-pos-1") == []
+    assert stats["updated"] == 0
+    assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
+    assert stats["review_required_persisted"] == 1
+    assert portfolio.positions[0].shares == 20.0
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "quarantined"
+    assert [event["event_type"] for event in query_position_events(conn, "rt-pos-1")] == [
+        "REVIEW_REQUIRED"
+    ]
     conn.close()
 
 
@@ -3256,11 +2960,11 @@ def test_reconciliation_size_correction_no_baseline_persists_durable_review():
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_rows():
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3270,6 +2974,7 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3282,7 +2987,6 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -3377,11 +3081,11 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows():
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3393,6 +3097,7 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
     pending_pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3405,7 +3110,6 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
@@ -3567,7 +3271,6 @@ def test_chronicler_log_event_still_fails_loudly_when_chronicle_missing_outside_
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_chronicle():
     from src.state.chronicler import log_event
     from src.state.db import apply_architecture_kernel_schema
@@ -3583,18 +3286,15 @@ def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_
         ALTER TABLE position_events ADD COLUMN source TEXT;
         ALTER TABLE position_events ADD COLUMN details_json TEXT;
         ALTER TABLE position_events ADD COLUMN timestamp TEXT;
-        ALTER TABLE position_events ADD COLUMN env TEXT;
         """
     )
 
     try:
         log_event(conn, "SETTLEMENT", "trade-1", {"ok": True})
-    except sqlite3.OperationalError as exc:
-        assert "chronicle" in str(exc).lower()
+    except RuntimeError as exc:
+        assert "hybrid position_events schema" in str(exc)
     else:
-        raise AssertionError(
-            "expected hybrid drift schema without chronicle to fail loudly"
-        )
+        raise AssertionError("expected hybrid drift schema to fail loudly")
 
     conn.close()
 
@@ -3680,7 +3380,6 @@ def test_harvester_settlement_path_skips_canonical_write_without_prior_canonical
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
     from src.execution.harvester import _settle_positions
     from src.state.db import init_schema, query_position_events
@@ -3705,7 +3404,7 @@ def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
 
     assert settled == 1
     events = query_position_events(conn, "rt-pos-1")
-    assert any(event["event_type"] == "POSITION_SETTLED" for event in events)
+    assert events == []
     conn.close()
 
 
@@ -4158,15 +3857,14 @@ def test_cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_sche
     conn.close()
 
 
-@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
-def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_on_canonical_db():
+def test_cycle_runtime_entry_sequence_writes_canonical_entry_events():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import (
         apply_architecture_kernel_schema,
-        init_schema,
         log_execution_report,
         log_trade_entry,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     class _Logger:
         def debug(self, *args, **kwargs):
@@ -4186,51 +3884,6 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
 
     pos = _runtime_position(state="entered", chain_state="unknown")
 
-    legacy_conn = sqlite3.connect(":memory:")
-    legacy_conn.row_factory = sqlite3.Row
-    init_schema(legacy_conn)
-    # Drop canonical tables to simulate legacy-only DB
-    legacy_conn.execute("DROP TABLE IF EXISTS position_current")
-    legacy_conn.execute("DROP TABLE IF EXISTS position_events")
-    legacy_conn.commit()
-    # Re-create position_events_legacy if init_schema didn't create it
-    legacy_conn.execute("""
-        CREATE TABLE IF NOT EXISTS position_events_legacy (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            runtime_trade_id TEXT,
-            position_state TEXT,
-            order_id TEXT,
-            decision_snapshot_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            market_id TEXT,
-            bin_label TEXT,
-            direction TEXT,
-            strategy TEXT,
-            edge_source TEXT,
-            source TEXT DEFAULT 'runtime',
-            details_json TEXT,
-            timestamp TEXT NOT NULL,
-            env TEXT
-        )
-    """)
-    legacy_conn.commit()
-    log_trade_entry(legacy_conn, pos)
-    wrote_legacy = _dual_write_canonical_entry_if_available(
-        legacy_conn,
-        pos,
-        decision_id="dec-1",
-        deps=_Deps(),
-    )
-    log_execution_report(legacy_conn, pos, _Result())
-    assert wrote_legacy is False
-    assert (
-        legacy_conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0]
-        >= 2
-    )
-    legacy_conn.close()
-
     canonical_conn = sqlite3.connect(":memory:")
     canonical_conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(canonical_conn)
@@ -4238,6 +3891,7 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
     wrote_canonical = _dual_write_canonical_entry_if_available(
         canonical_conn,
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         deps=_Deps(),
     )

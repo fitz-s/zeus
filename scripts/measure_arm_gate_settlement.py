@@ -5,7 +5,7 @@
 #   zeus-forecasts.db.settlement_outcomes WHERE authority='VERIFIED'.
 #
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
-# Purpose: Reproducible after-cost settlement win-rate measurement for EDLI shadow
+# Purpose: Reproducible after-cost settlement win-rate measurement for EDLI
 #   positions, split by ALL and gate-PASS (mainstream_agreement_pass=1) cohorts.
 #   Computes the ARM verdict: ELIGIBLE only if gate-PASS win_rate stably >51% after
 #   cost, >=2sigma above breakeven, n>=20 pooled / n>=5 per city.
@@ -14,7 +14,7 @@
 #   must post-date gate deployment (commit fe53b00c98, ~2026-06-03). Inspect the
 #   printed "gate-PASS overlap" count; if still 0, verdict stays INSUFFICIENT.
 #
-"""Measure after-cost settlement win-rate for EDLI shadow positions.
+"""Measure after-cost settlement win-rate for EDLI measured positions.
 
 Direction Law (must hold exactly):
     buy_yes on bin B: WIN iff settlement lands IN bin B  (settled_bin == B)
@@ -30,7 +30,7 @@ Bin matching:
     Unit: extracted from the bin_label text (°C or °F). Must match
     settlement_outcomes.settlement_unit. Mismatch rows are EXCLUDED with a warning.
 
-Dedup: one final shadow position per (city, target_date, token_id, direction) —
+Dedup: one final measured position per (city, target_date, token_id, direction) —
     latest decision_time kept (same approach as prior measurement).
 """
 from __future__ import annotations
@@ -176,7 +176,7 @@ def _grade_row_won(
     settlement_unit: str,
     bin_label: str,
 ) -> Optional[bool]:
-    """Grade one shadow position via the canonical ``grade_receipt`` truth fn.
+    """Grade one measured position via the canonical ``grade_receipt`` truth fn.
 
     Returns ``won`` (bool) for a gradeable row, or ``None`` when the row cannot
     be graded (bin label un-buildable into a ``Bin``, or a unit mismatch). A
@@ -929,7 +929,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="Measure after-cost settlement win-rate for EDLI shadow "
+        description="Measure after-cost settlement win-rate for EDLI measured "
                     "positions and compute the capital-weighted ARM verdict.",
     )
     parser.add_argument(
@@ -953,7 +953,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     # --- Load ---
     receipts = _load_deduped_receipts(_WORLD_DB)
     settlements = _load_settlements(_FORECASTS_DB)
-    print(f"\nDeduped shadow positions:        {len(receipts):>6}")
+    print(f"\nDeduped measured positions:      {len(receipts):>6}")
     print(f"VERIFIED settlements:            {len(settlements):>6}")
 
     # --- Join ---

@@ -20,14 +20,11 @@ HIGH_DATA_VERSION = "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1"
 LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_bayes_fusion_low_v1"
 LIVE_RUNTIME_LAYER = "live"
 READY_STATUS = "READY"
-LEGACY_READY_STATUS = "SHADOW_ONLY"
 BLOCKED_STATUS = "BLOCKED"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
 def normalize_replacement_readiness_status(status: str) -> str:
-    if status == LEGACY_READY_STATUS:
-        return READY_STATUS
     return status
 
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-29
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871 [decision_id, case, predictive, omega, joint_q,
@@ -9,7 +9,7 @@
 #   no_trade PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE) -> joint_q -> joint_q_band ->
 #   family_book -> market_implied_q -> coherence -> routes -> payoff candidates ->
 #   filter [direction_law_ok, coherence_allows, edge_lcb>0 & optimal_delta_u>0] ->
-#   selected = max robust utility density) and the Stage 8 block lines 1166-1184.
+#   selected = max ROI-frontier candidate) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
 #   is telemetry only — it CANNOT select. This is the ONLY decision authority; it
@@ -67,18 +67,20 @@ THE PIPELINE (spec decide() lines 876-901; the order is the contract):
     candidates = [c for c in candidates if coherence_allows(c)]
     candidates = [c for c in candidates if c.edge_lcb > 0 and c.optimal_delta_u > 0]
 
-    selected   = max(candidates, key=lambda c: c.optimal_delta_u / c.optimal_stake_usd)
+    selected   = max(candidates, key=lambda c: c.roi_frontier)
     return FamilyDecision(...)
 
 THE THREE CORRECTED TRANSFORMATIONS THIS ORCHESTRATOR PRESERVES (operator law — make the
 bad output mathematically impossible; NO gate/cap/clamp/haircut that catches a bad value
 and leaves a broken transform in place):
 
-  1. SELECTION IS ROBUST UTILITY DENSITY OVER THE SURVIVORS, NEVER A SCALAR TRADE
+  1. SELECTION IS ROI-FRONTIER OVER THE SURVIVORS, NEVER A SCALAR TRADE
      SCORE (operator Shanghai correction over spec lines 900-903, 1184). The candidate filter chain is
      ``direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)``,
-     and the survivor with the maximum ``optimal_delta_u / optimal_stake_usd`` is selected.
-     Total ``optimal_delta_u`` remains a secondary ordering signal. The scalar
+     and live qkernel selects on an ROI frontier: guarded edge per dollar first, after
+     excluding dust candidates with no meaningful lower-bound profit, with robust log-growth
+     as the secondary tie-breaker. ``total_delta_u`` remains an explicit research objective,
+     but it is not the live default. The scalar
      ``robust_trade_score`` (``scalar_trade_score`` from payoff_vector) is computed for
      EVERY candidate as TELEMETRY on the receipt, but it is never one of the filter
      conditions and never the argmax key. There is no code path where the scalar reaches
@@ -112,15 +114,11 @@ selects a trade carries the selected candidate; a decision that selects nothing 
 ``candidates`` tuple so the no-trade is auditable. The ``receipt_hash`` anchors the exact
 (predictive, omega, q, band, family_book, coherence, candidates, selected) tuple.
 
-DIRECTION LAW (spec lines 947-951):
-``YES_i`` is structurally direction-law-clean when ``i`` IS the forecast bin (buying the
-forecast/modal bin); ``NO_i`` is structurally direction-law-clean when its bin is NOT the
-forecast bin. The forecast bin is the μ*-containing settlement bin of the family. This flag is a
-receipt proof, not the whole selector: a side-aware empirical OOF reliability verdict may license
-an otherwise non-directional Arrow claim onto the family optimizer when the candidate's own
-q_safe, edge, ΔU, and coherence evidence all survive. That license is symmetric across YES and
-NO; the old asymmetric bypass recreated an all-NO live bias and prevented family-level best
-expression selection.
+SIDE ADMISSION:
+``direction_law_ok`` is now a native-side proof: the executable route must be a valid YES/NO
+claim, but the rounded forecast center is not a hard bin veto. Direct YES on any bin and direct
+NO on any bin may reach the real live gates. Settlement-aware payoff vectors, q_lcb reliability,
+market coherence, executable cost, and robust DeltaU decide whether that side/bin has alpha.
 
 GREENFIELD / WAVE-5 WIRING. The spec ``decide(case, family, snapshots, portfolio)``
 references ``fresh_model_reader``, ``day0_reader``, ``predictive_builder``,
@@ -207,9 +205,15 @@ from src.decision.qlcb_reliability_guard import apply_guard as _apply_qlcb_guard
 from src.decision.qlcb_reliability_guard import (
     precision_class_for_city as _qlcb_precision_class_for_city,
 )
+from src.decision.selection_calibrator import apply_selection_calibrator
 from src.probability.joint_q import JointQ, build_joint_q
 from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
+from src.strategy.live_inference.live_admission import (
+    LIVE_DIRECTION_WIN_RATE_FLOOR,
+    is_qkernel_exact_yes_strategy,
+    qkernel_center_yes_quality_floor,
+)
 from src.strategy.utility_ranker import (
     FamilyPayoffMatrix,
     PortfolioExposureVector,
@@ -224,18 +228,199 @@ NO_TRADE_NO_EXECUTABLE_ROUTE = "NO_EXECUTABLE_ROUTE_CANDIDATE"
 NO_TRADE_NO_DIRECTION_LAW = "NO_DIRECTION_LAW_CANDIDATE"
 NO_TRADE_MARKET_INCOHERENT = "MARKET_INCOHERENT_BLOCK_LIVE"
 NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
-# q_lcb empirical reliability guard (FINAL no-shadow execution flow §6): every candidate's
+NO_TRADE_NO_POSITIVE_UTILITY = "NO_POSITIVE_UTILITY_CANDIDATE"
+NO_TRADE_NO_MIN_ORDER_UTILITY = "NO_MIN_ORDER_UTILITY_CANDIDATE"
+NO_TRADE_NO_ROI_FRONTIER_CANDIDATE = "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+# q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
-NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE = (
-    "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE"
-)
 _OOF_LIVE_RELIABILITY_BASES = frozenset(
     {
         "OOF_WILSON_95",
         "OOF_WILSON_95_POOLED_TAIL",
     }
 )
+DAY0_REMAINING_DAY_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
+_ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
+_ROI_FRONTIER_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
+_ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
+_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
+_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN = 0.05
+LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
+
+
+@dataclass(frozen=True)
+class EntryPriceFloorDecision:
+    live_min_entry_price: float
+    effective_min_entry_price: float
+    qkernel_low_price_floor_authorized: bool
+
+
+def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
+    """Conservative live floor for cheap YES routes.
+
+    Cheap YES routes are valid when the forecast genuinely prices a center
+    point-bin too low, but raw edge/cost over-rewards lottery-like tails whose
+    lower bound merely clears the book. The live selector uses the same q-kernel
+    center-YES quality floor as submit/executor, while NO remains on the ordinary
+    binary win-rate floor.
+    """
+
+    side_text = str(side or "").strip().upper()
+    floor = (
+        qkernel_center_yes_quality_floor()
+        if side_text == "YES"
+        else float(LIVE_DIRECTION_WIN_RATE_FLOOR)
+    )
+    if (
+        side_text == "YES"
+        and np.isfinite(cost)
+        and 0.0 < float(cost) < _ROI_FRONTIER_CHEAP_YES_COST_CEILING
+    ):
+        cost_f = float(cost)
+        edge_margin = float(_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN) * (
+            1.0 - (cost_f / float(_ROI_FRONTIER_CHEAP_YES_COST_CEILING))
+        )
+        floor = max(
+            floor,
+            float(_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB),
+            cost_f + max(0.0, edge_margin),
+        )
+    return floor
+
+
+def roi_frontier_min_profit_lcb_usd() -> float:
+    return float(_ROI_FRONTIER_MIN_PROFIT_LCB_USD)
+
+
+def roi_frontier_growth_density(
+    *,
+    cost: float,
+    edge_lcb: float,
+    payoff_q_lcb: float,
+) -> float:
+    roi = edge_lcb / cost if cost > 0.0 else float("-inf")
+    if not (
+        np.isfinite(roi)
+        and np.isfinite(cost)
+        and np.isfinite(payoff_q_lcb)
+        and 0.0 < cost < 1.0
+        and payoff_q_lcb > cost
+    ):
+        return float("-inf")
+    return float(roi * ((payoff_q_lcb - cost) / (1.0 - cost)))
+
+
+def roi_frontier_profit_lcb_usd(
+    *,
+    stake: float,
+    cost: float,
+    edge_lcb: float,
+) -> float:
+    roi = edge_lcb / cost if cost > 0.0 else float("-inf")
+    if not (np.isfinite(stake) and stake > 0.0 and np.isfinite(roi)):
+        return float("-inf")
+    return float(stake * roi)
+
+
+def roi_frontier_useful_values(
+    *,
+    side: str | None,
+    cost: float,
+    payoff_q_lcb: float,
+    edge_lcb: float,
+    stake: float,
+    delta_u_at_min: float,
+) -> bool:
+    min_payoff_q_lcb = roi_frontier_min_payoff_q_lcb(side=side, cost=cost)
+    return bool(
+        np.isfinite(stake)
+        and stake > 0.0
+        and np.isfinite(delta_u_at_min)
+        and delta_u_at_min > 0.0
+        and np.isfinite(payoff_q_lcb)
+        and payoff_q_lcb >= min_payoff_q_lcb
+        and roi_frontier_profit_lcb_usd(
+            stake=stake,
+            cost=cost,
+            edge_lcb=edge_lcb,
+        )
+        >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
+        and np.isfinite(
+            roi_frontier_growth_density(
+                cost=cost,
+                edge_lcb=edge_lcb,
+                payoff_q_lcb=payoff_q_lcb,
+            )
+        )
+    )
+
+
+def native_curve_side_for_direction(direction: object) -> str | None:
+    normalized = str(direction or "").strip().lower()
+    if normalized.endswith("_yes"):
+        return "YES"
+    if normalized.endswith("_no"):
+        return "NO"
+    return None
+
+
+def live_entry_min_price_floor(*, strategy_key: object, direction: object) -> float:
+    if (
+        is_qkernel_exact_yes_strategy(strategy_key)
+        and str(direction or "").strip().lower() == "buy_yes"
+    ):
+        return float(CENTER_BUY_YES_MIN_ENTRY_PRICE)
+    return float(LIVE_ENTRY_MIN_ENTRY_PRICE)
+
+
+def _finite_submit_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
+def entry_price_floor_decision(
+    *,
+    strategy_key: object,
+    direction: object,
+    declared_min_entry_price: object,
+    selection_authority_applied: object,
+    economics: Mapping[str, object] | None,
+    q_live: object,
+    q_lcb: object,
+    limit_price: object,
+) -> EntryPriceFloorDecision:
+    candidate_live_floor = live_entry_min_price_floor(
+        strategy_key=strategy_key,
+        direction=direction,
+    )
+    qkernel_floor_candidate = bool(
+        is_qkernel_exact_yes_strategy(strategy_key)
+        and str(direction or "").strip().lower() == "buy_yes"
+        and str(selection_authority_applied or "").strip() == "qkernel_spine"
+        and isinstance(economics, Mapping)
+        and str(economics.get("source") or "").strip() == "qkernel_spine"
+    )
+    live_floor = (
+        candidate_live_floor if qkernel_floor_candidate else float(LIVE_ENTRY_MIN_ENTRY_PRICE)
+    )
+    declared_floor = _finite_submit_float(declared_min_entry_price)
+    if declared_floor is None:
+        declared_floor = 0.0
+    effective_min_entry_price = (
+        live_floor if qkernel_floor_candidate else max(declared_floor, live_floor)
+    )
+    return EntryPriceFloorDecision(
+        live_min_entry_price=live_floor,
+        effective_min_entry_price=effective_min_entry_price,
+        qkernel_low_price_floor_authorized=qkernel_floor_candidate,
+    )
 
 
 class FamilyDecisionError(ValueError):
@@ -345,6 +530,10 @@ class CandidateDecision:
     * ``q_lcb_guard_basis`` / ``q_lcb_guard_abstained`` — the side-aware OOF reliability
       verdict applied to this candidate. A NO-on-modal direction relaxation can only use
       an active OOF verdict, never an inert/missing evidence path.
+    * ``selection_guard_basis`` / ``selection_guard_abstained`` — the selection-aware
+      settlement calibrator verdict applied before live selection. This guard keys on
+      the raw side probability that admission selected on, then only lowers the payoff
+      qLCB consumed by edge/DeltaU/ROI.
     """
 
     route: CandidateRoute
@@ -354,7 +543,14 @@ class CandidateDecision:
     robust_trade_score: float
     q_lcb_guard_basis: str = ""
     q_lcb_guard_abstained: bool = False
+    # [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] Domain provenance identifier, not a credential.
     q_lcb_guard_cell_key: str = ""
+    selection_guard_basis: str = ""
+    selection_guard_abstained: bool = False
+    # [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] Domain provenance identifier, not a credential.
+    selection_guard_cell_key: str = ""
+    selection_guard_n: int = 0
+    selection_guard_q_safe: float | None = None
 
 
 @dataclass(frozen=True)
@@ -362,9 +558,9 @@ class PortfolioCandidateDecision:
     """Non-executable portfolio comparator over already-scored direct routes.
 
     This is not an execution route. It records whether a multi-leg family portfolio
-    would dominate the selected single direct route, so the engine can refuse the
-    inferior executable leg instead of pretending the current one-leg executor can
-    submit an aggregate position.
+    would dominate the selected single direct route. The live executor can only submit
+    the selected direct route; this evidence is receipt telemetry until an atomic
+    multi-leg executor exists.
     """
 
     portfolio_type: str
@@ -409,8 +605,8 @@ class FamilyDecision:
       path). Its ``status`` is the calibration-incident contract.
     * ``candidates`` — the ``CandidateEconomics`` for EVERY enumerated candidate (passing or
       not), so the decision is fully auditable. Empty on the ineligible path.
-    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (maximum robust utility
-      density over the survivors), or ``None`` for a no-trade.
+    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (live default:
+      ROI-frontier over the survivors), or ``None`` for a no-trade.
     * ``no_trade_reason`` — the reason the survivor set was empty (``None`` when a trade was
       selected). Names the first gate that emptied it.
     * ``receipt_hash`` — a deterministic hash over the whole decision tuple (the receipt
@@ -439,16 +635,14 @@ class FamilyDecision:
 
 
 # ===========================================================================
-# Forecast (modal) bin — the direction-law reference (spec lines 947-951).
+# Forecast-bin helpers — receipt/provenance context, not live side admission.
 # ===========================================================================
 
 def forecast_bin_id(joint_q: JointQ) -> str:
-    """The forecast bin — the modal (max-mass) bin of the joint q (spec line 948-951).
+    """The modal max-mass bin of the joint q.
 
-    The direction law is anchored on the bin the predictive distribution most favors. The
-    modal bin of the normalized joint q IS that bin: it carries the most settlement mass,
-    so a YES on it is "buying the forecast bin" and a NO on it is illegal (you would be
-    betting against your own forecast). Ties resolve to the first max bin (deterministic).
+    This is useful for receipts and diagnostics. It is not a live admission rule; direct
+    native side/bin selection is governed by vector economics.
     """
     q = np.asarray(joint_q.q, dtype=float)
     if q.shape[0] == 0:
@@ -462,10 +656,10 @@ def forecast_settlement_bin_id(
 ) -> str:
     """The bin where the served center settles under this family's rounding rule.
 
-    Direction law is a contract/settlement statement, not a largest-mass statement.
+    This settlement bin is receipt/provenance context, not a largest-mass statement and
+    not a live side/bin admission gate.
     Open shoulders can carry more probability than a one-degree center bin simply
-    because they aggregate many integer outcomes. That must not make the shoulder
-    the "forecast bin" for live direction law. The forecast bin is the bin containing
+    because they aggregate many integer outcomes. The settlement-center bin is the bin containing
     the settlement value of ``predictive.mu_native`` under ``omega.resolution``.
     """
     mu = float(predictive.mu_native)
@@ -494,23 +688,23 @@ def forecast_settlement_bin_id(
 
 
 def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
-    """Whether ``route`` is direction-law-legal against the forecast bin (spec 947-951).
+    """Whether ``route`` has a live-tradable native side.
 
-    * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
-      bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
-      direction-law-clean, but it may still be admitted later by the side-aware OOF reliability
-      license when its own empirical, edge, ΔU, and coherence evidence survives.
-    * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
-      wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
+    ``forecast_bin`` is retained in the signature because callers already compute and
+    stamp it for receipt reconstruction, but it is not an admission gate. A weather
+    binary is an Arrow-Debreu payoff; the mathematically relevant live question is
+    whether the executable payoff vector has positive robust edge and positive robust
+    utility after cost, coherence, q_lcb reliability, and exposure. The rounded
+    predictive center is useful telemetry, not a proof that only ``YES_forecast`` or
+    ``NO_nonforecast`` can carry alpha.
 
-    This function stays purely structural: ``point_q`` and empirical reliability are not read
-    here. The selector combines this receipt flag with the side-aware OOF license; doing that in
-    one place prevents a hard-coded all-NO bias while preserving auditable direction-law status.
+    This avoids the Shanghai failure mode: a cheap YES on a non-center bin, or a NO on
+    the rounded-center bin, must not be rejected merely because ``mu_native`` rounds
+    elsewhere. If its vector economics are wrong, the q/payoff/edge/DeltaU gates reject
+    it. If they are right, the family selector may choose it.
     """
-    if route.side == "YES":
-        return route.bin_id == forecast_bin
-    # NO_i is legal exactly when its bin is NOT the forecast bin.
-    return route.bin_id != forecast_bin
+    _ = forecast_bin
+    return route.side in {"YES", "NO"}
 
 
 def coherence_allows(route: CandidateRoute, report: MarketCoherenceReport) -> bool:
@@ -570,10 +764,10 @@ class FamilyDecisionEngine:
         min_depth: float = 1.0,
         max_spread: float = 0.10,
         selection_objective: Literal[
-            "utility_density", "total_delta_u"
-        ] = "utility_density",
+            "roi_frontier", "utility_density", "total_delta_u"
+        ] = "roi_frontier",
     ) -> None:
-        if selection_objective not in {"utility_density", "total_delta_u"}:
+        if selection_objective not in {"roi_frontier", "utility_density", "total_delta_u"}:
             raise ValueError(f"unknown selection_objective: {selection_objective!r}")
         self._fresh_model_reader = fresh_model_reader
         self._day0_reader = day0_reader
@@ -613,6 +807,9 @@ class FamilyDecisionEngine:
         max_stake_usd: Optional[Decimal] = None,
         shares_for_routing: Decimal = Decimal("1"),
         licensed_model_superiority=None,
+        served_joint_q: JointQ | None = None,
+        served_band: JointQBand | None = None,
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> FamilyDecision:
         """Run the full decision pipeline once and emit a ``FamilyDecision`` (spec 876-901).
 
@@ -674,10 +871,26 @@ class FamilyDecisionEngine:
             )
 
         # --- (3) the joint q and its coherent band -------------------------------
-        joint_q = build_joint_q(predictive, omega)
-        band = build_joint_q_band(
-            predictive, omega, n_draws=self._n_band_draws, alpha=self._band_alpha
-        )
+        if served_joint_q is not None or served_band is not None:
+            if served_joint_q is None or served_band is None:
+                raise FamilyDecisionError("SERVED_BELIEF_INCOMPLETE")
+            if served_joint_q.omega.topology_hash != omega.topology_hash:
+                raise FamilyDecisionError(
+                    "SERVED_JOINT_Q_OMEGA_MISMATCH: served joint q does not match Omega"
+                )
+            if served_band.joint_q.identity_hash != served_joint_q.identity_hash:
+                raise FamilyDecisionError(
+                    "SERVED_BAND_JOINT_Q_MISMATCH: served band does not bracket served joint q"
+                )
+            served_joint_q.assert_valid()
+            served_band.assert_valid()
+            joint_q = served_joint_q
+            band = served_band
+        else:
+            joint_q = build_joint_q(predictive, omega)
+            band = build_joint_q_band(
+                predictive, omega, n_draws=self._n_band_draws, alpha=self._band_alpha
+            )
 
         # --- (4) the executable family book + de-frictioned market q -------------
         family_book = self._family_book_builder(
@@ -701,10 +914,11 @@ class FamilyDecisionEngine:
             enable_negrisk_routes=self._enable_negrisk_routes,
         )
 
-        # The forecast settlement bin — the direction-law reference. This is the bin
-        # containing the rounded served center, not necessarily the max-mass bin (open
-        # shoulders can accumulate more mass than a one-degree center bin).
-        forecast_bin = forecast_settlement_bin_id(predictive, omega)
+        # The forecast/modal bin must be derived from the same q surface the decision
+        # is about to score.  When the reactor injects ``served_joint_q`` the predictive
+        # center is still receipt context, but modal/nonmodal empirical guard cells and
+        # center-YES dominance must follow the served posterior, not a second center.
+        forecast_bin = forecast_bin_id(joint_q)
 
         # --- (6) enumerate + score every candidate route -------------------------
         enumerated = self._enumerate_candidates(
@@ -716,11 +930,13 @@ class FamilyDecisionEngine:
             exposure=portfolio,
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
+            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
 
-        # Stamp the direction-law first. The q_lcb reliability guard is empirical
-        # model-superiority evidence; it must run before market coherence so a guarded,
-        # positive-edge candidate can carry the license promised by the coherence contract.
+        # Stamp the native-side direction proof first. The q_lcb reliability guard is
+        # empirical model-superiority evidence; it must run before market coherence so a
+        # guarded, positive-edge candidate can carry the license promised by the
+        # coherence contract.
         pre_coherence_scored = tuple(
             CandidateDecision(
                 route=d.route,
@@ -735,49 +951,84 @@ class FamilyDecisionEngine:
             for d in enumerated
         )
 
-        # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (FINAL no-shadow flow §6) -----
-        # The RAW-honest serving rule: deflate each candidate's served q_lcb to
-        # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
-        # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
-        # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
-        # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
-        # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
-        # absent -> scored is byte-identical (no abstain). Moves no μ.
-        guarded = self._apply_qlcb_reliability_guard(
-            scored=pre_coherence_scored,
-            case=case,
-            joint_q=joint_q,
-            band=band,
-            forecast_bin=forecast_bin,
-            matrix=matrix,
-            exposure=portfolio,
-            sizing_candidates=sizing_candidates,
-            max_stake_usd=max_stake_usd,
-        )
+        if bool(getattr(predictive.day0, "active", False)):
+            # Day0 is the same qkernel family decision with a stronger information
+            # state: an observed running extreme has already conditioned the posterior.
+            # The conservative lower bound consumed by edge/DeltaU is therefore the
+            # monotone hard-fact payoff lower bound implied by that running extreme:
+            # already-impossible finite bins and already-absorbed shoulders are valid
+            # hard facts; a finite point/range that merely contains the current running
+            # extreme is not settled and must not inherit a near-1 lower bound.
+            guarded = self._apply_day0_observed_boundary_guard(
+                scored=pre_coherence_scored,
+                case=case,
+                predictive=predictive,
+                omega=omega,
+                joint_q=joint_q,
+                band=band,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
+            )
+        else:
+            # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
+            # The RAW-honest serving rule: deflate each candidate's served q_lcb to
+            # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
+            # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
+            # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
+            # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
+            # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
+            # absent -> scored is byte-identical (no abstain). Moves no μ.
+            guarded = self._apply_qlcb_reliability_guard(
+                scored=pre_coherence_scored,
+                case=case,
+                joint_q=joint_q,
+                band=band,
+                forecast_bin=forecast_bin,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
+            )
+
+            # --- (6c) selection-aware settlement guard --------------------------------
+            # The OOF q_lcb guard is price-blind; the selection calibrator is keyed on the
+            # raw side probability that admission selected on, so it catches the adverse
+            # selection that made high-confidence NO entries lose after settlement. It runs
+            # before coherence/selection so live ranking sees guarded edge, stake, and DeltaU.
+            guarded = self._apply_selection_calibrator_guard(
+                scored=guarded,
+                case=case,
+                joint_q=joint_q,
+                band=band,
+                forecast_bin=forecast_bin,
+                matrix=matrix,
+                exposure=portfolio,
+                sizing_candidates=sizing_candidates,
+                max_stake_usd=max_stake_usd,
+            )
 
         # --- the market-coherence report over the candidate bins (spec 891) ------
         # A large model/market logit gap is not automatically a live-money incident.
-        # When the same qkernel candidate has side-aware OOF reliability evidence, did not
-        # abstain, and still has positive guarded edge and positive guarded ΔU, that cell is
-        # the receipt-carrying model-superiority license the coherence module was designed
-        # to consume. INERT/missing/error guard states license nothing, preserving the Tokyo
-        # tick-floor block.
-        empirical_license_bins = frozenset(
+        # Side-aware OOF reliability evidence can support market-coherence acceptance for
+        # a candidate whose native side is live-tradable. It does not move mu or fabricate
+        # edge; q/payoff economics still decide selection.
+        empirical_reliability_bins = frozenset(
             d.route.bin_id
             for d in guarded
             if d.direction_law_ok
-            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
-            and not d.q_lcb_guard_abstained
-            and d.economics.edge_lcb > 0.0
+            and self._has_side_aware_oof_reliability_evidence(d)
+            and self._selection_edge_lcb(d) > 0.0
             and d.economics.optimal_delta_u > 0.0
         )
 
-        def _empirical_or_injected_license(case_key: str, bin_id: str) -> bool:
+        def _empirical_or_injected_reliability(case_key: str, bin_id: str) -> bool:
             if licensed_model_superiority is not None and licensed_model_superiority(
                 case_key, bin_id
             ):
                 return True
-            return bin_id in empirical_license_bins
+            return bin_id in empirical_reliability_bins
 
         candidate_bin_ids = sorted({d.route.bin_id for d in guarded})
         coherence = assess_market_coherence(
@@ -785,7 +1036,7 @@ class FamilyDecisionEngine:
             family_book=family_book,
             candidate_bin_ids=candidate_bin_ids,
             case_key=case.family_id,
-            licensed_model_superiority=_empirical_or_injected_license,
+            licensed_model_superiority=_empirical_or_injected_reliability,
             min_depth=self._min_depth,
             max_spread=self._max_spread,
             depth_reference_size=self._depth_reference_size,
@@ -799,7 +1050,7 @@ class FamilyDecisionEngine:
         )
 
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
-        #   direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
+        #   native side proof -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
         # The scalar robust_trade_score is NOT one of the conditions.
         selected_decision, no_trade_reason = self._select(scored)
         if selected_decision is not None:
@@ -807,6 +1058,7 @@ class FamilyDecisionEngine:
                 selected_decision=selected_decision,
                 scored=scored,
                 forecast_bin=forecast_bin,
+                outcome_bin_ids=tuple(b.bin_id for b in omega.bins),
             )
         portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
         if selected_decision is not None:
@@ -817,9 +1069,6 @@ class FamilyDecisionEngine:
                 band=band,
                 forecast_bin=forecast_bin,
             )
-            if any(c.dominates_selected for c in portfolio_comparisons):
-                selected_decision = None
-                no_trade_reason = NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE
 
         candidates_economics = tuple(d.economics for d in scored)
         selected_economics = (
@@ -869,6 +1118,7 @@ class FamilyDecisionEngine:
         exposure: PortfolioExposureVector,
         sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
         max_stake_usd: Optional[Decimal],
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> tuple[CandidateDecision, ...]:
         """Enumerate one candidate per (bin, side) executable route and score its economics.
 
@@ -897,6 +1147,7 @@ class FamilyDecisionEngine:
                     exposure=exposure,
                     sizing_candidates=sizing_candidates,
                     max_stake_usd=max_stake_usd,
+                    served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
                 )
                 if d is not None:
                     decisions.append(d)
@@ -916,6 +1167,7 @@ class FamilyDecisionEngine:
                     exposure=exposure,
                     sizing_candidates=sizing_candidates,
                     max_stake_usd=max_stake_usd,
+                    served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
                 )
                 if d is not None:
                     decisions.append(d)
@@ -935,6 +1187,7 @@ class FamilyDecisionEngine:
         exposure: PortfolioExposureVector,
         sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
         max_stake_usd: Optional[Decimal],
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> Optional[CandidateDecision]:
         """Build a CandidateRoute for one route and compute its economics.
 
@@ -963,6 +1216,9 @@ class FamilyDecisionEngine:
             # It is still recorded for the receipt (a no-trade candidate is auditable).
             economics = self._zero_economics(route, joint_q, band)
         else:
+            served_payoff_q_lcb = None
+            if served_payoff_q_lcb_by_side is not None:
+                served_payoff_q_lcb = served_payoff_q_lcb_by_side.get((bin_id, side))
             economics = compute_candidate_economics(
                 route,
                 joint_q=joint_q,
@@ -971,6 +1227,7 @@ class FamilyDecisionEngine:
                 matrix=matrix,
                 exposure=exposure,
                 max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=served_payoff_q_lcb,
             )
 
         scalar = scalar_trade_score(joint_q, route)
@@ -1016,13 +1273,172 @@ class FamilyDecisionEngine:
         )
 
     # ------------------------------------------------ portfolio comparison
-    def _direction_admitted(self, d: CandidateDecision) -> bool:
-        return d.direction_law_ok or (
-            d.economics.edge_lcb > 0.0
-            and d.economics.optimal_delta_u > 0.0
+    def _has_side_aware_oof_reliability_evidence(self, d: CandidateDecision) -> bool:
+        cell_key = str(d.q_lcb_guard_cell_key or "").strip()
+        side = str(d.route.side or "").strip().upper()
+        return (
+            side in {"YES", "NO"}
             and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
             and not d.q_lcb_guard_abstained
+            and bool(cell_key)
+            and f"|{side}|" in cell_key
         )
+
+    def _apply_day0_observed_boundary_guard(
+        self,
+        *,
+        scored: tuple[CandidateDecision, ...],
+        case: ForecastCase,
+        predictive: PredictiveDistribution,
+        omega: OutcomeSpace,
+        joint_q: JointQ,
+        band: JointQBand,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
+        max_stake_usd: Optional[Decimal],
+    ) -> tuple[CandidateDecision, ...]:
+        """Stamp Day0 monotone hard-fact lower-bound provenance.
+
+        A running HIGH max can only rise, and a running LOW min can only fall.
+        Therefore Day0 can prove hard lower bounds only for monotone facts:
+        an already-passed finite bin makes YES impossible / NO certain, and an
+        already-entered open shoulder makes YES certain / NO impossible. A finite
+        bin that currently contains the observed extreme is not a hard fact; the
+        day can still move out of that bin. That state keeps the remaining-day
+        qLCB rather than inheriting a near-1 hard-fact lower bound.
+        """
+
+        observed = getattr(getattr(predictive, "day0", None), "observed_extreme_native", None)
+        try:
+            observed_f = float(observed)
+        except (TypeError, ValueError):
+            observed_f = float("nan")
+        metric = str(getattr(case, "metric", "") or "").lower()
+        bin_by_id = {b.bin_id: b for b in omega.bins}
+
+        def _base_q_safe(d: CandidateDecision) -> float:
+            try:
+                q_safe = (
+                    float(d.economics.payoff_q_lcb)
+                    if d.economics.payoff_q_lcb is not None
+                    else self._selection_edge_lcb(d) + self._selection_cost(d)
+                )
+            except Exception:  # noqa: BLE001
+                q_safe = 0.0
+            if not math.isfinite(q_safe):
+                return 0.0
+            return min(max(float(q_safe), 0.0), 1.0)
+
+        def _day0_hard_fact_payoff_lcb(
+            d: CandidateDecision, fallback: float
+        ) -> tuple[float, str, bool]:
+            b = bin_by_id.get(d.route.bin_id)
+            side = str(d.route.side or "").upper()
+            if b is None or side not in {"YES", "NO"} or metric not in {"high", "low"}:
+                return fallback, "day0_remaining_day_q_lcb", False
+            if not math.isfinite(observed_f):
+                return 0.0, "day0_observed_extreme_missing", True
+
+            lower = b.lower_native
+            upper = b.upper_native
+            yes_hard: float | None = None
+            if metric == "high":
+                if upper is not None and observed_f > float(upper):
+                    yes_hard = 0.0
+                elif upper is None and lower is not None and observed_f >= float(lower):
+                    yes_hard = 1.0
+            else:
+                if lower is not None and observed_f < float(lower):
+                    yes_hard = 0.0
+                elif lower is None and upper is not None and observed_f <= float(upper):
+                    yes_hard = 1.0
+
+            if yes_hard is None:
+                return fallback, "day0_remaining_day_q_lcb", False
+            q_safe = yes_hard if side == "YES" else 1.0 - yes_hard
+            return (
+                min(max(float(q_safe), 0.0), 1.0),
+                "day0_monotone_hard_fact_q_lcb",
+                True,
+            )
+
+        def _blocked_economics(econ: CandidateEconomics, *, q_safe: float) -> CandidateEconomics:
+            edge_lcb = float(q_safe) - float(econ.cost.value)
+            return replace(
+                econ,
+                edge_lcb=edge_lcb,
+                payoff_q_lcb=float(q_safe),
+                chosen_stake_edge_lcb=edge_lcb,
+                delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
+                optimal_stake_usd=Decimal("0"),
+                optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
+        def _recomputed_hard_fact_economics(
+            d: CandidateDecision, *, q_safe: float
+        ) -> CandidateEconomics:
+            sizing = sizing_candidates.get((d.route.bin_id, d.route.side))
+            if sizing is None or not sizing.is_tradeable:
+                return _blocked_economics(d.economics, q_safe=q_safe)
+
+            economics = compute_candidate_economics(
+                d.route,
+                joint_q=joint_q,
+                band=band,
+                sizing_candidate=sizing,
+                matrix=matrix,
+                exposure=exposure,
+                max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=float(q_safe),
+            )
+            cost = float(economics.cost.value)
+            chosen_cost = (
+                float(economics.chosen_stake_cost.value)
+                if economics.chosen_stake_cost is not None
+                else None
+            )
+            return replace(
+                economics,
+                point_ev=float(q_safe) - cost,
+                edge_lcb=float(q_safe) - cost,
+                q_dot_payoff=float(q_safe),
+                payoff_q_lcb=float(q_safe),
+                chosen_stake_point_ev=(
+                    float(q_safe) - chosen_cost if chosen_cost is not None else None
+                ),
+                chosen_stake_edge_lcb=(
+                    float(q_safe) - chosen_cost if chosen_cost is not None else None
+                ),
+            )
+
+        guarded: list[CandidateDecision] = []
+        for d in scored:
+            q_safe, cell_key, is_hard_fact = _day0_hard_fact_payoff_lcb(d, _base_q_safe(d))
+            if q_safe <= 0.0:
+                economics = _blocked_economics(d.economics, q_safe=q_safe)
+            elif is_hard_fact:
+                economics = _recomputed_hard_fact_economics(d, q_safe=q_safe)
+            else:
+                economics = d.economics
+            guarded.append(
+                replace(
+                    d,
+                    economics=economics,
+                    q_lcb_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
+                    q_lcb_guard_abstained=False,
+                    q_lcb_guard_cell_key=cell_key,
+                    selection_guard_basis=DAY0_REMAINING_DAY_GUARD_BASIS,
+                    selection_guard_abstained=False,
+                    selection_guard_cell_key=cell_key,
+                    selection_guard_n=0,
+                    selection_guard_q_safe=q_safe,
+                )
+            )
+        return tuple(guarded)
+
+    def _direction_admitted(self, d: CandidateDecision) -> bool:
+        return d.direction_law_ok is True
 
     def _utility_density(self, d: CandidateDecision) -> float:
         try:
@@ -1032,12 +1448,159 @@ class FamilyDecisionEngine:
         stake = max(stake, 1e-9)
         return float(d.economics.optimal_delta_u) / stake
 
+    def _selection_cost(self, d: CandidateDecision) -> float:
+        cost_obj = (
+            d.economics.chosen_stake_cost
+            if d.economics.chosen_stake_cost is not None
+            else d.economics.cost
+        )
+        try:
+            cost = float(cost_obj.value)
+        except Exception:  # noqa: BLE001
+            return float("inf")
+        if not (np.isfinite(cost) and cost > 0.0):
+            return float("inf")
+        return cost
+
+    def _selection_edge_lcb(self, d: CandidateDecision) -> float:
+        edge = (
+            d.economics.chosen_stake_edge_lcb
+            if d.economics.chosen_stake_edge_lcb is not None
+            else d.economics.edge_lcb
+        )
+        try:
+            return float(edge)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+
+    def _selection_point_ev(self, d: CandidateDecision) -> float:
+        point = (
+            d.economics.chosen_stake_point_ev
+            if d.economics.chosen_stake_point_ev is not None
+            else d.economics.point_ev
+        )
+        try:
+            return float(point)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+
+    def _edge_roi_lcb(self, d: CandidateDecision) -> float:
+        cost = self._selection_cost(d)
+        if not (np.isfinite(cost) and cost > 0.0):
+            return float("-inf")
+        return self._selection_edge_lcb(d) / cost
+
+    def _profit_lcb_usd(self, d: CandidateDecision) -> float:
+        try:
+            stake = float(d.economics.optimal_stake_usd)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        return roi_frontier_profit_lcb_usd(
+            stake=stake,
+            cost=self._selection_cost(d),
+            edge_lcb=self._selection_edge_lcb(d),
+        )
+
+    def _roi_frontier_useful(self, d: CandidateDecision) -> bool:
+        try:
+            stake = float(d.economics.optimal_stake_usd)
+            delta_u_at_min = float(d.economics.delta_u_at_min)
+        except Exception:  # noqa: BLE001
+            stake = 0.0
+            delta_u_at_min = 0.0
+        q_lcb = self._payoff_q_lcb(d)
+        cost = self._selection_cost(d)
+        return roi_frontier_useful_values(
+            side=getattr(d.route, "side", None),
+            cost=cost,
+            payoff_q_lcb=q_lcb,
+            edge_lcb=self._selection_edge_lcb(d),
+            stake=stake,
+            delta_u_at_min=delta_u_at_min,
+        )
+
+    def _payoff_q_lcb(self, d: CandidateDecision) -> float:
+        try:
+            cost = self._selection_cost(d)
+            payoff_q_lcb = d.economics.payoff_q_lcb
+            q_lcb = (
+                float(payoff_q_lcb)
+                if payoff_q_lcb is not None
+                else self._selection_edge_lcb(d) + cost
+            )
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        return q_lcb
+
+    def _robust_kelly_growth_density(self, d: CandidateDecision) -> float:
+        """Capital-efficiency objective with confidence, not raw payout odds.
+
+        ``edge_lcb / cost`` alone over-rewards one-cent tails whose lower-bound
+        win probability only barely clears price. Multiplying by the binary
+        Kelly lower-bound fraction keeps cheap center YES legs dominant when
+        their belief is genuinely strong, while refusing to let tiny
+        low-confidence tails beat a high-confidence lower-ROI leg.
+        """
+        return roi_frontier_growth_density(
+            cost=self._selection_cost(d),
+            edge_lcb=self._selection_edge_lcb(d),
+            payoff_q_lcb=self._payoff_q_lcb(d),
+        )
+
+    def _roi_frontier_key(self, d: CandidateDecision) -> tuple[float, float, float, float, float, float]:
+        return (
+            self._robust_kelly_growth_density(d),
+            self._edge_roi_lcb(d),
+            self._profit_lcb_usd(d),
+            self._utility_density(d),
+            float(d.economics.optimal_delta_u),
+            -self._selection_cost(d),
+        )
+
+    def _roi_frontier_candidates(
+        self, survivors: Sequence[CandidateDecision]
+    ) -> list[CandidateDecision]:
+        useful = [d for d in survivors if self._roi_frontier_useful(d)]
+        if not useful:
+            return []
+        frontier: list[CandidateDecision] = []
+        for candidate in useful:
+            dominated = False
+            c_growth_density = self._robust_kelly_growth_density(candidate)
+            c_roi = self._edge_roi_lcb(candidate)
+            c_profit = self._profit_lcb_usd(candidate)
+            c_du = float(candidate.economics.optimal_delta_u)
+            for other in useful:
+                if other is candidate:
+                    continue
+                o_growth_density = self._robust_kelly_growth_density(other)
+                o_roi = self._edge_roi_lcb(other)
+                o_profit = self._profit_lcb_usd(other)
+                o_du = float(other.economics.optimal_delta_u)
+                if (
+                    o_growth_density >= c_growth_density
+                    and o_roi >= c_roi
+                    and o_profit >= c_profit
+                    and o_du >= c_du
+                    and (
+                        o_growth_density > c_growth_density
+                        or o_roi > c_roi
+                        or o_profit > c_profit
+                        or o_du > c_du
+                    )
+                ):
+                    dominated = True
+                    break
+            if not dominated:
+                frontier.append(candidate)
+        return frontier
+
     def _live_selectable_candidate(self, d: CandidateDecision) -> bool:
         return (
             d.route.route_cost.executable
             and self._direction_admitted(d)
             and d.coherence_allows
-            and d.economics.edge_lcb > 0.0
+            and self._selection_edge_lcb(d) > 0.0
             and d.economics.optimal_delta_u > 0.0
             and live_candidate_passes(
                 d.economics,
@@ -1053,6 +1616,7 @@ class FamilyDecisionEngine:
         selected_decision: CandidateDecision,
         scored: Sequence[CandidateDecision],
         forecast_bin: str,
+        outcome_bin_ids: Sequence[str] | None = None,
     ) -> CandidateDecision:
         """Replace an inferior selected NO with a strictly superior center YES.
 
@@ -1079,8 +1643,8 @@ class FamilyDecisionEngine:
         )
         if center_yes is None:
             return selected_decision
-        selected_cost = float(selected_decision.economics.cost.value)
-        center_cost = float(center_yes.economics.cost.value)
+        selected_cost = self._selection_cost(selected_decision)
+        center_cost = self._selection_cost(center_yes)
         if not (
             np.isfinite(selected_cost)
             and selected_cost > 0.0
@@ -1088,10 +1652,10 @@ class FamilyDecisionEngine:
             and center_cost > 0.0
         ):
             return selected_decision
-        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
-        center_edge_density = center_yes.economics.edge_lcb / center_cost
-        selected_point_density = selected_decision.economics.point_ev / selected_cost
-        center_point_density = center_yes.economics.point_ev / center_cost
+        selected_edge_density = self._selection_edge_lcb(selected_decision) / selected_cost
+        center_edge_density = self._selection_edge_lcb(center_yes) / center_cost
+        selected_point_density = self._selection_point_ev(selected_decision) / selected_cost
+        center_point_density = self._selection_point_ev(center_yes) / center_cost
         if (
             self._utility_density(center_yes) > self._utility_density(selected_decision)
             and center_edge_density > selected_edge_density
@@ -1102,6 +1666,7 @@ class FamilyDecisionEngine:
             scored=scored,
             forecast_bin=forecast_bin,
             selected_decision=selected_decision,
+            outcome_bin_ids=outcome_bin_ids,
         )
         if adjacent_pair is None:
             return selected_decision
@@ -1119,7 +1684,7 @@ class FamilyDecisionEngine:
         pair_upside = pair_payoff - float(np.min(pair_payoff))
         if not np.all(pair_upside + 1e-9 >= center_payoff):
             return selected_decision
-        pair_cost = float(left.economics.cost.value) + float(right.economics.cost.value)
+        pair_cost = self._selection_cost(left) + self._selection_cost(right)
         if not (np.isfinite(pair_cost) and pair_cost > 0.0):
             return selected_decision
         try:
@@ -1127,8 +1692,8 @@ class FamilyDecisionEngine:
             # proxy. This is enough for canonicalization: center YES must be no
             # worse than the NO expression on both lower-bound and point edge
             # density, while tying up strictly less capital.
-            pair_edge = float(left.economics.edge_lcb) + float(right.economics.edge_lcb)
-            pair_point = float(left.economics.point_ev) + float(right.economics.point_ev)
+            pair_edge = self._selection_edge_lcb(left) + self._selection_edge_lcb(right)
+            pair_point = self._selection_point_ev(left) + self._selection_point_ev(right)
         except Exception:  # noqa: BLE001
             return selected_decision
         eps = 1e-9
@@ -1146,9 +1711,13 @@ class FamilyDecisionEngine:
         scored: Sequence[CandidateDecision],
         forecast_bin: str,
         selected_decision: CandidateDecision,
+        outcome_bin_ids: Sequence[str] | None = None,
     ) -> tuple[CandidateDecision, CandidateDecision] | None:
-        bin_ids = [d.route.bin_id for d in scored]
-        ordered_unique = list(dict.fromkeys(bin_ids))
+        if outcome_bin_ids is None:
+            bin_ids = [d.route.bin_id for d in scored]
+            ordered_unique = list(dict.fromkeys(bin_ids))
+        else:
+            ordered_unique = list(dict.fromkeys(str(b) for b in outcome_bin_ids if str(b)))
         try:
             idx = ordered_unique.index(forecast_bin)
         except ValueError:
@@ -1168,7 +1737,7 @@ class FamilyDecisionEngine:
             if (
                 not leg.route.route_cost.executable
                 or not leg.coherence_allows
-                or leg.economics.edge_lcb <= 0.0
+                or self._selection_edge_lcb(leg) <= 0.0
                 or leg.economics.optimal_delta_u <= 0.0
             ):
                 return None
@@ -1189,9 +1758,8 @@ class FamilyDecisionEngine:
         still present a capital-efficiency question that lives above a single leg: the
         two adjacent NO legs around the modal bin can approximate a center YES but with
         very different cost/payoff geometry. Until portfolio execution has parent/child
-        command semantics, the correct live action when such a portfolio is superior is
-        not to submit a weaker direct leg. This comparator therefore produces evidence
-        and a typed no-trade only; it never creates an executable route.
+        command semantics, this comparator produces evidence only; it must not veto the
+        selected executable route or create a synthetic route.
         """
         if selected_decision.route.side != "YES" or selected_decision.route.bin_id != forecast_bin:
             return ()
@@ -1215,27 +1783,27 @@ class FamilyDecisionEngine:
             or not right.route.route_cost.executable
             or not left.coherence_allows
             or not right.coherence_allows
-            or left.economics.edge_lcb <= 0.0
-            or right.economics.edge_lcb <= 0.0
+            or self._selection_edge_lcb(left) <= 0.0
+            or self._selection_edge_lcb(right) <= 0.0
         ):
             return ()
 
         payoff = np.asarray(left.route.payoff_vector, dtype=float) + np.asarray(
             right.route.payoff_vector, dtype=float
         )
-        cost_sum = float(left.economics.cost.value) + float(right.economics.cost.value)
+        cost_sum = self._selection_cost(left) + self._selection_cost(right)
         if not (np.isfinite(cost_sum) and cost_sum > 0.0):
             return ()
         q_dot = float(np.asarray(joint_q.q, dtype=float) @ payoff)
         point_ev = q_dot - cost_sum
         edge_lcb = float(np.quantile(np.asarray(band.samples, dtype=float) @ payoff - cost_sum, band.alpha))
-        selected_cost = float(selected_decision.economics.cost.value)
+        selected_cost = self._selection_cost(selected_decision)
         if not (np.isfinite(selected_cost) and selected_cost > 0.0):
             return ()
         edge_density = edge_lcb / cost_sum
         point_density = point_ev / cost_sum
-        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
-        selected_point_density = selected_decision.economics.point_ev / selected_cost
+        selected_edge_density = self._selection_edge_lcb(selected_decision) / selected_cost
+        selected_point_density = self._selection_point_ev(selected_decision) / selected_cost
         dominates = (
             edge_lcb > 0.0
             and point_ev > 0.0
@@ -1285,9 +1853,11 @@ class FamilyDecisionEngine:
     ) -> tuple[CandidateDecision, ...]:
         """Deflate each candidate's served q_lcb by the empirical OOF reliability guard.
 
-        FINAL no-shadow execution flow §6. The candidate's served q_lcb (the route's robust
-        lower bound) is ``q_lcb_route = economics.edge_lcb + cost`` (because
-        ``edge_lcb = quantile(samples @ payoff) − cost``). The guard resolves the cell
+        Single-serving-rule flow §6. The candidate's served q_lcb is the route's
+        robust payoff lower bound, ``economics.payoff_q_lcb``. It is produced in
+        the payoff-vector layer from the same q-band/payoff vector that produced
+        ``edge_lcb``; this guard does not reconstruct probability by adding cost
+        back to an edge. The guard resolves the cell
         ``(metric, lead_bucket, side, bin_position, q_lcb_bucket)`` — ``side`` is the actual
         executable YES/NO claim, and ``bin_position`` is "modal" for the forecast (modal) bin,
         "nonmodal" otherwise (a stable, NON-per-city position label) — and returns
@@ -1319,6 +1889,7 @@ class FamilyDecisionEngine:
             return replace(
                 econ,
                 edge_lcb=float(edge_lcb),
+                chosen_stake_edge_lcb=float(edge_lcb),
                 delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
                 optimal_stake_usd=Decimal("0"),
                 optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
@@ -1333,7 +1904,7 @@ class FamilyDecisionEngine:
             if sizing is None or not sizing.is_tradeable:
                 return _blocked_economics(
                     d.economics,
-                    edge_lcb=float(q_safe) - float(d.economics.cost.value),
+                    edge_lcb=float(q_safe) - self._selection_cost(d),
                 )
             return compute_candidate_economics(
                 d.route,
@@ -1350,10 +1921,11 @@ class FamilyDecisionEngine:
         for d in scored:
             try:
                 econ = d.economics
-                cost = float(econ.cost.value)
-                edge_lcb = float(econ.edge_lcb)
-                # The route's served q_lcb lower bound (payoff-space, pre-deflation).
-                q_lcb_route = edge_lcb + cost
+                cost = self._selection_cost(d)
+                edge_lcb = self._selection_edge_lcb(d)
+                q_lcb_route = float(econ.payoff_q_lcb)
+                if not math.isfinite(q_lcb_route) or not (0.0 <= q_lcb_route <= 1.0):
+                    raise FamilyDecisionError("QKERNEL_PAYOFF_Q_LCB_MISSING")
                 bin_position = "modal" if d.route.bin_id == forecast_bin else "nonmodal"
                 verdict = _apply_qlcb_guard(
                     band_q_lcb=q_lcb_route,
@@ -1368,6 +1940,20 @@ class FamilyDecisionEngine:
                     "q_lcb_guard_abstained": bool(verdict.abstained),
                     "q_lcb_guard_cell_key": verdict.cell_key,
                 }
+                if (
+                    d.route.side == "YES"
+                    and bin_position == "modal"
+                    and verdict.basis == "OOF_WILSON_95_POOLED_TAIL"
+                    and q_lcb_route >= qkernel_center_yes_quality_floor()
+                    and edge_lcb > 0.0
+                ):
+                    # A pooled right-tail cell is same-claim evidence that the sparse
+                    # high bucket is not an unknown family, but it is not the exact
+                    # high-confidence bucket's numerical lower-bound authority. Let it
+                    # license market-superiority while preserving the served qkernel
+                    # qLCB/cost pair. Exact OOF cells still deflate below.
+                    out.append(replace(d, **guard_fields))
+                    continue
                 if verdict.basis == "INERT" and not verdict.abstained:
                     out.append(replace(d, **guard_fields))  # no artifact; pass-through
                     continue
@@ -1394,7 +1980,7 @@ class FamilyDecisionEngine:
             except Exception:  # noqa: BLE001 — guard failures are live-money abstains.
                 econ = d.economics
                 try:
-                    cost = float(econ.cost.value)
+                    cost = self._selection_cost(d)
                 except Exception:  # noqa: BLE001
                     cost = 1.0
                 new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
@@ -1409,6 +1995,210 @@ class FamilyDecisionEngine:
                 )
         return tuple(out)
 
+    # ------------------------------------------- selection-aware settlement guard
+    def _apply_selection_calibrator_guard(
+        self,
+        *,
+        scored: tuple[CandidateDecision, ...],
+        case: ForecastCase,
+        joint_q: JointQ,
+        band: JointQBand,
+        forecast_bin: str,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
+        max_stake_usd: Optional[Decimal],
+    ) -> tuple[CandidateDecision, ...]:
+        """Apply the selection-aware settlement lower bound before qkernel selection.
+
+        This is the qkernel-side counterpart of the submit-time selection-curse check:
+        each native YES/NO candidate is calibrated on the raw side probability that
+        admission selected on (``q_dot_payoff`` for the candidate payoff). The guard never
+        raises probability and never moves the forecast center; it only lowers the
+        candidate-local ``payoff_q_lcb`` used by edge, robust DeltaU, stake, and ROI.
+
+        Active armed cells that are missing/thin/stale remain live-money
+        abstains for NO and nonmodal YES. Forecast-modal YES is not re-expressed
+        through this selected-bias guard when the guard has no cell evidence:
+        it stays under the qkernel payoff lower bound, the OOF reliability guard,
+        market coherence, and live strategy price floors. That breaks the
+        closed loop where a missing selected-bias cell starved all center-buy
+        YES while still blocking tail/adjacent substitutes.
+        """
+        lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
+        modal_yes_no_selection_bias_evidence = {
+            "SIDE_NOT_ARMED",
+            "ACTIVE_MISSING_CELL",
+            "ACTIVE_THIN_CELL",
+            "EB_THIN_SELECTED",
+        }
+
+        def _blocked_economics(econ: CandidateEconomics, *, edge_lcb: float) -> CandidateEconomics:
+            return replace(
+                econ,
+                edge_lcb=float(edge_lcb),
+                chosen_stake_edge_lcb=float(edge_lcb),
+                delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
+                optimal_stake_usd=Decimal("0"),
+                optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
+        def _recomputed_guarded_economics(
+            d: CandidateDecision,
+            *,
+            q_safe: float,
+        ) -> CandidateEconomics:
+            sizing = sizing_candidates.get((d.route.bin_id, d.route.side))
+            if sizing is None or not sizing.is_tradeable:
+                return _blocked_economics(
+                    d.economics,
+                    edge_lcb=float(q_safe) - self._selection_cost(d),
+                )
+            return compute_candidate_economics(
+                d.route,
+                joint_q=joint_q,
+                band=band,
+                sizing_candidate=sizing,
+                matrix=matrix,
+                exposure=exposure,
+                max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=float(q_safe),
+            )
+
+        out: list[CandidateDecision] = []
+        for d in scored:
+            try:
+                econ = d.economics
+                cost = self._selection_cost(d)
+                prior_lcb = (
+                    float(econ.payoff_q_lcb)
+                    if econ.payoff_q_lcb is not None
+                    else self._selection_edge_lcb(d) + cost
+                )
+                raw_side_prob = float(econ.q_dot_payoff)
+                if not (
+                    math.isfinite(cost)
+                    and math.isfinite(prior_lcb)
+                    and math.isfinite(raw_side_prob)
+                    and 0.0 <= prior_lcb <= 1.0
+                    and 0.0 <= raw_side_prob <= 1.0
+                ):
+                    raise FamilyDecisionError("SELECTION_GUARD_INPUT_MISSING")
+                bin_class = "modal" if d.route.bin_id == forecast_bin else "nonmodal"
+                verdict = apply_selection_calibrator(
+                    raw_side_prob=raw_side_prob,
+                    side=d.route.side,
+                    lead_days=lead_days,
+                    bin_class=bin_class,
+                    admission_margin=cost,
+                )
+                unarmed_side = str(verdict.basis) == "SIDE_NOT_ARMED"
+                modal_yes_without_selection_bias_evidence = (
+                    d.route.side == "YES"
+                    and bin_class == "modal"
+                    and str(verdict.basis) in modal_yes_no_selection_bias_evidence
+                )
+                q_safe = float(min(prior_lcb, float(verdict.q_safe)))
+                if unarmed_side:
+                    q_safe = 0.0
+                guard_fields = {
+                    "selection_guard_basis": str(verdict.basis),
+                    "selection_guard_abstained": bool(
+                        verdict.abstained or not verdict.trade or unarmed_side
+                    ),
+                    "selection_guard_cell_key": str(verdict.cell_key),
+                    "selection_guard_n": int(getattr(verdict, "n_g", 0) or 0),
+                    "selection_guard_q_safe": float(q_safe),
+                }
+                if modal_yes_without_selection_bias_evidence:
+                    out.append(
+                        replace(
+                            d,
+                            selection_guard_basis="MODAL_YES_QKERNEL_OOF_GUARD",
+                            selection_guard_abstained=False,
+                            selection_guard_cell_key=(
+                                f"{str(verdict.basis)}:{str(verdict.cell_key)}"
+                            ),
+                            selection_guard_n=int(getattr(verdict, "n_g", 0) or 0),
+                            selection_guard_q_safe=float(prior_lcb),
+                        )
+                    )
+                    continue
+                if not verdict.trade or unarmed_side:
+                    new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
+                    out.append(replace(d, economics=new_econ, **guard_fields))
+                    continue
+                guarded_edge = q_safe - cost
+                if guarded_edge < self._selection_edge_lcb(d):
+                    new_econ = _recomputed_guarded_economics(d, q_safe=q_safe)
+                    out.append(replace(d, economics=new_econ, **guard_fields))
+                else:
+                    out.append(replace(d, **guard_fields))
+            except Exception:  # noqa: BLE001 — active selection guard faults fail closed.
+                econ = d.economics
+                try:
+                    cost = self._selection_cost(d)
+                except Exception:  # noqa: BLE001
+                    cost = 1.0
+                new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
+                out.append(
+                    replace(
+                        d,
+                        economics=new_econ,
+                        selection_guard_basis="SELECTION_CALIBRATOR_GUARD_ERROR",
+                        selection_guard_abstained=True,
+                        selection_guard_cell_key="ERROR",
+                        selection_guard_n=0,
+                        selection_guard_q_safe=0.0,
+                    )
+                )
+        return tuple(out)
+
+    def _log_select_gate_diag(
+        self,
+        *,
+        scored: Sequence[CandidateDecision],
+        after_executable: Sequence[CandidateDecision],
+        after_direction: Sequence[CandidateDecision],
+        after_coherence: Sequence[CandidateDecision],
+        positive_edge: Sequence[CandidateDecision],
+        positive_utility: Sequence[CandidateDecision],
+        positive_min_order: Sequence[CandidateDecision],
+        survivors: Sequence[CandidateDecision],
+    ) -> None:
+        """Best-effort live evidence for the first empty selection gate."""
+
+        try:
+            import logging as _gate_diag
+
+            _tops = sorted(
+                scored,
+                key=self._selection_edge_lcb,
+                reverse=True,
+            )[:4]
+            _rows = "; ".join(
+                f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
+                f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
+                f"exec={int(d.route.route_cost.executable)} "
+                f"e={self._selection_edge_lcb(d):+.4f} dU={d.economics.optimal_delta_u:+.5f} "
+                f"dUmin={d.economics.delta_u_at_min:+.5f}"
+                for d in _tops
+            )
+            _gate_diag.getLogger("zeus.spine_edge").info(
+                "SELECT_GATE_DIAG n=%d exec=%d dir=%d coh=%d edge=%d du=%d min=%d live=%d tops=[%s]",
+                len(scored),
+                len(after_executable),
+                len(after_direction),
+                len(after_coherence),
+                len(positive_edge),
+                len(positive_utility),
+                len(positive_min_order),
+                len(survivors),
+                _rows,
+            )
+        except Exception:
+            pass
+
     # --------------------------------------------------------------- selection
     def _select(
         self, scored: Sequence[CandidateDecision]
@@ -1417,15 +2207,15 @@ class FamilyDecisionEngine:
 
         The filter ORDER is the contract:
 
-            1. direction_law_ok          (the candidate is on the legal side of the forecast)
+            1. direction_law_ok          (the candidate has a live-tradable native side)
             2. coherence_allows          (the market-coherence report does NOT block the bin)
             3. edge_lcb > 0 AND optimal_delta_u > 0   (the vector edge + the vector ΔU)
-               (the executable-route + direction-law + coherence preconditions of the live
+               (the executable-route + native-side + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
-        The default live objective selects the survivor with the MAX
-        ``optimal_delta_u / optimal_stake_usd``. Terminal/research callers may explicitly
-        request ``total_delta_u`` to rank first by absolute robust utility. The scalar
+        The default live objective selects on an ROI frontier: lower-bound edge per cost
+        with absolute lower-bound profit and stake floors, then robust utility. Research
+        callers may explicitly request ``total_delta_u`` or ``utility_density``. The scalar
         ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
         returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
         is auditable to its cause).
@@ -1440,12 +2230,8 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # Direction law is structural, but the q_lcb reliability guard is the empirical
-        # settlement evidence that can license an otherwise non-directional Arrow claim.
-        # The license is side-aware and symmetric: YES and NO both need their own active,
-        # non-abstaining OOF verdict plus positive edge and positive ΔU. Bare positive edge from
-        # an INERT/missing guard is never enough. This lets the family optimizer choose the best
-        # executable expression instead of hard-biasing the survivor set toward NO.
+        # Direction law is a native-side route proof. It must not impose a rounded-mu
+        # bin heuristic after q/payoff economics have already priced the route.
         after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
@@ -1454,20 +2240,65 @@ class FamilyDecisionEngine:
         if not after_coherence:
             return None, NO_TRADE_MARKET_INCOHERENT
 
-        edge_survivors = [
+        positive_edge = [
             d
             for d in after_coherence
-            if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
+            if self._selection_edge_lcb(d) > 0.0
         ]
-        # The live pass is a final structural re-proof (executable route, direction-law
-        # proof present, coherence accepted, the vector edge/ΔU). The direction-law proof
-        # passed here MUST be the SAME `_direction_admitted` predicate used by
-        # after_direction above — passing the bare `d.direction_law_ok` re-zeroes the
-        # edge-gated NO-on-modal harvest (live_candidate_passes hard-requires
-        # direction_law_proof_present=True). Every other vector gate still applies.
+        if not positive_edge:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=(),
+                positive_min_order=(),
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_POSITIVE_EDGE
+
+        positive_utility = [
+            d
+            for d in positive_edge
+            if d.economics.optimal_delta_u > 0.0
+        ]
+        if not positive_utility:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=(),
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_POSITIVE_UTILITY
+
+        positive_min_order = [
+            d
+            for d in positive_utility
+            if d.economics.delta_u_at_min > 0.0
+        ]
+        if not positive_min_order:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=positive_min_order,
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_MIN_ORDER_UTILITY
+
+        # The live pass is a final structural re-proof (executable route, native-side
+        # proof present, coherence accepted, vector edge/DeltaU).
         survivors = [
             d
-            for d in edge_survivors
+            for d in positive_min_order
             if self._live_selectable_candidate(d)
         ]
         if not survivors:
@@ -1477,53 +2308,40 @@ class FamilyDecisionEngine:
             # harvest. This names, per top candidate, every gate flag + the per-stage
             # survivor counts, so the exact suppressor is auditable. Fail-safe; the diag
             # never raises into the decision path and changes no behavior.
-            try:
-                import logging as _gate_diag
-
-                _tops = sorted(
-                    scored,
-                    key=lambda d: (
-                        d.economics.edge_lcb
-                        if d.economics.edge_lcb is not None
-                        else float("-inf")
-                    ),
-                    reverse=True,
-                )[:4]
-                _rows = "; ".join(
-                    f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
-                    f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
-                    f"exec={int(d.route.route_cost.executable)} "
-                    f"e={d.economics.edge_lcb:+.4f} dU={d.economics.optimal_delta_u:+.5f} "
-                    f"dUmin={d.economics.delta_u_at_min:+.5f}"
-                    for d in _tops
-                )
-                _gate_diag.getLogger("zeus.spine_edge").info(
-                    "SELECT_GATE_DIAG n=%d exec=%d dir=%d coh=%d edge=%d live=%d tops=[%s]",
-                    len(scored),
-                    len(after_executable),
-                    len(after_direction),
-                    len(after_coherence),
-                    len(edge_survivors),
-                    len(survivors),
-                    _rows,
-                )
-            except Exception:
-                pass
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=positive_min_order,
+                survivors=survivors,
+            )
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
-        # SELECT: live defaults to the best robust utility density over the survivors.
-        # Total ΔU remains a secondary ordering signal, so a high-capital low-density NO
-        # cannot dominate a lower-capital higher-density YES just because it ties up more
-        # dollars. Terminal/research callers can explicitly request total ΔU first. The
-        # scalar trade score is NOT a key in either objective.
-        if self._selection_objective == "total_delta_u":
+        # SELECT: live defaults to an ROI frontier so capital-efficient YES can beat a
+        # larger but lower-return NO without banning either side. There is deliberately
+        # no selector-level fixed-dollar stake floor: venue minimum handling belongs to
+        # ``delta_u_at_min`` and the submit-time min-order bump. Low-confidence tails are
+        # rejected by confidence-weighted Kelly growth density plus lower-bound profit,
+        # not by their raw notional size. Research callers can explicitly request total
+        # utility or density.
+        # The scalar trade score is NOT a key in any objective.
+        if self._selection_objective == "roi_frontier":
+            roi_frontier = self._roi_frontier_candidates(survivors)
+            if not roi_frontier:
+                return None, NO_TRADE_NO_ROI_FRONTIER_CANDIDATE
+            selected = max(roi_frontier, key=self._roi_frontier_key)
+        elif self._selection_objective == "total_delta_u":
             selected = max(
                 survivors,
                 key=lambda d: (
                     d.economics.optimal_delta_u,
+                    self._edge_roi_lcb(d),
                     self._utility_density(d),
-                    d.economics.edge_lcb,
-                    -float(d.economics.cost.value),
+                    self._selection_edge_lcb(d),
+                    -self._selection_cost(d),
                 ),
             )
         else:
@@ -1532,8 +2350,8 @@ class FamilyDecisionEngine:
                 key=lambda d: (
                     self._utility_density(d),
                     d.economics.optimal_delta_u,
-                    d.economics.edge_lcb,
-                    -float(d.economics.cost.value),
+                    self._selection_edge_lcb(d),
+                    -self._selection_cost(d),
                 ),
             )
         return selected, None

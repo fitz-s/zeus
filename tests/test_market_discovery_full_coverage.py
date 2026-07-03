@@ -21,6 +21,7 @@ Three tests:
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 import time
@@ -138,6 +139,38 @@ def _make_clob_mock() -> MagicMock:
     clob.get_orderbook_snapshot.side_effect = _orderbook
     clob.get_fee_rate_details.side_effect = _fee_details
     return clob
+
+
+def _make_multi_outcome_refresh_market(city_name: str, *, outcomes: int = 5) -> dict:
+    city_slug = city_name.lower().replace(" ", "-")
+    rows = []
+    for idx in range(outcomes):
+        cid = f"0x{city_slug[:2]:0<2}{idx:02x}" + "c" * 60
+        cid = cid[:66]
+        rows.append(
+            {
+                "condition_id": cid,
+                "market_id": cid,
+                "token_id": f"{cid[:-1]}a",
+                "no_token_id": f"{cid[:-1]}b",
+                "executable": True,
+                "accepting_orders": True,
+                "closed": False,
+                "enable_orderbook": True,
+            }
+        )
+    return {
+        "event_id": f"evt-{city_slug}",
+        "slug": f"highest-temperature-in-{city_slug}-on-2026-06-26",
+        "city": city_name,
+        "target_date": "2026-06-26",
+        "temperature_metric": "high",
+        "hours_to_resolution": 12.0,
+        "hours_since_open": 3.0,
+        "_zeus_refresh_urgency": 4,
+        "outcomes": rows,
+        "condition_ids": [str(row["condition_id"]) for row in rows],
+    }
 
 
 def _make_in_memory_trade_db() -> sqlite3.Connection:
@@ -311,6 +344,51 @@ def test_refresh_order_pairs_yes_no_sides_before_next_city():
     assert third_condition == fourth_condition
     assert [third_direction, fourth_direction] == ["buy_yes", "buy_no"]
     assert third_condition != first_condition
+
+
+def test_refresh_prioritizes_money_path_condition_ids_before_family_siblings():
+    """Confirmation refresh must price the scoped money-path condition first.
+
+    Continuous redecision may refresh a full weather family, but the next action
+    depends on a small scoped set: a held leg, an open rest, or a screened entry.
+    When the batch orderbook path only has budget to recover a prefix, that prefix
+    must be the scoped condition, not arbitrary sibling bins.
+    """
+    markets = [
+        _make_market("Miami", 1, metric="highest", target_date="2026-05-25"),
+        _make_market("Miami", 2, metric="highest", target_date="2026-05-26"),
+        _make_market("Miami", 3, metric="highest", target_date="2026-05-27"),
+    ]
+    priority_condition = markets[2]["condition_ids"][0]
+    captured: list[tuple[str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(decision.tokens.get("market_id") or ""),
+                str(decision.edge.direction),
+            )
+        )
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots = None
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            priority_condition_ids={priority_condition},
+        )
+
+    assert captured[:2] == [
+        (priority_condition, "buy_yes"),
+        (priority_condition, "buy_no"),
+    ]
 
 
 def test_refresh_order_prioritizes_one_sided_fresh_condition_completion():
@@ -589,7 +667,7 @@ def test_capture_reuses_clob_market_info_for_adjacent_condition_sides():
 
 
 def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
-    """Warm cycles with cached topology must reserve most time for CLOB prices."""
+    """Cached topology short-cuts Gamma only when no family needs Gamma hydration."""
     import src.main as main_mod
 
     fake_now = 108.0
@@ -601,6 +679,14 @@ def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
         refresh_budget_s=15.0,
         snapshot_reserve_s=6.0,
         cached_topology_count=50,
+        gamma_family_count=0,
+    )
+    deadline_with_cache_and_gamma_work = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=115.0,
+        refresh_budget_s=15.0,
+        snapshot_reserve_s=6.0,
+        cached_topology_count=50,
+        gamma_family_count=20,
     )
     deadline_without_cache = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=115.0,
@@ -610,7 +696,31 @@ def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
     )
 
     assert deadline_with_cache == pytest.approx(101.0)
+    assert deadline_with_cache_and_gamma_work == pytest.approx(109.0)
     assert deadline_without_cache == pytest.approx(109.0)
+
+
+def test_snapshot_refresh_reports_candidate_identity_rejection_counts():
+    market = _make_market("Chicago", 1)
+    market["outcomes"][0]["no_token_id"] = ""
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot") as capture:
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_make_clob_mock(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+        )
+
+    capture.assert_not_called()
+    assert summary["executable_substrate_coverage_status"] == "NO_EXECUTABLE_CANDIDATES"
+    assert summary["executable_snapshot_candidate_count"] == 0
+    assert summary["executable_snapshot_candidate_rejection_counts"] == {
+        "missing_yes_no_token_identity": 1
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -627,11 +737,14 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     Pre-fix baseline: _market_discovery_cycle imports and calls
     find_slug_pattern_weather_markets only; find_weather_markets never called.
     """
-    import src.main as main_mod
-
     tag_scan_called = []
     slug_only_called = []
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     def _mock_find_weather_markets(**kwargs):
         tag_scan_called.append(kwargs)
@@ -647,7 +760,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
 
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda conn, *, markets, clob, captured_at, scan_authority: {
+        lambda conn, *, markets, clob, captured_at, scan_authority, **_kwargs: {
             "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
             "truncated": 0, "budget_exhausted": 0,
         },
@@ -713,6 +826,11 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     calls: list[dict] = []
     captured: list[dict] = []
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # STALE substrate: last full capture 400s ago (> 300s fairness window).
@@ -725,7 +843,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
 
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
 
-    def _capture(conn, *, markets, clob, captured_at, scan_authority):
+    def _capture(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         captured.append({"scan_authority": scan_authority})
         return {"attempted": 0, "inserted": 0, "skipped": 0, "failed": 0, "truncated": 0, "budget_exhausted": 0}
 
@@ -777,11 +895,15 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     broken by it. This test now asserts the stronger invariant: with a STALE substrate the
     producer captures the universe, with zero reference to any pending/reactor state.
     """
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     calls: list[dict] = []
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     # P2: force STALE substrate so the staleness gate falls through to capture (order-independent).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
@@ -793,7 +915,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda conn, *, markets, clob, captured_at, scan_authority: {
+        lambda conn, *, markets, clob, captured_at, scan_authority, **_kwargs: {
             "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
             "truncated": 0, "budget_exhausted": 0,
         },
@@ -825,7 +947,6 @@ class _FakeLock:
 
 
 def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatch):
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     discovery_lock = _FakeLock(True)
@@ -838,6 +959,7 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
     # back to None so this lock test is order-independent.)
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must not scan"))
 
     substrate_observer._market_discovery_cycle()
@@ -849,7 +971,6 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
 
 
 def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     discovery_lock = _FakeLock(True)
@@ -860,6 +981,7 @@ def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
     # capture/lock path this test exercises (order-independent — see note above).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: [_make_market("Miami", 1)])
 
     def _raise_refresh(*args, **kwargs):
@@ -1161,6 +1283,97 @@ def test_unbounded_family_refresh_batches_complete_groups_per_tick(monkeypatch):
     assert summary["budget_truncated_city_count"] == 2
 
 
+def test_unbounded_family_refresh_cap_keeps_multibin_family_whole(monkeypatch):
+    """A tight full-family cap must not leave several families half-refreshed."""
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "8")
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "16",
+    )
+
+    def _with_outcomes(market: dict, prefix: str) -> dict:
+        outcomes = []
+        for idx in range(3):
+            condition_id = f"cond-{prefix}-{idx}"
+            outcomes.append(
+                {
+                    "condition_id": condition_id,
+                    "token_id": f"yes-{prefix}-{idx}",
+                    "no_token_id": f"no-{prefix}-{idx}",
+                    "executable": True,
+                    "accepting_orders": True,
+                    "closed": False,
+                    "enable_orderbook": True,
+                    "gamma_market_raw": {
+                        "conditionId": condition_id,
+                        "acceptingOrders": True,
+                        "closed": False,
+                        "active": False,
+                        "enableOrderBook": True,
+                    },
+                }
+            )
+        out = dict(market)
+        out["outcomes"] = outcomes
+        out["condition_ids"] = [str(outcome["condition_id"]) for outcome in outcomes]
+        return out
+
+    markets = [
+        _with_outcomes(_make_market("Tokyo", 1, metric="highest"), "tokyo"),
+        _with_outcomes(_make_market("Seoul", 2, metric="highest"), "seoul"),
+    ]
+    captured_conditions: list[str] = []
+    batch_token_counts: list[int] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            batch_token_counts.append(len(call))
+            return {
+                token_id: {
+                    "market": token_id,
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.55", "size": "100"}],
+                    "asks": [{"price": "0.60", "size": "100"}],
+                }
+                for token_id in call
+            }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured_conditions.append(str(decision.tokens.get("market_id") or ""))
+
+    conn = _make_in_memory_trade_db()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=20.0,
+            max_outcomes=0,
+        )
+
+    assert summary["selected_executable_snapshot_count"] == 6
+    assert summary["prefetched_orderbook_count"] == 6
+    assert batch_token_counts == [6]
+    assert len(captured_conditions) == 6
+    captured_prefixes = {condition.split("-")[1] for condition in captured_conditions}
+    assert len(captured_prefixes) == 1
+    assert {condition.rsplit("-", 1)[1] for condition in captured_conditions} == {"0", "1", "2"}
+    assert summary["truncated"] == 1
+    assert summary["budget_truncated_city_count"] == 1
+
+
+def test_unbounded_family_refresh_default_cap_uses_batch_books_envelope(monkeypatch):
+    """Default full-family refresh cap must fit the live snapshot-write window."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", raising=False)
+
+    assert ms._snapshot_capture_max_candidates_per_tick(per_city_limit=0) == 32
+
+
 def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
     """Tiny prefetch window MUST still fire ONE batch POST /books, not fall back
     to a per-token GET /book storm.
@@ -1241,6 +1454,55 @@ def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
     assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(BUDGET_SECONDS - 0.05)
 
 
+def test_batch_capable_warm_lane_defers_missing_books_without_per_token_fallback(monkeypatch):
+    """A partial/failed /books response must not degrade into serial /book reads.
+
+    Live root cause (2026-06-25): the warm lane had a tiny batch-prefetch window,
+    but missing batch entries still fell back to per-token ``GET /book`` inside
+    capture. A single slow/partial batch could therefore become dozens of blocking
+    HTTP calls and starve the next 100+ pending families. Batch-capable substrate
+    refresh now skips those missing books for this tick; the next scheduled tick
+    retries with fresh CLOB evidence.
+    """
+
+    market = _make_market("Shanghai", 1, metric="highest")
+
+    class _Clob:
+        def __init__(self):
+            self.book_get_calls = 0
+
+        def get_orderbook_snapshots(self, token_ids):
+            return {}
+
+        def get_orderbook_snapshot(self, token_id):
+            self.book_get_calls += 1
+            raise AssertionError("batch-capable warm lane must not fall back to per-token /book")
+
+    clob = _Clob()
+    conn = _make_in_memory_trade_db()
+    capture_calls: list[str] = []
+
+    def _capture(*_args, **_kwargs):
+        capture_calls.append("capture")
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=6.0,
+            max_outcomes=0,
+        )
+
+    assert capture_calls == []
+    assert clob.book_get_calls == 0
+    assert summary["attempted"] == 0
+    assert summary["prefetch_missing_skipped"] == summary["selected_executable_snapshot_count"]
+    assert summary["prefetch_missing_skipped"] > 0
+
+
 def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
     """PER-TOKEN STORM FIX boundary antibody: the FIRST POST /books chunk always
     fires (it replaces the per-token GET storm), while the SECOND-and-later chunks
@@ -1251,7 +1513,7 @@ def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
     gate INTO the chunk loop and exempts chunk 0, so:
       * no deadline                -> every chunk fires (unchanged)
       * deadline already in the past -> chunk 0 STILL fires (one POST, no storm);
-        chunks 1+ are skipped and their tokens fall back per-token inside capture.
+        chunks 1+ are skipped and retried by a later warm tick.
 
     Driven directly against ``_prefetch_selected_orderbooks`` with a tiny chunk
     size so a small token set spans multiple chunks. RED-on-revert: restoring the
@@ -1292,7 +1554,1179 @@ def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
         "first chunk MUST always fire (one POST /books replaces the per-token GET "
         f"storm); got {len(chunk_calls)} chunks"
     )
-    assert len(books) == 2  # only the first chunk's tokens; the rest fall back per-token
+    assert len(books) == 2  # only the first chunk's tokens; the rest retry later
+
+
+def test_prefetch_failed_large_chunk_splits_to_retry_chunks(monkeypatch):
+    """A large POST /books failure must not zero the whole substrate price surface."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS", "3")
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            if len(call) == 6:
+                raise TimeoutError("handshake timeout")
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+
+    assert calls == [
+        ["yes-0", "yes-1", "yes-2", "yes-3", "yes-4", "yes-5"],
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
+def test_prefetch_failed_large_chunk_retries_bounded_priority_prefix_by_default(monkeypatch):
+    """Live default must not let a failed 100-token POST fan out into every retry
+    subchunk and overrun the scheduler interval."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            if len(call) == 6:
+                raise TimeoutError("handshake timeout")
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+
+    assert calls == [
+        ["yes-0", "yes-1", "yes-2", "yes-3", "yes-4", "yes-5"],
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+    ]
+    assert sorted(books) == ["yes-0", "yes-1", "yes-2", "yes-3"]
+
+
+def test_prefetch_failed_large_chunk_can_retry_full_family_until_deadline(monkeypatch):
+    """Money-path full-family refresh is deadline-bound, not fixed at two retry chunks."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            if len(call) == 6:
+                raise TimeoutError("handshake timeout")
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(
+        _Clob(),
+        candidates,
+        deadline=None,
+        max_retry_chunks=0,
+    )
+
+    assert calls == [
+        ["yes-0", "yes-1", "yes-2", "yes-3", "yes-4", "yes-5"],
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
+def test_prefetch_full_family_can_use_smaller_primary_chunk(monkeypatch):
+    """Scoped money-path refresh must avoid one huge /books call consuming the tick."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 100)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", "100")
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            return {t: {"asset_id": t, "bids": [], "asks": [{"price": "0.4", "size": "1"}]} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(
+        _Clob(),
+        candidates,
+        deadline=None,
+        max_retry_chunks=0,
+        primary_chunk_size=2,
+    )
+
+    assert calls == [
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
+def test_prefetch_retry_chunk_defers_without_singular_get(monkeypatch):
+    """If POST /books is unhealthy even for tiny chunks, defer price capture.
+
+    The substrate sidecar owns retry cadence; batch failure must not turn into
+    serial per-token GET /book work inside the live refresh loop.
+    """
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            raise TimeoutError("books endpoint timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(token_id)
+            return {"asset_id": token_id, "bids": [], "asks": []}
+
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+
+    assert singular_calls == []
+    assert books == {}
+
+
+def test_prefetch_batch_failure_never_samples_singular_get(monkeypatch):
+    """Batch failure must not probe per-token /book as a hidden fallback."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS", "3")
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            raise TimeoutError("books endpoint timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(token_id)
+            raise TimeoutError("book endpoint timeout")
+
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+
+    assert singular_calls == []
+    assert books == {}
+
+
+def test_prefetch_missing_orderbook_uses_fresh_feasibility_book(monkeypatch):
+    """Priority substrate can use the live price-channel witness when /books misses."""
+
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1",
+            "evt1",
+            "cond-1",
+            "yes-1",
+            "YES",
+            "buy_yes",
+            _NOW.isoformat(),
+            "hash-1",
+            0.24,
+            0.27,
+            '{"bids":[{"price":"0.24","size":"10"}],"asks":[{"price":"0.27","size":"12"}]}',
+            _NOW.isoformat(),
+            1,
+        ),
+    )
+    conn.commit()
+    outcome = {
+        "token_id": "yes-1",
+        "no_token_id": "no-1",
+        "min_tick_size": "0.001",
+        "min_order_size": "1",
+        "neg_risk": True,
+    }
+    candidates = [(0, 0, 0, {"slug": "m1"}, outcome, "cond-1", "buy_yes")]
+
+    books = ms._prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        candidates,
+        captured=_NOW,
+        already_prefetched=set(),
+    )
+
+    assert sorted(books) == ["yes-1"]
+    assert books["yes-1"]["asset_id"] == "yes-1"
+    assert books["yes-1"]["asks"][0]["price"] == "0.27"
+    assert books["yes-1"]["tick_size"] == "0.001"
+    assert books["yes-1"]["neg_risk"] is True
+
+
+def test_prefetch_missing_orderbook_uses_same_token_feasibility_book_any_direction(monkeypatch):
+    """Book evidence is token-level; a sell-side witness can hydrate buy substrate."""
+
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1",
+            "evt1",
+            "cond-1",
+            "yes-1",
+            "YES",
+            "sell_yes",
+            _NOW.isoformat(),
+            "hash-1",
+            0.24,
+            0.27,
+            '{"bids":[{"price":"0.24","size":"10"}],"asks":[{"price":"0.27","size":"12"}]}',
+            _NOW.isoformat(),
+            1,
+        ),
+    )
+    conn.commit()
+    outcome = {
+        "token_id": "yes-1",
+        "no_token_id": "no-1",
+        "min_tick_size": "0.001",
+        "min_order_size": "1",
+        "neg_risk": True,
+    }
+    candidates = [(0, 0, 0, {"slug": "m1"}, outcome, "cond-1", "buy_yes")]
+
+    books = ms._prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        candidates,
+        captured=_NOW,
+        already_prefetched=set(),
+    )
+
+    assert sorted(books) == ["yes-1"]
+    assert books["yes-1"]["asset_id"] == "yes-1"
+    assert books["yes-1"]["asks"][0]["price"] == "0.27"
+
+
+def test_prefetch_missing_orderbook_hydrates_from_top_of_book_feasibility(monkeypatch):
+    """Live price-channel rows may carry top-of-book without full depth JSON."""
+
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1",
+            "evt1",
+            "cond-1",
+            "yes-1",
+            "YES",
+            "buy_yes",
+            _NOW.isoformat(),
+            "hash-1",
+            0.24,
+            0.27,
+            "",
+            _NOW.isoformat(),
+            1,
+        ),
+    )
+    conn.commit()
+    outcome = {
+        "token_id": "yes-1",
+        "no_token_id": "no-1",
+        "min_tick_size": "0.001",
+        "min_order_size": "5",
+        "neg_risk": False,
+    }
+    candidates = [(0, 0, 0, {"slug": "m1"}, outcome, "cond-1", "buy_yes")]
+
+    books = ms._prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        candidates,
+        captured=_NOW,
+        already_prefetched=set(),
+    )
+
+    assert sorted(books) == ["yes-1"]
+    assert books["yes-1"]["bids"] == [{"price": "0.24", "size": "1"}]
+    assert books["yes-1"]["asks"] == [{"price": "0.27", "size": "1"}]
+    assert books["yes-1"]["min_order_size"] == "5"
+
+
+def test_full_family_refresh_uses_feasibility_instead_of_synchronous_network_prefetch(monkeypatch):
+    """Money-path redecision must not block capture behind direct /books latency."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK", "1")
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    yes_token = outcome["token_id"]
+    no_token = outcome["no_token_id"]
+    for evidence_id, token_id, outcome_label, direction, bid, ask in [
+        ("e-yes", yes_token, "YES", "buy_yes", 0.24, 0.27),
+        ("e-no", no_token, "NO", "buy_no", 0.70, 0.73),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                market["event_id"],
+                outcome["condition_id"],
+                token_id,
+                outcome_label,
+                direction,
+                _NOW.isoformat(),
+                f"hash-{outcome_label.lower()}",
+                bid,
+                ask,
+                f'{{"bids":[{{"price":"{bid}","size":"10"}}],"asks":[{{"price":"{ask}","size":"12"}}]}}',
+                _NOW.isoformat(),
+                1,
+            ),
+        )
+    conn.commit()
+
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    assert network_calls == []
+    assert captured_books == [yes_token, no_token]
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetched_orderbook_count"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_skipped"] == 0
+
+
+def test_full_family_refresh_defers_missing_books_to_price_channel(monkeypatch):
+    """Missing money-path books are deferred instead of synchronously blocking capture."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES", "0")
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            network_calls.append(list(token_ids))
+            raise AssertionError("full-family redecision must not synchronously call /books by default")
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    assert network_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
+    assert summary["direct_clob_prefetch_skipped"] == 1
+
+
+def test_small_full_family_refresh_fills_missing_books_from_direct_clob(monkeypatch):
+    """Targeted family refresh must complete missing live-price books, not disappear."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES", "64")
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    expected_tokens = [outcome["token_id"], outcome["no_token_id"]]
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    assert network_calls == [expected_tokens]
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_skipped"] == 0
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 1
+
+
+def test_large_full_family_refresh_fills_priority_books_from_direct_clob(monkeypatch):
+    """Priority redecision families must not starve behind non-priority siblings."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "2",
+    )
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    sibling_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    sibling_outcome = sibling_market["outcomes"][0]
+    expected_tokens = [priority_outcome["token_id"], priority_outcome["no_token_id"]]
+    sibling_tokens = {sibling_outcome["token_id"], sibling_outcome["no_token_id"]}
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market, sibling_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert network_calls == [expected_tokens]
+    assert captured_books == expected_tokens
+    assert not sibling_tokens.intersection(captured_books)
+    assert summary["selected_executable_snapshot_count"] == 4
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 2
+    assert summary["direct_clob_prefetch_skipped"] == 0
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 0
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_bounded_priority_scope_still_prefetches_unscoped_family_books(monkeypatch):
+    """Exact held/rest priority must not disable bounded claim-family discovery."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "4",
+    )
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    sibling_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    sibling_outcome = sibling_market["outcomes"][0]
+    expected_tokens = [
+        priority_outcome["token_id"],
+        priority_outcome["no_token_id"],
+        sibling_outcome["token_id"],
+        sibling_outcome["no_token_id"],
+    ]
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market, sibling_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert network_calls == [expected_tokens]
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 4
+    assert summary["inserted"] == 4
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_skipped"] == 0
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 1
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_priority_full_family_refresh_defers_when_batch_books_fail(monkeypatch):
+    """Priority held/rest conditions do not use per-token GET fallback."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "2",
+    )
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    sibling_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    expected_tokens = [priority_outcome["token_id"], priority_outcome["no_token_id"]]
+    batch_calls: list[list[str]] = []
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            batch_calls.append(list(token_ids))
+            raise TimeoutError("batch timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market, sibling_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert batch_calls == [expected_tokens]
+    assert singular_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] >= 2
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_small_priority_refresh_defers_without_per_token_book_reads(monkeypatch):
+    """Money-path priority conditions wait for batch price evidence."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "10",
+    )
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    expected_tokens = [priority_outcome["token_id"], priority_outcome["no_token_id"]]
+    batch_calls: list[list[str]] = []
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            batch_calls.append(list(token_ids))
+            raise TimeoutError("batch timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert batch_calls == [expected_tokens]
+    assert singular_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 0
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_priority_refresh_captures_partial_batch_misses_as_identity(monkeypatch):
+    """Partial /books responses capture missing priority sides as non-executable identity."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "10",
+    )
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    expected_tokens = [priority_outcome["token_id"], priority_outcome["no_token_id"]]
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            first = str(list(token_ids)[0])
+            return {
+                first: {
+                    "asset_id": first,
+                    "market": first,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+            }
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert singular_calls == []
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["prefetch_missing_identity_captured"] == 1
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_urgent_full_family_capture_breadth_covers_price_pairs(monkeypatch):
+    """Urgent Day0/redecision families need fresh price pairs across many cities."""
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "8")
+    conn = _make_in_memory_trade_db()
+    captured: list[tuple[str, str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, **kwargs):
+        captured.append(
+            (
+                str(market["city"]),
+                str(decision.tokens["market_id"]),
+                str(decision.edge.direction),
+            )
+        )
+
+    with (
+        patch.object(ms, "_snapshot_condition_refresh_state", return_value=((1, 0.0), set())),
+        patch.object(ms, "_candidates_missing_prefetched_orderbooks", return_value=[]),
+        patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture),
+    ):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[
+                _make_multi_outcome_refresh_market(city)
+                for city in ("Austin", "Boston", "Chicago", "Denver")
+            ],
+            clob=object(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+        )
+
+    assert summary["selected_executable_snapshot_count"] == 8
+    assert summary["selected_executable_city_count"] == 4
+    assert summary["urgent_refresh_family_count"] == 4
+    assert summary["selected_urgent_refresh_city_count"] == 4
+    assert {row[0] for row in captured} == {"Austin", "Boston", "Chicago", "Denver"}
+    assert all(direction in {"buy_yes", "buy_no"} for *_rest, direction in captured)
+
+
+def test_full_family_nonpriority_batch_failure_defers_without_singular_storm(monkeypatch):
+    """Ordinary backlog refresh must not spend the live tick on serial /book retries."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "10",
+    )
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            raise TimeoutError("batch timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    summary = refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[market],
+        clob=_Clob(),
+        captured_at=_NOW,
+        scan_authority="VERIFIED",
+        max_outcomes=0,
+        budget_seconds=15.0,
+    )
+
+    assert singular_calls == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
+
+
+def test_broad_priority_refresh_services_bounded_direct_books(monkeypatch):
+    """Broad priority scopes service a bounded direct-CLOB subset instead of starving all."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
+        "1",
+    )
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    market_with_witness = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    missing_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
+    outcome = market_with_witness["outcomes"][0]
+    yes_token = outcome["token_id"]
+    no_token = outcome["no_token_id"]
+    for evidence_id, token_id, outcome_label, direction, bid, ask in [
+        ("broad-yes", yes_token, "YES", "buy_yes", 0.24, 0.27),
+        ("broad-no", no_token, "NO", "buy_no", 0.70, 0.73),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                market_with_witness["event_id"],
+                outcome["condition_id"],
+                token_id,
+                outcome_label,
+                direction,
+                _NOW.isoformat(),
+                f"hash-{outcome_label.lower()}",
+                bid,
+                ask,
+                f'{{"bids":[{{"price":"{bid}","size":"10"}}],"asks":[{{"price":"{ask}","size":"12"}}]}}',
+                _NOW.isoformat(),
+                1,
+            ),
+        )
+    conn.commit()
+
+    missing_outcome = missing_market["outcomes"][0]
+    missing_tokens = [missing_outcome["token_id"], missing_outcome["no_token_id"]]
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market_with_witness, missing_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=14.0,
+            priority_condition_ids={
+                outcome["condition_id"],
+                missing_market["outcomes"][0]["condition_id"],
+            },
+        )
+
+    assert len(network_calls) == 1
+    assert len(network_calls[0]) == 2
+    assert set(network_calls[0]).issubset({yes_token, no_token, *missing_tokens})
+    assert set(captured_books) == {yes_token, no_token, *missing_tokens}
+    assert len(captured_books) == 4
+    assert summary["attempted"] == 4
+    assert summary["inserted"] == 4
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_selected_priority_condition_count"] == 2
+    assert summary["direct_clob_prefetch_priority_serviced_condition_count"] == 1
+    assert summary["direct_clob_prefetch_priority_deferred_condition_count"] == 1
+    assert summary["direct_clob_prefetch_priority_scope_allowed"] == 1
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_capture_busy_timeout_denominator_uses_attemptable_prefetched_candidates():
+    """Missing price books must not dilute the SQLite wait budget for writable rows."""
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(129)]
+    prefetched = {
+        "yes-0": {"asset_id": "yes-0"},
+        "yes-1": {"asset_id": "yes-1"},
+    }
+
+    assert (
+        ms._remaining_attemptable_snapshot_candidates(
+            candidates,
+            0,
+            batch_orderbook_supported=True,
+            prefetched_books=prefetched,
+        )
+        == 2
+    )
+    assert ms._snapshot_capture_busy_timeout_ms(18.0, remaining_candidates=2) > ms._snapshot_capture_busy_timeout_ms(
+        18.0,
+        remaining_candidates=129,
+    )
 
 
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
@@ -1331,6 +2765,48 @@ def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
     assert summary["executable_substrate_coverage_status"] == "FULL"
 
 
+def test_priority_condition_missing_batch_book_still_attempts_capture(monkeypatch):
+    """Redecision priority conditions must not vanish when batch /books is partial."""
+
+    market = _make_market("Tokyo", 1, metric="lowest", target_date="2026-06-08")
+    priority_condition = market["outcomes"][0]["condition_id"]
+    captured: list[tuple[str, str | None]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(decision.edge.direction),
+                kwargs.get("prefetched_orderbook", {}).get("asset_id")
+                if kwargs.get("prefetched_orderbook") is not None
+                else None,
+            )
+        )
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.return_value = {}
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=5.0,
+            max_outcomes=0,
+            priority_condition_ids={priority_condition},
+        )
+
+    expected_tokens = [market["outcomes"][0]["token_id"], market["outcomes"][0]["no_token_id"]]
+    assert captured == [("buy_yes", expected_tokens[0]), ("buy_no", expected_tokens[1])]
+    assert summary["attempted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["prefetch_missing_identity_captured"] == 2
+    assert summary["inserted"] == 2
+    assert summary["executable_substrate_coverage_status"] == "FULL"
+
+
 def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(monkeypatch):
     """The default pending-family path must reserve a real capture phase.
 
@@ -1342,6 +2818,17 @@ def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(m
 
     summary_budget = 15.0
     assert ms._snapshot_capture_reserve_seconds_from_env(summary_budget) == pytest.approx(12.0)
+
+
+def test_call_site_snapshot_capture_reserve_overrides_global_default(monkeypatch):
+    """Tight sidecar budgets must not silently inherit the 12s global capture reserve."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", "12.0")
+
+    assert ms._snapshot_capture_reserve_seconds_from_env(
+        8.0,
+        reserve_seconds=6.0,
+    ) == pytest.approx(6.0)
 
 
 def test_illiquid_identity_capture_skips_fee_rate_http():
@@ -1432,10 +2919,101 @@ def test_illiquid_identity_capture_skips_fee_rate_http():
     assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
 
 
-def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
-    """Background substrate identity rows should not spend one /markets HTTP per bin."""
+def test_substrate_identity_capture_persists_non_accepting_clob_state():
+    """Priority substrate refresh must record current non-executable CLOB state."""
 
-    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
+    condition_id = "0x" + "3" * 64
+    yes_token = "0x" + "4" * 64
+    no_token = "0x" + "5" * 64
+    market = {
+        "event_id": "evt-non-accepting",
+        "slug": "highest-temperature-in-chicago-on-june-7-2026",
+        "city": ms.cities_by_name.get("Chicago", "Chicago"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class NonAcceptingClob:
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": yes_token}, {"token_id": no_token}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": False,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, _token_id: str) -> dict:
+            return {
+                "asset_id": yes_token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            raise AssertionError("non-executable substrate identity must not fetch fee-rate")
+
+    captured = []
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        ms.capture_executable_market_snapshot(
+            _make_in_memory_trade_db(),
+            market=market,
+            decision=decision,
+            clob=NonAcceptingClob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            tolerate_missing_book=True,
+        )
+
+    assert len(captured) == 1
+    assert captured[0].tradeability_status.executable_allowed is False
+    assert captured[0].tradeability_status.reason == "accepting_orders_not_true"
+    assert (
+        captured[0].fee_details["source"]
+        == "not_applicable_non_executable_identity:accepting_orders_not_true"
+    )
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
+
+
+def test_substrate_identity_capture_requires_real_clob_market_info(monkeypatch):
+    """Background substrate identity rows must be backed by real CLOB metadata."""
+
     condition_id = "0x" + "4" * 64
     yes_token = "0x" + "5" * 64
     no_token = "0x" + "6" * 64
@@ -1475,8 +3053,24 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
     )
 
     class LiquidSubstrateClob:
+        def __init__(self) -> None:
+            self.market_info_calls: list[str] = []
+
         def get_clob_market_info(self, _condition_id: str) -> dict:
-            raise AssertionError("substrate identity capture must not fetch /markets")
+            self.market_info_calls.append(_condition_id)
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": yes_token, "outcome": "YES"},
+                    {"token_id": no_token, "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
 
         def get_orderbook_snapshot(self, _token_id: str) -> dict:
             return {
@@ -1492,6 +3086,7 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
             raise AssertionError("substrate identity capture must not fetch /fee-rate")
 
     captured = []
+    clob = LiquidSubstrateClob()
     with (
         patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
         patch("src.data.market_scanner._write_book_hash_transition"),
@@ -1500,12 +3095,13 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
             _make_in_memory_trade_db(),
             market=market,
             decision=decision,
-            clob=LiquidSubstrateClob(),
+            clob=clob,
             captured_at=_NOW,
             scan_authority="VERIFIED",
             tolerate_missing_book=True,
         )
 
+    assert clob.market_info_calls == [condition_id]
     assert len(captured) == 1
     assert captured[0].tradeability_status.executable_allowed is True
     assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
@@ -1514,10 +3110,9 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
     assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
 
 
-def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
+def test_substrate_identity_capture_uses_contract_fee_without_fee_rate_http(monkeypatch):
     """Background substrate refresh should not fetch fee rate for every token."""
 
-    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
     condition_id = "0x" + "7" * 64
     yes_token = "0x" + "8" * 64
     no_token = "0x" + "9" * 64
@@ -1555,9 +3150,23 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
     class FamilyFeeClob:
         def __init__(self) -> None:
             self.fee_tokens: list[str] = []
+            self.market_info_calls: list[str] = []
 
         def get_clob_market_info(self, _condition_id: str) -> dict:
-            raise AssertionError("substrate identity capture must not fetch /markets")
+            self.market_info_calls.append(_condition_id)
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": yes_token, "outcome": "YES"},
+                    {"token_id": no_token, "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
 
         def get_orderbook_snapshot(self, token_id: str) -> dict:
             return {
@@ -1576,6 +3185,7 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
     captured = []
     clob = FamilyFeeClob()
     fee_cache: dict[str, dict[str, object]] = {}
+    clob_market_info_cache: dict[str, dict[str, object]] = {}
     with (
         patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
         patch("src.data.market_scanner._write_book_hash_transition"),
@@ -1591,11 +3201,13 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
                 clob=clob,
                 captured_at=_NOW,
                 scan_authority="VERIFIED",
+                clob_market_info_cache=clob_market_info_cache,
                 fee_details_cache=fee_cache,
                 tolerate_missing_book=True,
             )
 
     assert clob.fee_tokens == []
+    assert clob.market_info_calls == [condition_id]
     assert len(captured) == 2
     assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
     assert captured[1].fee_details["source"] == "weather_fee_contract_substrate_identity"
@@ -1675,11 +3287,8 @@ def test_fetch_events_by_tags_stops_when_budget_exhausted(monkeypatch):
 
     tag_calls: list[str] = []
 
-    original_gamma_get = ms_mod._gamma_get
-
     def _slow_gamma_get(path, **kwargs):
         import time as _time
-        import httpx
         if path.startswith("/tags/slug/"):
             tag_calls.append(path)
             _time.sleep(SLEEP_PER_TAG)

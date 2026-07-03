@@ -119,7 +119,7 @@ def _render_explain(rows: list[FrontierRow], source: str) -> str:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Data-collection frontier report (read-only).")
-    parser.add_argument("--role", choices=["live", "backfill", "shadow"], default=None)
+    parser.add_argument("--role", choices=["live", "backfill", "diagnostic", "derived"], default=None)
     parser.add_argument("--source", default=None, help="filter/explain a single source_id or calendar_id")
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument("--table", action="store_true", help="emit a table (default)")

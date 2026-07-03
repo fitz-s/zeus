@@ -44,18 +44,28 @@ def test_reserve_does_not_apply_any_hidden_notional_ceiling():
     assert r.reserved_notional_usd == 800.0
 
 
+@pytest.mark.skip(
+    reason="RETIRED (fixture-hygiene 2026-07-03): docs(cleanup) 2b158c02a "
+    "(2026-06-25, 'archive retired operational artifacts') deliberately "
+    "DELETED the entire evidence-doc cluster this test reads — "
+    "LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md and all 4 referencing "
+    "docs — rather than archiving them to docs/archive/2026-Q2/ as this test "
+    "(created 2026-06-05, predates the cleanup) assumed. The behavior it "
+    "guards (no notional cap) is independently covered by the other tests in "
+    "this file; the documentation-provenance trail no longer exists to check."
+)
 def test_historical_cap_audits_are_superseded_by_no_cap_authority():
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[2]
-    current = root / "docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md"
+    current = root / "docs/archive/2026-Q2/operations_historical/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md"
     text = current.read_text()
     assert "no configured notional cap and no non-configurable notional limit" in text
     for path in (
-        root / "docs/operations/EDLI_LIVE_VS_DESIGN_MASTER_SPEC_2026-06-01.md",
-        root / "docs/operations/BEST_ORDER_SELECTION_ROOT_2026-06-01.md",
-        root / "docs/operations/PREARM_SAFETY_AUDIT_2026-06-02.md",
-        root / "docs/operations/DROPPED_CONTEXT_SEAM_LEDGER_2026-06-01.md",
+        root / "docs/archive/2026-Q2/operations_historical/EDLI_LIVE_VS_DESIGN_MASTER_SPEC_2026-06-01.md",
+        root / "docs/archive/2026-Q2/operations_historical/BEST_ORDER_SELECTION_ROOT_2026-06-01.md",
+        root / "docs/archive/2026-Q2/operations_historical/PREARM_SAFETY_AUDIT_2026-06-02.md",
+        root / "docs/archive/2026-Q2/operations_historical/DROPPED_CONTEXT_SEAM_LEDGER_2026-06-01.md",
     ):
         body = path.read_text()
         assert "LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md" in body

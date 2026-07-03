@@ -14,15 +14,14 @@ pattern (e.g. ``src/strategy/oracle_penalty.py``,
 ``scripts/bridge_oracle_to_calibration.py``,
 ``scripts/oracle_snapshot_listener.py``). The duplication is a known-bug
 class: when the listener writes to one path and the reader looks at another,
-the daemon silently sees stale (or empty) data — exactly the failure mode
-PR #40's emergency oracle-gate-removal is currently masking.
+the daemon silently sees stale or empty data.
 
 This module is the single locus for:
 
 - Storage-root resolution via ``ZEUS_STORAGE_ROOT`` env override
   (default = repo root via ``__file__`` traversal).
-- Path builders for all storage artifacts (oracle error rates, oracle
-  shadow snapshots, heartbeat).
+- Path builders for all storage artifacts (oracle error rates, oracle-time
+  snapshots, heartbeat).
 - ``write_json_atomic`` — public atomic JSON writer with checksum +
   writer-identity metadata.
 - ``write_heartbeat`` — paired heartbeat record for stale-artifact detection.
@@ -35,8 +34,7 @@ that bites global constants.
 Migration scope (this packet, A2): oracle_penalty + bridge + listener move
 to the path builders. The 5 private ``_atomic_write_json`` copies stay
 private for now — migrating them is doc-rot risk we'll batch when each
-caller's surface gets touched for substantive reasons (separate from this
-storage cutover).
+caller's surface gets touched for substantive reasons.
 """
 from __future__ import annotations
 
@@ -102,12 +100,12 @@ def oracle_artifact_heartbeat_path() -> Path:
 
 
 def oracle_snapshot_dir() -> Path:
-    """Directory hosting per-(city, date) oracle shadow snapshots.
+    """Directory hosting per-(city, date) oracle-time snapshots.
 
     Single writer: ``scripts/oracle_snapshot_listener.py``.
     Single reader: ``scripts/bridge_oracle_to_calibration.py``.
     """
-    return storage_root() / "raw" / "oracle_shadow_snapshots"
+    return storage_root() / "raw" / "oracle_time_snapshots"
 
 
 # ── atomic JSON writer ─────────────────────────────────────────────── #
