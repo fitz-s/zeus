@@ -68,6 +68,39 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
     )
 
 
+def _valid_execution_capability_payload() -> dict:
+    """Minimal payload satisfying venue_command_repo._validate_entry_submit_payload
+    for ENTRY SUBMIT_REQUESTED (shape mirrors the production builder in
+    src/execution/executor.py::_build_execution_capability /
+    _entry_economics_component). Fresh dict per call so callers can safely mutate."""
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.7,
+                        "q_lcb_5pct": 0.6,
+                        "expected_edge": 0.1,
+                        "min_entry_price": 0.01,
+                        "limit_price": 0.5,
+                        "submit_edge": 0.1,
+                        "expected_profit_usd": 1.0,
+                        "min_expected_profit_usd": 0.01,
+                        "submit_edge_density": 0.1,
+                        "min_submit_edge_density": 0.01,
+                        "shares": 10.0,
+                        "qkernel_side": "buy_yes",
+                    },
+                },
+                {"component": "entry_actionable_certificate", "allowed": True},
+            ],
+        },
+    }
+
+
 def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -446,14 +479,16 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         assert get_command(conn, "cmd-001")["state"] == "SUBMITTING"
 
     def test_submitting_to_acked(self, conn):
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:02:00Z")
         assert get_command(conn, "cmd-001")["state"] == "ACKED"
@@ -462,7 +497,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REJECTED",
                      occurred_at="2026-04-26T00:02:00Z")
         assert get_command(conn, "cmd-001")["state"] == "REJECTED"
@@ -471,7 +507,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_UNKNOWN",
                      occurred_at="2026-04-26T00:02:00Z")
         assert get_command(conn, "cmd-001")["state"] == "UNKNOWN"
@@ -480,7 +517,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:02:00Z")
         append_event(conn, command_id="cmd-001", event_type="PARTIAL_FILL_OBSERVED",
@@ -491,7 +529,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:02:00Z")
         append_event(conn, command_id="cmd-001", event_type="FILL_CONFIRMED",
@@ -502,7 +541,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="CANCEL_REQUESTED",
                      occurred_at="2026-04-26T00:02:00Z")
         append_event(conn, command_id="cmd-001", event_type="CANCEL_ACKED",
@@ -520,7 +560,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:02:00Z",
                      payload={"venue_order_id": "ord-live"})
@@ -582,21 +623,23 @@ class TestAppendEventStateTransitionIsGrammarChecked:
     # --- illegal transitions ---
 
     @pytest.mark.parametrize("from_state,event_type,setup_events", [
-        # From INTENT_CREATED: submit/cancel/provenance-boundary/review events are legal
-        ("INTENT_CREATED", "SUBMIT_ACKED", []),
-        ("INTENT_CREATED", "SUBMIT_REJECTED", []),
+        # From INTENT_CREATED: submit/cancel/provenance-boundary/review events are legal.
+        # NOTE: INTENT_CREATED->SUBMIT_REJECTED was legalized by 260f75863
+        # ("retire pre-submit orphan commands") and is no longer illegal; see the
+        # legal-transition coverage instead (no dedicated positive test today).
         ("INTENT_CREATED", "SUBMIT_UNKNOWN", []),
         ("INTENT_CREATED", "FILL_CONFIRMED", []),
         ("INTENT_CREATED", "CANCEL_ACKED", []),
         ("INTENT_CREATED", "EXPIRED", []),
         ("INTENT_CREATED", "PARTIAL_FILL_OBSERVED", []),
         # From SUBMITTING: SUBMIT_ACKED, SUBMIT_REJECTED, SUBMIT_UNKNOWN,
-        # CANCEL_REQUESTED, REVIEW_REQUIRED are legal; others illegal
+        # CANCEL_REQUESTED, REVIEW_REQUIRED, EXPIRED are legal; others illegal.
+        # NOTE: SUBMITTING->EXPIRED was legalized by bb74e650c
+        # ("restore redecision freshness flow") and is no longer illegal.
         ("SUBMITTING", "INTENT_CREATED", ["SUBMIT_REQUESTED"]),
         ("SUBMITTING", "FILL_CONFIRMED", ["SUBMIT_REQUESTED"]),
         ("SUBMITTING", "PARTIAL_FILL_OBSERVED", ["SUBMIT_REQUESTED"]),
         ("SUBMITTING", "CANCEL_ACKED", ["SUBMIT_REQUESTED"]),
-        ("SUBMITTING", "EXPIRED", ["SUBMIT_REQUESTED"]),
         # From ACKED: fill/cancel/expire/review legal; submit events illegal
         ("ACKED", "SUBMIT_REQUESTED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
         ("ACKED", "SUBMIT_ACKED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
@@ -621,8 +664,11 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         from src.state.venue_command_repo import append_event
         _insert(conn)
         for evt in setup_events:
-            append_event(conn, command_id="cmd-001", event_type=evt,
-                         occurred_at="2026-04-26T00:00:00Z")
+            append_event(
+                conn, command_id="cmd-001", event_type=evt,
+                occurred_at="2026-04-26T00:00:00Z",
+                payload=_valid_execution_capability_payload() if evt == "SUBMIT_REQUESTED" else None,
+            )
         with pytest.raises(ValueError, match="Illegal command-event grammar"):
             append_event(conn, command_id="cmd-001", event_type=event_type,
                          occurred_at="2026-04-26T00:10:00Z")
@@ -703,26 +749,30 @@ class TestFindUnresolvedCommandsReturnsOnlyInFlight:
         # ACKED (terminal-ish, not in unresolved set)
         _insert(conn, command_id="cmd-acked", idempotency_key="key-acked")
         append_event(conn, command_id="cmd-acked", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:00:00Z")
+                     occurred_at="2026-04-26T00:00:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-acked", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:01:00Z")
 
         # SUBMITTING
         _insert(conn, command_id="cmd-submitting", idempotency_key="key-sub")
         append_event(conn, command_id="cmd-submitting", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:00:00Z")
+                     occurred_at="2026-04-26T00:00:00Z",
+                     payload=_valid_execution_capability_payload())
 
         # UNKNOWN
         _insert(conn, command_id="cmd-unknown", idempotency_key="key-unk")
         append_event(conn, command_id="cmd-unknown", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:00:00Z")
+                     occurred_at="2026-04-26T00:00:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-unknown", event_type="SUBMIT_UNKNOWN",
                      occurred_at="2026-04-26T00:01:00Z")
 
         # FILLED (resolved, should not appear)
         _insert(conn, command_id="cmd-filled", idempotency_key="key-filled")
         append_event(conn, command_id="cmd-filled", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:00:00Z")
+                     occurred_at="2026-04-26T00:00:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-filled", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:01:00Z")
         append_event(conn, command_id="cmd-filled", event_type="FILL_CONFIRMED",
@@ -750,7 +800,8 @@ class TestListEventsOrderedBySequenceNo:
 
         _insert(conn)
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
-                     occurred_at="2026-04-26T00:01:00Z")
+                     occurred_at="2026-04-26T00:01:00Z",
+                     payload=_valid_execution_capability_payload())
         append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
                      occurred_at="2026-04-26T00:02:00Z")
 
@@ -915,7 +966,9 @@ class TestAppendEventPayloadRoundTrip:
         from src.state.venue_command_repo import append_event, list_events
         _insert(conn)
         payload = {"venue_order_id": "ord-abc", "status": "ok"}
-        append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
+        # REVIEW_REQUIRED (not SUBMIT_REQUESTED): this test exercises generic
+        # payload_json round-trip, not the ENTRY execution_capability gate.
+        append_event(conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
                      occurred_at="2026-04-26T00:01:00Z", payload=payload)
         events = list_events(conn, "cmd-001")
         evt = events[1]  # sequence_no=2
@@ -925,7 +978,9 @@ class TestAppendEventPayloadRoundTrip:
     def test_none_payload_stored_as_null(self, conn):
         from src.state.venue_command_repo import append_event, list_events
         _insert(conn)
-        append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
+        # REVIEW_REQUIRED (not SUBMIT_REQUESTED): this test exercises generic
+        # payload_json round-trip, not the ENTRY execution_capability gate.
+        append_event(conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
                      occurred_at="2026-04-26T00:01:00Z", payload=None)
         events = list_events(conn, "cmd-001")
         assert events[1]["payload_json"] is None
@@ -992,6 +1047,7 @@ class TestSavepointComposability:
             command_id="cmd-001",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:00:30Z",
+            payload=_valid_execution_capability_payload(),
         )
         events_during = list_events(conn, "cmd-001")
         assert len(events_during) == 2
@@ -1027,7 +1083,7 @@ class TestAppendEventPayloadCoercion:
             command_id="cmd-001",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:01:00Z",
-            payload={"observed_at": ts},
+            payload={"observed_at": ts, **_valid_execution_capability_payload()},
         )
         evt = list_events(conn, "cmd-001")[1]
         decoded = json.loads(evt["payload_json"])
@@ -1044,7 +1100,7 @@ class TestAppendEventPayloadCoercion:
             command_id="cmd-001",
             event_type="SUBMIT_REQUESTED",
             occurred_at="2026-04-26T00:01:00Z",
-            payload={"raw": raw},
+            payload={"raw": raw, **_valid_execution_capability_payload()},
         )
         evt = list_events(conn, "cmd-001")[1]
         decoded = json.loads(evt["payload_json"])
@@ -1063,5 +1119,5 @@ class TestAppendEventPayloadCoercion:
                 command_id="cmd-001",
                 event_type="SUBMIT_REQUESTED",
                 occurred_at="2026-04-26T00:01:00Z",
-                payload={"x": Opaque()},
+                payload={"x": Opaque(), **_valid_execution_capability_payload()},
             )
