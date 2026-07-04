@@ -168,7 +168,13 @@ def _canonical_phase_before_for_settlement(pos) -> str:
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
-_TERMINAL_PHASES = frozenset(TERMINAL_STATES)
+# P0c: "quarantined" retained explicitly — it dropped out of the canonical
+# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
+# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5). The harvester's
+# own settlement dual-write path still must skip a quarantined row (unchanged
+# behavior, documented as the root cause in that doc's §1); only the
+# chain-mirror reconciler is empowered to fold quarantined -> settled/voided.
+_TERMINAL_PHASES = frozenset(TERMINAL_STATES | {"quarantined"})
 _HARVESTER_STAGE2_TRADE_TABLES = (
     "position_events",
     "position_current",

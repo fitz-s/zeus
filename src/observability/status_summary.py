@@ -50,9 +50,15 @@ logger = logging.getLogger(__name__)
 
 STATUS_PATH = state_path("status_summary.json")
 LEGACY_POSITIONS_PATH = state_path("positions.json")
+# P0c: "quarantined" retained explicitly in both sets below — it dropped out
+# of the canonical TERMINAL_STATES when its fold widened to
+# {QUARANTINED, SETTLED, VOIDED} (docs/rebuild/chain_mirror_state_model_2026-07-04.md
+# §5), but a quarantined row is still inactive/no-new-entry for status display
+# purposes until the chain-mirror reconciler resolves it.
 _LEGACY_JSON_INACTIVE_POSITION_STATES = set(TERMINAL_STATES) | {
     "closed",
     "exited",
+    "quarantined",
 }
 _OPEN_ENTRY_COMMAND_STATES = {"ACKED", "PARTIAL", "POST_ACKED", "SUBMITTED"}
 _TERMINAL_ENTRY_COMMAND_STATES = {
@@ -71,7 +77,7 @@ _TERMINAL_ENTRY_ORDER_STATUSES = {
     "rejected",
     "voided",
 }
-_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES)
+_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES) | {"quarantined"}
 _TERMINAL_VENUE_ORDER_STATES = {
     "MATCHED",
     "FILLED",

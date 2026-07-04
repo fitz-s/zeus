@@ -115,7 +115,40 @@ reconcile cycle once the investigation's evidence (chain truth) is available.
     `command_recovery_reason` entry shape) so the money-path semantic-diff
     gate has a home for them.
 
-## 5. Scope decision: the standing invariant vs. `LEGAL_LIFECYCLE_FOLDS`
+## 5. Scope decision: the standing invariant vs. `LEGAL_LIFECYCLE_FOLDS` (DONE — P0c, 2026-07-04)
+
+**Status: implemented.** The follow-up described below was executed as its own
+dedicated slice (P0c of the market-semantics purity plan, same day). Summary
+of what changed, so this section remains an accurate record rather than a
+stale TODO:
+
+- `LEGAL_LIFECYCLE_FOLDS[LifecyclePhase.QUARANTINED]` widened from
+  `frozenset({QUARANTINED})` to `frozenset({QUARANTINED, SETTLED, VOIDED})`.
+  `TERMINAL_STATES` (programmatically derived) now excludes `quarantined`
+  (3 terminal phases remain: `settled`, `voided`, `admin_closed`).
+- `enter_settled_runtime_state` and `enter_voided_runtime_state` both widened
+  to accept a `quarantined` starting phase.
+- The ~8 production consumers of `TERMINAL_STATES` that need "quarantined
+  still excluded from active/order-management processing" semantics
+  (`portfolio.py` ×3 sites, `chain_state.py`, `projection.py`'s
+  `_ABSORBING_POSITION_PHASES`, `cycle_runtime.py`'s order-ownership query,
+  `status_summary.py` ×2 sites, `cycle_runner.py`'s force-exit sweep,
+  `executor.py`'s entry-duplicate gate, `harvester.py`'s settlement dedup)
+  each retain an explicit local `"quarantined"` check alongside the now-
+  narrower `TERMINAL_STATES`, so none of those operational behaviors changed.
+  Only the *fold legality* changed.
+- `src/state/chain_mirror_reconciler.py::_apply_settlement_finding` no longer
+  bypasses the fold: it now calls `enter_settled_runtime_state(phase_before,
+  chain_state=...)` instead of hardcoding `projection["phase"] = "settled"`,
+  so a quarantined row folds through the same guard every other settlement
+  writer uses.
+- `tests/test_lifecycle_terminal_predicate.py` updated for the 3-phase
+  terminal set and the new `is_terminal_state("quarantined") is False` anchor.
+
+The original scope-decision writeup (why this was deferred out of the
+2026-07-04 reconciler slice) is preserved below for history.
+
+---
 
 The clean systemic fix would widen
 `LEGAL_LIFECYCLE_FOLDS[LifecyclePhase.QUARANTINED]` from

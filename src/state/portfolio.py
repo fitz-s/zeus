@@ -1774,6 +1774,14 @@ class DeprecatedStateFileError(RuntimeError):
 # src/state/lifecycle_manager.TERMINAL_STATES, derived from
 # LEGAL_LIFECYCLE_FOLDS. Imported at module top under the local alias
 # `_TERMINAL_POSITION_STATES` for zero call-site churn at L1008/L1343.
+#
+# P0c (2026-07-04): QUARANTINED dropped out of TERMINAL_STATES when its fold
+# widened to {QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler can
+# legally close it (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5). A
+# quarantined row is still not an "active position" for this file's read/
+# write-side filters until the reconciler resolves it, so each call site below
+# ORs in "quarantined" explicitly alongside `_TERMINAL_POSITION_STATES` rather
+# than relying on the (now narrower) canonical set alone.
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:
@@ -1814,7 +1822,7 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
         # from a prior save_portfolio write that predates the write-side
         # filter. Strip them here and log which were skipped.
         raw_state = str(p.get("state", "") or "").strip().lower()
-        if raw_state in _TERMINAL_POSITION_STATES:
+        if raw_state in _TERMINAL_POSITION_STATES or raw_state == "quarantined":
             skipped_terminal.append(
                 f"{p.get('trade_id', '?')}({raw_state})"
             )
@@ -2808,7 +2816,8 @@ def save_portfolio(
     # position_events / position_current, not in this cache file.
     active_positions = [
         p for p in state.positions
-        if _semantic_value(getattr(p, "state", "")).strip().lower() not in _TERMINAL_POSITION_STATES
+        if _semantic_value(getattr(p, "state", "")).strip().lower()
+        not in (_TERMINAL_POSITION_STATES | {"quarantined"})
     ]
     data = {
         "positions": [asdict(p) for p in active_positions],
@@ -2959,7 +2968,14 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 
 
 INACTIVE_RUNTIME_STATES = frozenset(
-    set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
+    # P0c: "quarantined" is retained explicitly — it dropped out of the
+    # canonical TERMINAL_STATES when its fold widened to
+    # {QUARANTINED, SETTLED, VOIDED}, but every consumer of
+    # INACTIVE_RUNTIME_STATES (chain_reconciliation.py, cycle_runtime.py,
+    # evaluator.py entry-dedup, exchange_reconcile.py) still needs a
+    # quarantined row treated as inactive/non-open until the chain-mirror
+    # reconciler resolves it. See docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
+    set(_TERMINAL_POSITION_STATES) | {"economically_closed", "quarantined"}
 )
 NO_EXPOSURE_CHAIN_STATES = NO_CURRENT_MONEY_RISK_CHAIN_STATES
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6

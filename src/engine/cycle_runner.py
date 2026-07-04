@@ -216,7 +216,16 @@ def _execute_force_exit_sweep(
         # so extract .value when available.
         raw_state = getattr(pos, "state", "") or ""
         state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
-        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP:
+        # P0c: "quarantined" is checked explicitly alongside
+        # _TERMINAL_POSITION_STATES_FOR_SWEEP (rather than folded into that
+        # constant) because it dropped out of the canonical TERMINAL_STATES
+        # when its fold widened to {QUARANTINED, SETTLED, VOIDED}
+        # (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5); the RED
+        # force-exit sweep must still skip quarantined positions (there is no
+        # legal quarantined -> pending_exit fold) and the module-level
+        # constant stays an identity alias of TERMINAL_STATES per
+        # test_cycle_runner_sweep_set_matches_canonical.
+        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP or state_val == "quarantined":
             skipped_terminal += 1
             continue
         existing_reason = str(getattr(pos, "exit_reason", "") or "").strip()

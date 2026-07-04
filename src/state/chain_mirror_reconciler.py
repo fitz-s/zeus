@@ -509,6 +509,7 @@ def _apply_settlement_finding(
     transition_phase() / harvester Position-object builder.
     """
     from src.state.db import append_many_and_project
+    from src.state.lifecycle_manager import enter_settled_runtime_state
     from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
     position_id = finding.position_id
@@ -533,7 +534,16 @@ def _apply_settlement_finding(
         chain_state_after = str(current["chain_state"] or "")
     else:
         chain_state_after = CLOSED_REDEEMED if won else CLOSED_WORTHLESS
-    projection["phase"] = "settled"
+    # P0c (2026-07-04): the direct `projection["phase"] = "settled"` bypass
+    # documented in docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 is
+    # retired now that LEGAL_LIFECYCLE_FOLDS[QUARANTINED] legally folds to
+    # SETTLED — this now goes through the same guard every other settlement
+    # writer uses, which also fails loudly if `phase_before` is somehow not a
+    # legal starting phase (active/day0/economically_closed/pending_exit/
+    # quarantined) instead of silently minting an illegal transition.
+    projection["phase"] = enter_settled_runtime_state(
+        phase_before, chain_state=str(current["chain_state"] or "")
+    )
     projection["chain_state"] = chain_state_after
     projection["updated_at"] = occurred_at
     projection["settled_at"] = projection.get("settled_at") or occurred_at

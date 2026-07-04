@@ -169,8 +169,13 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
+# P0c: "quarantined" retained explicitly — it dropped out of the canonical
+# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
+# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but this gate
+# still must treat a quarantined row as non-open (i.e. not a duplicate-entry
+# blocker) until the chain-mirror reconciler resolves it.
 _ENTRY_DUPLICATE_NON_OPEN_PHASES = frozenset(
-    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.QUARANTINED.value}
 )
 _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
     {
