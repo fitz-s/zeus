@@ -692,18 +692,49 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    code = (
-        "import json; "
-        "from src.state.db import get_trade_connection, init_schema_trade_only; "
-        "conn = get_trade_connection(write_class='live'); "
-        "init_schema_trade_only(conn); "
-        "conn.commit(); "
-        "conn.close(); "
-        "from src.execution.command_recovery import reconcile_unresolved_commands; "
-        "summary = reconcile_unresolved_commands(scope='restart_preflight'); "
-        "print(json.dumps(summary, sort_keys=True, default=str)); "
-        "raise SystemExit(1 if int(summary.get('errors') or 0) else 0)"
-    )
+    code = textwrap.dedent(
+        """
+        import json
+        from scripts.migrations import apply_migrations
+        from src.state.db import (
+            get_trade_connection,
+            get_world_connection,
+            init_schema_trade_only,
+        )
+
+        applied = {}
+
+        world_conn = get_world_connection(write_class='live')
+        try:
+            applied['world'] = apply_migrations(
+                world_conn,
+                target='202607_drop_world_collateral_unsettled_ghost',
+                db_identity='world',
+            )
+        finally:
+            world_conn.close()
+
+        trade_conn = get_trade_connection(write_class='live')
+        try:
+            init_schema_trade_only(trade_conn)
+            applied['trade'] = apply_migrations(
+                trade_conn,
+                target='202607_cas_reservation_ledger',
+                db_identity='trade',
+            )
+            init_schema_trade_only(trade_conn)
+            trade_conn.commit()
+        finally:
+            trade_conn.close()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(scope='restart_preflight')
+        summary['schema_migrations_applied'] = applied
+        print(json.dumps(summary, sort_keys=True, default=str))
+        raise SystemExit(1 if int(summary.get('errors') or 0) else 0)
+        """
+    ).strip()
     try:
         res = subprocess.run(
             [py, "-c", code],

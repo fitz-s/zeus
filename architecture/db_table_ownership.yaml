@@ -2398,7 +2398,7 @@ tables:
 
   - name: exchange_reconcile_findings_v2
     db: trade
-    schema_class: trade_class
+    schema_class: legacy_archived
     schema_version_owner: null
     created_by: scripts/migrations/202607_cas_reservation_ledger.py
     pk_col: finding_id
@@ -2408,8 +2408,10 @@ tables:
       (adds collateral_identity_mismatch) via the precedented CREATE-new +
       INSERT-copy + DROP-old + RENAME recipe (SQLite cannot ALTER CHECK); the
       v2 name exists only inside a single migration transaction and is renamed
-      to exchange_reconcile_findings before commit. Registered to satisfy
-      db_table_delta_gate (every CREATE TABLE in-tree needs an owner, INV-37).
+      to exchange_reconcile_findings before commit. Registered as
+      legacy_archived so db_table_delta_gate sees the in-tree CREATE TABLE while
+      assert_db_matches_registry(TRADE) does not require the transient table to
+      exist after a successful migration.
 
   - name: collateral_unsettled_proceeds
     db: trade

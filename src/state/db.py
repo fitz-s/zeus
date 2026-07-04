@@ -59,7 +59,6 @@ from src.state.ledger import (
     append_many_and_project,
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
-from src.state.collateral_ledger import init_collateral_schema
 from src.state.market_topology_repo import write_market_topology_state
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
@@ -2652,7 +2651,6 @@ def init_schema(
     """)
     _ensure_job_run_release_key_identity(conn)
     init_snapshot_schema(conn, include_latest=False)
-    init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
     # importing src.execution modules.  The execution module repeats the same
     # idempotent CREATE TABLE for direct use.
