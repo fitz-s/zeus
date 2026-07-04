@@ -596,6 +596,26 @@ scripts:
     required_helpers: [src.state.ledger.append_many_and_project, src.state.projection.upsert_position_current]
     required_tests: [tests/test_repair_dust_exit_projection.py, tests/test_check_live_restart_preflight.py]
     reason: "Eliminates restart reload risk where chain dust already reached backoff_exhausted but position_current.order_status still says filled."
+  repair_terminal_order_fact_sequence.py:
+    # Created: 2026-07-04
+    # Last reused or audited: 2026-07-04
+    # Authority basis: AGENTS.md position/execution truth gate; scripts/AGENTS.md repair contract
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_order_fact_sequence_repair
+    canonical_command: "python3 scripts/repair_terminal_order_fact_sequence.py --json"
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: false
+    promotion_barrier: "Append-only repair for commands that already have terminal order-fact proof; cannot submit/cancel orders, update/delete rows, copy DBs, or authorize live trading."
+    required_helpers: [src.state.venue_command_repo.append_order_fact]
+    required_tests: [tests/test_repair_terminal_order_fact_sequence.py, tests/test_healthcheck.py]
+    reason: "Restores latest-order-fact monotonicity when a stale PARTIALLY_MATCHED row was appended after terminal CANCEL_CONFIRMED/EXPIRED/VENUE_WIPED proof."
   init_replacement_forecast_live_schema.py:
     # Created: 2026-06-18
     # Last reused or audited: 2026-06-18
