@@ -1058,7 +1058,12 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
             """
             SELECT event_type, strategy_key
             FROM position_events
-            WHERE event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_FILLED', 'ENTRY_ORDER_REJECTED')
+            WHERE event_type IN (
+                'POSITION_OPEN_INTENT',
+                'ENTRY_ORDER_FILLED',
+                'ENTRY_ORDER_REJECTED',
+                'ENTRY_ORDER_VOIDED'
+            )
             ORDER BY occurred_at DESC
             LIMIT ?
             """,
@@ -1067,12 +1072,20 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
     except sqlite3.OperationalError:
         rows = []
 
-    overall = {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None}
+    overall = {
+        "attempted": 0,
+        "filled": 0,
+        "rejected": 0,
+        "voided": 0,
+        "terminal_observed": 0,
+        "fill_rate": None,
+    }
     by_strategy: dict[str, dict] = {}
     mapping = {
         "POSITION_OPEN_INTENT": "attempted",
         "ENTRY_ORDER_FILLED": "filled",
         "ENTRY_ORDER_REJECTED": "rejected",
+        "ENTRY_ORDER_VOIDED": "voided",
     }
     for row in rows:
         event_type = str(row["event_type"])
@@ -1082,14 +1095,24 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
         strategy = str(row["strategy_key"] or "unclassified")
         bucket = by_strategy.setdefault(
             strategy,
-            {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None},
+            {
+                "attempted": 0,
+                "filled": 0,
+                "rejected": 0,
+                "voided": 0,
+                "terminal_observed": 0,
+                "fill_rate": None,
+            },
         )
         overall[counter_key] += 1
         bucket[counter_key] += 1
 
     def _finalize(bucket: dict) -> None:
-        denom = bucket["filled"] + bucket["rejected"]
-        bucket["fill_rate"] = round(bucket["filled"] / denom, 4) if denom else None
+        terminal_observed = bucket["filled"] + bucket["rejected"] + bucket["voided"]
+        bucket["terminal_observed"] = terminal_observed
+        bucket["fill_rate"] = (
+            round(bucket["filled"] / terminal_observed, 4) if terminal_observed else None
+        )
 
     _finalize(overall)
     for bucket in by_strategy.values():
@@ -1798,7 +1821,7 @@ def _tick_once() -> RiskLevel:
             settlement_quality_level = RiskLevel.YELLOW
         execution_quality_level = RiskLevel.GREEN
         execution_overall = entry_execution_summary["overall"]
-        execution_observed = execution_overall["filled"] + execution_overall["rejected"]
+        execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
@@ -1852,7 +1875,7 @@ def _tick_once() -> RiskLevel:
             strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
             _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
         for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
-            observed = bucket["filled"] + bucket["rejected"]
+            observed = int(bucket.get("terminal_observed", 0) or 0)
             fill_rate = bucket.get("fill_rate")
             if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
                 _append_reason(
