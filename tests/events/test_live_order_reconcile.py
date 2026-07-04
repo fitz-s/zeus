@@ -1,5 +1,5 @@
 # Created: 2026-05-26
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-03
 # Authority basis: PR332 user-channel/reconcile authority substrate.
 #   2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the user-channel/reconcile
 #   cycle was lifted from src.main to src.ingest.price_channel_ingest. The four
