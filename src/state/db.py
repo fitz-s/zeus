@@ -4205,7 +4205,7 @@ def _ensure_venue_commands_q_version_column(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
-    """Remove stale hardcoded strategy_key CHECK from telemetry tables.
+    """Remove stale hardcoded strategy_key CHECK from world-class tables.
 
     Finding 6 (P2, 2026-05-22): probability_trace_fact and strategy_health had
     a hardcoded CHECK enumerating the 4 founding strategies. Day0_nowcast_entry
@@ -4214,7 +4214,15 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     Uses full table-swap so existing rows are preserved.
     """
     import re as _re  # noqa: F811
-    for tname in ("probability_trace_fact", "strategy_health", "opportunity_fact"):
+    for tname in (
+        "probability_trace_fact",
+        "strategy_health",
+        "opportunity_fact",
+        "execution_fact",
+        "outcome_fact",
+        "position_events",
+        "position_current",
+    ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
@@ -4223,6 +4231,10 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
         old_sql = str(row[0])
         if "'opening_inertia'" not in old_sql or "day0_nowcast_entry" in old_sql:
             continue  # Already migrated or no stale CHECK
+        triggers = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
         indexes = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
             (tname,),
@@ -4243,6 +4255,8 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
         finally:
             _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
+        for (trg_sql,) in triggers:
+            conn.execute(trg_sql)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
 
@@ -4599,7 +4613,13 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
     sqlite_master query+recreate.
     """
     import re as _re  # noqa: F811
-    for tname in ("position_events", "position_current", "execution_fact", "opportunity_fact"):
+    for tname in (
+        "position_events",
+        "position_current",
+        "execution_fact",
+        "opportunity_fact",
+        "outcome_fact",
+    ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
