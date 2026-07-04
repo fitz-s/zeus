@@ -77,6 +77,21 @@ class ChainState(str, Enum):
     # through the runtime loader; monitor/exit policy, not enum coercion, owns
     # whether the held exposure is reduced, sold, or held to settlement.
     ENTRY_AUTHORITY_QUARANTINED = "entry_authority_quarantined"
+    # Chain-mirror reconciliation terminal-close classes (2026-07-04, operator
+    # directive: the local book must mirror on-chain state). Written by
+    # src.state.chain_mirror_reconciler when a graded position's held token
+    # is absent from the venue data-api wallet snapshot and the market has
+    # settlement_outcomes.authority=='VERIFIED'. CLOSED_REDEEMED: the held
+    # token was the winner (tokens gone via the standing third-party
+    # auto-redeemer sweep — Zeus never submits redeemPositions, per operator
+    # law). CLOSED_WORTHLESS: the held token lost (value is, and always will
+    # be, zero — whether the dust is still in the wallet or already gone).
+    # See docs/rebuild/chain_mirror_state_model_2026-07-04.md §2-4. Registered
+    # here (not SQL-CHECK-constrained on position_current.chain_state) because
+    # writer-set values must be enum members before Position loader coercion
+    # (__post_init__ -> VenueVisibilityStatus(value)) sees them.
+    CLOSED_REDEEMED = "closed_redeemed"
+    CLOSED_WORTHLESS = "closed_worthless"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.

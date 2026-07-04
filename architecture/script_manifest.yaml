@@ -656,6 +656,27 @@ scripts:
     required_helpers: [src.execution.command_recovery.reconcile_matched_order_facts]
     required_tests: [tests/test_repair_review_required_matched_order_fact.py, tests/test_command_recovery.py]
     reason: "Provides a dry-run-first operator path for REVIEW_REQUIRED matched-order rows with positive authenticated CLOB trade truth."
+  reconcile_chain_mirror.py:
+    # Created: 2026-07-04
+    # Last reused or audited: 2026-07-04
+    # Authority basis: operator directive 2026-07-04 (root AGENTS.md §2 reconciliation
+    #   order Chain > Chronicler > Portfolio); docs/rebuild/chain_mirror_state_model_2026-07-04.md
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_chain_mirror_reconcile
+    canonical_command: "python3 scripts/reconcile_chain_mirror.py --json"
+    read_targets: [state/zeus_trades.db, state/zeus-forecasts.db, authenticated_polymarket_data_api_positions]
+    write_targets: [state/zeus_trades.db, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    external_inputs: [live_runtime_dbs, authenticated_venue_read]
+    dangerous_if_run: false
+    promotion_barrier: "Closes only local rows whose held token is absent on chain with a VERIFIED settlement_outcomes grading, or corrects chain_shares to the venue-reported size; every write goes through append_many_and_project (append-only position_events + upsert_position_current). Never creates a position_current row, never adopts a foreign (non-Zeus-origin) token, never auto-closes an open-phase row whose market has not resolved, never submits a venue order, never submits redeemPositions."
+    required_helpers: [src.state.chain_mirror_reconciler.reconcile, src.state.db.append_many_and_project]
+    required_tests: [tests/test_reconcile_chain_mirror.py]
+    reason: "Standing chain-mirror invariant: the local position book must mirror on-chain state (operator law 2026-07-04). Drains gradable quarantined/stale position_current rows into settled within one reconcile cycle without requiring every quarantine writer to be rewired in this slice (design doc §5)."
   init_replacement_forecast_live_schema.py:
     # Created: 2026-06-18
     # Last reused or audited: 2026-06-18
