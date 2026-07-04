@@ -551,11 +551,12 @@ def _apply_settlement_finding(
         default=str,
         sort_keys=True,
     )
+    sequence_no = _next_sequence_no(conn, position_id)
     event = {
-        "event_id": f"{position_id}:chain_mirror_settled:{_next_sequence_no(conn, position_id)}",
+        "event_id": f"{position_id}:chain_mirror_settled:{sequence_no}",
         "position_id": position_id,
         "event_version": 1,
-        "sequence_no": _next_sequence_no(conn, position_id),
+        "sequence_no": sequence_no,
         "event_type": "SETTLED",
         "occurred_at": occurred_at,
         "phase_before": phase_before,
@@ -609,11 +610,12 @@ def _apply_size_correction_finding(
         default=str,
         sort_keys=True,
     )
+    sequence_no = _next_sequence_no(conn, position_id)
     event = {
-        "event_id": f"{position_id}:chain_mirror_size:{_next_sequence_no(conn, position_id)}",
+        "event_id": f"{position_id}:chain_mirror_size:{sequence_no}",
         "position_id": position_id,
         "event_version": 1,
-        "sequence_no": _next_sequence_no(conn, position_id),
+        "sequence_no": sequence_no,
         "event_type": "CHAIN_SIZE_CORRECTED",
         "occurred_at": occurred_at,
         "phase_before": phase_before,
