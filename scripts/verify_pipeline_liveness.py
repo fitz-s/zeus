@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-07-04
 # Authority basis: 10h production dead-zone incident 2026-06-10 (operator: "连下载都没接上,一上线卡了整整10小时")
 #   + operator 2026-06-11: "这纯粹是我要求的e2e验证下载到下单的不完全验证。甚至没有人probe过是否能下载"
 #   — the download legs themselves must be ACTIVELY PROBED (real provider round-trips),
@@ -41,6 +41,8 @@ BARS_HOURS = {
     "candidate_receipt": 6.0,
 }
 MIN_READY_SCOPES = 10
+SQLITE_PROGRESS_VM_STEPS = 1000
+SQLITE_PROGRESS_CALL_LIMIT = 250
 
 
 def _ro(path: str) -> sqlite3.Connection:
@@ -61,6 +63,67 @@ def _age_hours(now: dt.datetime, iso: str | None) -> float | None:
         return None
 
 
+def _fetchone_bounded(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple = (),
+) -> tuple[sqlite3.Row | None, bool]:
+    """Return one row, or mark the query incomplete before it can monopolize live DB reads."""
+
+    calls = 0
+
+    def _progress() -> int:
+        nonlocal calls
+        calls += 1
+        return 1 if calls > SQLITE_PROGRESS_CALL_LIMIT else 0
+
+    conn.set_progress_handler(_progress, SQLITE_PROGRESS_VM_STEPS)
+    try:
+        return conn.execute(sql, params).fetchone(), False
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            return None, True
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+def _candidate_receipt_latest(conn: sqlite3.Connection) -> tuple[str | None, dict]:
+    diagnostics: dict = {
+        "query_strategy": "per_rejection_stage_idx_no_trade_regret_stage_ordered_desc",
+        "query_complete": True,
+        "interrupted_stages": [],
+        "checked_stages": 0,
+    }
+
+    rows = conn.execute(
+        "SELECT DISTINCT rejection_stage FROM no_trade_regret_events ORDER BY rejection_stage"
+    ).fetchall()
+    latest: str | None = None
+    for row in rows:
+        stage = row[0]
+        diagnostics["checked_stages"] += 1
+        found, interrupted = _fetchone_bounded(
+            conn,
+            """
+            SELECT created_at
+              FROM no_trade_regret_events INDEXED BY idx_no_trade_regret_stage
+             WHERE rejection_stage = ?
+               AND q_live IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (stage,),
+        )
+        if interrupted:
+            diagnostics["query_complete"] = False
+            diagnostics["interrupted_stages"].append(stage)
+            continue
+        if found is not None and found[0] and (latest is None or str(found[0]) > latest):
+            latest = str(found[0])
+    return latest, diagnostics
+
+
 def check() -> tuple[int, dict]:
     now = dt.datetime.now(dt.timezone.utc)
     f = _ro(FORECASTS)
@@ -77,9 +140,7 @@ def check() -> tuple[int, dict]:
         "SELECT COUNT(*) FROM readiness_state WHERE status='READY' AND expires_at > ?",
         (now.isoformat(),),
     ).fetchone()[0]
-    cand_latest = w.execute(
-        "SELECT MAX(created_at) FROM no_trade_regret_events WHERE q_live IS NOT NULL"
-    ).fetchone()[0]
+    cand_latest, cand_diagnostics = _candidate_receipt_latest(w)
 
     failures = []
     for name, latest in (
@@ -90,8 +151,15 @@ def check() -> tuple[int, dict]:
         age = _age_hours(now, latest)
         ok = age is not None and age <= BARS_HOURS[name]
         out["stages"][name] = {"latest": latest, "age_hours": age, "ok": ok}
+        if name == "candidate_receipt":
+            out["stages"][name].update(cand_diagnostics)
         if not ok:
             failures.append(f"{name} stale (age={age}, bar={BARS_HOURS[name]}h)")
+        if name == "candidate_receipt" and not cand_diagnostics["query_complete"]:
+            failures.append(
+                "candidate_receipt query incomplete "
+                f"(interrupted_stages={cand_diagnostics['interrupted_stages']})"
+            )
 
     ready_ok = ready_n >= MIN_READY_SCOPES
     out["stages"]["readiness_ready_scopes"] = {"count": ready_n, "ok": ready_ok}
