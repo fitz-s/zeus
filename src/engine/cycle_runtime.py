@@ -111,6 +111,7 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
+_QUARANTINE_MONITOR_TARGET_DATE_GRACE_DAYS = 1
 POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD = Decimal("1")
 
 
@@ -3972,6 +3973,21 @@ _CANONICAL_MONITOR_PHASE_PRIORITY = {
 }
 
 
+def _quarantine_target_date_still_actionable(target_date: object, *, now_utc: datetime | None = None) -> bool:
+    """Quarantine rows from already-expired markets are reconciliation debt, not fast exit cadence."""
+
+    text = str(target_date or "").strip()
+    if not text:
+        return True
+    try:
+        target_day = date.fromisoformat(text[:10])
+    except ValueError:
+        return True
+    now_day = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+    floor = now_day - timedelta(days=_QUARANTINE_MONITOR_TARGET_DATE_GRACE_DAYS)
+    return target_day >= floor
+
+
 def _canonical_monitor_position_order(conn) -> list[str] | None:
     """Return monitorable position ids from canonical position_current.
 
@@ -3993,6 +4009,7 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
             _select_expr(columns, "shares", "shares", "0.0"),
             _select_expr(columns, "chain_shares", "chain_shares", "0.0"),
             _select_expr(columns, "updated_at", "updated_at", "''"),
+            _select_expr(columns, "target_date", "target_date", "''"),
             _select_expr(columns, "chain_state", "chain_state", "''"),
             _select_expr(columns, "direction", "direction", "''"),
             _select_expr(
@@ -4020,6 +4037,8 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
             if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
                 continue
             if direction not in {"buy_yes", "buy_no"}:
+                continue
+            if not _quarantine_target_date_still_actionable(_row_get(row, "target_date")):
                 continue
         shares = _finite_positive_or_none(_row_get(row, "shares"))
         chain_shares = _finite_positive_or_none(_row_get(row, "chain_shares"))

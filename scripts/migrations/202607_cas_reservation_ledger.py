@@ -135,17 +135,23 @@ def _findings_check_already_widened(conn: sqlite3.Connection) -> bool:
 def _rebuild_exchange_reconcile_findings(conn: sqlite3.Connection) -> None:
     """SQLite cannot ALTER CHECK in place — rebuild via CREATE new + INSERT
     copy + DROP old + RENAME (precedent: 202605_add_redeem_operator_required_state.py)."""
-    conn.execute(_NEW_FINDINGS_TABLE_DDL.strip())
-    conn.execute(
-        "INSERT INTO exchange_reconcile_findings_v2 "
-        "(finding_id, kind, subject_id, context, evidence_json, recorded_at, resolved_at, resolution, resolved_by) "
-        "SELECT finding_id, kind, subject_id, context, evidence_json, recorded_at, resolved_at, resolution, resolved_by "
-        "FROM exchange_reconcile_findings"
-    )
-    conn.execute("DROP TABLE exchange_reconcile_findings")
-    conn.execute("ALTER TABLE exchange_reconcile_findings_v2 RENAME TO exchange_reconcile_findings")
-    for idx_sql in _FINDINGS_INDEXES:
-        conn.execute(idx_sql)
+    legacy_alter_row = conn.execute("PRAGMA legacy_alter_table").fetchone()
+    legacy_alter_before = int(legacy_alter_row[0] if legacy_alter_row else 0)
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute(_NEW_FINDINGS_TABLE_DDL.strip())
+        conn.execute(
+            "INSERT INTO exchange_reconcile_findings_v2 "
+            "(finding_id, kind, subject_id, context, evidence_json, recorded_at, resolved_at, resolution, resolved_by) "
+            "SELECT finding_id, kind, subject_id, context, evidence_json, recorded_at, resolved_at, resolution, resolved_by "
+            "FROM exchange_reconcile_findings"
+        )
+        conn.execute("DROP TABLE exchange_reconcile_findings")
+        conn.execute("ALTER TABLE exchange_reconcile_findings_v2 RENAME TO exchange_reconcile_findings")
+        for idx_sql in _FINDINGS_INDEXES:
+            conn.execute(idx_sql)
+    finally:
+        conn.execute(f"PRAGMA legacy_alter_table={legacy_alter_before}")
 
 
 def up(conn: sqlite3.Connection) -> None:
@@ -178,13 +184,15 @@ def up(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            before_violations = {tuple(row) for row in conn.execute("PRAGMA foreign_key_check")}
             _rebuild_exchange_reconcile_findings(conn)
-            violations = list(conn.execute("PRAGMA foreign_key_check"))
-            if violations:
+            after_violations = {tuple(row) for row in conn.execute("PRAGMA foreign_key_check")}
+            new_violations = after_violations - before_violations
+            if new_violations:
                 conn.execute("ROLLBACK")
                 raise RuntimeError(
-                    f"foreign_key_check returned {len(violations)} violations after "
-                    f"exchange_reconcile_findings rebuild: {violations[:5]!r}"
+                    f"foreign_key_check returned {len(new_violations)} new violations after "
+                    f"exchange_reconcile_findings rebuild: {sorted(new_violations)[:5]!r}"
                 )
             conn.execute("COMMIT")
         except Exception:

@@ -589,7 +589,12 @@ def enqueue_cycle_advance_reseeds(
         "already_enqueued": 0,
         "manifest_missing": 0,
         "leg_artifact_missing": 0,
+        "family_cycle_missing": 0,
+        "family_cycle_not_newer": 0,
         "day0_skipped": 0,
+        "comparison_failed": 0,
+        "family_scope_check_failed": 0,
+        "seed_build_failed": 0,
         "enqueued": [],
     }
     if not forecast_db.exists():
@@ -660,6 +665,7 @@ def enqueue_cycle_advance_reseeds(
                     conn, city=city, target_date=target_date, metric=metric, freshest_cycle=freshest
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                report["comparison_failed"] = int(report.get("comparison_failed", 0)) + 1
                 _LOG.debug("cycle-advance comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
             if not verdict["needs_advance"]:
@@ -687,6 +693,9 @@ def enqueue_cycle_advance_reseeds(
                     latest_manifest=_latest_manifest,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                report["family_scope_check_failed"] = int(
+                    report.get("family_scope_check_failed", 0)
+                ) + 1
                 _LOG.debug("cycle-advance family-scope check failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
             if missing_legs:
@@ -718,7 +727,13 @@ def enqueue_cycle_advance_reseeds(
             # If it is NOT strictly newer than the consumed cycle, the global verdict was a false
             # positive for this family (the fresher universe cycle was carried by OTHER cities) —
             # honest no-op, not an advance.
-            if family_cycle is None or family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
+            if family_cycle is None:
+                report["family_cycle_missing"] = int(report.get("family_cycle_missing", 0)) + 1
+                continue
+            if family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
+                report["family_cycle_not_newer"] = int(
+                    report.get("family_cycle_not_newer", 0)
+                ) + 1
                 continue
             target_cycle_iso = family_cycle.isoformat()
             if _already_enqueued(
@@ -748,6 +763,7 @@ def enqueue_cycle_advance_reseeds(
                     expected_identity=expected_replacement_dependency_identity_by_role,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                report["seed_build_failed"] = int(report.get("seed_build_failed", 0)) + 1
                 _LOG.debug("cycle-advance seed build failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
             if seed_file is None:

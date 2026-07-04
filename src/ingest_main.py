@@ -398,6 +398,66 @@ def _world_schema_ready_sentinel_current() -> bool:
     )
 
 
+def _world_schema_current_lightweight() -> bool:
+    """Read-only live-required world schema check for fast data-ingest restarts."""
+    import sqlite3
+
+    from src.state.db import ZEUS_WORLD_DB_PATH, assert_schema_current
+
+    required_tables = frozenset(
+        {
+            "decision_events",
+            "position_current",
+            "trade_decisions",
+        }
+    )
+    required_indexes = frozenset(
+        {
+            "idx_opportunity_events_day0_family_extreme",
+            "idx_opportunity_event_processing_pending_retry_floor",
+            "idx_opportunity_event_processing_stale_claim",
+            "idx_opportunity_event_processing_status",
+        }
+    )
+    try:
+        uri = f"file:{ZEUS_WORLD_DB_PATH.resolve()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=2000")
+            assert_schema_current(conn)
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            indexes = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            return required_tables.issubset(tables) and required_indexes.issubset(indexes)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("world schema lightweight probe failed: %s", exc)
+        return False
+
+
+def _world_schema_boot_requires_init() -> bool:
+    if _world_schema_ready_sentinel_current():
+        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
+        return False
+    if _world_schema_current_lightweight():
+        logger.info(
+            "init_schema skipped: lightweight world schema probe passed; refreshing sentinel"
+        )
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Ingest tick functions
 # ---------------------------------------------------------------------------
@@ -1082,6 +1142,7 @@ def _replacement_availability_poll_tick():
     """
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
+        _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
@@ -1095,17 +1156,87 @@ def _replacement_availability_poll_tick():
     cfg = _replacement_forecast_live_materialization_queue_config()
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
+
+    def _compact_current_target_report(download_report):
+        if not isinstance(download_report, dict):
+            return None
+        compact = {
+            "status": download_report.get("status"),
+            "available_cycle": download_report.get("available_cycle"),
+            "downloaded_cycle": download_report.get("downloaded_cycle"),
+            "candidate_row_count": download_report.get("candidate_row_count"),
+            "written_row_count": download_report.get("written_row_count"),
+            "target_count": download_report.get("target_count"),
+        }
+        coverage = download_report.get("coverage")
+        if isinstance(coverage, dict):
+            compact["coverage"] = {
+                key: coverage.get(key)
+                for key in (
+                    "status",
+                    "target_count",
+                    "covered_count",
+                    "missing_coverage_count",
+                    "can_seed_count",
+                    "missing_openmeteo_manifest_count",
+                    "day0_observed_extreme_required_count",
+                )
+            }
+        errors = download_report.get("transport_errors")
+        if errors:
+            compact["transport_errors"] = tuple(errors)[:3]
+        return {k: v for k, v in compact.items() if v is not None}
+
+    def _attach_reseed_reports(report: dict[str, object]) -> dict[str, object]:
+        upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+        if upgrade_report is not None:
+            report["fusion_upgrade_status"] = upgrade_report.get("status")
+            report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+        cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+        if cycle_advance_report is not None:
+            report["cycle_advance_status"] = cycle_advance_report.get("status")
+            report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
+            if cycle_advance_report.get("advances_detected"):
+                report["cycle_advance_detail"] = {
+                    k: cycle_advance_report.get(k)
+                    for k in (
+                        "freshest_materializable_cycle",
+                        "scopes_checked",
+                        "advances_detected",
+                        "held_advances_detected",
+                        "seeds_enqueued",
+                        "held_seeds_enqueued",
+                        "already_enqueued",
+                        "manifest_missing",
+                        "leg_artifact_missing",
+                        "family_cycle_missing",
+                        "family_cycle_not_newer",
+                        "day0_skipped",
+                        "comparison_failed",
+                        "family_scope_check_failed",
+                        "seed_build_failed",
+                        "enqueued",
+                    )
+                }
+        return report
+
+    current_target_download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
+    current_target_download_compact = _compact_current_target_report(current_target_download_report)
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
-        logger.info("replacement source-clock poll current: %s", source_clock_payload)
-        return {
+        report: dict[str, object] = {
             "status": "SOURCE_CLOCK_POLL_CURRENT",
             "source_clock_status": source_clock_payload.get("status"),
             "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
+        if current_target_download_compact is not None:
+            report["current_target_download"] = current_target_download_compact
+        report = _attach_reseed_reports(report)
+        logger.info("replacement source-clock poll current: %s", report)
+        return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     report = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         cfg,
@@ -1115,29 +1246,16 @@ def _replacement_availability_poll_tick():
         ),
     )
     if report is None:
-        return None
-    upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
-    if upgrade_report is not None:
-        report["fusion_upgrade_status"] = upgrade_report.get("status")
-        report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
-    cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
-    if cycle_advance_report is not None:
-        report["cycle_advance_status"] = cycle_advance_report.get("status")
-        report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
-        if cycle_advance_report.get("advances_detected"):
-            report["cycle_advance_detail"] = {
-                k: cycle_advance_report.get(k)
-                for k in (
-                    "freshest_materializable_cycle",
-                    "advances_detected",
-                    "held_advances_detected",
-                    "seeds_enqueued",
-                    "held_seeds_enqueued",
-                    "already_enqueued",
-                    "manifest_missing",
-                    "enqueued",
-                )
-            }
+        report = {
+            "status": "SOURCE_CLOCK_SCOPED_DOWNLOAD_SKIPPED",
+            "source_clock_status": source_clock_payload.get("status"),
+            "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
+            "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
+            "source_clock_error": source_clock_payload.get("error"),
+        }
+    if current_target_download_compact is not None:
+        report["current_target_download"] = current_target_download_compact
+    report = _attach_reseed_reports(report)
     if source_clock_scoped_download_allows_cursor_advance(report):
         report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
     else:
@@ -2020,9 +2138,7 @@ def main() -> None:
     # already returned OK for the pinned DDL; skip the repeat write path on
     # restarts so source-clock polling is not delayed behind a world DB lock.
     from src.state.db import init_schema, get_world_connection
-    if _world_schema_ready_sentinel_current():
-        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
-    else:
+    if _world_schema_boot_requires_init():
         conn = get_world_connection(write_class="bulk")
         init_schema(conn)
         conn.close()
