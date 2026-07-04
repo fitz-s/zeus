@@ -559,6 +559,7 @@ def enqueue_cycle_advance_reseeds(
         write_seed,
     )
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        _day0_observed_extreme_seed_payload,
         _latest_manifest,
         _load_manifests,
         _manifest_base_dir,
@@ -654,11 +655,25 @@ def enqueue_cycle_advance_reseeds(
             metric = str(row.temperature_metric)
             scope = (city, target_date, metric)
             is_held = scope in held
-            # DAY0 GUARD (mirrors seed discovery + fusion-upgrade trigger): a started local day's
-            # scope needs the observed-extreme path, not a plain re-materialization.
+            day0_payload: dict[str, object] = {}
+            day0_observation_time: str | None = None
+            # DAY0 GUARD: a started local day's scope must re-materialize with the canonical
+            # observed-extreme hard fact. Skipping here permanently strands same-day stale
+            # posteriors even when observation_instants already has the required truth.
             if bool(getattr(row, "day0_observed_extreme_required", False)):
-                report["day0_skipped"] = int(report["day0_skipped"]) + 1
-                continue
+                payload = _day0_observed_extreme_seed_payload(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    computed_at=now,
+                )
+                if payload is None:
+                    report["day0_skipped"] = int(report["day0_skipped"]) + 1
+                    continue
+                day0_payload = payload
+                day0_observation_time = str(
+                    payload.get("day0_observed_extreme_observation_time") or ""
+                ) or None
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_needs_cycle_advance(
@@ -737,7 +752,13 @@ def enqueue_cycle_advance_reseeds(
                 continue
             target_cycle_iso = family_cycle.isoformat()
             if _already_enqueued(
-                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                allow_missing_seed_file_reenqueue=bool(day0_payload),
+                day0_observed_extreme_observation_time=day0_observation_time,
             ):
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
                 continue
@@ -761,6 +782,13 @@ def enqueue_cycle_advance_reseeds(
                     resolve_path=_resolve_path,
                     seed_name=_seed_name,
                     expected_identity=expected_replacement_dependency_identity_by_role,
+                    day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                    day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
+                    day0_observed_extreme_observation_time=day0_observation_time,
+                    day0_observed_extreme_sample_count=day0_payload.get(
+                        "day0_observed_extreme_sample_count"
+                    ),
+                    day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(report.get("seed_build_failed", 0)) + 1
@@ -778,6 +806,8 @@ def enqueue_cycle_advance_reseeds(
                 target_cycle_iso=target_cycle_iso,
                 held_position=is_held,
                 seed_file=str(seed_file),
+                replace_existing_seed_file=bool(day0_payload),
+                day0_observed_extreme_observation_time=day0_observation_time,
             )
             conn.commit()
             if inserted:
