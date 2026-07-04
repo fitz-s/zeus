@@ -1,5 +1,24 @@
 # Exit / Portfolio-Kelly / Dynamic-Execution / Constant-Elimination authority — 2026-06-13
 
+## ERRATUM (2026-07-02, operator decision)
+
+The delivery mechanism prescribed below — "All new capability lands flag-gated,
+default = current behavior, shadow-computed" (final section), "Replay-licensed
+feature flag only" (X3), "flag, replay-licensed" (priority item 5) — is
+**superseded** by the same-day operator law (2026-06-13): no standing shadow
+lane, live-direct, gate-mass is disease. Corrected delivery mechanism (P2
+precedent, followed by the order-engine rebuild plan
+`docs/rebuild/order_engine_implementation_architecture_2026-07-02.md`):
+**time-boxed promotion harness** — G3 byte-identical-OFF proof → settlement-graded
+evidence gate → ARM flip → flag deleted at promotion. No flag survives promotion;
+no permanently shadow-computed lane exists.
+
+Scope of the erratum is the runtime mechanism ONLY. The math is untouched: E/Q/X/K
+results stand, X1 (event-driven re-decision) is affirmed as core law, and K4's
+"paired replay / A-B shadow" **estimation** remains licensed — offline walk-forward
+replay as a design-time analysis tool is not a runtime shadow lane and was never
+banned.
+
 Status: AUTHORITY (clean-room consult-3, GPT Pro, no Zeus context). Raw archived at
 `consult3_exit_portfolio_execution_2026-06-13_raw.txt`. Confidence: HIGH for Q1
 fixed-position exit formulas, Q2 horse-race Kelly, the stop-loss-not-distinct proof;
