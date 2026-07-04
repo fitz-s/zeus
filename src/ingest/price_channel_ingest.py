@@ -2041,10 +2041,14 @@ def _edli_own_resting_order_token_ids(
         rows = trade_conn.execute(
             f"""
             SELECT DISTINCT vc.token_id
-              FROM {trade_prefix}venue_commands vc
-              JOIN {trade_prefix}venue_order_facts vof ON vof.command_id = vc.command_id
+             FROM {trade_prefix}venue_commands vc
+             JOIN {trade_prefix}venue_order_facts vof ON vof.command_id = vc.command_id
              WHERE vc.token_id IN ({token_placeholders})
                AND vof.state IN ({open_state_placeholders})
+               AND upper(COALESCE(vc.state, '')) NOT IN (
+                     'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED',
+                     'SUBMIT_REJECTED', 'FILLED'
+               )
                AND vof.local_sequence = (
                      SELECT MAX(vof2.local_sequence)
                        FROM {trade_prefix}venue_order_facts vof2
