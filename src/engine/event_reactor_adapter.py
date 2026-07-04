@@ -5493,6 +5493,33 @@ def _build_event_bound_no_submit_receipt_core(
     direction = proof.direction
     execution_price = proof.execution_price
     receipt_q_live, receipt_q_lcb = _event_bound_execution_probability_pair(proof)
+    _coverage_hierarchy_pair = _settlement_coverage_hierarchy_executable_pair(
+        event_type=event.event_type,
+        city=family.city,
+        metric=family.metric,
+        bin_label=getattr(getattr(proof, "candidate", None), "bin", None) and proof.candidate.bin.label,
+        direction=direction,
+        q_raw=receipt_q_live,
+        q_lcb_raw=receipt_q_lcb,
+        forecast_conn=source_conn,
+        topology_conn=topology_authority_conn,
+        decision_time=decision_time,
+        coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
+    )
+    _coverage_hierarchy_receipt_kwargs: dict[str, Any] = (
+        {
+            "q_live_raw": _coverage_hierarchy_pair.q_raw,
+            "q_lcb_raw": _coverage_hierarchy_pair.q_lcb_raw,
+            "coverage_hierarchy_level": _coverage_hierarchy_pair.level,
+            "coverage_hierarchy_cohort_key": _coverage_hierarchy_pair.cohort_key,
+            "coverage_hierarchy_n": _coverage_hierarchy_pair.n,
+            "coverage_hierarchy_wins": _coverage_hierarchy_pair.wins,
+            "coverage_hierarchy_estimator": _coverage_hierarchy_pair.estimator,
+        }
+        if _coverage_hierarchy_pair.level is not None
+        else {}
+    )
+    receipt_q_live, receipt_q_lcb = _coverage_hierarchy_pair.q_exec, _coverage_hierarchy_pair.q_lcb_exec
     if execution_price is None:
         # REJECTION-LABEL TRUTH (operator law 2026-06-11). A non-executable proof was
         # surfaced as the best-belief fallback. EXECUTABLE_NATIVE_ASK_MISSING is the
@@ -5525,6 +5552,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=None,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5556,6 +5584,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5722,6 +5751,33 @@ def _build_event_bound_no_submit_receipt_core(
     # Recompute once at the executable boundary so every later receipt/sizing path
     # consumes the final proof's single execution probability pair.
     receipt_q_live, receipt_q_lcb = _event_bound_execution_probability_pair(proof)
+    _coverage_hierarchy_pair = _settlement_coverage_hierarchy_executable_pair(
+        event_type=event.event_type,
+        city=family.city,
+        metric=family.metric,
+        bin_label=getattr(getattr(proof, "candidate", None), "bin", None) and proof.candidate.bin.label,
+        direction=proof.direction,
+        q_raw=receipt_q_live,
+        q_lcb_raw=receipt_q_lcb,
+        forecast_conn=source_conn,
+        topology_conn=topology_authority_conn,
+        decision_time=decision_time,
+        coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
+    )
+    _coverage_hierarchy_receipt_kwargs = (
+        {
+            "q_live_raw": _coverage_hierarchy_pair.q_raw,
+            "q_lcb_raw": _coverage_hierarchy_pair.q_lcb_raw,
+            "coverage_hierarchy_level": _coverage_hierarchy_pair.level,
+            "coverage_hierarchy_cohort_key": _coverage_hierarchy_pair.cohort_key,
+            "coverage_hierarchy_n": _coverage_hierarchy_pair.n,
+            "coverage_hierarchy_wins": _coverage_hierarchy_pair.wins,
+            "coverage_hierarchy_estimator": _coverage_hierarchy_pair.estimator,
+        }
+        if _coverage_hierarchy_pair.level is not None
+        else {}
+    )
+    receipt_q_live, receipt_q_lcb = _coverage_hierarchy_pair.q_exec, _coverage_hierarchy_pair.q_lcb_exec
     trade_score = proof.trade_score
     if trade_score <= 0.0:
         return EventSubmissionReceipt(
@@ -5740,6 +5796,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5826,6 +5883,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5860,6 +5918,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -6162,6 +6221,7 @@ def _build_event_bound_no_submit_receipt_core(
                                 direction=direction,
                                 q_live=receipt_q_live,
                                 q_lcb_5pct=receipt_q_lcb,
+                                **_coverage_hierarchy_receipt_kwargs,
                                 c_fee_adjusted=execution_price.value,
                                 c_cost_95pct=proof.c_cost_95pct,
                                 p_fill_lcb=proof.p_fill_lcb,
@@ -6186,6 +6246,7 @@ def _build_event_bound_no_submit_receipt_core(
                             direction=direction,
                             q_live=receipt_q_live,
                             q_lcb_5pct=receipt_q_lcb,
+                            **_coverage_hierarchy_receipt_kwargs,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -6235,6 +6296,7 @@ def _build_event_bound_no_submit_receipt_core(
                                 direction=direction,
                                 q_live=receipt_q_live,
                                 q_lcb_5pct=receipt_q_lcb,
+                                **_coverage_hierarchy_receipt_kwargs,
                                 c_fee_adjusted=execution_price.value,
                                 c_cost_95pct=proof.c_cost_95pct,
                                 p_fill_lcb=proof.p_fill_lcb,
@@ -6287,6 +6349,7 @@ def _build_event_bound_no_submit_receipt_core(
                             direction=direction,
                             q_live=receipt_q_live,
                             q_lcb_5pct=receipt_q_lcb,
+                            **_coverage_hierarchy_receipt_kwargs,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -6317,6 +6380,7 @@ def _build_event_bound_no_submit_receipt_core(
                         direction=direction,
                         q_live=receipt_q_live,
                         q_lcb_5pct=receipt_q_lcb,
+                        **_coverage_hierarchy_receipt_kwargs,
                         c_fee_adjusted=execution_price.value,
                         c_cost_95pct=proof.c_cost_95pct,
                         p_fill_lcb=proof.p_fill_lcb,
@@ -6395,6 +6459,7 @@ def _build_event_bound_no_submit_receipt_core(
                         direction=direction,
                         q_live=receipt_q_live,
                         q_lcb_5pct=receipt_q_lcb,
+                        **_coverage_hierarchy_receipt_kwargs,
                         c_fee_adjusted=execution_price.value,
                         c_cost_95pct=proof.c_cost_95pct,
                         p_fill_lcb=proof.p_fill_lcb,
@@ -6466,6 +6531,7 @@ def _build_event_bound_no_submit_receipt_core(
                             direction=direction,
                             q_live=receipt_q_live,
                             q_lcb_5pct=receipt_q_lcb,
+                            **_coverage_hierarchy_receipt_kwargs,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -6531,6 +6597,7 @@ def _build_event_bound_no_submit_receipt_core(
                                 direction=direction,
                                 q_live=receipt_q_live,
                                 q_lcb_5pct=receipt_q_lcb,
+                                **_coverage_hierarchy_receipt_kwargs,
                                 c_fee_adjusted=execution_price.value,
                                 c_cost_95pct=proof.c_cost_95pct,
                                 p_fill_lcb=proof.p_fill_lcb,
@@ -6578,6 +6645,7 @@ def _build_event_bound_no_submit_receipt_core(
                             direction=direction,
                             q_live=receipt_q_live,
                             q_lcb_5pct=receipt_q_lcb,
+                            **_coverage_hierarchy_receipt_kwargs,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -6622,6 +6690,7 @@ def _build_event_bound_no_submit_receipt_core(
                             direction=direction,
                             q_live=receipt_q_live,
                             q_lcb_5pct=receipt_q_lcb,
+                            **_coverage_hierarchy_receipt_kwargs,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -6691,6 +6760,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -6741,6 +6811,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -6787,6 +6858,7 @@ def _build_event_bound_no_submit_receipt_core(
             direction=direction,
             q_live=receipt_q_live,
             q_lcb_5pct=receipt_q_lcb,
+            **_coverage_hierarchy_receipt_kwargs,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -21522,6 +21594,321 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     f"dir={direction}:{exc}"
                 ) from exc
     return verdicts
+
+
+# ---------------------------------------------------------------------------
+# F1: hierarchical settlement-coverage calibrator wiring (2026-07-04).
+#
+# GENERALIZES K3 (above) into a cohort HIERARCHY (exact cell -> strategy bucket
+# -> strategy super-bucket -> cross-strategy -> global), producing an EXECUTABLE
+# (q_exec, q_lcb_exec) pair distinct from the frozen raw certificate. K3 itself
+# (settlement_backward_coverage.py + the ARM gate above) is UNCHANGED -- this is
+# an ADDITIONAL, flag-gated layer consumed at the money-path choke point
+# (_event_bound_execution_probability_pair call sites in
+# _build_event_bound_no_submit_receipt_core). Flag OFF (default): zero DB reads,
+# byte-identical pass-through. See src/calibration/settlement_coverage_hierarchy.py
+# for the estimator/hierarchy-selection authority + docstring.
+# ---------------------------------------------------------------------------
+
+
+def _hierarchy_observations_all(
+    *,
+    forecast_conn: sqlite3.Connection,
+    topology_conn: sqlite3.Connection,
+    coverage_cache: dict | None = None,
+    fail_closed_on_fault: bool = True,
+) -> list[Any]:
+    """Full enriched (strategy_key, q_raw, city, metric, band, direction, won,
+    settlement_time) observation stream for the F1 hierarchy calibrator.
+
+    Reads ``edli_no_submit_receipts`` (world.db) for the per-claim RAW q (the
+    ``q_live_raw`` column when present -- post-wiring rows -- else the legacy
+    ``q_live`` column, which IS the raw claim on pre-wiring / flag-off rows by
+    construction) + ``strategy_key`` (canonicalized) from ``receipt_json``.
+    Grades each claim against ``settlement_outcomes`` (VERIFIED authority ONLY)
+    via the D1 keystone ``grade_receipt`` -- the historical claim's Bin is
+    reconstructed from ``market_events`` by ``condition_id`` (mirrors
+    ``_bin_from_market_event``), NEVER by string/value heuristics on the stored
+    band label. Results are cached per decision-cycle via ``coverage_cache``.
+
+    FAIL-CLOSED (``fail_closed_on_fault=True``, the default -- this feeds a live
+    sizing decision): a structural read/schema fault on ANY of the three
+    authorities (world.db receipts, settlement_outcomes, market_events) raises
+    ``QLCB_COVERAGE_AUTHORITY_FAULT`` and PROPAGATES, exactly mirroring K3's
+    ``_settlement_coverage_observations``. A genuinely thin/absent history (the
+    queries SUCCEED but match nothing) returns an EMPTY list -- INSUFFICIENT_DATA
+    downstream, non-blocking (RULE 1: absence of history is never proof of
+    overconfidence).
+    """
+    cache_key = "hierarchy_observations_all"
+    if coverage_cache is not None:
+        cached = coverage_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+    import json as _json
+    from types import SimpleNamespace
+
+    from src.calibration.settlement_coverage_hierarchy import (
+        HierarchyObservation,
+        canonicalize_strategy_key,
+        dedupe_observations,
+    )
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.temperature import UnitMismatchError
+
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        world_conn = get_world_connection_read_only()
+    except Exception as exc:
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:world_connect:{type(exc).__name__}:{exc}"
+            ) from exc
+        return []
+    try:
+        try:
+            claim_rows = world_conn.execute(
+                "SELECT receipt_json, q_live, q_live_raw, direction, created_at "
+                "FROM edli_no_submit_receipts "
+                "WHERE q_live IS NOT NULL ORDER BY created_at ASC"
+            ).fetchall()
+        except Exception:
+            # q_live_raw column absent (pre-migration DB) -- legacy shape fallback.
+            claim_rows = [
+                (r[0], r[1], None, r[2], r[3])
+                for r in world_conn.execute(
+                    "SELECT receipt_json, q_live, direction, created_at "
+                    "FROM edli_no_submit_receipts WHERE q_live IS NOT NULL "
+                    "ORDER BY created_at ASC"
+                ).fetchall()
+            ]
+    except Exception as exc:
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:receipt_read:{type(exc).__name__}:{exc}"
+            ) from exc
+        return []
+    finally:
+        try:
+            world_conn.close()
+        except Exception:
+            pass
+
+    claims: list[dict[str, Any]] = []
+    for row in claim_rows:
+        try:
+            receipt_json, legacy_q_live, q_live_raw_col, direction, created_at = row
+        except (TypeError, ValueError):
+            continue
+        try:
+            doc = _json.loads(receipt_json)
+        except Exception:
+            continue
+        city = str(doc.get("city") or "")
+        metric = str(doc.get("metric") or "").lower()
+        target_date = doc.get("target_date")
+        condition_id = str(doc.get("condition_id") or "")
+        band_template = _coverage_band_template(doc.get("bin_label"))
+        if not (city and metric and target_date and band_template and direction and condition_id):
+            continue
+        q_raw_value = q_live_raw_col if q_live_raw_col is not None else legacy_q_live
+        try:
+            q_raw_value = float(q_raw_value)
+        except (TypeError, ValueError):
+            continue
+        claims.append(
+            {
+                "city": city,
+                "metric": metric,
+                "target_date": str(target_date),
+                "condition_id": condition_id,
+                "band_template": band_template,
+                "direction": str(direction),
+                "q_raw": q_raw_value,
+                "strategy_key": canonicalize_strategy_key(doc.get("strategy_key")),
+                "created_at": str(created_at or ""),
+            }
+        )
+    if not claims:
+        return []
+
+    # Settlement authority (VERIFIED only), scoped to the distinct (city, metric)
+    # pairs actually claimed -- avoids a full-table settlement scan.
+    scopes = {(c["city"], c["metric"]) for c in claims}
+    settlement_by_scope: dict[tuple[str, str], dict[str, tuple[float, str, str]]] = {}
+    try:
+        for city, metric in scopes:
+            rows = forecast_conn.execute(
+                "SELECT target_date, settlement_value, settlement_unit, "
+                "COALESCE(recorded_at, settled_at, '') "
+                "FROM settlement_outcomes "
+                "WHERE city = ? AND temperature_metric = ? "
+                "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL "
+                "AND authority = 'VERIFIED'",
+                (city, metric),
+            ).fetchall()
+            by_date: dict[str, tuple[float, str, str]] = {}
+            for target_date, value, unit, settled_time in rows:
+                try:
+                    by_date[str(target_date)] = (float(value), str(unit), str(settled_time or ""))
+                except (TypeError, ValueError):
+                    continue
+            settlement_by_scope[(city, metric)] = by_date
+    except Exception as exc:
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:settlement_query:{type(exc).__name__}:{exc}"
+            ) from exc
+        return []
+
+    # Bin reconstruction per DISTINCT condition_id (market_events lookup), so a
+    # historical claim from ANY city/metric can be graded via the D1 keystone
+    # grade_receipt spine -- never a hand-rolled label/value comparison.
+    condition_ids = sorted({c["condition_id"] for c in claims})
+    bin_row_by_condition: dict[str, dict[str, Any]] = {}
+    try:
+        table_ref = _market_events_table_ref(topology_conn)
+        if table_ref is not None:
+            columns = _market_events_columns(topology_conn, table_ref)
+            if {"condition_id", "range_low", "range_high"}.issubset(columns):
+                label_expr = _optional_column_expr(columns, "range_label")
+                chunk = 400
+                for i in range(0, len(condition_ids), chunk):
+                    ids = condition_ids[i : i + chunk]
+                    placeholders = ",".join("?" for _ in ids)
+                    query = (
+                        f"SELECT condition_id, range_low, range_high, {label_expr} "
+                        f"FROM {table_ref} WHERE condition_id IN ({placeholders})"
+                    )
+                    for cond_id, low, high, label in topology_conn.execute(query, ids).fetchall():
+                        bin_row_by_condition[str(cond_id)] = {
+                            "range_low": low,
+                            "range_high": high,
+                            "range_label": label,
+                        }
+    except Exception as exc:
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:topology_query:{type(exc).__name__}:{exc}"
+            ) from exc
+        return []
+
+    observations: list[Any] = []
+    for c in claims:
+        settlement_row = settlement_by_scope.get((c["city"], c["metric"]), {}).get(c["target_date"])
+        if settlement_row is None:
+            continue
+        bin_row = bin_row_by_condition.get(c["condition_id"])
+        if bin_row is None:
+            continue
+        try:
+            bin_obj = _bin_from_market_event(bin_row, {"city": c["city"]})
+        except Exception:
+            continue
+        settled_value, settled_unit, settled_time = settlement_row
+        settlement = SimpleNamespace(settlement_value=settled_value, settlement_unit=settled_unit)
+        try:
+            graded = grade_receipt(bin_obj, c["direction"], settlement)
+        except UnitMismatchError:
+            continue
+        except Exception:
+            continue
+        observations.append(
+            HierarchyObservation(
+                condition_or_market_id=c["condition_id"],
+                target_date=c["target_date"],
+                city=c["city"],
+                metric=c["metric"],
+                band_template=c["band_template"],
+                direction=c["direction"],
+                strategy_key=c["strategy_key"],
+                q_raw=c["q_raw"],
+                won=bool(graded.won),
+                settlement_time=settled_time or c["created_at"],
+            )
+        )
+    observations = dedupe_observations(observations)
+    if coverage_cache is not None:
+        coverage_cache[cache_key] = list(observations)
+    return observations
+
+
+def _settlement_coverage_hierarchy_executable_pair(
+    *,
+    event_type: str,
+    city: str,
+    metric: str,
+    bin_label: str | None,
+    direction: str,
+    q_raw: float,
+    q_lcb_raw: float,
+    forecast_conn: sqlite3.Connection,
+    topology_conn: sqlite3.Connection,
+    decision_time: datetime,
+    coverage_cache: dict | None = None,
+) -> Any:
+    """F1 money-path choke point: the executable (q_exec, q_lcb_exec) pair.
+
+    Flag-gated by ``feature_flags.settlement_coverage_hierarchy_enabled``
+    (default OFF): when OFF this makes ZERO DB reads and returns the RAW pair
+    unchanged (byte-identical to pre-F1 behavior). When ON, builds the enriched
+    observation stream, applies the STRICT walk-forward prefix filter (a
+    decision at ``decision_time`` may only see settlements finalized strictly
+    before it -- defense-in-depth; the live read is already naturally prefix
+    since future settlements do not exist in the DB yet), and runs
+    ``hierarchical_coverage_check``.
+
+    FAIL-CLOSED: a structural read fault in the observation build PROPAGATES as
+    ``QLCB_COVERAGE_AUTHORITY_FAULT`` (mirrors K3 exactly) -- never silently
+    keeps the raw, unshrunk pair on a broken read.
+    """
+    from src.calibration.settlement_coverage_hierarchy import (
+        ExecutablePair,
+        filter_observations_prefix,
+        hierarchical_coverage_check,
+    )
+
+    def _no_op() -> Any:
+        return ExecutablePair(
+            status="INSUFFICIENT_DATA", level=None, cohort_key=None, n=0, wins=0,
+            q_raw=float(q_raw), q_lcb_raw=float(q_lcb_raw),
+            q_exec=float(q_raw), q_lcb_exec=float(q_lcb_raw),
+        )
+
+    if not bool(settings["feature_flags"].get("settlement_coverage_hierarchy_enabled", False)):
+        return _no_op()
+
+    band_template = _coverage_band_template(bin_label)
+    if not band_template:
+        return _no_op()
+
+    try:
+        strategy_key = _event_bound_strategy_key(
+            event_type=event_type, direction=direction, metric=metric,
+        )
+    except Exception:
+        strategy_key = None
+
+    observations = _hierarchy_observations_all(
+        forecast_conn=forecast_conn,
+        topology_conn=topology_conn,
+        coverage_cache=coverage_cache,
+        fail_closed_on_fault=True,
+    )
+    decision_time_iso = (
+        decision_time.astimezone(UTC).isoformat()
+        if hasattr(decision_time, "astimezone")
+        else str(decision_time)
+    )
+    observations = filter_observations_prefix(observations, decision_time_iso)
+
+    return hierarchical_coverage_check(
+        city=city, metric=metric, band_template=band_template, direction=direction,
+        strategy_key=strategy_key, q_raw=q_raw, q_lcb_raw=q_lcb_raw,
+        observations=observations,
+    )
 
 
 def _snapshot_p_raw(

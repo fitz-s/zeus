@@ -97,7 +97,10 @@ class EdliNoSubmitReceiptLedger:
                 mainstream_source, mainstream_fetched_at_utc,
                 alpha_gap,
                 posterior_id, probability_authority, q_lcb_calibration_source,
-                envelope_json
+                envelope_json,
+                q_live_raw, q_lcb_raw, coverage_hierarchy_level,
+                coverage_hierarchy_cohort_key, coverage_hierarchy_n,
+                coverage_hierarchy_wins, coverage_hierarchy_estimator
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -112,7 +115,10 @@ class EdliNoSubmitReceiptLedger:
                 :mainstream_source, :mainstream_fetched_at_utc,
                 :alpha_gap,
                 :posterior_id, :probability_authority, :q_lcb_calibration_source,
-                :envelope_json
+                :envelope_json,
+                :q_live_raw, :q_lcb_raw, :coverage_hierarchy_level,
+                :coverage_hierarchy_cohort_key, :coverage_hierarchy_n,
+                :coverage_hierarchy_wins, :coverage_hierarchy_estimator
             )
             """,
             {
@@ -190,6 +196,16 @@ class EdliNoSubmitReceiptLedger:
                 # provenance blob. NULL on legacy receipts; observability only — never gates and is
                 # omit-when-None in receipt_json so existing receipt_hash stays byte-stable.
                 "envelope_json": receipt.envelope_json,
+                # F1 (2026-07-04): hierarchical settlement-coverage calibrator
+                # provenance. None on legacy / flag-OFF receipts — observability
+                # only, never gates a schema requirement.
+                "q_live_raw": receipt.q_live_raw,
+                "q_lcb_raw": receipt.q_lcb_raw,
+                "coverage_hierarchy_level": receipt.coverage_hierarchy_level,
+                "coverage_hierarchy_cohort_key": receipt.coverage_hierarchy_cohort_key,
+                "coverage_hierarchy_n": receipt.coverage_hierarchy_n,
+                "coverage_hierarchy_wins": receipt.coverage_hierarchy_wins,
+                "coverage_hierarchy_estimator": receipt.coverage_hierarchy_estimator,
             },
         )
         return receipt_id
@@ -321,6 +337,17 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # full selection-stage decision stays queryable in SQL via the columns.
     for _c2_field in ("lfsr", "edge_shrunk", "edge_shrunk_posterior_sd", "selection_authority"):
         payload.pop(_c2_field, None)
+    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance —
+    # omit when None so legacy / flag-OFF receipts keep byte-identical
+    # receipt_json (and therefore receipt_hash). Present (set) only when the
+    # hierarchy calibrator reached a licensed verdict for this receipt.
+    for _f1_field in (
+        "q_live_raw", "q_lcb_raw", "coverage_hierarchy_level",
+        "coverage_hierarchy_cohort_key", "coverage_hierarchy_n",
+        "coverage_hierarchy_wins", "coverage_hierarchy_estimator",
+    ):
+        if payload.get(_f1_field) is None:
+            payload.pop(_f1_field, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

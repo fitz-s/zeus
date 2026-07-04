@@ -746,6 +746,40 @@ E4. REAL-COMBAT MONITORING vs IDEAL DESIGN (the operator axiom made measurable �
    - IDEAL-VS-ACTUAL REPORT: after the window, write docs/rebuild/real_combat_vs_ideal_
      <date>.md — per design-doc §axis (speed/safety/truth), measured vs intended, gaps ranked;
      this report IS the input to the W3 promotion decision and the W5 go-ahead.
+   - PRE-DEPLOY BASELINES (2026-07-04, two independent audits; E4 compares against these):
+     ALPHA (settled-chain, reconstruction via settlement_outcomes.winning_bin because the
+     recorded P&L columns are broken — defect F2): 101 settled, win 50.5% vs breakeven 56.4%,
+     P&L −$105 (−15.2% ROI), last-7d −22.8%. THE robust defect (z≈−4.5, p<0.0001):
+     p_posterior overconfident ~20–25pp concentrated in the 0.8-q bucket (claims 84%, wins
+     44%) on opening_inertia buy_no; 0.7 bucket well-calibrated. Market price (0.564)
+     outpredicts model posterior (0.709). Fill rate 14.5% (88/607 commands, 14d).
+     PIPELINE (live trace 17:16 UTC): execution RED — zero new venue_commands for 37.6h,
+     100% of reactor candidates blocked by entries_paused
+     (operator_pause_observe_fixed_code_after_restart, issued 07-03 00:34); the pause's own
+     precondition was never met because the daemon (PID 44991) runs 181769b0, 22 commits
+     behind HEAD — c3_staleness_cancel fails every cycle ("no such column: vc.q_version";
+     fix IS in the undeployed code). Fusion posteriors 3h45m stale at trace time (design
+     tolerates ~6h; re-check post-deploy). 40 quarantined positions ($293) batch-stamped at
+     the 07-04 01:18 restart window, unreconciled. no_trade_events_new has 0 rows (no
+     persistent no-trade log — E4 needs one to attribute conversion loss).
+   - E4 MUST TRACK (from the baselines): (1) stated-vs-realized gap in the 0.75–0.95
+     q-bucket closing toward 0; (2) rolling-7d win-rate-vs-avg-entry-price crossing
+     breakeven; (3) quarantined capital + idle reservations ($112) draining via the repair
+     lane; (4) fill rate not degrading below 14.5%; (5) entries_paused lifted with fresh
+     justification recorded; (6) c3_staleness_cancel error-free on the new code.
+   - POST-E4 FIX QUEUE (ranked by $ impact; none gate the OFF deploy):
+     F1) settlement-realized recalibration of high-q posteriors (shrink 0.75–0.95 toward
+        market; gate entries on calibrated q) — the −$95..109 lane;
+     F2) P&L accounting break: position_current.realized_pnl_usd / settlement_price /
+        outcome_fact.pnl default 0.0, never backfilled (19/101 true wins recorded as $0) —
+        settlement write path must populate them;
+     F3) exit engine effectively absent: 101 held-to-settlement vs 8 early exits; 1-day-lead
+        cohort is the loss center (−15.3pp) — "exit before probability decays" must exist
+        in runtime, not only in design;
+     F4) adverse sizing: win-edge buckets (0.5 price, 2-day lead) lose dollars because
+        losers are sized larger — decorrelate stake from uncalibrated edge until F1 lands;
+     F5) persistent no-trade reason log (no_trade_events_new is empty) so conversion loss
+        is attributable over windows, not only from in-memory cycle snapshots.
 E5. W3 PROMOTION (operator gate, evidence from E4): ledger-provider hand-threading (shape in
    W3.4 report) → flag ON → settlement-graded PROJECTION evidence window (actual-submitted-size
    grading per the recorded contract) → α-sensitivity replay {.01,.05,.10} decision-stability →

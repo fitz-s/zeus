@@ -182,6 +182,31 @@ state_machines:
     invariant_tests:
       - tests/test_command_recovery.py
       - tests/execution/test_abandoned_unsubmitted_ghost_reconcile.py
+  chain_mirror_reconciliation_classification:
+    owner: src/state/chain_mirror_reconciler.py
+    description: >
+      Chain-mirror market-rule classification codes (operator directive
+      2026-07-04; docs/rebuild/chain_mirror_state_model_2026-07-04.md). These
+      are not venue/lifecycle states; they are the reconciler's own
+      diff-outcome vocabulary carried in position_events.payload_json under
+      "chain_mirror_classification" (CLOSED_REDEEMED/CLOSED_WORTHLESS reuse
+      the existing SETTLED event_type; SIZE_CORRECTED reuses the existing
+      CHAIN_SIZE_CORRECTED event_type — no position_events.event_type CHECK
+      widening was needed). REDEEMABLE/REVIEW_OPEN_ABSENT/MISSING_LOCAL_ROW/
+      FOREIGN/UNGRADEABLE/CONSISTENT are report-only findings and never
+      appear in a persisted row.
+    states:
+      - CLOSED_REDEEMED
+      - CLOSED_WORTHLESS
+      - SIZE_CORRECTED
+      - REDEEMABLE
+      - REVIEW_OPEN_ABSENT
+      - MISSING_LOCAL_ROW
+      - FOREIGN
+      - UNGRADEABLE
+      - CONSISTENT
+    invariant_tests:
+      - tests/test_reconcile_chain_mirror.py
   family_rebalance_lease:
     owner: src/state/schema/family_rebalance_intents_schema.py
     description: >

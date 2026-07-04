@@ -200,6 +200,8 @@
   "feature_flags": {
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,
-    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF."
+    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
+    "settlement_coverage_hierarchy_enabled": false,
+    "_settlement_coverage_hierarchy_enabled_note": "F1: hierarchical settlement-coverage calibrator (src/calibration/settlement_coverage_hierarchy.py). Default OFF = byte-identical current behavior."
   }
 }

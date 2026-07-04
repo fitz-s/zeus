@@ -628,6 +628,24 @@ class EventSubmissionReceipt:
     edge_shrunk: float | None = None
     edge_shrunk_posterior_sd: float | None = None
     selection_authority: str | None = None
+    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance
+    # (src/calibration/settlement_coverage_hierarchy.py). ``q_live``/``q_lcb_5pct``
+    # above BECOME the EXECUTABLE pair when the flag is ON (the values Kelly/
+    # admission actually consume); ``q_live_raw``/``q_lcb_raw`` carry the FROZEN
+    # raw certificate unchanged (audit law — the raw pair is never mutated).
+    # ``coverage_hierarchy_level`` names which cohort licensed the verdict
+    # (LOCAL_SHIELD/STRATEGY_BUCKET/STRATEGY_SUPERBUCKET/CROSS_STRATEGY/GLOBAL);
+    # None when no cohort reached a licensed verdict (flag OFF, or a genuine
+    # INSUFFICIENT_DATA no-op — both leave q_live/q_lcb_5pct untouched). All
+    # None on legacy / flag-OFF receipts; omit-when-None in receipt_json keeps
+    # existing receipt_hash byte-stable (mirrors submit_lane / lfsr above).
+    q_live_raw: float | None = None
+    q_lcb_raw: float | None = None
+    coverage_hierarchy_level: str | None = None
+    coverage_hierarchy_cohort_key: str | None = None
+    coverage_hierarchy_n: int | None = None
+    coverage_hierarchy_wins: int | None = None
+    coverage_hierarchy_estimator: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

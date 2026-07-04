@@ -115,6 +115,22 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "edge_shrunk", "REAL")
     _ensure_column(conn, "edge_shrunk_posterior_sd", "REAL")
     _ensure_column(conn, "selection_authority", "TEXT")
+    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance
+    # (src/calibration/settlement_coverage_hierarchy.py). Nullable, no DEFAULT so
+    # existing-row receipt_hash stability is preserved (mirrors lfsr / envelope_json
+    # above). ``q_live``/``q_lcb_5pct`` become the EXECUTABLE pair when the flag
+    # (feature_flags.settlement_coverage_hierarchy_enabled) is ON; ``q_live_raw``/
+    # ``q_lcb_raw`` carry the frozen raw certificate unchanged (audit law). Also
+    # used as the per-claim RAW-q read for THIS calibrator's own observation
+    # stream (q_live_raw when present, else the legacy q_live column, which IS
+    # the raw claim on pre-migration / flag-OFF rows by construction).
+    _ensure_column(conn, "q_live_raw", "REAL")
+    _ensure_column(conn, "q_lcb_raw", "REAL")
+    _ensure_column(conn, "coverage_hierarchy_level", "TEXT")
+    _ensure_column(conn, "coverage_hierarchy_cohort_key", "TEXT")
+    _ensure_column(conn, "coverage_hierarchy_n", "INTEGER")
+    _ensure_column(conn, "coverage_hierarchy_wins", "INTEGER")
+    _ensure_column(conn, "coverage_hierarchy_estimator", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
     conn.execute(CREATE_PROBABILITY_AUTHORITY_INDEX_SQL)
