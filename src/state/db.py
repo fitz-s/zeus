@@ -2908,6 +2908,7 @@ def init_schema(
         conn.execute("ALTER TABLE venue_commands ADD COLUMN snapshot_id TEXT;")
     except sqlite3.OperationalError:
         pass
+    _ensure_venue_commands_q_version_column(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_snapshot ON venue_commands(snapshot_id);")
 
     # B3cont: ALTER TABLE platt_models (bare) removed — table dropped.
@@ -4192,6 +4193,15 @@ def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
 
 def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
     conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
+
+
+def _ensure_venue_commands_q_version_column(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "venue_commands"):
+        return
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
+    if "q_version" in columns:
+        return
+    conn.execute("ALTER TABLE venue_commands ADD COLUMN q_version TEXT;")
 
 
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
@@ -5848,6 +5858,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # this call migrates the live table instead of silently landing columns only
     # on the world-class ghost shell. Idempotent: skips columns that already exist.
     _ensure_position_current_authority_columns(conn)
+    _ensure_venue_commands_q_version_column(conn)
     _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
