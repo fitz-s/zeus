@@ -2066,10 +2066,41 @@ def _point_order_from_maker_trade_payloads(
     asset_id = ""
     outcome = ""
     market = ""
+    source = "account_trades_maker_orders"
     for trade in trade_payloads:
         trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
-        tx_hash = str(trade.get("transaction_hash") or trade.get("transactionHash") or "").strip()
+        tx_hash = str(
+            trade.get("transaction_hash") or trade.get("transactionHash") or trade.get("tx_hash") or ""
+        ).strip()
         last_status = str(trade.get("status") or last_status or "MATCHED").upper()
+        taker_order_id = str(
+            trade.get("taker_order_id")
+            or trade.get("takerOrderId")
+            or trade.get("order_id")
+            or ""
+        ).strip()
+        if taker_order_id.lower() == order_id.lower():
+            matched_amount = _positive_decimal_or_none(
+                trade.get("size")
+                or trade.get("matched_amount")
+                or trade.get("matchedAmount")
+                or trade.get("size_matched")
+                or trade.get("matched_size")
+            )
+            price = _positive_decimal_or_none(trade.get("price"))
+            if matched_amount is not None and price is not None:
+                total += matched_amount
+                weighted_price += matched_amount * price
+                if trade_id:
+                    trade_ids.append(trade_id)
+                if tx_hash:
+                    tx_hashes.append(tx_hash)
+                asset_id = str(trade.get("asset_id") or trade.get("token_id") or asset_id)
+                outcome = str(trade.get("outcome") or outcome)
+                market = str(trade.get("market") or market)
+                raw_matches.append({"trade": dict(trade), "taker_order_id": taker_order_id})
+                source = "account_trades_taker_order"
+                continue
         for maker_order in _maker_order_payloads(trade):
             maker_order_id = str(
                 maker_order.get("order_id")
@@ -2113,7 +2144,7 @@ def _point_order_from_maker_trade_payloads(
         "asset_id": asset_id,
         "outcome": outcome,
         "market": market,
-        "source": "account_trades_maker_orders",
+        "source": source,
         "matched_maker_order_count": len(raw_matches),
         "matched_maker_orders": raw_matches,
     }
@@ -7030,13 +7061,21 @@ def reconcile_terminal_order_facts(
     return summary
 
 
-def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
+def reconcile_matched_order_facts(
+    conn: sqlite3.Connection,
+    client,
+    *,
+    command_id: str | None = None,
+) -> dict:
     """Recover ACKED command fill facts when point-order truth says the order matched."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     get_order = getattr(client, "get_order", None)
     trade_payloads_cache: list[dict] | None = None
+    target_command_id = str(command_id or "").strip()
     for row in _latest_matched_order_fact_candidates(conn):
+        if target_command_id and str(row.get("command_id") or "") != target_command_id:
+            continue
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
         command_order_id = str(row.get("venue_order_id") or "")
@@ -14175,6 +14214,34 @@ def _review_required_trade_maker_match(command: dict, trade: dict) -> dict | Non
     command_size = _decimal_or_none(command.get("size"))
     if not token_id or command_size is None:
         return None
+    if str(trade.get("asset_id") or trade.get("token_id") or "") == token_id:
+        if side and str(trade.get("side") or "").upper() == side:
+            if _decimal_matches(trade.get("price"), command_price):
+                matched = _positive_decimal_or_none(trade.get("size") or trade.get("matched_amount"))
+                if matched is not None:
+                    residual = command_size - matched
+                    if residual < 0:
+                        residual = Decimal("0")
+                    order_id = str(
+                        trade.get("taker_order_id")
+                        or trade.get("order_id")
+                        or trade.get("id")
+                        or ""
+                    ).strip()
+                    if residual < Decimal("0.01") and order_id:
+                        return {
+                            "order_id": order_id,
+                            "matched_size": _decimal_text(matched),
+                            "fill_price": str(trade.get("price") or command_price),
+                            "maker_order": {
+                                "asset_id": token_id,
+                                "side": side,
+                                "price": trade.get("price") or command_price,
+                                "matched_amount": _decimal_text(matched),
+                                "order_id": order_id,
+                                "source": "top_level_taker_trade",
+                            },
+                        }
     for maker in trade.get("maker_orders") or []:
         if not isinstance(maker, dict):
             continue

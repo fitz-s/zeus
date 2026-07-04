@@ -31,10 +31,12 @@ import pytest
 def conn():
     """In-memory DB with full schema."""
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_collateral_schema(c)
     yield c
     c.close()
 
