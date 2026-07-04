@@ -51,6 +51,25 @@ POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
     }
 )
 VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS = frozenset({"q_version"})
+TERMINAL_ENTRY_COMMAND_STATES = frozenset(
+    {
+        "CANCELLED",
+        "CANCELED",
+        "EXPIRED",
+        "FILLED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+    }
+)
+NONTERMINAL_VENUE_ORDER_STATES = frozenset(
+    {
+        "LIVE",
+        "OPEN",
+        "PARTIAL",
+        "PARTIALLY_MATCHED",
+        "RESTING",
+    }
+)
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
 # docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
@@ -733,6 +752,166 @@ def _venue_commands_schema_status() -> dict:
             "path": str(db_path),
             "issue": f"VENUE_COMMANDS_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
             "missing_columns": sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS),
+        }
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _terminal_entry_command_venue_fact_conflicts_status() -> dict:
+    """Detect local-terminal entry commands without terminal venue-fact proof."""
+
+    db_path = _trade_db_path()
+    base = {
+        "path": str(db_path),
+        "authority": "derived_operator_visibility",
+        "source": "venue_commands+position_current+venue_order_facts",
+        "count": 0,
+        "by_command_state": {},
+        "by_venue_state": {},
+        "by_position_phase": {},
+        "sample": [],
+    }
+    if not db_path.exists():
+        return {
+            **base,
+            "ok": False,
+            "issue": "VENUE_ORDER_TRUTH_DB_MISSING",
+        }
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        present = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing = [
+            table
+            for table in ("venue_commands", "venue_order_facts")
+            if table not in present
+        ]
+        if missing:
+            return {
+                **base,
+                "ok": False,
+                "issue": "VENUE_ORDER_TRUTH_TABLE_MISSING",
+                "missing_tables": missing,
+            }
+        has_position_current = "position_current" in present
+        pc_select = (
+            "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
+            "pc.target_date, pc.strategy_key"
+            if has_position_current
+            else (
+                "vc.position_id, NULL AS phase, NULL AS order_status, NULL AS chain_state, "
+                "NULL AS city, NULL AS target_date, NULL AS strategy_key"
+            )
+        )
+        pc_join = (
+            "LEFT JOIN position_current pc ON pc.position_id = vc.position_id"
+            if has_position_current
+            else ""
+        )
+        command_placeholders = ",".join("?" for _ in TERMINAL_ENTRY_COMMAND_STATES)
+        venue_placeholders = ",".join("?" for _ in NONTERMINAL_VENUE_ORDER_STATES)
+        rows = conn.execute(
+            f"""
+            WITH latest_order_facts AS (
+                SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY venue_order_id
+                           ORDER BY COALESCE(local_sequence, 0) DESC,
+                                    COALESCE(observed_at, '') DESC,
+                                    COALESCE(ingested_at, '') DESC,
+                                    fact_id DESC
+                       ) AS rn
+                  FROM venue_order_facts
+            )
+            SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
+                   vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
+                   vc.updated_at, {pc_select},
+                   lof.state AS venue_state, lof.remaining_size, lof.matched_size,
+                   lof.observed_at AS venue_observed_at
+              FROM venue_commands vc
+              JOIN latest_order_facts lof
+                ON lof.venue_order_id = vc.venue_order_id
+               AND lof.rn = 1
+              {pc_join}
+             WHERE upper(COALESCE(vc.intent_kind, '')) = 'ENTRY'
+               AND vc.venue_order_id IS NOT NULL
+               AND trim(vc.venue_order_id) != ''
+               AND upper(COALESCE(vc.state, '')) IN ({command_placeholders})
+               AND upper(COALESCE(lof.state, '')) IN ({venue_placeholders})
+             ORDER BY vc.updated_at DESC, vc.created_at DESC, vc.command_id
+            """,
+            tuple(sorted(TERMINAL_ENTRY_COMMAND_STATES))
+            + tuple(sorted(NONTERMINAL_VENUE_ORDER_STATES)),
+        ).fetchall()
+        by_command_state: dict[str, int] = {}
+        by_venue_state: dict[str, int] = {}
+        by_position_phase: dict[str, int] = {}
+        sample = []
+        for row in rows:
+            command_state = str(row["command_state"] or "UNKNOWN").upper()
+            venue_state = str(row["venue_state"] or "UNKNOWN").upper()
+            phase = str(row["phase"] or "unknown")
+            by_command_state[command_state] = by_command_state.get(command_state, 0) + 1
+            by_venue_state[venue_state] = by_venue_state.get(venue_state, 0) + 1
+            by_position_phase[phase] = by_position_phase.get(phase, 0) + 1
+            if len(sample) < 5:
+                sample.append(
+                    {
+                        "command_id": str(row["command_id"] or ""),
+                        "venue_order_id": str(row["venue_order_id"] or ""),
+                        "position_id": str(row["position_id"] or ""),
+                        "city": str(row["city"] or ""),
+                        "target_date": str(row["target_date"] or ""),
+                        "strategy_key": str(row["strategy_key"] or "unclassified"),
+                        "phase": phase,
+                        "order_status": str(row["order_status"] or ""),
+                        "chain_state": str(row["chain_state"] or ""),
+                        "command_state": command_state,
+                        "venue_state": venue_state,
+                        "side": str(row["side"] or ""),
+                        "submitted_price": _float_or_none(row["submitted_price"]),
+                        "submitted_size": _float_or_none(row["submitted_size"]),
+                        "remaining_size": _float_or_none(row["remaining_size"]),
+                        "matched_size": _float_or_none(row["matched_size"]),
+                        "updated_at": str(row["updated_at"] or ""),
+                        "venue_observed_at": str(row["venue_observed_at"] or ""),
+                    }
+                )
+        count = len(rows)
+        return {
+            **base,
+            "ok": count == 0,
+            "issue": "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT" if count else None,
+            "count": count,
+            "by_command_state": by_command_state,
+            "by_venue_state": by_venue_state,
+            "by_position_phase": by_position_phase,
+            "sample": sample,
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "ok": False,
+            "issue": f"VENUE_ORDER_TRUTH_CONFLICT_CHECK_UNAVAILABLE:{type(exc).__name__}",
         }
     finally:
         try:
@@ -1812,6 +1991,17 @@ def check() -> dict:
             result["venue_commands_schema"].get("issue")
             or "VENUE_COMMANDS_SCHEMA_DRIFT"
         )
+    result["venue_order_truth_conflicts"] = (
+        _terminal_entry_command_venue_fact_conflicts_status()
+    )
+    result["venue_order_truth_conflicts_ok"] = bool(
+        result["venue_order_truth_conflicts"].get("ok", True)
+    )
+    if not result["venue_order_truth_conflicts_ok"]:
+        result["venue_order_truth_conflicts_issue"] = (
+            result["venue_order_truth_conflicts"].get("issue")
+            or "VENUE_ORDER_TRUTH_CONFLICT"
+        )
     result["monitor_cadence"] = _monitor_cadence_status()
     result["monitor_cadence_ok"] = bool(result["monitor_cadence"].get("ok", True))
     if not result["monitor_cadence_ok"]:
@@ -2120,6 +2310,7 @@ def check() -> dict:
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
         and bool(result.get("venue_commands_schema_ok", True))
+        and bool(result.get("venue_order_truth_conflicts_ok", True))
         and bool(result.get("monitor_cadence_ok", True))
         and bool(result.get("edli_queue_ok", True))
         and bool(result.get("forecast_posteriors_schema_ok", True))

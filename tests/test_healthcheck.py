@@ -20,6 +20,9 @@ _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
 _ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS = healthcheck._venue_commands_schema_status
+_ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS = (
+    healthcheck._terminal_entry_command_venue_fact_conflicts_status
+)
 _ORIGINAL_MONITOR_CADENCE_STATUS = healthcheck._monitor_cadence_status
 _ORIGINAL_EDLI_QUEUE_STATUS = healthcheck._edli_queue_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
@@ -121,6 +124,20 @@ def _mock_venue_commands_schema_status(monkeypatch):
         healthcheck,
         "_venue_commands_schema_status",
         lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_terminal_entry_command_venue_fact_conflicts_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_terminal_entry_command_venue_fact_conflicts_status",
+        lambda: {
+            "ok": True,
+            "path": "/tmp/zeus_trades.db",
+            "count": 0,
+            "sample": [],
+        },
     )
 
 
@@ -1291,6 +1308,124 @@ def test_venue_commands_schema_status_accepts_q_version(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["missing_columns"] == []
+
+
+def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state: str) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            venue_order_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            side TEXT,
+            size REAL,
+            price REAL,
+            position_id TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            order_status TEXT,
+            chain_state TEXT,
+            city TEXT,
+            target_date TEXT,
+            strategy_key TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            remaining_size TEXT,
+            matched_size TEXT,
+            observed_at TEXT,
+            ingested_at TEXT,
+            local_sequence INTEGER
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, venue_order_id, intent_kind, state, side, size, price,
+            position_id, created_at, updated_at
+        ) VALUES (
+            'cmd-1', 'ord-1', 'ENTRY', ?, 'BUY', 9.0, 0.42, 'pos-1',
+            '2026-07-04T00:00:00+00:00', '2026-07-04T00:01:00+00:00'
+        )
+        """,
+        (command_state,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, order_status, chain_state, city, target_date, strategy_key
+        ) VALUES (
+            'pos-1', 'quarantined', 'rejected', 'entry_authority_quarantined',
+            'Paris', '2026-07-04', 'center_bin_buy'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            observed_at, ingested_at, local_sequence
+        ) VALUES (
+            'ord-1', 'cmd-1', ?, '9.0', '0.0',
+            '2026-07-04T00:01:30+00:00',
+            '2026-07-04T00:01:31+00:00', 2
+        )
+        """,
+        (venue_state,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_terminal_entry_command_venue_fact_conflict_status_rejects_resting_fact(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="SUBMIT_REJECTED",
+        venue_state="RESTING",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT"
+    assert result["count"] == 1
+    assert result["by_command_state"] == {"SUBMIT_REJECTED": 1}
+    assert result["by_venue_state"] == {"RESTING": 1}
+    assert result["sample"][0]["command_id"] == "cmd-1"
+    assert result["sample"][0]["remaining_size"] == 9.0
+
+
+def test_terminal_entry_command_venue_fact_conflict_status_accepts_terminal_fact(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="CANCELLED",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["count"] == 0
+    assert result["sample"] == []
 
 
 def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
@@ -2629,6 +2764,49 @@ def test_healthcheck_is_not_healthy_when_venue_commands_schema_drifts(
 
     assert result["venue_commands_schema_ok"] is False
     assert result["venue_commands_schema_issue"] == "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_venue_order_truth_conflicts(
+    monkeypatch, tmp_path
+):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_terminal_entry_command_venue_fact_conflicts_status",
+        lambda: {
+            "ok": False,
+            "path": str(tmp_path / "zeus_trades.db"),
+            "issue": "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT",
+            "count": 1,
+            "sample": [{"command_id": "cmd-1"}],
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["venue_order_truth_conflicts_ok"] is False
+    assert (
+        result["venue_order_truth_conflicts_issue"]
+        == "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT"
+    )
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

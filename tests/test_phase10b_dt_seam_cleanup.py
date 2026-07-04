@@ -839,6 +839,20 @@ class TestRCPV2RowCountSensor:
         assert status["execution"] == {
             "pulse_only": True,
             "current_open_entry_orders": {"status": "ok", "orders": 2},
+            "terminal_command_venue_fact_conflicts": {
+                "status": "missing_venue_commands",
+                "authority": "derived_operator_visibility",
+                "source": "venue_commands+position_current+venue_order_facts",
+                "description": (
+                    "entry commands locally terminal while latest stored venue fact "
+                    "is still nonterminal"
+                ),
+                "count": 0,
+                "by_command_state": {},
+                "by_venue_state": {},
+                "by_position_phase": {},
+                "orders": [],
+            },
         }
         assert status["learning"]["status"] == "not_refreshed_by_cycle_pulse"
         assert status["calibration_serving"]["status"] == "not_refreshed_by_cycle_pulse"
@@ -1186,6 +1200,234 @@ class TestRCPV2RowCountSensor:
         assert open_orders["status"] == "ok"
         assert open_orders["count"] == 0
         assert open_orders["orders"] == []
+
+    def test_terminal_entry_command_with_nonterminal_venue_fact_is_conflict(self):
+        """Terminal local commands still need explicit venue-fact visibility."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-terminal', 'ord-terminal', 'ENTRY', 'CANCELLED', 'BUY', 25.0, 0.68,
+                'pos-terminal', '2026-07-02T13:38:00+00:00',
+                '2026-07-02T13:47:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-terminal', 'economically_closed', 'sell_filled', 'synced',
+                'Paris', '2026-07-04', 'center_bin_buy'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-terminal', 'cmd-terminal', 'PARTIALLY_MATCHED', '15.0', '10.0',
+                'REST', '2026-07-02T13:38:59+00:00',
+                '2026-07-02T13:48:00+00:00', 5
+            )
+            """
+        )
+        conn.commit()
+
+        open_orders = status_summary_module._query_current_open_entry_orders(conn)
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert open_orders["status"] == "ok"
+        assert open_orders["count"] == 0
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 1
+        assert conflicts["by_command_state"] == {"CANCELLED": 1}
+        assert conflicts["by_venue_state"] == {"PARTIALLY_MATCHED": 1}
+        assert conflicts["by_position_phase"] == {"economically_closed": 1}
+        assert conflicts["orders"][0]["command_id"] == "cmd-terminal"
+        assert conflicts["orders"][0]["remaining_size"] == 15.0
+
+    def test_write_status_surfaces_terminal_command_venue_fact_conflict(
+        self, tmp_path, monkeypatch
+    ):
+        """Full status must expose terminal-command/latest-fact contradictions."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({"updated_at": "2026-07-04T00:00:00+00:00", "positions": []}))
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-rejected-resting', 'ord-rejected-resting', 'ENTRY',
+                'SUBMIT_REJECTED', 'BUY', 9.0, 0.42, 'pos-rejected-resting',
+                '2026-07-04T00:00:00+00:00', '2026-07-04T00:01:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-rejected-resting', 'quarantined', 'rejected', 'entry_authority_quarantined',
+                'Paris', '2026-07-04', 'center_bin_buy'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-rejected-resting', 'cmd-rejected-resting', 'RESTING', '9.0', '0.0',
+                'REST', '2026-07-04T00:01:30+00:00',
+                '2026-07-04T00:01:31+00:00', 2
+            )
+            """
+        )
+        conn.commit()
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: conn)
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda _conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda _conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda _conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda _conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda _conn, not_before=None: self._empty_lifecycle_funnel())
+        monkeypatch.setattr(status_summary_module, "build_calibration_serving_status", lambda _conn: {"status": "observed"})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda _conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN"})
+        status = json.loads(status_path.read_text())
+        conflicts = status["execution"]["terminal_command_venue_fact_conflicts"]
+
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 1
+        assert conflicts["by_command_state"] == {"SUBMIT_REJECTED": 1}
+        assert conflicts["by_venue_state"] == {"RESTING": 1}
+        assert "terminal_entry_command_venue_fact_conflicts:1" in status["risk"]["infrastructure_issues"]
+        assert status["risk"]["infrastructure_level"] == "YELLOW"
 
     def test_status_summary_exposes_s2_lifecycle_funnel(self, tmp_path, monkeypatch):
         """S2 visibility stays a derived status block, not a cycle authority."""

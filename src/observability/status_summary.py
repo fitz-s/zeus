@@ -55,6 +55,14 @@ _LEGACY_JSON_INACTIVE_POSITION_STATES = set(TERMINAL_STATES) | {
     "exited",
 }
 _OPEN_ENTRY_COMMAND_STATES = {"ACKED", "PARTIAL", "POST_ACKED", "SUBMITTED"}
+_TERMINAL_ENTRY_COMMAND_STATES = {
+    "CANCELLED",
+    "CANCELED",
+    "EXPIRED",
+    "FILLED",
+    "REJECTED",
+    "SUBMIT_REJECTED",
+}
 _TERMINAL_ENTRY_ORDER_STATUSES = {
     "filled",
     "cancelled",
@@ -71,6 +79,13 @@ _TERMINAL_VENUE_ORDER_STATES = {
     "CANCELLED",
     "EXPIRED",
     "REJECTED",
+}
+_NONTERMINAL_VENUE_ORDER_STATES = {
+    "LIVE",
+    "PARTIAL",
+    "PARTIALLY_MATCHED",
+    "OPEN",
+    "RESTING",
 }
 _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE = {
     "mode",
@@ -565,6 +580,9 @@ def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
     try:
         conn = get_trade_connection_with_world()
         current_open_entry_orders = _query_current_open_entry_orders(conn)
+        terminal_command_venue_fact_conflicts = (
+            _query_terminal_entry_command_venue_fact_conflicts(conn)
+        )
     except Exception as exc:
         logger.warning(
             "status_summary: current_open_entry_orders pulse refresh failed: %s",
@@ -581,6 +599,8 @@ def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
             **prior_open_orders,
             "status": "query_error",
         }
+        terminal_command_venue_fact_conflicts = _terminal_entry_command_conflict_empty()
+        terminal_command_venue_fact_conflicts["status"] = "query_error"
     finally:
         if conn is not None:
             try:
@@ -590,6 +610,7 @@ def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
     status["execution"] = {
         "pulse_only": True,
         "current_open_entry_orders": current_open_entry_orders,
+        "terminal_command_venue_fact_conflicts": terminal_command_venue_fact_conflicts,
     }
 
 
@@ -824,6 +845,125 @@ def _query_current_open_entry_orders(conn) -> dict:
         "count": len(orders),
         "pending_entry_count": pending_entry_count,
         "by_strategy": by_strategy,
+        "orders": orders,
+    }
+
+
+def _terminal_entry_command_conflict_empty() -> dict:
+    return {
+        "status": "skipped_no_connection",
+        "authority": "derived_operator_visibility",
+        "source": "venue_commands+position_current+venue_order_facts",
+        "description": (
+            "entry commands locally terminal while latest stored venue fact "
+            "is still nonterminal"
+        ),
+        "count": 0,
+        "by_command_state": {},
+        "by_venue_state": {},
+        "by_position_phase": {},
+        "orders": [],
+    }
+
+
+def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
+    """Surface local-terminal entry commands lacking terminal venue-fact proof."""
+
+    empty = _terminal_entry_command_conflict_empty()
+    if conn is None:
+        return empty
+    if not _table_exists(conn, "main", "venue_commands"):
+        return {**empty, "status": "missing_venue_commands"}
+    if not _table_exists(conn, "main", "venue_order_facts"):
+        return {**empty, "status": "missing_venue_order_facts"}
+
+    has_position_current = _table_exists(conn, "main", "position_current")
+    pc_select = (
+        "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
+        "pc.target_date, pc.strategy_key"
+        if has_position_current
+        else (
+            "vc.position_id, NULL AS phase, NULL AS order_status, NULL AS chain_state, "
+            "NULL AS city, NULL AS target_date, NULL AS strategy_key"
+        )
+    )
+    pc_join = "LEFT JOIN position_current pc ON pc.position_id = vc.position_id" if has_position_current else ""
+
+    rows = conn.execute(
+        f"""
+        WITH latest_order_facts AS (
+            SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY venue_order_id
+                       ORDER BY COALESCE(local_sequence, 0) DESC,
+                                COALESCE(observed_at, '') DESC,
+                                COALESCE(ingested_at, '') DESC,
+                                fact_id DESC
+                   ) AS rn
+              FROM venue_order_facts
+        )
+        SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
+               vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
+               vc.updated_at, {pc_select},
+               lof.state AS venue_state, lof.remaining_size, lof.matched_size,
+               lof.observed_at AS venue_observed_at
+          FROM venue_commands vc
+          JOIN latest_order_facts lof
+            ON lof.venue_order_id = vc.venue_order_id
+           AND lof.rn = 1
+          {pc_join}
+         WHERE upper(COALESCE(vc.intent_kind, '')) = 'ENTRY'
+           AND vc.venue_order_id IS NOT NULL
+           AND trim(vc.venue_order_id) != ''
+           AND upper(COALESCE(vc.state, '')) IN ({",".join("?" for _ in _TERMINAL_ENTRY_COMMAND_STATES)})
+           AND upper(COALESCE(lof.state, '')) IN ({",".join("?" for _ in _NONTERMINAL_VENUE_ORDER_STATES)})
+         ORDER BY vc.updated_at DESC, vc.created_at DESC, vc.command_id
+        """,
+        tuple(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        + tuple(sorted(_NONTERMINAL_VENUE_ORDER_STATES)),
+    ).fetchall()
+
+    by_command_state: dict[str, int] = {}
+    by_venue_state: dict[str, int] = {}
+    by_position_phase: dict[str, int] = {}
+    orders: list[dict] = []
+    for row in rows:
+        command_state = str(row["command_state"] or "UNKNOWN").upper()
+        venue_state = str(row["venue_state"] or "UNKNOWN").upper()
+        phase = str(row["phase"] or "unknown")
+        by_command_state[command_state] = by_command_state.get(command_state, 0) + 1
+        by_venue_state[venue_state] = by_venue_state.get(venue_state, 0) + 1
+        by_position_phase[phase] = by_position_phase.get(phase, 0) + 1
+        orders.append(
+            {
+                "command_id": str(row["command_id"] or ""),
+                "venue_order_id": str(row["venue_order_id"] or ""),
+                "position_id": str(row["position_id"] or ""),
+                "city": str(row["city"] or ""),
+                "target_date": str(row["target_date"] or ""),
+                "strategy_key": str(row["strategy_key"] or "unclassified"),
+                "phase": phase,
+                "order_status": str(row["order_status"] or ""),
+                "chain_state": str(row["chain_state"] or ""),
+                "command_state": command_state,
+                "venue_state": venue_state,
+                "side": str(row["side"] or ""),
+                "submitted_price": _float_or_none(row["submitted_price"]),
+                "submitted_size": _float_or_none(row["submitted_size"]),
+                "remaining_size": _float_or_none(row["remaining_size"]),
+                "matched_size": _float_or_none(row["matched_size"]),
+                "updated_at": str(row["updated_at"] or ""),
+                "venue_observed_at": str(row["venue_observed_at"] or ""),
+            }
+        )
+
+    return {
+        **empty,
+        "status": "ok",
+        "count": len(orders),
+        "by_command_state": by_command_state,
+        "by_venue_state": by_venue_state,
+        "by_position_phase": by_position_phase,
         "orders": orders,
     }
 
@@ -1377,11 +1517,15 @@ def write_status(cycle_summary: dict = None) -> None:
         recommended_controls_not_applied.append("review_strategy_gates")
     conn = None
     current_open_entry_orders = _query_current_open_entry_orders(None)
+    terminal_command_venue_fact_conflicts = _terminal_entry_command_conflict_empty()
     try:
         conn = get_trade_connection_with_world()
         position_view = query_position_current_status_view(conn)
         strategy_health = query_strategy_health_snapshot(conn, now=generated_at)
         current_open_entry_orders = _query_current_open_entry_orders(conn)
+        terminal_command_venue_fact_conflicts = (
+            _query_terminal_entry_command_venue_fact_conflicts(conn)
+        )
     except Exception:
         position_view = {
             "status": "query_error",
@@ -1402,6 +1546,10 @@ def write_status(cycle_summary: dict = None) -> None:
         }
         current_open_entry_orders = {
             **current_open_entry_orders,
+            "status": "query_error",
+        }
+        terminal_command_venue_fact_conflicts = {
+            **terminal_command_venue_fact_conflicts,
             "status": "query_error",
         }
 
@@ -1629,11 +1777,15 @@ def write_status(cycle_summary: dict = None) -> None:
         if not isinstance(execution_summary, dict):
             execution_summary = {}
         execution_summary["current_open_entry_orders"] = current_open_entry_orders
+        execution_summary["terminal_command_venue_fact_conflicts"] = (
+            terminal_command_venue_fact_conflicts
+        )
         status["execution"] = execution_summary
     except Exception:
         status["execution"] = {
             "error": "execution_summary_unavailable",
             "current_open_entry_orders": current_open_entry_orders,
+            "terminal_command_venue_fact_conflicts": terminal_command_venue_fact_conflicts,
         }
 
     try:
@@ -1703,6 +1855,20 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("cycle_failed")
     if status.get("execution", {}).get("error"):
         consistency_issues.append("execution_summary_unavailable")
+    terminal_command_conflicts = (
+        (status.get("execution", {}) or {}).get("terminal_command_venue_fact_conflicts", {})
+        if isinstance(status.get("execution"), dict)
+        else {}
+    )
+    if (
+        isinstance(terminal_command_conflicts, dict)
+        and str(terminal_command_conflicts.get("status") or "") == "ok"
+        and int(terminal_command_conflicts.get("count", 0) or 0) > 0
+    ):
+        consistency_issues.append(
+            "terminal_entry_command_venue_fact_conflicts:"
+            f"{int(terminal_command_conflicts.get('count', 0) or 0)}"
+        )
     if status.get("learning", {}).get("error"):
         consistency_issues.append("learning_summary_unavailable")
     calibration_serving_status = str((status.get("calibration_serving", {}) or {}).get("status") or "")
