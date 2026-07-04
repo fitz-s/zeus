@@ -39,6 +39,7 @@ _CITY = "Shanghai"
 _TARGET_DATE = "2026-06-07"
 _METRIC = "high"
 _BASELINE_RUN = "b0-run"
+_OPENMETEO_RUN = "om9-run"
 
 
 def _seed() -> dict[str, object]:
@@ -47,6 +48,7 @@ def _seed() -> dict[str, object]:
         "target_date": _TARGET_DATE,
         "temperature_metric": _METRIC,
         "baseline_source_run_id": _BASELINE_RUN,
+        "openmeteo_source_run_id": _OPENMETEO_RUN,
     }
 
 
@@ -87,7 +89,7 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
             q_lcb_json,
             None if q_lcb_json is None else json.dumps({"cold": 0.3, "warm": 0.9}),
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-            json.dumps({"baseline_b0": _BASELINE_RUN}),
+            json.dumps({"baseline_b0": _BASELINE_RUN, "openmeteo_ifs9_anchor": _OPENMETEO_RUN}),
                 json.dumps({"city": _CITY, "q_lcb_basis": "fused_center_bootstrap_p05"}),
             "live",
             0,
@@ -115,7 +117,12 @@ def _insert_readiness(db_path: str, *, expires_at: datetime) -> None:
             _STRATEGY_KEY,
             expires_at.isoformat(),
             json.dumps(
-                {"dependencies": [{"role": "baseline_b0", "source_run_id": _BASELINE_RUN}]}
+                {
+                    "dependencies": [
+                        {"role": "baseline_b0", "source_run_id": _BASELINE_RUN},
+                        {"role": "openmeteo_ifs9_anchor", "source_run_id": _OPENMETEO_RUN},
+                    ]
+                }
             ),
             json.dumps(
                 {"city": _CITY, "target_date": _TARGET_DATE, "temperature_metric": _METRIC}

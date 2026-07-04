@@ -200,6 +200,7 @@ def test_bayes_precision_fusion_uses_downloaded_artifact_cycle_when_probe_unreso
         posterior_count=0,
         readiness_count=0,
         openmeteo_manifest_count=1,
+        fusion_current_value_count=1,
     )
     monkeypatch.setattr(
         plan_mod,
@@ -212,6 +213,7 @@ def test_bayes_precision_fusion_uses_downloaded_artifact_cycle_when_probe_unreso
             missing_coverage_count=1,
             can_seed_count=1,
             missing_openmeteo_manifest_count=0,
+            missing_fusion_current_values_count=0,
             day0_observed_extreme_required_count=0,
             rows=(row,),
         ),
