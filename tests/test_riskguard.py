@@ -1902,6 +1902,354 @@ class TestRiskGuardTrailingLossSemantics:
         assert details["daily_loss_reference"]["checked_at"] == trusted_checked_at
 
 
+def _patch_riskguard_bankroll(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.runtime import bankroll_provider as _bp
+
+    monkeypatch.setattr(
+        _bp,
+        "current",
+        lambda **_kw: _bp.BankrollOfRecord(
+            value_usd=211.37,
+            fetched_at="2026-04-01T00:00:00+00:00",
+            source="polymarket_wallet",
+            authority="canonical",
+            staleness_seconds=0.0,
+            cached=False,
+        ),
+    )
+
+
+class TestRiskGuardOrangeLocalization:
+    """ORANGE-localization coverage (live incident 2026-07-04): a portfolio
+    Brier ORANGE breach fully attributable to a durably-gated, canonical
+    strategy may localize to GREEN admission instead of freezing every
+    strategy — but ONLY when all three safety preconditions hold: clean
+    attribution (no unclassified rows), a read-after-write CONFIRMED active
+    durable gate per degraded strategy, and a residual (non-gated) portfolio
+    that itself recomputes to GREEN. RED never localizes.
+
+    Test data: 45 opening_inertia rows at p=0.58/outcome=0 (per-row squared
+    error 0.3364, individually ORANGE) + 5 center_buy rows at p=0.80/outcome=1
+    (per-row squared error 0.04, individually GREEN) pool to a portfolio Brier
+    of ~0.3068 (ORANGE); excluding the gated opening_inertia rows leaves just
+    the clean center_buy rows at 0.04 (GREEN) — mirroring the live incident's
+    opening_inertia trailing-30d Brier 0.322 freezing healthy center_buy.
+    """
+
+    def _orange_rows(self, *, unclassified_count: int = 0) -> list[dict]:
+        # RISKGUARD_SETTLEMENT_LIMIT caps the learning-ready sample at 50, so
+        # keep the total at 45 (degraded pool, minus any unclassified_count
+        # carved out of it) + 5 (clean) == 50 — otherwise trailing rows appended
+        # past the limit are silently dropped from the Brier sample.
+        classified_degraded = 45 - unclassified_count
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.58,
+                outcome=0,
+            )
+            for i in range(classified_degraded)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ] + [
+            _settlement_row(
+                trade_id=f"unclassified-{i}",
+                strategy="legacy_unattributed",
+                p_posterior=0.58,
+                outcome=0,
+            )
+            for i in range(unclassified_count)
+        ]
+        return rows
+
+    def test_orange_localizes_to_green_when_clean_attribution_and_gate_confirmed_and_residual_green(
+        self, monkeypatch, tmp_path,
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        gate_row = get_connection(zeus_db).execute(
+            """
+            SELECT strategy_key, status
+            FROM risk_actions
+            WHERE action_id = 'riskguard:gate:opening_inertia'
+            """
+        ).fetchone()
+
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert details["portfolio_brier_level"] == "ORANGE"
+        assert details["brier_level"] == "GREEN"
+        assert details["brier_all_strategies_level"] == "ORANGE"
+        assert details["brier_active_portfolio_level"] == "GREEN"
+        assert details["localized_orange_quarantine"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_orange_quarantine"
+        assert details["brier_strategy_localization"]["gated_strategies"] == ["opening_inertia"]
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
+        assert dict(gate_row) == {"strategy_key": "opening_inertia", "status": "active"}
+
+    def test_orange_stays_global_when_unclassified_rows_present(self, monkeypatch, tmp_path):
+        """Live-incident regression pin: unclassified_count>0 must NOT localize,
+        even though the classified portion is cleanly attributable and gated."""
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows(unclassified_count=3)
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert details["portfolio_brier_level"] == "ORANGE"
+        assert details["brier_level"] == "ORANGE"
+        assert details["brier_active_portfolio_level"] == "ORANGE"
+        assert details["localized_orange_quarantine"] is False
+        assert details["brier_strategy_localization"]["status"] == "not_localized"
+        assert details["brier_strategy_breakdown"]["unclassified_count"] == 3
+
+    def test_orange_stays_global_when_durable_gate_write_is_skipped(self, monkeypatch, tmp_path):
+        """Condition #2 failure mode A: the write itself reports non-emitted
+        (e.g. lock/contention) — ORANGE localization is the SAFETY
+        PRECONDITION, unlike YELLOW's lock-tolerant auxiliary bookkeeping."""
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+        monkeypatch.setattr(
+            riskguard_module,
+            "_sync_riskguard_strategy_gate_actions",
+            lambda *a, **k: {"status": "skipped_dependency_lock", "emitted_count": 0, "expired_count": 0},
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert details["brier_level"] == "ORANGE"
+        assert details["localized_orange_quarantine"] is False
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_orange"
+        )
+        assert details["brier_strategy_localization"]["durable_risk_action_status"] == "skipped_dependency_lock"
+        assert details["durable_risk_action_emission_status"] == "skipped_dependency_lock"
+
+    def test_orange_stays_global_when_residual_portfolio_is_not_green(self, monkeypatch, tmp_path):
+        """Condition #3 failure mode. Note: with clean per-strategy attribution
+        (condition #1) and ALL degraded strategies durably gated (condition
+        #2), the residual portfolio is mathematically bounded GREEN — a
+        weighted mean of individually-GREEN strategy scores cannot itself
+        exceed the yellow threshold. So this precondition is exercised via a
+        targeted monkeypatch of the isolated `_residual_active_portfolio_brier_level`
+        helper (unit-tested in isolation from the data-shape constraint) to
+        verify the orchestration keeps global ORANGE when the residual verdict
+        is NOT GREEN, regardless of how that residual was computed."""
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+        monkeypatch.setattr(
+            riskguard_module,
+            "_residual_active_portfolio_brier_level",
+            lambda *a, **k: (RiskLevel.ORANGE, 0.31, 10),
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert details["brier_level"] == "ORANGE"
+        assert details["localized_orange_quarantine"] is False
+        assert details["brier_strategy_localization"]["status"] == "orange_residual_portfolio_not_green"
+        assert details["brier_strategy_localization"]["residual_brier_level"] == "ORANGE"
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
+
+    def test_red_never_localizes_even_with_confirmed_durable_gate(self, monkeypatch, tmp_path):
+        """RED stays global fail-closed unconditionally — even when a durable
+        gate for the offending strategy is ALREADY active going into the tick."""
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.95,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        conn = get_connection(zeus_db)
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:gate:opening_inertia",
+            strategy_key="opening_inertia",
+            action_type="gate",
+            value="true",
+            issued_at="2026-07-03T00:00:00+00:00",
+            effective_until=None,
+            precedence=50,
+            status="active",
+        )
+        conn.commit()
+        conn.close()
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.RED
+        assert risk_row["level"] == RiskLevel.RED.value
+        assert details["portfolio_brier_level"] == "RED"
+        assert details["brier_level"] == "RED"
+        assert details["brier_all_strategies_level"] == "RED"
+        assert details["brier_active_portfolio_level"] == "RED"
+        assert details["localized_orange_quarantine"] is False
+        assert details["brier_strategy_localization"]["status"] == "not_localized"
+
+    def test_orange_stays_global_when_read_after_write_confirmation_finds_no_gate_row(
+        self, monkeypatch, tmp_path,
+    ):
+        """Condition #2 failure mode B: the write CLAIMS emission ("emitted")
+        but the read-after-write confirmation finds no active gate row for the
+        degraded strategy — must NOT be trusted, unlike YELLOW's write-status-only
+        check."""
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+        # The write CLAIMS success but performs no actual INSERT — simulating a
+        # write that lies about emission (or writes the wrong row/strategy_key).
+        monkeypatch.setattr(
+            riskguard_module,
+            "_sync_riskguard_strategy_gate_actions",
+            lambda *a, **k: {"status": "emitted", "emitted_count": 1, "expired_count": 0},
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        gate_row = get_connection(zeus_db).execute(
+            "SELECT 1 FROM risk_actions WHERE action_id = 'riskguard:gate:opening_inertia'"
+        ).fetchone()
+
+        assert gate_row is None
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert details["brier_level"] == "ORANGE"
+        assert details["localized_orange_quarantine"] is False
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_orange"
+        )
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": False}
+        assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
+
+
 class TestStrategyPolicyResolver:
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)

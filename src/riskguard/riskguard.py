@@ -1278,6 +1278,67 @@ def _sync_riskguard_strategy_gate_actions(
     }
 
 
+def _confirm_active_durable_strategy_gates(
+    conn: sqlite3.Connection,
+    strategies: list[str],
+) -> dict[str, bool]:
+    """Read-after-write confirmation that each strategy holds an ACTIVE gate.
+
+    ORANGE localization (unlike the pre-existing YELLOW localization) treats
+    the durable ``risk_actions`` gate as a SAFETY PRECONDITION rather than
+    lock-tolerant auxiliary bookkeeping: a write that CLAIMS emission but did
+    not actually land an active row for a degraded strategy must NOT be
+    trusted. This queries the SAME connection the write used (uncommitted
+    writes are visible to later reads on that same connection), so this is a
+    true same-cycle read-after-write check, not a check against stale/committed
+    state from a prior tick.
+    """
+    if not strategies:
+        return {}
+    if not _table_exists(conn, "risk_actions"):
+        return {strategy: False for strategy in strategies}
+    confirmed: dict[str, bool] = {}
+    for strategy in strategies:
+        row = conn.execute(
+            """
+            SELECT 1 FROM risk_actions
+            WHERE source = 'riskguard'
+              AND action_type = 'gate'
+              AND status = 'active'
+              AND strategy_key = ?
+            LIMIT 1
+            """,
+            (strategy,),
+        ).fetchone()
+        confirmed[strategy] = row is not None
+    return confirmed
+
+
+def _residual_active_portfolio_brier_level(
+    brier_metric_rows: list[dict],
+    thresholds: dict,
+    excluded_strategies: set[str],
+) -> tuple[RiskLevel, float, int]:
+    """Recompute portfolio Brier EXCLUDING durably-gated strategies' rows.
+
+    This is the ORANGE-localization residual check (condition #3): the
+    strategies already quarantined behind a confirmed durable gate are removed
+    from the sample, and the REMAINING ("active") portfolio must itself land
+    GREEN before admission may be relaxed from the global ORANGE. An empty
+    residual sample (no remaining rows) is treated as GREEN, matching the
+    existing convention that an empty Brier sample is not itself a breach.
+    """
+    residual_rows = [
+        row for row in brier_metric_rows
+        if str(row.get("strategy") or "unclassified") not in excluded_strategies
+    ]
+    residual_p = [float(row["p_posterior"]) for row in residual_rows]
+    residual_o = [int(row["outcome"]) for row in residual_rows]
+    residual_score = brier_score(residual_p, residual_o) if residual_p else 0.0
+    residual_level = evaluate_brier(residual_score, thresholds) if residual_p else RiskLevel.GREEN
+    return residual_level, residual_score, len(residual_p)
+
+
 def _refresh_riskguard_auxiliary_bookkeeping(
     zeus_conn: sqlite3.Connection,
     *,
@@ -1825,16 +1886,13 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
-        if (
-            portfolio_brier_level == RiskLevel.YELLOW
-            and isinstance(degraded_brier_strategies, dict)
-            and degraded_brier_strategies
+        clean_brier_attribution = (
+            isinstance(degraded_brier_strategies, dict)
+            and bool(degraded_brier_strategies)
             and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
-        ):
-            brier_strategy_localization = {
-                "status": "pending_durable_strategy_gate",
-                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
-            }
+        )
+
+        def _append_brier_degraded_gate_reasons() -> None:
             for strategy, payload in sorted(degraded_brier_strategies.items()):
                 if not isinstance(payload, dict):
                     continue
@@ -1849,6 +1907,27 @@ def _tick_once() -> RiskLevel:
                         ")"
                     ),
                 )
+
+        if portfolio_brier_level == RiskLevel.YELLOW and clean_brier_attribution:
+            brier_strategy_localization = {
+                "status": "pending_durable_strategy_gate",
+                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+            }
+            _append_brier_degraded_gate_reasons()
+        elif portfolio_brier_level == RiskLevel.ORANGE and clean_brier_attribution:
+            # ORANGE localization (live incident 2026-07-04, opening_inertia
+            # trailing-30d Brier 0.322 froze healthy strategies for ~30 trailing
+            # days). Unlike YELLOW, ORANGE localization additionally requires
+            # (checked after the durable bookkeeping write below): a
+            # read-after-write CONFIRMED active gate per degraded strategy, and
+            # the residual (non-gated) portfolio itself recomputing to GREEN.
+            # Until both are confirmed this stays "pending" and the level below
+            # remains the global portfolio_brier_level (fail closed).
+            brier_strategy_localization = {
+                "status": "pending_durable_strategy_gate_orange",
+                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+            }
+            _append_brier_degraded_gate_reasons()
         elif portfolio_brier_level != RiskLevel.GREEN:
             brier_strategy_localization = {
                 "status": "not_localized",
@@ -1928,6 +2007,51 @@ def _tick_once() -> RiskLevel:
                     "status": "durable_strategy_gate_unavailable_global_yellow",
                     "durable_risk_action_status": durable_action_status.get("status"),
                 }
+        elif brier_strategy_localization.get("status") == "pending_durable_strategy_gate_orange":
+            orange_gated_strategies = list(brier_strategy_localization.get("gated_strategies", []))
+            if durable_action_status.get("status") == "emitted":
+                gate_confirmation = _confirm_active_durable_strategy_gates(zeus_conn, orange_gated_strategies)
+                all_gates_confirmed = bool(orange_gated_strategies) and all(gate_confirmation.values())
+            else:
+                gate_confirmation = {strategy: False for strategy in orange_gated_strategies}
+                all_gates_confirmed = False
+
+            if all_gates_confirmed:
+                residual_level, residual_score, residual_sample_size = _residual_active_portfolio_brier_level(
+                    brier_metric_rows, thresholds, set(orange_gated_strategies),
+                )
+                if residual_level == RiskLevel.GREEN:
+                    brier_level = RiskLevel.GREEN
+                    brier_strategy_localization = {
+                        **brier_strategy_localization,
+                        "status": "localized_orange_quarantine",
+                        "durable_risk_action_status": durable_action_status.get("status"),
+                        "gate_confirmation": gate_confirmation,
+                        "residual_brier_level": residual_level.value,
+                        "residual_brier_score": round(float(residual_score), 6),
+                        "residual_sample_size": residual_sample_size,
+                    }
+                else:
+                    brier_level = portfolio_brier_level
+                    brier_strategy_localization = {
+                        **brier_strategy_localization,
+                        "status": "orange_residual_portfolio_not_green",
+                        "durable_risk_action_status": durable_action_status.get("status"),
+                        "gate_confirmation": gate_confirmation,
+                        "residual_brier_level": residual_level.value,
+                        "residual_brier_score": round(float(residual_score), 6),
+                        "residual_sample_size": residual_sample_size,
+                    }
+            else:
+                brier_level = portfolio_brier_level
+                brier_strategy_localization = {
+                    **brier_strategy_localization,
+                    "status": "durable_strategy_gate_unconfirmed_global_orange",
+                    "durable_risk_action_status": durable_action_status.get("status"),
+                    "gate_confirmation": gate_confirmation,
+                }
+
+        localized_orange_quarantine = brier_strategy_localization.get("status") == "localized_orange_quarantine"
 
         total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
         total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
@@ -2013,6 +2137,16 @@ def _tick_once() -> RiskLevel:
             json.dumps({
                 "brier_level": brier_level.value,
                 "portfolio_brier_level": portfolio_brier_level.value,
+                # ORANGE-localization audit surface (2026-07-04): the raw,
+                # unfiltered portfolio view (all strategies pooled) vs. the
+                # view that actually DRIVES admission after any localization
+                # (YELLOW-to-durable-gate or ORANGE-quarantine) is applied.
+                # Kept as an explicit alias of portfolio_brier_level/brier_level
+                # so downstream consumers see a coherent, self-describing pair
+                # regardless of which localization branch (if any) fired.
+                "brier_all_strategies_level": portfolio_brier_level.value,
+                "brier_active_portfolio_level": brier_level.value,
+                "localized_orange_quarantine": localized_orange_quarantine,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
                 "settlement_quality_level": settlement_quality_level.value,
