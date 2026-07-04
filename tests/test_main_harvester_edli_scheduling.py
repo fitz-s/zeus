@@ -197,3 +197,54 @@ def test_cascade_contract_requires_harvester_producer():
         "harvester drives _settle_positions state transitions; mode must not be "
         "liveness_only (that mode forbids state-transition helpers)."
     )
+
+
+def test_p4_harvester_cycle_raises_when_resolver_reports_errors(monkeypatch):
+    """Resolver error counts must become scheduler-visible failures.
+
+    The P4 daemon wrapper records exceptions to scheduler_jobs_health. If the
+    harvester body only logs ``{"errors": 1}``, live health says OK while
+    settlement/redeem production is broken.
+    """
+    import src.execution.post_trade_capital as p4
+
+    class _Lock:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Conn:
+        def close(self):
+            pass
+
+    resolver_mod = types.SimpleNamespace(
+        resolve_pnl_for_settled_markets=lambda _trade, _forecasts: {
+            "status": "ok",
+            "positions_settled": 0,
+            "decision_log_rows_written": 0,
+            "errors": 1,
+        }
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.data.dual_run_lock",
+        types.SimpleNamespace(acquire_lock=lambda _name: _Lock()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.state.db",
+        types.SimpleNamespace(
+            get_trade_connection=lambda write_class=None: _Conn(),
+            get_forecasts_connection=lambda write_class=None: _Conn(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.execution.harvester_pnl_resolver",
+        resolver_mod,
+    )
+
+    with pytest.raises(RuntimeError, match="HARVESTER_PNL_RESOLVER_FAILED"):
+        p4._harvester_cycle()
