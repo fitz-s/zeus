@@ -386,6 +386,28 @@ state_machines:
     invariant_tests:
       - tests/execution/test_batch_order_submission.py
       - tests/venue/test_batch_submit.py
+  operator_repair_evidence_label:
+    owner: scripts/repair_review_required_no_venue_exposure.py
+    description: >
+      Evidence/diagnostic labels introduced by the 2026-07-04 operator repair
+      and observability lane. Not command lifecycle states:
+      EXTERNALLY_REDEEMED_ZERO_PAYOUT is a chain_truth_resolution label the
+      release gate (scripts/check_live_release_gate.py) accepts as proof that a
+      redeem-review command's market settled externally with zero payout;
+      CLOSED_MARKET_UNKNOWN is an existing venue error-code literal matched by
+      the repair script's candidate filter (src/state/venue_command_repo.py
+      transition table already routes it to SUBMIT_UNKNOWN_SIDE_EFFECT);
+      VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT is a healthcheck issue label
+      (scripts/healthcheck.py) for a live venue_commands table missing
+      SCH-W1.2 columns. None are written to venue_commands.state.
+    states:
+      - EXTERNALLY_REDEEMED_ZERO_PAYOUT
+      - CLOSED_MARKET_UNKNOWN
+      - VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT
+    invariant_tests:
+      - tests/test_repair_review_required_no_venue_exposure.py
+      - tests/test_live_release_gate.py
+      - tests/test_healthcheck.py
   live_runtime_config:
     owner: src/strategy/family_exclusive_dedup.py
     description: >
