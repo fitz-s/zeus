@@ -716,6 +716,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
+        "scripts/drain_settlement_quarantine.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes (authority/settlement_value/winning_bin/settlement_unit/provenance_json) only with --apply, atomic SAVEPOINT, never fetches network (zeus-forecasts.db, P0a settlement-purity quarantine drain 2026-07-04)
         # --- BAYES_PRECISION_FUSION-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
         "scripts/backfill_bayes_precision_fusion_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts training-history rows (training_allowed=0) only; INSERT OR IGNORE idempotent; never writes posterior/readiness/orders; --db REQUIRED; B0 seed 2026-06-08
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
