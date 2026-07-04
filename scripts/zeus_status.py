@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-04; last_reused=2026-07-04
 # Purpose: heartbeat funnel CLI that answers '为什么没单' in 5 seconds — one invocation
 #   prints the full money path (daemons → events → blocks → surface → positions).
 # Reuse: READ-ONLY over the three live DBs (zeus-world.db / zeus_trades.db /
@@ -7,7 +7,7 @@
 #   (src/state/db_writer_lock.py). ISO-T cutoff law (probe_lib §law1) baked in: never
 #   compare T-format timestamps to datetime('now') — the 'T'>' ' lexicographic trap
 #   silently widens every window to "all of today".
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-07-04
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 #   + external-review mediums inventory 2026-06-12 (price-cache hole census, Task 3)
 """Zeus money-funnel heartbeat — one invocation, full picture, ~5 seconds.
@@ -85,6 +85,7 @@ DAEMON_HEARTBEATS = {
     "post-trade-capital": "daemon-heartbeat-post-trade-capital.json",
 }
 DAEMON_HEARTBEAT_STALE_SECONDS = 300.0
+OPEN_POSITION_PHASES = ("active", "day0_window", "pending_exit")
 
 # Substrate-transient vs honest-economics classification for BLOCKS.
 # Substring sets (case-insensitive) — display-only, not authority.
@@ -185,6 +186,16 @@ def classify_block(stage: str | None, reason: str | None) -> str:
     if any(t in stage_u for t in _ECONOMIC_TOKENS):
         return "economic"
     return "unknown"
+
+
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    """Return current table columns; empty if the table is missing."""
+
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})")}
+
+
+def select_column_or_null(columns: set[str], column: str) -> str:
+    return column if column in columns else f"NULL AS {column}"
 
 
 # --------------------------------------------------------------------------
@@ -692,14 +703,35 @@ def section_positions() -> dict:
     try:
         conn = ro(TRADES_DB)
         try:
+            columns = table_columns(conn, "position_current")
+            placeholders = ",".join("?" for _ in OPEN_POSITION_PHASES)
+            select_columns = (
+                "phase",
+                "city",
+                "target_date",
+                "bin_label",
+                "direction",
+                "shares",
+                "entry_price",
+                "last_monitor_prob",
+                "last_monitor_market_price",
+                "last_monitor_prob_is_fresh",
+                "last_monitor_market_price_is_fresh",
+                "chain_state",
+                "updated_at",
+            )
+            order_expr = "updated_at DESC" if "updated_at" in columns else "rowid DESC"
             rows = conn.execute(
-                "SELECT city, target_date, bin_label, direction, shares, entry_price, "
-                "       last_monitor_prob, last_monitor_market_price, updated_at "
-                "FROM position_current WHERE phase='active' "
-                "ORDER BY updated_at DESC LIMIT 12"
+                "SELECT "
+                + ", ".join(select_column_or_null(columns, column) for column in select_columns)
+                + f" FROM position_current "
+                  f"WHERE lower(coalesce(phase, '')) IN ({placeholders}) "
+                  f"ORDER BY {order_expr} LIMIT 12",
+                tuple(OPEN_POSITION_PHASES),
             ).fetchall()
             out["open"] = [
                 {
+                    "phase": r["phase"],
                     "city": r["city"],
                     "date": r["target_date"],
                     "bin": r["bin_label"],
@@ -707,13 +739,29 @@ def section_positions() -> dict:
                     "shares": r["shares"],
                     "entry": r["entry_price"],
                     "mon_prob": r["last_monitor_prob"],
+                    "mon_market_price": r["last_monitor_market_price"],
+                    "mon_prob_fresh": r["last_monitor_prob_is_fresh"],
+                    "mon_market_price_fresh": r["last_monitor_market_price_is_fresh"],
+                    "chain_state": r["chain_state"],
                     "mon_age": age_str(r["updated_at"]),
                 }
                 for r in rows
             ]
-            out["n_active"] = conn.execute(
-                "SELECT count(*) FROM position_current WHERE phase='active'"
-            ).fetchone()[0]
+            phase_counts = {
+                str(r["phase"] or ""): int(r["n"] or 0)
+                for r in conn.execute(
+                    f"""
+                    SELECT lower(coalesce(phase, '')) AS phase, count(*) AS n
+                      FROM position_current
+                     WHERE lower(coalesce(phase, '')) IN ({placeholders})
+                     GROUP BY lower(coalesce(phase, ''))
+                    """,
+                    tuple(OPEN_POSITION_PHASES),
+                ).fetchall()
+            }
+            out["n_open_by_phase"] = {phase: phase_counts.get(phase, 0) for phase in OPEN_POSITION_PHASES}
+            out["n_open"] = sum(out["n_open_by_phase"].values())
+            out["n_active"] = out["n_open_by_phase"].get("active", 0)
             # exit-fallback rate 24h: fraction of recently-settled with a fallback exit_reason.
             settled = conn.execute(
                 "SELECT exit_reason, count(*) FROM position_current "
@@ -939,15 +987,24 @@ def render_text(data: dict) -> str:
     if p.get("error"):
         L.append(f"POSITIONS ERR {p['error']}")
     else:
-        L.append(f"POSITIONS active={p.get('n_active', '?')}"
-                 + (f"  exit-fallback 24h={p['exit_fallback_24h']}"
-                    if "exit_fallback_24h" in p else ""))
+        by_phase = p.get("n_open_by_phase") or {}
+        phase_text = " ".join(
+            f"{phase}={by_phase.get(phase, 0)}" for phase in OPEN_POSITION_PHASES
+        )
+        L.append(
+            f"POSITIONS open={p.get('n_open', '?')}  {phase_text}"
+            + (
+                f"  exit-fallback 24h={p['exit_fallback_24h']}"
+                if "exit_fallback_24h" in p else ""
+            )
+        )
         for r in p.get("open", [])[:8]:
             mp = f"{r['mon_prob']:.2f}" if isinstance(r["mon_prob"], (int, float)) else "-"
             ep = f"{r['entry']:.2f}" if isinstance(r["entry"], (int, float)) else "-"
             sh = f"{r['shares']:.0f}" if isinstance(r["shares"], (int, float)) else "-"
+            phase = str(r.get("phase") or "?")
             L.append(
-                f"   {(r['city'] or '?'):<10} {(r['date'] or ''):<10} "
+                f"   {phase:<12} {(r['city'] or '?'):<10} {(r['date'] or ''):<10} "
                 f"{(r['bin'] or '')[:12]:<12} {(r['dir'] or ''):<4} "
                 f"sh={sh:<6} entry={ep:<5} mon={mp} ({r['mon_age']})"
             )
