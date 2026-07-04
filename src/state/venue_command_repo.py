@@ -292,52 +292,6 @@ def trade_fact_has_positive_fill_economics(row: Mapping[str, Any] | sqlite3.Row)
     ) and _positive_finite_decimal_text(_row_value(row, "fill_price"))
 
 
-def _prior_terminal_zero_remainder_order_fact_id(
-    conn: sqlite3.Connection,
-    *,
-    venue_order_id: str,
-    command_id: str,
-) -> int | None:
-    row = conn.execute(
-        """
-        SELECT fact_id, state, remaining_size
-          FROM venue_order_facts
-         WHERE venue_order_id = ?
-           AND command_id = ?
-           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
-         ORDER BY local_sequence DESC, fact_id DESC
-         LIMIT 1
-        """,
-        (venue_order_id, command_id),
-    ).fetchone()
-    if row is None or not _decimal_text_is_zero(row["remaining_size"]):
-        return None
-    return int(row["fact_id"])
-
-
-def _prior_terminal_zero_remainder_order_fact(
-    conn: sqlite3.Connection,
-    *,
-    venue_order_id: str,
-    command_id: str,
-) -> sqlite3.Row | None:
-    row = conn.execute(
-        """
-        SELECT fact_id, state, remaining_size, matched_size
-          FROM venue_order_facts
-         WHERE venue_order_id = ?
-           AND command_id = ?
-           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
-         ORDER BY local_sequence DESC, fact_id DESC
-         LIMIT 1
-        """,
-        (venue_order_id, command_id),
-    ).fetchone()
-    if row is None or not _decimal_text_is_zero(row["remaining_size"]):
-        return None
-    return row
-
-
 def _prior_terminal_no_resting_order_fact(
     conn: sqlite3.Connection,
     *,
