@@ -19,6 +19,7 @@ _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
+_ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS = healthcheck._venue_commands_schema_status
 _ORIGINAL_MONITOR_CADENCE_STATUS = healthcheck._monitor_cadence_status
 _ORIGINAL_EDLI_QUEUE_STATUS = healthcheck._edli_queue_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
@@ -110,6 +111,15 @@ def _mock_position_current_schema_status(monkeypatch):
     monkeypatch.setattr(
         healthcheck,
         "_position_current_schema_status",
+        lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_venue_commands_schema_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_venue_commands_schema_status",
         lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
     )
 
@@ -1197,6 +1207,51 @@ def test_position_current_schema_status_accepts_monitor_freshness_cols(
     monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
 
     result = _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["missing_columns"] == []
+
+
+def test_venue_commands_schema_status_rejects_missing_q_version(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT"
+    assert result["missing_columns"] == ["q_version"]
+
+
+def test_venue_commands_schema_status_accepts_q_version(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            q_version TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS()
 
     assert result["ok"] is True
     assert result["issue"] is None
@@ -2500,6 +2555,45 @@ def test_healthcheck_is_not_healthy_when_position_current_schema_drifts(
         result["position_current_schema_issue"]
         == "POSITION_CURRENT_MONITOR_FRESHNESS_SCHEMA_DRIFT"
     )
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_venue_commands_schema_drifts(
+    monkeypatch, tmp_path
+):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_venue_commands_schema_status",
+        lambda: {
+            "ok": False,
+            "path": str(tmp_path / "zeus_trades.db"),
+            "issue": "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT",
+            "missing_columns": ["q_version"],
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["venue_commands_schema_ok"] is False
+    assert result["venue_commands_schema_issue"] == "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

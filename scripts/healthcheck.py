@@ -50,6 +50,7 @@ POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
         "last_monitor_market_price_is_fresh",
     }
 )
+VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS = frozenset({"q_version"})
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
 # docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
@@ -678,6 +679,57 @@ def _position_current_schema_status() -> dict:
             "path": str(db_path),
             "issue": f"POSITION_CURRENT_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
             "missing_columns": sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS),
+        }
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _venue_commands_schema_status() -> dict:
+    """Ensure live submit journaling can persist the current command contract."""
+
+    db_path = _trade_db_path()
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": "VENUE_COMMANDS_SCHEMA_DB_MISSING",
+            "missing_columns": sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS),
+        }
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='venue_commands'"
+        ).fetchone()
+        if table is None:
+            return {
+                "ok": False,
+                "path": str(db_path),
+                "issue": "VENUE_COMMANDS_TABLE_MISSING",
+                "missing_columns": sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS),
+            }
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+        missing = sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS - columns)
+        return {
+            "ok": not missing,
+            "path": str(db_path),
+            "issue": "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT" if missing else None,
+            "missing_columns": missing,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": f"VENUE_COMMANDS_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
+            "missing_columns": sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS),
         }
     finally:
         try:
@@ -1748,6 +1800,15 @@ def check() -> dict:
             result["position_current_schema"].get("issue")
             or "POSITION_CURRENT_SCHEMA_DRIFT"
         )
+    result["venue_commands_schema"] = _venue_commands_schema_status()
+    result["venue_commands_schema_ok"] = bool(
+        result["venue_commands_schema"].get("ok", True)
+    )
+    if not result["venue_commands_schema_ok"]:
+        result["venue_commands_schema_issue"] = (
+            result["venue_commands_schema"].get("issue")
+            or "VENUE_COMMANDS_SCHEMA_DRIFT"
+        )
     result["monitor_cadence"] = _monitor_cadence_status()
     result["monitor_cadence_ok"] = bool(result["monitor_cadence"].get("ok", True))
     if not result["monitor_cadence_ok"]:
@@ -2055,6 +2116,7 @@ def check() -> dict:
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
+        and bool(result.get("venue_commands_schema_ok", True))
         and bool(result.get("monitor_cadence_ok", True))
         and bool(result.get("edli_queue_ok", True))
         and bool(result.get("forecast_posteriors_schema_ok", True))
