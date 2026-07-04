@@ -692,18 +692,49 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    code = (
-        "import json; "
-        "from src.state.db import get_trade_connection, init_schema_trade_only; "
-        "conn = get_trade_connection(write_class='live'); "
-        "init_schema_trade_only(conn); "
-        "conn.commit(); "
-        "conn.close(); "
-        "from src.execution.command_recovery import reconcile_unresolved_commands; "
-        "summary = reconcile_unresolved_commands(scope='restart_preflight'); "
-        "print(json.dumps(summary, sort_keys=True, default=str)); "
-        "raise SystemExit(1 if int(summary.get('errors') or 0) else 0)"
-    )
+    code = textwrap.dedent(
+        """
+        import json
+        from scripts.migrations import apply_migrations
+        from src.state.db import (
+            get_trade_connection,
+            get_world_connection,
+            init_schema_trade_only,
+        )
+
+        applied = {}
+
+        world_conn = get_world_connection(write_class='live')
+        try:
+            applied['world'] = apply_migrations(
+                world_conn,
+                target='202607_drop_world_collateral_unsettled_ghost',
+                db_identity='world',
+            )
+        finally:
+            world_conn.close()
+
+        trade_conn = get_trade_connection(write_class='live')
+        try:
+            init_schema_trade_only(trade_conn)
+            applied['trade'] = apply_migrations(
+                trade_conn,
+                target='202607_cas_reservation_ledger',
+                db_identity='trade',
+            )
+            init_schema_trade_only(trade_conn)
+            trade_conn.commit()
+        finally:
+            trade_conn.close()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(scope='restart_preflight')
+        summary['schema_migrations_applied'] = applied
+        print(json.dumps(summary, sort_keys=True, default=str))
+        raise SystemExit(1 if int(summary.get('errors') or 0) else 0)
+        """
+    ).strip()
     try:
         res = subprocess.run(
             [py, "-c", code],
@@ -869,30 +900,9 @@ def cmd_restart(args: argparse.Namespace) -> int:
         return 1
     print(pause_detail)
 
-    non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
-    for label in non_live_labels:
-        ok, detail = _launch_or_restart_label(label)
-        if ok:
-            print(detail)
-        else:
-            rc_all = 1
-            print(detail, file=sys.stderr)
-    if rc_all != 0:
-        if includes_live_trading and live_was_loaded_before:
-            print(
-                "live-trading was not stopped; fix prerequisite daemon restart blockers "
-                "before reloading it",
-                file=sys.stderr,
-            )
-        elif includes_live_trading:
-            print(
-                "live-trading left stopped because a prerequisite daemon failed to restart",
-                file=sys.stderr,
-            )
-        return rc_all
-
     expected_live_sha = ""
     launched_after: datetime | None = None
+    non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
     if includes_live_trading:
         expected_live_sha = head_sha(short=False)
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
@@ -901,6 +911,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
         else:
             print(detail, file=sys.stderr)
             return 1
+        for label in non_live_labels:
+            ok, detail = _stop_label(label)
+            if ok:
+                print(detail)
+            else:
+                print(detail, file=sys.stderr)
+                return 1
 
     recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
     if not recovery_ok:
@@ -910,6 +927,21 @@ def cmd_restart(args: argparse.Namespace) -> int:
             print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
         return 1
     print(recovery_detail)
+
+    for label in non_live_labels:
+        ok, detail = _launch_or_restart_label(label)
+        if ok:
+            print(detail)
+        else:
+            rc_all = 1
+            print(detail, file=sys.stderr)
+    if rc_all != 0:
+        if includes_live_trading:
+            print(
+                "live-trading left stopped because a prerequisite daemon failed to restart",
+                file=sys.stderr,
+            )
+        return rc_all
 
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:

@@ -108,10 +108,12 @@ class VenueOrderTruthReducer:
             matched_from_orders = max(matched_from_orders, matched)
             if state == "MATCHED" and _zero(remaining) and matched > 0:
                 terminal_fill = fact
-            elif state in _TERMINAL_STATES and _zero(remaining):
-                if matched > 0:
+            elif state in _TERMINAL_STATES:
+                if state == "MATCHED" and not _zero(remaining):
+                    pass
+                elif matched > 0:
                     terminal_partial = fact
-                else:
+                elif _zero(remaining):
                     terminal_zero_no_fill = fact
             elif state in _OPEN_STATES:
                 latest_open = fact

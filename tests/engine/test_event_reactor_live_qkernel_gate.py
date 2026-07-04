@@ -107,6 +107,45 @@ def _day0_qkernel_cert(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dict:
     return cert
 
 
+def _bound_day0_qkernel_route_proof(
+    *,
+    q_live: float,
+    q_lcb: float,
+    price: float,
+    trade_score: float,
+    false_edge_rate: float,
+) -> SimpleNamespace:
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        q_posterior=q_live,
+        q_lcb_5pct=q_lcb,
+        execution_price=SimpleNamespace(value=price),
+        trade_score=trade_score,
+        probability_authority="day0_absorbing_hard_fact",
+        missing_reason=None,
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        direction="buy_yes",
+        candidate=SimpleNamespace(
+            condition_id="condition-1",
+            bin=SimpleNamespace(low=10, high=10, unit="C", label="10C"),
+        ),
+    )
+    bin_id = era._candidate_bin_id(proof)
+    cert = _day0_qkernel_cert(q_live=q_live, q_lcb=q_lcb)
+    cert.update(
+        candidate_id=f"YES:{bin_id}:DIRECT_YES:{bin_id}@proof",
+        bin_id=bin_id,
+        route_id=f"DIRECT_YES:{bin_id}@proof",
+        cost=price,
+        edge_lcb=q_lcb - price,
+        false_edge_rate=false_edge_rate,
+        selection_guard_q_safe=q_lcb,
+    )
+    proof.qkernel_execution_economics = cert
+    return proof
+
+
 def _fake_qkernel_decision() -> SimpleNamespace:
     cost = SimpleNamespace(value=0.40)
     economics = SimpleNamespace(
@@ -1159,6 +1198,89 @@ def test_day0_absorbing_hard_fact_route_fdr_passes_before_qkernel_false_edge():
     assert fdr is not None
     assert fdr.passed is True
     assert fdr.selected_post_fdr == ("h7",)
+
+
+def test_day0_route_fdr_uses_qkernel_empirical_false_edge_when_present():
+    proof = _bound_day0_qkernel_route_proof(
+        q_live=0.8732666666666666,
+        q_lcb=0.6666666666666667,
+        price=0.41,
+        trade_score=0.23428719523121821,
+        false_edge_rate=0.05,
+    )
+
+    fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="Milan|2026-07-04|high",
+        all_hypothesis_ids=tuple(f"h{i}" for i in range(22)),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+    reason = _fdr_rejection_reason(
+        event_type="DAY0_EXTREME_UPDATED",
+        fdr=SimpleNamespace(attempted_hypotheses=22, selected_post_fdr=()),
+        selected_proof=proof,
+    )
+
+    assert fdr is not None
+    assert fdr.passed is True
+    assert fdr.selected_post_fdr == ("h7",)
+    assert "day0_false_edge_rate=0.050000" in reason
+    assert "day0_false_edge_source=qkernel_route_false_edge_rate" in reason
+
+
+def test_day0_route_fdr_ignores_unbound_qkernel_false_edge_rate():
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        q_posterior=0.8732666666666666,
+        q_lcb_5pct=0.6666666666666667,
+        execution_price=SimpleNamespace(value=0.41),
+        trade_score=0.23428719523121821,
+        probability_authority="day0_absorbing_hard_fact",
+        missing_reason=None,
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "false_edge_rate": 0.01,
+        },
+    )
+
+    fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="Milan|2026-07-04|high",
+        all_hypothesis_ids=tuple(f"h{i}" for i in range(22)),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+    reason = _fdr_rejection_reason(
+        event_type="DAY0_EXTREME_UPDATED",
+        fdr=SimpleNamespace(attempted_hypotheses=22, selected_post_fdr=()),
+        selected_proof=proof,
+    )
+
+    assert fdr is not None
+    assert fdr.passed is False
+    assert fdr.selected_post_fdr == ()
+    assert "day0_false_edge_rate=0.333333" in reason
+    assert "day0_false_edge_source=q_lcb_complement" in reason
+
+
+def test_day0_route_fdr_keeps_q_lcb_complement_when_qkernel_rate_is_weaker():
+    proof = _bound_day0_qkernel_route_proof(
+        q_live=1.0,
+        q_lcb=1.0,
+        price=0.63,
+        trade_score=0.348848,
+        false_edge_rate=0.95,
+    )
+
+    reason = _fdr_rejection_reason(
+        event_type="DAY0_EXTREME_UPDATED",
+        fdr=SimpleNamespace(attempted_hypotheses=22, selected_post_fdr=()),
+        selected_proof=proof,
+    )
+
+    assert "day0_false_edge_rate=0.000000" in reason
+    assert "day0_false_edge_source=q_lcb_complement" in reason
 
 
 def test_day0_pre_submit_payload_preserves_observation_authority_and_qkernel():

@@ -614,9 +614,26 @@ CREATE TABLE position_events (
 )
 """
 
+_STALE_WORLD_POSITION_CURRENT_DDL = """\
+CREATE TABLE position_current (
+    position_id TEXT PRIMARY KEY,
+    phase TEXT NOT NULL,
+    strategy_key TEXT CHECK(strategy_key IN ('settlement_capture','shoulder_sell','center_buy','opening_inertia')),
+    updated_at TEXT NOT NULL
+)
+"""
+
 _STALE_OPPORTUNITY_DDL = """\
 CREATE TABLE opportunity_fact (
     decision_id TEXT PRIMARY KEY,
+    recorded_at TEXT NOT NULL,
+    strategy_key TEXT CHECK(strategy_key IN ('settlement_capture','shoulder_sell','center_buy','opening_inertia'))
+)
+"""
+
+_STALE_OUTCOME_FACT_DDL = """\
+CREATE TABLE outcome_fact (
+    position_id TEXT PRIMARY KEY,
     recorded_at TEXT NOT NULL,
     strategy_key TEXT CHECK(strategy_key IN ('settlement_capture','shoulder_sell','center_buy','opening_inertia'))
 )
@@ -679,6 +696,62 @@ class TestF6StrategyKeyCheckMigration:
         count = conn.execute("SELECT COUNT(*) FROM opportunity_fact").fetchone()[0]
         assert count == 2
 
+    def test_migrate_world_removes_position_current_strategy_check_preserves_triggers(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_WORLD_POSITION_CURRENT_DDL)
+        conn.execute(
+            """CREATE TRIGGER pc_audit AFTER INSERT ON position_current
+               BEGIN SELECT 1; END"""
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (position_id, phase, strategy_key, updated_at)
+            VALUES (?,?,?,?)
+            """,
+            ("pos-1", "settled", "settlement_capture", "2026-05-22T00:00:00Z"),
+        )
+        conn.commit()
+
+        _migrate_world_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            """
+            INSERT INTO position_current (position_id, phase, strategy_key, updated_at)
+            VALUES (?,?,?,?)
+            """,
+            ("pos-2", "settled", "day0_nowcast_entry", "2026-05-22T01:00:00Z"),
+        )
+        conn.commit()
+
+        trg = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='pc_audit'"
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        assert trg is not None
+        assert count == 2
+
+    def test_migrate_world_removes_outcome_fact_strategy_check(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_OUTCOME_FACT_DDL)
+        conn.execute(
+            "INSERT INTO outcome_fact (position_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("pos-1", "2026-05-22T00:00:00Z", "opening_inertia"),
+        )
+        conn.commit()
+
+        _migrate_world_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            "INSERT INTO outcome_fact (position_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("pos-2", "2026-05-22T01:00:00Z", "forecast_qkernel_entry"),
+        )
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
+        assert count == 2
+
     def test_migrate_trade_removes_opportunity_fact_strategy_check(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.execute(_STALE_OPPORTUNITY_DDL)
@@ -698,6 +771,27 @@ class TestF6StrategyKeyCheckMigration:
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM opportunity_fact").fetchone()[0]
+        assert count == 2
+
+    def test_migrate_trade_removes_outcome_fact_strategy_check(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_OUTCOME_FACT_DDL)
+        conn.execute(
+            "INSERT INTO outcome_fact (position_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("pos-1", "2026-05-22T00:00:00Z", "opening_inertia"),
+        )
+        conn.commit()
+
+        _migrate_trade_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            "INSERT INTO outcome_fact (position_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("pos-2", "2026-05-22T01:00:00Z", "day0_nowcast_entry"),
+        )
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
         assert count == 2
 
     def test_architecture_kernel_opportunity_fact_accepts_day0_strategy_key(self) -> None:

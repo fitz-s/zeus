@@ -107,6 +107,9 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     # exact live DDL is now in _TRADE_CLASS_DDL, so init_schema_trade_only creates them.
     "collateral_ledger_snapshots",
     "collateral_reservations",
+    "collateral_unsettled_proceeds",
+    "ctf_conversion_command_events",
+    "ctf_conversion_commands",
     "decision_log",
     "exchange_reconcile_findings",
     "exit_mutex_holdings",

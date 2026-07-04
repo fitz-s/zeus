@@ -267,6 +267,67 @@ def test_append_order_fact_preserves_prior_terminal_zero_remainder(conn, termina
     ]
 
 
+def test_append_order_fact_preserves_prior_cancel_confirmed_partial_remainder(conn):
+    from src.state.venue_command_repo import append_order_fact
+
+    _insert(conn, command_id="cmd-cancelled-partial", size=25.07)
+
+    first_id = append_order_fact(
+        conn,
+        venue_order_id="ord-cancelled-partial",
+        command_id="cmd-cancelled-partial",
+        state="CANCEL_CONFIRMED",
+        remaining_size="15.07",
+        matched_size="10",
+        source="WS_USER",
+        observed_at="2026-07-02T13:47:22.683000+00:00",
+        raw_payload_hash="5" * 64,
+        raw_payload_json={
+            "status": "CANCELED",
+            "remaining_size": "15.07",
+            "matched_size": "10",
+        },
+    )
+
+    second_id = append_order_fact(
+        conn,
+        venue_order_id="ord-cancelled-partial",
+        command_id="cmd-cancelled-partial",
+        state="PARTIALLY_MATCHED",
+        remaining_size="15.07",
+        matched_size="10",
+        source="REST",
+        observed_at="2026-07-02T13:38:59.763701+00:00",
+        raw_payload_hash="6" * 64,
+        raw_payload_json={
+            "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+            "remaining_size": "15.07",
+            "matched_size": "10",
+        },
+    )
+
+    rows = conn.execute(
+        """
+        SELECT fact_id, state, remaining_size, matched_size, source
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+         ORDER BY local_sequence, fact_id
+        """,
+        ("ord-cancelled-partial",),
+    ).fetchall()
+
+    assert second_id == first_id
+    assert [dict(row) for row in rows] == [
+        {
+            "fact_id": first_id,
+            "state": "CANCEL_CONFIRMED",
+            "remaining_size": "15.07",
+            "matched_size": "10",
+            "source": "WS_USER",
+        }
+    ]
+
+
 def test_append_order_fact_terminal_preservation_is_command_scoped(conn):
     from src.state.venue_command_repo import append_order_fact
 

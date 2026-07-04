@@ -305,6 +305,7 @@ def _entry_command_has_terminal_no_fill_order_fact(
         SELECT state, matched_size
           FROM venue_order_facts
          WHERE command_id = ?
+           AND state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
          ORDER BY local_sequence DESC, observed_at DESC
          LIMIT 1
         """,
@@ -313,8 +314,6 @@ def _entry_command_has_terminal_no_fill_order_fact(
     if row is None:
         return False
     state = str(row["state"] if isinstance(row, sqlite3.Row) else row[0] or "").upper()
-    if state not in _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES:
-        return False
     matched_size = row["matched_size"] if isinstance(row, sqlite3.Row) else row[1]
     try:
         return Decimal(str(matched_size or "0")) == Decimal("0")

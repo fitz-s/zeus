@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-04; last_reused=2026-07-04
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-07-04
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -43,6 +43,7 @@ from src.control.heartbeat_supervisor import (
     write_heartbeat_keeper_status,
     _describe_heartbeat_exception,
 )
+import src.control.heartbeat_supervisor as heartbeat_supervisor_module
 from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
 import src.data.substrate_observer as substrate_observer
@@ -355,6 +356,57 @@ def test_install_dedicated_heartbeat_timeout_replaces_sdk_http_client(monkeypatc
         if installed is not old_client:
             installed.close()
         heartbeat_http_helpers._http_client = old_client
+
+
+def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monkeypatch):
+    """The heartbeat sidecar must not collapse transport failures into an opaque SDK string."""
+
+    import httpx
+    from py_clob_client_v2.exceptions import PolyApiException
+    from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+
+    monkeypatch.delenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", raising=False)
+    old_client = heartbeat_http_helpers._http_client
+    old_request = heartbeat_http_helpers.request
+    old_installed = getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", None)
+    old_diagnostic = heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED
+
+    class RaisingClient:
+        def request(self, **kwargs):
+            request = httpx.Request(kwargs["method"], kwargs["url"])
+            raise httpx.ConnectError("dns resolution failed", request=request)
+
+        def close(self):
+            pass
+
+    try:
+        if hasattr(heartbeat_http_helpers, "_zeus_request_cause_preserved"):
+            delattr(heartbeat_http_helpers, "_zeus_request_cause_preserved")
+        heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = False
+        install_dedicated_heartbeat_http_timeout(cadence_seconds=2)
+        assert heartbeat_supervisor_module.heartbeat_transport_diagnostics() == {
+            "request_cause_preserved": True
+        }
+        installed = heartbeat_http_helpers._http_client
+        installed.close()
+        heartbeat_http_helpers._http_client = RaisingClient()
+
+        with pytest.raises(PolyApiException) as raised:
+            heartbeat_http_helpers.request("https://clob.polymarket.com/v1/heartbeats", "POST")
+
+        assert isinstance(raised.value.__cause__, httpx.ConnectError)
+        described = _describe_heartbeat_exception(raised.value)
+        assert "Request exception: ConnectError" in described
+        assert "cause=ConnectError: dns resolution failed" in described
+    finally:
+        heartbeat_http_helpers.request = old_request
+        heartbeat_http_helpers._http_client = old_client
+        if old_installed is None:
+            with contextlib.suppress(AttributeError):
+                delattr(heartbeat_http_helpers, "_zeus_request_cause_preserved")
+        else:
+            heartbeat_http_helpers._zeus_request_cause_preserved = old_installed
+        heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = old_diagnostic
 
 
 def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
@@ -882,6 +934,10 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     payload = json.loads(status_path.read_text())
     assert payload["owner"] == "zeus-venue-heartbeat"
     assert payload["schema_version"] == 2
+    assert isinstance(
+        payload["transport_diagnostics"]["request_cause_preserved"],
+        bool,
+    )
     assert payload["health"] == "HEALTHY"
     assert payload["heartbeat_id"] == "keeper-A"
     assert payload["last_error"] is None

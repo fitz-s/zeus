@@ -297,6 +297,13 @@ def _harvester_cycle():
                 "errors": 1,
             }
     logger.info("Harvester: %s", result)
+    errors = int(result.get("errors") or 0) if isinstance(result, dict) else 1
+    status = str(result.get("status") or "") if isinstance(result, dict) else ""
+    if errors > 0 or status in {
+        "resolver_unavailable_fail_closed",
+        "settlement_outcomes_read_error",
+    }:
+        raise RuntimeError(f"HARVESTER_PNL_RESOLVER_FAILED:{result}")
 
 
 # ---------------------------------------------------------------------------

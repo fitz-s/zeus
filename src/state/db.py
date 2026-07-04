@@ -59,7 +59,6 @@ from src.state.ledger import (
     append_many_and_project,
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
-from src.state.collateral_ledger import init_collateral_schema
 from src.state.market_topology_repo import write_market_topology_state
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
@@ -2652,7 +2651,6 @@ def init_schema(
     """)
     _ensure_job_run_release_key_identity(conn)
     init_snapshot_schema(conn, include_latest=False)
-    init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
     # importing src.execution modules.  The execution module repeats the same
     # idempotent CREATE TABLE for direct use.
@@ -2910,6 +2908,7 @@ def init_schema(
         conn.execute("ALTER TABLE venue_commands ADD COLUMN snapshot_id TEXT;")
     except sqlite3.OperationalError:
         pass
+    _ensure_venue_commands_q_version_column(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_snapshot ON venue_commands(snapshot_id);")
 
     # B3cont: ALTER TABLE platt_models (bare) removed — table dropped.
@@ -4196,8 +4195,17 @@ def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
     conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
 
 
+def _ensure_venue_commands_q_version_column(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "venue_commands"):
+        return
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
+    if "q_version" in columns:
+        return
+    conn.execute("ALTER TABLE venue_commands ADD COLUMN q_version TEXT;")
+
+
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
-    """Remove stale hardcoded strategy_key CHECK from telemetry tables.
+    """Remove stale hardcoded strategy_key CHECK from world-class tables.
 
     Finding 6 (P2, 2026-05-22): probability_trace_fact and strategy_health had
     a hardcoded CHECK enumerating the 4 founding strategies. Day0_nowcast_entry
@@ -4206,7 +4214,15 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     Uses full table-swap so existing rows are preserved.
     """
     import re as _re  # noqa: F811
-    for tname in ("probability_trace_fact", "strategy_health", "opportunity_fact"):
+    for tname in (
+        "probability_trace_fact",
+        "strategy_health",
+        "opportunity_fact",
+        "execution_fact",
+        "outcome_fact",
+        "position_events",
+        "position_current",
+    ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
@@ -4215,6 +4231,10 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
         old_sql = str(row[0])
         if "'opening_inertia'" not in old_sql or "day0_nowcast_entry" in old_sql:
             continue  # Already migrated or no stale CHECK
+        triggers = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
         indexes = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
             (tname,),
@@ -4235,6 +4255,8 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
         finally:
             _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
+        for (trg_sql,) in triggers:
+            conn.execute(trg_sql)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
 
@@ -4591,7 +4613,13 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
     sqlite_master query+recreate.
     """
     import re as _re  # noqa: F811
-    for tname in ("position_events", "position_current", "execution_fact", "opportunity_fact"):
+    for tname in (
+        "position_events",
+        "position_current",
+        "execution_fact",
+        "opportunity_fact",
+        "outcome_fact",
+    ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
@@ -5850,6 +5878,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # this call migrates the live table instead of silently landing columns only
     # on the world-class ghost shell. Idempotent: skips columns that already exist.
     _ensure_position_current_authority_columns(conn)
+    _ensure_venue_commands_q_version_column(conn)
     _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and

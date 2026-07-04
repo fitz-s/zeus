@@ -556,6 +556,13 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     order_state_sql = (
         "EXISTS (SELECT 1 FROM venue_order_facts vof "
         "WHERE vof.command_id = vc.command_id "
+        "AND UPPER(COALESCE(vc.state, '')) NOT IN ("
+        "'CANCELLED','CANCELED','EXPIRED','REJECTED','SUBMIT_REJECTED','FILLED'"
+        ") "
+        "AND vof.local_sequence = ("
+        "SELECT MAX(vof2.local_sequence) FROM venue_order_facts vof2 "
+        "WHERE vof2.command_id = vof.command_id"
+        ") "
         f"AND UPPER(COALESCE(vof.state, '')) IN ({','.join('?' for _ in _TRADE_ORDER_BLOCKING_STATES)}))"
         if has_order_facts
         else "0"

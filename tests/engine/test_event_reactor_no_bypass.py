@@ -470,6 +470,26 @@ def _trade_conn_with_snapshot(
     from src.state.schema.family_rebalance_intents_schema import ensure_table as ensure_family_rebalance_intents_table
 
     ensure_family_rebalance_intents_table(conn)
+    # The EDLI selection exposure check fails closed when position_current is
+    # missing condition_id/direction (exposure ambiguity must not flatten live
+    # risk). An empty table with the required columns = provably zero exposure.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            condition_id TEXT,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
+            shares REAL,
+            chain_shares REAL,
+            size_usd REAL
+        )
+        """
+    )
     _depth_yes_no = depth_json if depth_json is not None else json.dumps(
         {
             "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": selected_bid, "size": "100"}]},

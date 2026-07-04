@@ -389,7 +389,14 @@ def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, targe
     metadata = manifest.product_metadata
     dates = metadata.get("target_dates")
     if isinstance(dates, list) and dates:
-        return target_date in {str(item).strip() for item in dates}
+        if target_date in {str(item).strip() for item in dates}:
+            return True
+        # Meta-stamped current-target artifacts are multi-day payloads even when
+        # their manifest retained the filename's start-date list. Let horizon
+        # admission decide, then _latest_manifest proves actual payload coverage.
+        if str(metadata.get("openmeteo_endpoint") or "") != "standard_api_meta_stamped":
+            return False
+        return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
     explicit = metadata.get("target_date")
     if explicit is not None and str(explicit).strip():
         if str(explicit).strip() == target_date:
@@ -413,7 +420,7 @@ def _manifest_horizon_allows_target_date(metadata: Mapping[str, object], *, targ
     endpoint = str(metadata.get("openmeteo_endpoint") or "")
     if artifact_class != "openmeteo_ecmwf_ifs9_anchor_current_targets":
         return False
-    if endpoint and endpoint != "single_runs_api":
+    if endpoint and endpoint not in {"single_runs_api", "standard_api_meta_stamped"}:
         return False
     start_raw = metadata.get("target_date")
     if start_raw is None or not str(start_raw).strip():

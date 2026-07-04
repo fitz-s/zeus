@@ -22,6 +22,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -563,6 +564,102 @@ def test_day0_observed_extreme_reseed_can_replace_moved_seed_file(tmp_path) -> N
     assert row["held_position"] == 1
     assert row["seed_file"] == str(new_seed)
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
+def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch redecision must not skip Day0 when canonical observed-extreme truth exists."""
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+
+    row = SimpleNamespace(
+        city="Amsterdam",
+        target_date="2026-07-04",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    plan = SimpleNamespace(status="OK", rows=(row,), reason_codes=())
+    target_cycle = datetime(2026, 7, 3, 12, tzinfo=UTC)
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    built: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._load_manifests",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: target_cycle)
+    monkeypatch.setattr(
+        cycle_advance,
+        "scope_needs_cycle_advance",
+        lambda *args, **kwargs: {
+            "needs_advance": True,
+            "consumed_cycle": "2026-07-03T00:00:00+00:00",
+            "target_cycle": target_cycle.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
+        lambda **kwargs: {
+            "day0_observed_extreme_c": 15.0,
+            "day0_observed_extreme_source": "durable_observation_instants",
+            "day0_observed_extreme_observation_time": "2026-07-03T22:00:00+00:00",
+            "day0_observed_extreme_sample_count": 1,
+            "day0_observed_extreme_unit": "C",
+        },
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        built.update(kwargs)
+        seed_dir.mkdir(exist_ok=True)
+        seed_file = seed_dir / "Amsterdam.2026-07-04.high.json"
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 7, 4, 1, tzinfo=UTC),
+        limit=5,
+    )
+
+    assert report["seeds_enqueued"] == 1
+    assert report["day0_skipped"] == 0
+    assert built["day0_observed_extreme_c"] == 15.0
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        marker = conn.execute(
+            """
+            SELECT seed_file, day0_observed_extreme_observation_time
+            FROM cycle_advance_enqueues
+            WHERE city='Amsterdam' AND target_date='2026-07-04' AND metric='high'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert marker is not None
+    assert marker["seed_file"]
+    assert marker["day0_observed_extreme_observation_time"] == "2026-07-03T22:00:00+00:00"
 
 
 def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:

@@ -2386,6 +2386,7 @@ def _valid_qkernel_execution_economics_payload(
     cert: Any,
     *,
     direction: str | None = None,
+    enforce_false_edge_alpha: bool = True,
 ) -> Mapping[str, Any] | None:
     if not isinstance(cert, Mapping):
         return None
@@ -2432,10 +2433,9 @@ def _valid_qkernel_execution_economics_payload(
         false_edge_rate = float(cert.get("false_edge_rate"))
     except (TypeError, ValueError):
         return None
-    if not (
-        math.isfinite(false_edge_rate)
-        and 0.0 < false_edge_rate <= _qkernel_max_false_edge_rate()
-    ):
+    if not (math.isfinite(false_edge_rate) and 0.0 < false_edge_rate <= 1.0):
+        return None
+    if enforce_false_edge_alpha and false_edge_rate > _qkernel_max_false_edge_rate():
         return None
     try:
         payoff_q_point = float(cert.get("payoff_q_point"))
@@ -4480,14 +4480,11 @@ def _qkernel_selected_route_fdr_proof(
     byte-for-byte responsible for legacy selections.
     """
 
-    cert = _qkernel_execution_economics(selected_proof)
+    cert = _qkernel_fdr_execution_economics(selected_proof)
     if cert is None:
         return None
-    try:
-        false_edge_rate = float(cert.get("false_edge_rate"))
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(false_edge_rate):
+    false_edge_rate = _qkernel_raw_false_edge_rate(cert)
+    if false_edge_rate is None:
         return None
     from src.events.money_path_adapters import FdrProof
     from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
@@ -4500,6 +4497,16 @@ def _qkernel_selected_route_fdr_proof(
         selected_post_fdr=(selected_hypothesis_id,) if passed else tuple(),
         passed=passed,
     )
+
+
+def _qkernel_raw_false_edge_rate(raw_cert: Mapping[str, Any]) -> float | None:
+    try:
+        false_edge_rate = float(raw_cert.get("false_edge_rate"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(false_edge_rate) and 0.0 <= false_edge_rate <= 1.0):
+        return None
+    return false_edge_rate
 
 
 def _day0_selected_route_fdr_proof(
@@ -4545,7 +4552,7 @@ def _day0_selected_route_fdr_proof(
         return _proof(False)
     if not (math.isfinite(q_lcb) and math.isfinite(price) and math.isfinite(trade_score)):
         return _proof(False)
-    false_edge_rate = max(0.0, 1.0 - q_lcb)
+    false_edge_rate, _false_edge_source = _day0_route_false_edge_rate(selected_proof, q_lcb)
 
     passed = (
         bool(getattr(selected_proof, "passed_prefilter", False))
@@ -4557,6 +4564,24 @@ def _day0_selected_route_fdr_proof(
         and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
     )
     return _proof(passed)
+
+
+def _day0_route_false_edge_rate(
+    selected_proof: "_CandidateProof",
+    q_lcb: float,
+) -> tuple[float, str]:
+    day0_bound = max(0.0, 1.0 - q_lcb)
+    cert = _qkernel_fdr_execution_economics(selected_proof)
+    if cert is None:
+        return day0_bound, "q_lcb_complement"
+    qkernel_false_edge = _qkernel_raw_false_edge_rate(cert)
+    if qkernel_false_edge is None:
+        return day0_bound, "q_lcb_complement"
+    return min(day0_bound, qkernel_false_edge), (
+        "qkernel_route_false_edge_rate"
+        if qkernel_false_edge <= day0_bound
+        else "q_lcb_complement"
+    )
 
 
 def _fdr_rejection_reason(
@@ -4603,9 +4628,17 @@ def _fdr_rejection_reason(
     if trade_score is not None:
         pieces.append(f"trade_score={trade_score:.6f}")
     if str(event_type or "") in _DAY0_LANE_EVENT_TYPES:
-        false_edge_rate = None if q_lcb is None else max(0.0, 1.0 - q_lcb)
+        false_edge_rate = None
+        false_edge_source = None
+        if q_lcb is not None:
+            false_edge_rate, false_edge_source = _day0_route_false_edge_rate(
+                selected_proof,
+                q_lcb,
+            )
         if false_edge_rate is not None:
             pieces.append(f"day0_false_edge_rate={false_edge_rate:.6f}")
+        if false_edge_source is not None:
+            pieces.append(f"day0_false_edge_source={false_edge_source}")
         pieces.append(
             "probability_authority="
             f"{str(getattr(selected_proof, 'probability_authority', '') or 'missing')}"
@@ -13029,16 +13062,39 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
     Missing or malformed certificates therefore return ``None`` and the caller
     must fail closed rather than fall back to legacy proof-qLCB sizing.
     """
+    return _qkernel_bound_execution_economics(proof, enforce_false_edge_alpha=True)
+
+
+def _qkernel_fdr_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
+    """Return a selected qkernel certificate for FDR accounting.
+
+    FDR needs the raw route false-edge rate even when it is above alpha so it can
+    emit an explicit failed qkernel proof.  It must still prove the cert belongs
+    to the selected route before bypassing the legacy family-BH path.
+    """
+    return _qkernel_bound_execution_economics(proof, enforce_false_edge_alpha=False)
+
+
+def _qkernel_bound_execution_economics(
+    proof: "_CandidateProof",
+    *,
+    enforce_false_edge_alpha: bool,
+) -> Mapping[str, Any] | None:
     if not _proof_uses_qkernel_spine(proof):
         return None
     cert = _valid_qkernel_execution_economics_payload(
         getattr(proof, "qkernel_execution_economics", None),
         direction=str(getattr(proof, "direction", "") or ""),
+        enforce_false_edge_alpha=enforce_false_edge_alpha,
     )
     if cert is None:
         return None
+    try:
+        selected_bin_id = _candidate_bin_id(proof)
+    except Exception:  # noqa: BLE001
+        return None
     bin_id = str(cert.get("bin_id") or "").strip()
-    if bin_id and bin_id != _candidate_bin_id(proof):
+    if bin_id and bin_id != selected_bin_id:
         return None
     route_id = str(cert.get("route_id") or "").strip()
     native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
@@ -17109,16 +17165,13 @@ def _family_existing_exposure_for_selection_by_bin_id(
     if held_position_conn is not None:
         try:
             columns = _position_current_columns(held_position_conn)
-            if "condition_id" not in columns:
-                try:
-                    row_count = held_position_conn.execute(
-                        "SELECT COUNT(*) FROM position_current"
-                    ).fetchone()
-                except Exception:
-                    return {}
-                if int(row_count[0] or 0) == 0:
-                    return {}
-                raise RuntimeError("position_current.condition_id missing")
+            required_columns = {"condition_id", "direction"}
+            missing_required = sorted(required_columns - columns)
+            if missing_required:
+                raise RuntimeError(
+                    "position_current selection exposure columns missing:"
+                    f"{','.join(missing_required)}"
+                )
             phase_sql, phase_params = _position_phase_or_positive_chain_clause(
                 columns,
                 _ENTRY_HELD_POSITION_BLOCKING_PHASES,
@@ -17131,7 +17184,7 @@ def _family_existing_exposure_for_selection_by_bin_id(
             if not positive_terms:
                 raise RuntimeError("position_current exposure columns missing")
             condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
-            direction_select = "direction" if "direction" in columns else "NULL AS direction"
+            direction_select = "direction"
             chain_cost_select = (
                 "chain_cost_basis_usd"
                 if "chain_cost_basis_usd" in columns

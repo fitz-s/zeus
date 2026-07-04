@@ -60,8 +60,8 @@ def _row(*, city: str, target_date: str, covered: bool) -> ReplacementForecastCu
         market_bin_count=1,
         posterior_count=n,
         readiness_count=n,
-        aifs_manifest_count=0,
-        openmeteo_manifest_count=0,
+        openmeteo_manifest_count=1,
+        fusion_current_value_count=1,
     )
 
 
@@ -74,8 +74,8 @@ def _plan(rows: list[ReplacementForecastCurrentTargetPlanRow]) -> ReplacementFor
         covered_count=covered,
         missing_coverage_count=len(rows) - covered,
         can_seed_count=0,
-        missing_aifs_manifest_count=0,
         missing_openmeteo_manifest_count=0,
+        missing_fusion_current_values_count=0,
         day0_observed_extreme_required_count=0,
         rows=tuple(rows),
     )

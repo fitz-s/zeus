@@ -97,6 +97,154 @@ def test_zeus_status_classifier():
     assert zs.classify_block("TRADE_SCORE", "TRADE_SCORE_NON_POSITIVE") == "economic"
 
 
+def test_zeus_status_positions_include_day0_and_pending_exit(tmp_path):
+    """Operator funnel must not hide non-active open lifecycle phases."""
+    zs = _load("zeus_status_positions_day0", "zeus_status.py")
+    tdb = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(tdb))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            shares REAL,
+            entry_price REAL,
+            last_monitor_prob REAL,
+            last_monitor_market_price REAL,
+            last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER,
+            chain_state TEXT,
+            updated_at TEXT,
+            settled_at TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, bin_label, direction,
+            shares, entry_price, last_monitor_prob, last_monitor_market_price,
+            last_monitor_prob_is_fresh, last_monitor_market_price_is_fresh,
+            chain_state, updated_at, settled_at, exit_reason
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            (
+                "pos-active",
+                "active",
+                "Tokyo",
+                "2026-07-04",
+                "32C",
+                "buy_yes",
+                10.0,
+                0.4,
+                0.6,
+                0.5,
+                1,
+                1,
+                "synced",
+                now,
+                None,
+                None,
+            ),
+            (
+                "pos-day0",
+                "day0_window",
+                "Manila",
+                "2026-07-04",
+                "33C",
+                "buy_yes",
+                11.0,
+                0.3,
+                0.0,
+                None,
+                1,
+                0,
+                "synced",
+                now,
+                None,
+                None,
+            ),
+            (
+                "pos-pending-exit",
+                "pending_exit",
+                "Paris",
+                "2026-07-04",
+                "22C",
+                "buy_yes",
+                12.0,
+                0.2,
+                0.1,
+                0.15,
+                1,
+                1,
+                "synced",
+                now,
+                None,
+                None,
+            ),
+            (
+                "pos-settled",
+                "settled",
+                "London",
+                "2026-07-04",
+                "21C",
+                "buy_yes",
+                13.0,
+                0.2,
+                None,
+                None,
+                None,
+                None,
+                "synced",
+                now,
+                now,
+                "settled",
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    zs.TRADES_DB = str(tdb)
+
+    result = zs.section_positions()
+
+    assert result["n_open"] == 3
+    assert result["n_open_by_phase"] == {
+        "active": 1,
+        "day0_window": 1,
+        "pending_exit": 1,
+    }
+    assert {row["phase"] for row in result["open"]} == {
+        "active",
+        "day0_window",
+        "pending_exit",
+    }
+    rendered = zs.render_text(
+        {
+            "generated_at": now,
+            "daemons": {"rows": []},
+            "events": {"pending": 0, "proc_1h": {}, "proc_24h": {}},
+            "blocks": {"w2h": {"class": {}, "top": []}, "w24h": {"class": {}, "top": []}},
+            "surface": {},
+            "obs_holes": {"holes": [], "cities_total": 0, "stale_hours": 2.0},
+            "price_holes": {"holes": [], "cities_total": 0, "fresh_count": 0, "stale_hours": 2.0},
+            "positions": result,
+            "orders": {"state_24h": {}, "last5": []},
+            "selection": {},
+        }
+    )
+    assert "POSITIONS open=3" in rendered
+    assert "day0_window=1" in rendered
+    assert "pending_exit=1" in rendered
+
+
 def test_zeus_status_screen_edges_filters_temperature_metric(tmp_path):
     """HIGH posterior must never join LOW market condition_ids (external review
     2026-06-12): same city/date carries both metrics; an unfiltered join counts

@@ -653,8 +653,26 @@ degrade maps affected_cities→None so q-stale pass cannot fire). Seam test rest
 Double mutation probes re-run independently. w4-2b worktree removed post-merge.
 CONSULT ROUND-3 CONFIRMATION SUBMITTED (rid REQ-20260703-040020-bc7d32, detached waiter):
 final go/no-go on 0afe42f52 for merge-to-main + OFF-deploy.
-NEXT: round-3 verdict → (GO) E2 merge-to-main (first: P0.1 parked dirty hotfix tree — hotfix
-branch advanced again this session, re-align at E2) → E3 deploy → E4 → E5 → E6.
+[2026-07-03 10:00] ROUND-3 VERDICT: GO (confidence 0.86, remaining blocker set: none) —
+merge-to-main ready + OFF-deploy ready under recorded quiet-window procedure. One LOW closed:
+47-node baseline + release-note attached in-repo (commit a7e752567).
+E2 EXECUTED VIA PR #422 (github.com/fitz-s/zeus/pull/422): main has branch protection
+(PR + 2 required checks — direct push rejected GH013). Local milestone merge 08f88adcb +
+baseline docs a7e752567 + collateral reconciliation 084db3f92 pushed as rebuild/e2-main-merge.
+E2 DISCOVERIES (recorded):
+- Hotfix branch is ACTIVELY worked by another session (8+ commits during this session, dirty
+  tree with src/ changes). E2 done in separate e2-main worktree, hotfix tree untouched.
+  E3 HARD PRECONDITION: merge/reconcile hotfix → main BEFORE deploy, else live fixes regress.
+- test_collateral_ledger.py 6 pre-existing reds RECONCILED (not baselined): layered fixture
+  drift vs THREE pre-rebuild contract commits (ae2f513b7 taker FOK/FAK proof, a6f47aa4a
+  raise→recoverable-rejection, a4707d1be legacy execute_intent blocked + persistence-failure
+  REVIEW_REQUIRED). All provenance-verified as settled law. execute_intent is structurally
+  dead (get_mode hardcoded live) — future cleanup candidate for W5.
+- ADDITIONAL known-red pool (outside frozen 47): tests/test_executor.py ~20 pre-existing
+  (stash-compared unchanged by our work). Baseline scope = the suites consult enumerated;
+  repo-wide red census belongs to E2 merge record, not re-frozen here.
+NEXT: PR #422 checks pass → merge PR → E3 deploy (precondition: hotfix reconcile + quiet
+window + migration runner + flag ABSENT) → E4 → E5 → E6.
 Housekeeping: 14 merged wave worktrees removed (branches kept, all ancestors of
 rebuild/w0-instrumentation@fba4cee21); remaining worktrees = rebuild-w0, w4-2, fixture-hygiene
 + 2 pre-existing DIRTY /private/tmp/zeus-pr421-* (NOT ours — left untouched, surfaced to operator).

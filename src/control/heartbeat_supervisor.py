@@ -48,6 +48,7 @@ _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
 )
 _LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC = 0.0
 _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC = 0.0
+_HEARTBEAT_REQUEST_CAUSE_PRESERVED = False
 
 
 class HeartbeatHealth(str, Enum):
@@ -184,9 +185,11 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
     here does not affect live evaluator/orderbook traffic.
     """
 
+    global _HEARTBEAT_REQUEST_CAUSE_PRESERVED
     timeout_seconds = heartbeat_http_timeout_seconds_from_env(cadence_seconds)
     try:
         import httpx
+        from py_clob_client_v2.exceptions import PolyApiException
         from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
     except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
         logger.warning("heartbeat HTTP timeout install skipped: %s", exc)
@@ -203,6 +206,61 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
             close()
         except Exception:
             logger.debug("old heartbeat HTTP client close failed", exc_info=True)
+
+    if getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", False):
+        _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
+        return
+
+    def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
+        overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
+        try:
+            if isinstance(data, str):
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    content=data.encode("utf-8"),
+                    params=params,
+                )
+            else:
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    json=data,
+                    params=params,
+                )
+
+            if resp.status_code != 200:
+                heartbeat_http_helpers.logger.error(
+                    "[py_clob_client_v2] request error status=%s url=%s body=%s",
+                    resp.status_code,
+                    endpoint,
+                    resp.text,
+                )
+                raise PolyApiException(resp)
+
+            try:
+                return resp.json()
+            except ValueError:
+                return resp.text
+        except PolyApiException:
+            raise
+        except httpx.RequestError as exc:
+            heartbeat_http_helpers.logger.error("[py_clob_client_v2] request error: %s", exc)
+            raise PolyApiException(
+                error_msg=f"Request exception: {type(exc).__name__}"
+            ) from exc
+
+    heartbeat_http_helpers.request = _request_with_cause
+    heartbeat_http_helpers._zeus_request_cause_preserved = True
+    _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
+
+
+def heartbeat_transport_diagnostics() -> dict[str, Any]:
+    return {
+        "request_cause_preserved": bool(_HEARTBEAT_REQUEST_CAUSE_PRESERVED),
+    }
 
 
 def heartbeat_status_max_age_seconds_from_env() -> int:
@@ -662,6 +720,7 @@ def write_heartbeat_keeper_status(
         "schema_version": 2,
         "owner": owner,
         "written_at": now.isoformat(),
+        "transport_diagnostics": heartbeat_transport_diagnostics(),
         **status.to_dict(),
     }
     tmp = target.with_suffix(target.suffix + ".tmp")

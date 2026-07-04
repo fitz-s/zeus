@@ -157,9 +157,11 @@ def _seed_open_entry(
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.execution.command_bus import IntentKind
+    from src.state.collateral_ledger import init_collateral_schema
     from src.state.snapshot_repo import insert_snapshot
     from src.state.venue_command_repo import insert_command, insert_submission_envelope
 
+    init_collateral_schema(conn)
     snapshot_id = f"snap-{command_id}"
     insert_snapshot(
         conn,
@@ -276,6 +278,42 @@ class TestFindOpenEntryRests:
         assert len(entries) == 1
         assert entries[0]["command_id"] == "c1"
         assert entries[0]["q_version"] == "q-old"
+
+    def test_pre_migration_schema_treats_q_version_as_null(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                token_id TEXT,
+                market_id TEXT,
+                created_at TEXT,
+                intent_kind TEXT,
+                state TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                matched_size TEXT,
+                local_sequence INTEGER
+            );
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, token_id, market_id, created_at, intent_kind, state
+            ) VALUES ('c-live-pre-migration', 'v1', 'tok1', 'mkt1', '2026-07-03T21:30:00+00:00', 'ENTRY', 'ACKED');
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, matched_size, local_sequence
+            ) VALUES ('v1', 'c-live-pre-migration', 'LIVE', '0', 1);
+            """
+        )
+
+        entries = find_open_entry_rests(conn)
+
+        assert len(entries) == 1
+        assert entries[0]["command_id"] == "c-live-pre-migration"
+        assert entries[0]["q_version"] is None
 
     def test_exit_orders_are_never_returned(self):
         conn = _trade_db()

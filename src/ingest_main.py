@@ -47,8 +47,11 @@ _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
 REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
+REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
+REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
+_replacement_current_target_timeout_suppressed_until = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -117,6 +120,47 @@ def _replacement_source_clock_download_budget_seconds(poll_seconds: int | None =
         )
         return default_s
     return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
+
+
+def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = None) -> float:
+    """Bound the current-target substep so source-clock/reseed cannot starve.
+
+    Current-target raw download is incremental and idempotent, but it runs before
+    the source-clock probe in the same availability tick. A single slow transport
+    must not monopolize the job's max_instances slot and suppress every later
+    re-decision seed.
+    """
+    cadence_s = float(poll_seconds if poll_seconds is not None else _replacement_availability_poll_seconds())
+    default_s = max(5.0, min(20.0, cadence_s / 3.0))
+    raw = os.environ.get(REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "").strip()
+    if not raw:
+        return default_s
+    try:
+        requested = float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using %.1fs replacement current-target poll timeout",
+            REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV,
+            raw,
+            default_s,
+        )
+        return default_s
+    return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
+
+
+def _replacement_current_target_timeout_cooldown_seconds() -> float:
+    raw = os.environ.get(REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV, "").strip()
+    if not raw:
+        return 600.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 600s replacement current-target timeout cooldown",
+            REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV,
+            raw,
+        )
+        return 600.0
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -189,8 +233,9 @@ def _scheduler_job(job_name: str):
         @functools.wraps(fn)
         def _wrapper(*args, **kwargs):
             try:
-                result = fn(*args, **kwargs)
                 from src.observability.scheduler_health import _write_scheduler_health
+                _write_scheduler_health(job_name, failed=False, started=True)
+                result = fn(*args, **kwargs)
                 failed, reason = _classify_result(result)
                 _write_scheduler_health(job_name, failed=failed, reason=reason)
                 return result
@@ -396,6 +441,66 @@ def _world_schema_ready_sentinel_current() -> bool:
         and payload.get("schema_version") == expected
         and payload.get("init_schema_returned_ok") is True
     )
+
+
+def _world_schema_current_lightweight() -> bool:
+    """Read-only live-required world schema check for fast data-ingest restarts."""
+    import sqlite3
+
+    from src.state.db import ZEUS_WORLD_DB_PATH, assert_schema_current
+
+    required_tables = frozenset(
+        {
+            "decision_events",
+            "position_current",
+            "trade_decisions",
+        }
+    )
+    required_indexes = frozenset(
+        {
+            "idx_opportunity_events_day0_family_extreme",
+            "idx_opportunity_event_processing_pending_retry_floor",
+            "idx_opportunity_event_processing_stale_claim",
+            "idx_opportunity_event_processing_status",
+        }
+    )
+    try:
+        uri = f"file:{ZEUS_WORLD_DB_PATH.resolve()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=2000")
+            assert_schema_current(conn)
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            indexes = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            return required_tables.issubset(tables) and required_indexes.issubset(indexes)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("world schema lightweight probe failed: %s", exc)
+        return False
+
+
+def _world_schema_boot_requires_init() -> bool:
+    if _world_schema_ready_sentinel_current():
+        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
+        return False
+    if _world_schema_current_lightweight():
+        logger.info(
+            "init_schema skipped: lightweight world schema probe passed; refreshing sentinel"
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1080,12 +1185,16 @@ def _replacement_availability_poll_tick():
     survives. Fail-soft: any error logs and the next tick retries; every lane it calls
     is idempotent per persisted row/manifest.
     """
+    global _replacement_current_target_timeout_suppressed_until
+
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
+        _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
+    from src.runtime.timeout_guard import run_with_timeout  # noqa: PLC0415
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
@@ -1095,17 +1204,126 @@ def _replacement_availability_poll_tick():
     cfg = _replacement_forecast_live_materialization_queue_config()
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
+
+    def _compact_current_target_report(download_report):
+        if not isinstance(download_report, dict):
+            return None
+        compact = {
+            "status": download_report.get("status"),
+            "available_cycle": download_report.get("available_cycle"),
+            "downloaded_cycle": download_report.get("downloaded_cycle"),
+            "candidate_row_count": download_report.get("candidate_row_count"),
+            "written_row_count": download_report.get("written_row_count"),
+            "target_count": download_report.get("target_count"),
+            "timeout_seconds": download_report.get("timeout_seconds"),
+            "cooldown_seconds": download_report.get("cooldown_seconds"),
+            "cooldown_remaining_seconds": download_report.get("cooldown_remaining_seconds"),
+            "error": download_report.get("error"),
+        }
+        coverage = download_report.get("coverage")
+        if isinstance(coverage, dict):
+            compact["coverage"] = {
+                key: coverage.get(key)
+                for key in (
+                    "status",
+                    "target_count",
+                    "covered_count",
+                    "missing_coverage_count",
+                    "can_seed_count",
+                    "missing_openmeteo_manifest_count",
+                    "day0_observed_extreme_required_count",
+                )
+            }
+        errors = download_report.get("transport_errors")
+        if errors:
+            compact["transport_errors"] = tuple(errors)[:3]
+        return {k: v for k, v in compact.items() if v is not None}
+
+    def _attach_reseed_reports(report: dict[str, object]) -> dict[str, object]:
+        upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+        if upgrade_report is not None:
+            report["fusion_upgrade_status"] = upgrade_report.get("status")
+            report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+        cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+        if cycle_advance_report is not None:
+            report["cycle_advance_status"] = cycle_advance_report.get("status")
+            report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
+            if cycle_advance_report.get("advances_detected"):
+                report["cycle_advance_detail"] = {
+                    k: cycle_advance_report.get(k)
+                    for k in (
+                        "freshest_materializable_cycle",
+                        "scopes_checked",
+                        "advances_detected",
+                        "held_advances_detected",
+                        "seeds_enqueued",
+                        "held_seeds_enqueued",
+                        "already_enqueued",
+                        "manifest_missing",
+                        "leg_artifact_missing",
+                        "family_cycle_missing",
+                        "family_cycle_not_newer",
+                        "day0_skipped",
+                        "comparison_failed",
+                        "family_scope_check_failed",
+                        "seed_build_failed",
+                        "enqueued",
+                    )
+                }
+        return report
+
+    current_target_download_report = None
+    now_monotonic = time.monotonic()
+    if now_monotonic < _replacement_current_target_timeout_suppressed_until:
+        current_target_download_report = {
+            "status": "CURRENT_TARGET_TIMEOUT_COOLDOWN_SKIPPED",
+            "cooldown_remaining_seconds": round(
+                _replacement_current_target_timeout_suppressed_until - now_monotonic, 3
+            ),
+        }
+    else:
+        current_target_timeout = _replacement_current_target_poll_timeout_seconds(
+            _replacement_availability_poll_seconds()
+        )
+        try:
+            current_target_download_report = run_with_timeout(
+                lambda: _download_replacement_forecast_current_targets_if_needed(cfg),
+                seconds=current_target_timeout,
+                label="replacement_current_targets",
+            )
+            _replacement_current_target_timeout_suppressed_until = 0.0
+        except TimeoutError as exc:
+            cooldown = _replacement_current_target_timeout_cooldown_seconds()
+            _replacement_current_target_timeout_suppressed_until = time.monotonic() + cooldown
+            current_target_download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": current_target_timeout,
+                "cooldown_seconds": cooldown,
+                "error": str(exc)[:240],
+            }
+            logger.warning("replacement current-target download timeboxed: %s", current_target_download_report)
+        except Exception as exc:  # noqa: BLE001 - source-clock/reseed must still run.
+            current_target_download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+            logger.warning("replacement current-target download failed fail-soft: %s", exc, exc_info=True)
+    current_target_download_compact = _compact_current_target_report(current_target_download_report)
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
-        logger.info("replacement source-clock poll current: %s", source_clock_payload)
-        return {
+        report: dict[str, object] = {
             "status": "SOURCE_CLOCK_POLL_CURRENT",
             "source_clock_status": source_clock_payload.get("status"),
             "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
+        if current_target_download_compact is not None:
+            report["current_target_download"] = current_target_download_compact
+        report = _attach_reseed_reports(report)
+        logger.info("replacement source-clock poll current: %s", report)
+        return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     report = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         cfg,
@@ -1115,29 +1333,16 @@ def _replacement_availability_poll_tick():
         ),
     )
     if report is None:
-        return None
-    upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
-    if upgrade_report is not None:
-        report["fusion_upgrade_status"] = upgrade_report.get("status")
-        report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
-    cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
-    if cycle_advance_report is not None:
-        report["cycle_advance_status"] = cycle_advance_report.get("status")
-        report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
-        if cycle_advance_report.get("advances_detected"):
-            report["cycle_advance_detail"] = {
-                k: cycle_advance_report.get(k)
-                for k in (
-                    "freshest_materializable_cycle",
-                    "advances_detected",
-                    "held_advances_detected",
-                    "seeds_enqueued",
-                    "held_seeds_enqueued",
-                    "already_enqueued",
-                    "manifest_missing",
-                    "enqueued",
-                )
-            }
+        report = {
+            "status": "SOURCE_CLOCK_SCOPED_DOWNLOAD_SKIPPED",
+            "source_clock_status": source_clock_payload.get("status"),
+            "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
+            "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
+            "source_clock_error": source_clock_payload.get("error"),
+        }
+    if current_target_download_compact is not None:
+        report["current_target_download"] = current_target_download_compact
+    report = _attach_reseed_reports(report)
     if source_clock_scoped_download_allows_cursor_advance(report):
         report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
     else:
@@ -2020,9 +2225,7 @@ def main() -> None:
     # already returned OK for the pinned DDL; skip the repeat write path on
     # restarts so source-clock polling is not delayed behind a world DB lock.
     from src.state.db import init_schema, get_world_connection
-    if _world_schema_ready_sentinel_current():
-        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
-    else:
+    if _world_schema_boot_requires_init():
         conn = get_world_connection(write_class="bulk")
         init_schema(conn)
         conn.close()

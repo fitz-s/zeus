@@ -1511,6 +1511,13 @@ class TestRiskGuardSettlementSource:
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
                "2026-04-01T10:02:00Z", "opening_inertia", "test", "live", '{}'))
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, ("exec-3:voided:1", "exec-3", 1, 1, "ENTRY_ORDER_VOIDED",
+               "2026-04-01T10:03:00Z", "opening_inertia", "test", "live", '{}'))
         conn.commit()
         conn.close()
 
@@ -1524,9 +1531,13 @@ class TestRiskGuardSettlementSource:
         assert overall["attempted"] == 1
         assert overall["filled"] == 1
         assert overall["rejected"] == 1
-        assert overall["fill_rate"] == pytest.approx(0.5)
+        assert overall["voided"] == 1
+        assert overall["terminal_observed"] == 3
+        assert overall["fill_rate"] == pytest.approx(1 / 3, rel=1e-3)
         assert details["entry_execution_summary"]["by_strategy"]["center_buy"]["filled"] == 1
         assert details["entry_execution_summary"]["by_strategy"]["opening_inertia"]["rejected"] == 1
+        assert details["entry_execution_summary"]["by_strategy"]["opening_inertia"]["voided"] == 1
+        assert details["entry_execution_summary"]["by_strategy"]["opening_inertia"]["fill_rate"] == 0.0
 
     def test_tick_records_strategy_tracker_diagnostics(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -2121,15 +2132,16 @@ class TestStrategyPolicyResolver:
         conn = get_connection(zeus_db)
         from src.state.db import init_schema
         init_schema(conn)
-        # Insert 10 ENTRY_ORDER_REJECTED canonical events (P9: log_position_event deleted)
+        # Insert 10 terminal-but-unfilled canonical events (P9: log_position_event deleted)
         for i in range(10):
+            event_type = "ENTRY_ORDER_VOIDED" if i < 8 else "ENTRY_ORDER_REJECTED"
             conn.execute("""
                 INSERT INTO position_events
                 (event_id, position_id, event_version, sequence_no, event_type,
                  occurred_at, strategy_key, source_module, env, payload_json)
                 VALUES (?,?,?,?,?,?,?,?,?,?)
-            """, (f"reject-{i}:rejected:1", f"reject-{i}", 1, 1,
-                   "ENTRY_ORDER_REJECTED", "2026-04-01T10:00:00Z",
+            """, (f"terminal-{i}:{event_type}:1", f"terminal-{i}", 1, 1,
+                   event_type, "2026-04-01T10:00:00Z",
                    "center_buy", "test", "live", '{}'))
         conn.commit()
         conn.close()

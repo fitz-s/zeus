@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-04
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) §"C3 mark orders stale" (NO-WRITE; cancel-set goes out through the
 #   existing CANCEL intent) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
@@ -57,12 +57,21 @@ _REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 FamilyKey = tuple[str, str, str]
 
 
+def _venue_commands_q_version_select_expr(conn: sqlite3.Connection) -> str:
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(venue_commands)")}
+    except sqlite3.DatabaseError:
+        columns = set()
+    return "vc.q_version" if "q_version" in columns else "NULL"
+
+
 def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every open ENTRY rest, with its stamped ``q_version``. No deadline filter —
     unlike the retired ``find_expired_resting_entries``, classification (stale vs.
     TTL-expired vs. neither) happens in Python via the derived predicates, not SQL.
     """
     placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
+    q_version_expr = _venue_commands_q_version_select_expr(conn)
     rows = conn.execute(
         f"""
         WITH latest_facts AS (
@@ -73,7 +82,7 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             FROM venue_order_facts
         )
         SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
-               vc.created_at, vc.q_version, lf.state AS fact_state, lf.matched_size
+               vc.created_at, {q_version_expr} AS q_version, lf.state AS fact_state, lf.matched_size
         FROM venue_commands vc
         JOIN latest_facts lf
           ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1

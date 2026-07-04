@@ -83,6 +83,7 @@ PAPER_PROOF_KEYS = (
     "reconcile",
     "redeem_reconciler",
 )
+FRESH_FUTURE_SKEW_TOLERANCE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -144,8 +145,10 @@ def _fresh(payload: dict[str, Any], *, max_age_seconds: int, now: datetime) -> t
     if parsed is None:
         return False, "missing_timestamp"
     age = (now - parsed).total_seconds()
-    if age < 0:
+    if age < -FRESH_FUTURE_SKEW_TOLERANCE_SECONDS:
         return False, f"timestamp_in_future:{parsed.isoformat()}"
+    if age < 0:
+        age = 0.0
     if age > max_age_seconds:
         return False, f"stale:{age:.0f}s>{max_age_seconds}s"
     return True, f"fresh:{age:.0f}s"
@@ -235,6 +238,10 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> frozenset[str]:
+    return frozenset(str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
 
 def _count_where_in(conn: sqlite3.Connection, table: str, column: str, values: Iterable[str]) -> int:
@@ -465,12 +472,58 @@ def _check_trade_state(trade_db: Path) -> GateResult:
     try:
         if not _table_exists(conn, "venue_commands"):
             return GateResult("trade_state", FAIL, "missing_table:venue_commands")
-        blocking = _count_where_in(conn, "venue_commands", "state", UNKNOWN_COMMAND_STATES)
+        total_unknown = _count_where_in(conn, "venue_commands", "state", UNKNOWN_COMMAND_STATES)
+        if total_unknown == 0:
+            return GateResult("trade_state", PASS, "no_unknown_commands")
+        proven_quarantined_zero_exposure = _proven_quarantined_zero_exposure_commands(conn)
+        blocking = max(0, total_unknown - proven_quarantined_zero_exposure)
         if blocking:
-            return GateResult("trade_state", FAIL, f"blocking_unknown_commands={blocking}")
-        return GateResult("trade_state", PASS, "no_unknown_commands")
+            detail = f"blocking_unknown_commands={blocking}"
+            if proven_quarantined_zero_exposure:
+                detail += f";proven_quarantined_zero_exposure={proven_quarantined_zero_exposure}"
+            return GateResult("trade_state", FAIL, detail)
+        return GateResult(
+            "trade_state",
+            PASS,
+            f"no_unknown_commands;proven_quarantined_zero_exposure={proven_quarantined_zero_exposure}",
+        )
     finally:
         conn.close()
+
+
+def _proven_quarantined_zero_exposure_commands(conn: sqlite3.Connection) -> int:
+    if not _table_exists(conn, "position_current"):
+        return 0
+    command_columns = _table_columns(conn, "venue_commands")
+    position_columns = _table_columns(conn, "position_current")
+    required_command = {"state", "position_id"}
+    required_position = {
+        "position_id",
+        "phase",
+        "chain_state",
+        "chain_shares",
+        "chain_absence_at",
+    }
+    if not required_command.issubset(command_columns):
+        return 0
+    if not required_position.issubset(position_columns):
+        return 0
+    placeholders = ",".join("?" for _ in UNKNOWN_COMMAND_STATES)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+          FROM venue_commands vc
+          JOIN position_current pc
+            ON pc.position_id = vc.position_id
+         WHERE vc.state IN ({placeholders})
+           AND COALESCE(pc.phase, '') = 'quarantined'
+           AND COALESCE(pc.chain_state, '') = 'chain_absent_confirmed_position_unattributed'
+           AND COALESCE(pc.chain_shares, 0) = 0
+           AND TRIM(COALESCE(pc.chain_absence_at, '')) != ''
+        """,
+        tuple(UNKNOWN_COMMAND_STATES),
+    ).fetchone()
+    return int(row[0] if row else 0)
 
 
 def _check_redeem_state(
@@ -479,6 +532,7 @@ def _check_redeem_state(
     if not trade_db.exists():
         return GateResult("redeem_state", FAIL, f"missing:{trade_db}")
     conn = sqlite3.connect(str(trade_db))
+    conn.row_factory = sqlite3.Row
     try:
         if not _table_exists(conn, "settlement_commands"):
             return GateResult("redeem_state", FAIL, "missing_table:settlement_commands")
@@ -486,15 +540,36 @@ def _check_redeem_state(
 
         # Hard-block states: always fail unless explicitly whitelisted.
         placeholders = ",".join("?" for _ in BLOCKING_REDEEM_STATES)
+        columns = _table_columns(conn, "settlement_commands")
+        has_external_zero_payout_proof = {
+            "error_payload",
+            "tx_hash",
+            "block_number",
+            "confirmation_count",
+        }.issubset(columns)
         hard_rows = conn.execute(
             f"""
-            SELECT command_id, state
+            SELECT *
             FROM settlement_commands
             WHERE state IN ({placeholders})
             """,
             BLOCKING_REDEEM_STATES,
         ).fetchall()
-        blocking = [(str(r[0]), str(r[1])) for r in hard_rows if str(r[0]) not in allow]
+        blocking = []
+        proven_external_zero = 0
+        for row in hard_rows:
+            command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
+            state = str(row["state"] if isinstance(row, sqlite3.Row) else row[1])
+            if command_id in allow:
+                continue
+            if (
+                state == "REDEEM_REVIEW_REQUIRED"
+                and has_external_zero_payout_proof
+                and _redeem_review_row_is_proven_external_zero_payout(row)
+            ):
+                proven_external_zero += 1
+                continue
+            blocking.append((command_id, state))
         if blocking:
             return GateResult("redeem_state", FAIL, f"blocking_redeem_rows={blocking[:5]}")
 
@@ -528,9 +603,43 @@ def _check_redeem_state(
             return GateResult(
                 "redeem_state", FAIL, f"stale_inflight_redeem={stale_findings[:5]}"
             )
-        return GateResult("redeem_state", PASS, "no_unwhitelisted_blocking_or_stale_redeem_rows")
+        suffix = (
+            f";proven_external_zero_payout_review_rows={proven_external_zero}"
+            if proven_external_zero
+            else ""
+        )
+        return GateResult(
+            "redeem_state",
+            PASS,
+            "no_unwhitelisted_blocking_or_stale_redeem_rows" + suffix,
+        )
     finally:
         conn.close()
+
+
+def _redeem_review_row_is_proven_external_zero_payout(row: sqlite3.Row) -> bool:
+    """Return true for historical operator/accounting review rows with final chain proof."""
+
+    try:
+        error_payload = json.loads(str(row["error_payload"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if error_payload.get("chain_truth_resolution") != "EXTERNALLY_REDEEMED_ZERO_PAYOUT":
+        return False
+    if not str(row["tx_hash"] or "").strip():
+        return False
+    try:
+        block_number = int(row["block_number"] or 0)
+        confirmations = int(row["confirmation_count"] or 0)
+    except (TypeError, ValueError):
+        return False
+    if block_number <= 0 or confirmations <= 0:
+        return False
+    payout = error_payload.get("payout_from_receipt")
+    try:
+        return int(payout) == 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _check_fresh_file(name: str, path: Path, *, max_age_seconds: int, now: datetime) -> GateResult:
@@ -842,7 +951,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=LIVE_RELEASE_STAGES, default="legacy_cron")
     parser.add_argument("--expected-sha", default="")
-    parser.add_argument("--loaded-sha-file", type=Path)
+    parser.add_argument(
+        "--loaded-sha-file",
+        type=Path,
+        default=ROOT / "state" / "loaded_sha.json",
+    )
     parser.add_argument("--world-db", type=Path, default=ROOT / "state" / "zeus-world.db")
     parser.add_argument("--forecasts-db", type=Path, default=ROOT / "state" / "zeus-forecasts.db")
     parser.add_argument("--trade-db", type=Path, default=ROOT / "state" / "zeus_trades.db")

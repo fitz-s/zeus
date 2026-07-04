@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfoNotFoundError
@@ -29,6 +29,7 @@ class ReplacementForecastCurrentTargetPlanRow:
     posterior_count: int
     readiness_count: int
     openmeteo_manifest_count: int
+    fusion_current_value_count: int = 0
     baseline_source_run_id: str | None = None
     baseline_source_cycle_time: str | None = None
     openmeteo_source_run_id: str | None = None
@@ -46,11 +47,21 @@ class ReplacementForecastCurrentTargetPlanRow:
             not self.covered
             and not self.day0_observed_extreme_required
             and self.openmeteo_manifest_count > 0
+            and self.fusion_current_value_count > 0
         )
 
     @property
     def missing_openmeteo_manifest(self) -> bool:
         return not self.covered and self.openmeteo_manifest_count <= 0
+
+    @property
+    def missing_fusion_current_values(self) -> bool:
+        return (
+            not self.covered
+            and not self.day0_observed_extreme_required
+            and self.openmeteo_manifest_count > 0
+            and self.fusion_current_value_count <= 0
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +72,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "posterior_count": self.posterior_count,
             "readiness_count": self.readiness_count,
             "openmeteo_manifest_count": self.openmeteo_manifest_count,
+            "fusion_current_value_count": self.fusion_current_value_count,
             "baseline_source_run_id": self.baseline_source_run_id,
             "baseline_source_cycle_time": self.baseline_source_cycle_time,
             "openmeteo_source_run_id": self.openmeteo_source_run_id,
@@ -68,6 +80,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "covered": self.covered,
             "can_seed": self.can_seed,
             "missing_openmeteo_manifest": self.missing_openmeteo_manifest,
+            "missing_fusion_current_values": self.missing_fusion_current_values,
         }
 
 
@@ -80,6 +93,7 @@ class ReplacementForecastCurrentTargetPlan:
     missing_coverage_count: int
     can_seed_count: int
     missing_openmeteo_manifest_count: int
+    missing_fusion_current_values_count: int
     day0_observed_extreme_required_count: int
     rows: tuple[ReplacementForecastCurrentTargetPlanRow, ...]
 
@@ -96,6 +110,7 @@ class ReplacementForecastCurrentTargetPlan:
             "missing_coverage_count": self.missing_coverage_count,
             "can_seed_count": self.can_seed_count,
             "missing_openmeteo_manifest_count": self.missing_openmeteo_manifest_count,
+            "missing_fusion_current_values_count": self.missing_fusion_current_values_count,
             "day0_observed_extreme_required_count": self.day0_observed_extreme_required_count,
             "rows": [row.as_dict() for row in self.rows],
             "ready": self.ready,
@@ -240,6 +255,51 @@ def _openmeteo_payload_covers_target_local_day(
     return True
 
 
+def _openmeteo_manifest_metadata_allows_target_date(
+    metadata: Mapping[str, object],
+    *,
+    target_date: str,
+) -> bool:
+    dates = metadata.get("target_dates")
+    if isinstance(dates, list) and dates:
+        if target_date in {str(item).strip() for item in dates}:
+            return True
+        return _openmeteo_manifest_horizon_allows_target_date(
+            metadata, target_date=target_date
+        )
+    explicit = metadata.get("target_date")
+    if explicit is not None and str(explicit).strip() == target_date:
+        return True
+    return _openmeteo_manifest_horizon_allows_target_date(
+        metadata, target_date=target_date
+    )
+
+
+def _openmeteo_manifest_horizon_allows_target_date(
+    metadata: Mapping[str, object],
+    *,
+    target_date: str,
+) -> bool:
+    if str(metadata.get("artifact_class") or "") != "openmeteo_ecmwf_ifs9_anchor_current_targets":
+        return False
+    endpoint = str(metadata.get("openmeteo_endpoint") or "")
+    if endpoint and endpoint not in {"single_runs_api", "standard_api_meta_stamped"}:
+        return False
+    start_raw = metadata.get("target_date")
+    if start_raw is None or not str(start_raw).strip():
+        return False
+    try:
+        start = date.fromisoformat(str(start_raw).strip())
+        wanted = date.fromisoformat(str(target_date).strip())
+        hours = int(float(metadata.get("forecast_hours") or 0))
+    except Exception:
+        return False
+    if hours <= 0:
+        return False
+    max_extra_days = max(0, (hours + 23) // 24)
+    return start <= wanted <= start + timedelta(days=max_extra_days)
+
+
 def _openmeteo_manifest_coverage(
     conn: sqlite3.Connection,
     *,
@@ -288,14 +348,6 @@ def _openmeteo_manifest_coverage(
                 WHERE value = ?
             )
           )
-          AND (
-            json_extract({metadata_column}, '$.target_date') = ?
-            OR EXISTS (
-                SELECT 1
-                FROM json_each({metadata_column}, '$.target_dates')
-                WHERE value = ?
-            )
-          )
           {cycle_clause}
         """,
         (
@@ -303,8 +355,6 @@ def _openmeteo_manifest_coverage(
             data_version,
             city,
             city,
-            target_date,
-            target_date,
             *cycle_params,
         ),
     ).fetchall()
@@ -314,6 +364,10 @@ def _openmeteo_manifest_coverage(
         if not artifact_path or not os.path.exists(artifact_path):
             continue
         metadata = _json_object(manifest["metadata_json"])
+        if not _openmeteo_manifest_metadata_allows_target_date(
+            metadata, target_date=target_date
+        ):
+            continue
         if not _openmeteo_payload_covers_target_local_day(
             metadata,
             artifact_path=artifact_path,
@@ -427,6 +481,40 @@ def _replacement_coverage_counts_for_dependencies(
     return posterior_count, readiness_count
 
 
+def _fusion_current_value_count(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    source_cycle_time: str | None,
+) -> int:
+    """Count current values the materializer q path can actually serve for a scope."""
+
+    if not source_cycle_time or not str(source_cycle_time).strip():
+        return 0
+    if "raw_model_forecasts" not in _table_names(conn):
+        # Legacy/fixture DBs without fusion capture storage cannot prove absence here.
+        return 1
+    try:
+        from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_current_instrument_values,
+        )
+
+        return len(
+            read_current_instrument_values(
+                conn,
+                city=city,
+                metric=temperature_metric,
+                target_date=target_date,
+                source_cycle_time_iso=str(source_cycle_time),
+                include_station_sources=True,
+            )
+        )
+    except Exception:
+        return 0
+
+
 def _blocked_plan(reason_code: str) -> ReplacementForecastCurrentTargetPlan:
     return ReplacementForecastCurrentTargetPlan(
         status="BLOCKED",
@@ -436,6 +524,7 @@ def _blocked_plan(reason_code: str) -> ReplacementForecastCurrentTargetPlan:
         missing_coverage_count=0,
         can_seed_count=0,
         missing_openmeteo_manifest_count=0,
+        missing_fusion_current_values_count=0,
         day0_observed_extreme_required_count=0,
         rows=(),
     )
@@ -447,6 +536,7 @@ def _status_from_counts(
     missing_coverage_count: int,
     can_seed_count: int,
     missing_openmeteo_manifest_count: int,
+    missing_fusion_current_values_count: int,
     day0_observed_extreme_required_count: int,
 ) -> tuple[str, tuple[str, ...]]:
     if target_count <= 0:
@@ -458,11 +548,14 @@ def _status_from_counts(
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_HAS_SEEDABLE_TARGETS")
     if missing_openmeteo_manifest_count:
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_OPENMETEO_MANIFESTS")
+    if missing_fusion_current_values_count:
+        reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_FUSION_CURRENT_VALUES")
     if day0_observed_extreme_required_count:
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_DAY0_OBSERVED_EXTREME_REQUIRED")
     if (
         can_seed_count <= 0
         and missing_openmeteo_manifest_count <= 0
+        and missing_fusion_current_values_count <= 0
         and day0_observed_extreme_required_count >= missing_coverage_count
     ):
         return (
@@ -569,6 +662,7 @@ def build_replacement_forecast_current_target_plan(
             missing_coverage_count=0,
             can_seed_count=0,
             missing_openmeteo_manifest_count=0,
+            missing_fusion_current_values_count=0,
             day0_observed_extreme_required_count=0,
             rows=(),
         )
@@ -595,6 +689,7 @@ def build_replacement_forecast_current_target_plan(
                 missing_coverage_count=0,
                 can_seed_count=0,
                 missing_openmeteo_manifest_count=0,
+                missing_fusion_current_values_count=0,
                 day0_observed_extreme_required_count=0,
                 rows=(),
             )
@@ -836,6 +931,7 @@ def build_replacement_forecast_current_target_plan(
             )
             openmeteo_count = 0
             openmeteo_source_run_id = None
+            fusion_current_count = 0
             if metadata_column is not None:
                 openmeteo_count, openmeteo_source_run_id = _openmeteo_manifest_coverage(
                     conn,
@@ -872,6 +968,14 @@ def build_replacement_forecast_current_target_plan(
             elif required_openmeteo_cycle_for_row and metadata_column is not None and openmeteo_count <= 0:
                 posterior_count = 0
                 readiness_count = 0
+            if openmeteo_count > 0:
+                fusion_current_count = _fusion_current_value_count(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                    source_cycle_time=required_openmeteo_cycle_for_row or baseline_source_cycle_time,
+                )
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
                     city=city,
@@ -881,6 +985,7 @@ def build_replacement_forecast_current_target_plan(
                     posterior_count=posterior_count,
                     readiness_count=readiness_count,
                     openmeteo_manifest_count=openmeteo_count,
+                    fusion_current_value_count=fusion_current_count,
                     baseline_source_run_id=baseline_source_run_id,
                     baseline_source_cycle_time=baseline_source_cycle_time,
                     openmeteo_source_run_id=openmeteo_source_run_id,
@@ -894,12 +999,14 @@ def build_replacement_forecast_current_target_plan(
     missing_coverage_count = target_count - covered_count
     can_seed_count = sum(1 for row in out if row.can_seed)
     missing_openmeteo_manifest_count = sum(1 for row in out if row.missing_openmeteo_manifest)
+    missing_fusion_current_values_count = sum(1 for row in out if row.missing_fusion_current_values)
     day0_observed_extreme_required_count = sum(1 for row in out if row.day0_observed_extreme_required and not row.covered)
     status, reasons = _status_from_counts(
         target_count=target_count,
         missing_coverage_count=missing_coverage_count,
         can_seed_count=can_seed_count,
         missing_openmeteo_manifest_count=missing_openmeteo_manifest_count,
+        missing_fusion_current_values_count=missing_fusion_current_values_count,
         day0_observed_extreme_required_count=day0_observed_extreme_required_count,
     )
     return ReplacementForecastCurrentTargetPlan(
@@ -910,6 +1017,7 @@ def build_replacement_forecast_current_target_plan(
         missing_coverage_count=missing_coverage_count,
         can_seed_count=can_seed_count,
         missing_openmeteo_manifest_count=missing_openmeteo_manifest_count,
+        missing_fusion_current_values_count=missing_fusion_current_values_count,
         day0_observed_extreme_required_count=day0_observed_extreme_required_count,
         rows=tuple(out),
     )
@@ -926,6 +1034,9 @@ def replacement_forecast_download_plan_from_current_targets(
         "reason_codes": list(plan.reason_codes),
         "openmeteo_download_targets": [
             row.as_dict() for row in missing if row.missing_openmeteo_manifest
+        ],
+        "fusion_current_value_missing_targets": [
+            row.as_dict() for row in missing if row.missing_fusion_current_values
         ],
         "seedable_targets": [
             row.as_dict() for row in missing if row.can_seed

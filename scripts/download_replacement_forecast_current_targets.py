@@ -408,6 +408,15 @@ def download_current_target_raw_inputs(
         required_openmeteo_source_cycle_time=cycle,
     )
     _rows = list(plan.rows) if include_covered else [row for row in plan.rows if not row.covered]
+    _rows.sort(
+        key=lambda row: (
+            0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
+            0 if not getattr(row, "covered", False) else 1,
+            str(getattr(row, "target_date", "")),
+            str(getattr(row, "city", "")),
+            str(getattr(row, "temperature_metric", "")),
+        )
+    )
     targets = _rows[:limit] if limit else _rows
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")

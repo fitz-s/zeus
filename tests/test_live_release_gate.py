@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-23; last_reused=2026-05-23
+# Lifecycle: created=2026-05-21; last_reviewed=2026-07-04; last_reused=2026-07-04
 # Purpose: Relationship tests for the read-only live release gate and its
 #   fail-closed proof requirements.
 # Reuse: Run when changing scripts/check_live_release_gate.py or live release
 #   money-path proof requirements.
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-07-04
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
 #   + review5.23 P0-1 (forecasts DB gate) + P1-5 (stale redeem age-check)
 
@@ -21,10 +21,14 @@ import pytest
 
 from scripts.check_live_release_gate import (
     PAPER_PROOF_KEYS, FAIL, PASS,
+    ROOT,
     STALE_REDEEM_TX_HASHED_SECONDS,
     _check_loaded_sha,
+    _check_redeem_state,
+    _check_trade_state,
     evaluate_release_gate,
     parse_args,
+    _fresh,
 )
 from src.state.db import (
     init_schema,
@@ -383,6 +387,84 @@ def test_release_gate_fails_on_unknown_command_state(tmp_path: Path) -> None:
     assert any(result.name == "trade_state" and result.status == "FAIL" for result in report.results)
 
 
+def test_trade_gate_passes_proven_quarantined_zero_exposure_unknown_command(
+    tmp_path: Path,
+) -> None:
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(str(trade_db))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                state TEXT NOT NULL
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_absence_at TEXT
+            );
+            INSERT INTO venue_commands(command_id, position_id, state)
+            VALUES ('cmd-1', 'pos-1', 'REVIEW_REQUIRED');
+            INSERT INTO position_current(
+                position_id, phase, chain_state, chain_shares, chain_absence_at
+            ) VALUES (
+                'pos-1', 'quarantined', 'chain_absent_confirmed_position_unattributed',
+                0.0, '2026-06-25T22:44:48+00:00'
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _check_trade_state(trade_db)
+
+    assert result.status == PASS
+    assert "proven_quarantined_zero_exposure=1" in result.detail
+
+
+def test_trade_gate_blocks_unknown_command_without_quarantine_proof(tmp_path: Path) -> None:
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(str(trade_db))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                state TEXT NOT NULL
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_absence_at TEXT
+            );
+            INSERT INTO venue_commands(command_id, position_id, state)
+            VALUES ('cmd-1', 'pos-1', 'REVIEW_REQUIRED');
+            INSERT INTO position_current(
+                position_id, phase, chain_state, chain_shares, chain_absence_at
+            ) VALUES (
+                'pos-1', 'quarantined', 'chain_absent_confirmed_position_unattributed',
+                1.0, ''
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _check_trade_state(trade_db)
+
+    assert result.status == FAIL
+    assert result.detail == "blocking_unknown_commands=1"
+
+
 def test_release_gate_rejects_paper_proof_claiming_live_eligibility(tmp_path: Path) -> None:
     args = _make_gate_args(tmp_path, live_eligibility="READY")
 
@@ -416,6 +498,33 @@ def test_loaded_sha_gate_rejects_invalid_sha_shape(tmp_path: Path) -> None:
 
     assert result.status == FAIL
     assert result.detail == "invalid_loaded_sha:abc123"
+
+
+def test_parse_args_defaults_to_runtime_loaded_sha() -> None:
+    args = parse_args([])
+
+    assert args.loaded_sha_file == ROOT / "state" / "loaded_sha.json"
+
+
+def test_fresh_tolerates_small_concurrent_writer_future_skew() -> None:
+    now = datetime(2026, 7, 4, 4, 25, tzinfo=timezone.utc)
+    payload = {"generated_at": (now + timedelta(seconds=3)).isoformat()}
+
+    ok, detail = _fresh(payload, max_age_seconds=60, now=now)
+
+    assert ok is True
+    assert detail == "fresh:0s"
+
+
+def test_fresh_rejects_large_future_skew() -> None:
+    now = datetime(2026, 7, 4, 4, 25, tzinfo=timezone.utc)
+    future = now + timedelta(seconds=30)
+    payload = {"generated_at": future.isoformat()}
+
+    ok, detail = _fresh(payload, max_age_seconds=60, now=now)
+
+    assert ok is False
+    assert detail == f"timestamp_in_future:{future.isoformat()}"
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +800,60 @@ def test_release_gate_passes_with_recent_redeem_tx_hashed(tmp_path: Path) -> Non
 
     assert report.status == PASS
     assert any(r.name == "redeem_state" and r.status == PASS for r in report.results)
+
+
+def test_release_gate_passes_proven_external_zero_payout_redeem_review(tmp_path: Path) -> None:
+    """Historical external zero-payout review rows are terminal accounting evidence, not live blockers."""
+    trade_db = tmp_path / "zeus_trades.db"
+    _make_trade_db(trade_db, redeem_state="REDEEM_REVIEW_REQUIRED")
+    conn = sqlite3.connect(str(trade_db))
+    try:
+        conn.executescript(
+            """
+            ALTER TABLE settlement_commands ADD COLUMN error_payload TEXT;
+            ALTER TABLE settlement_commands ADD COLUMN tx_hash TEXT;
+            ALTER TABLE settlement_commands ADD COLUMN block_number INTEGER;
+            ALTER TABLE settlement_commands ADD COLUMN confirmation_count INTEGER DEFAULT 0;
+            """
+        )
+        conn.execute(
+            """
+            UPDATE settlement_commands
+               SET error_payload = ?,
+                   tx_hash = '0xabc',
+                   block_number = 123,
+                   confirmation_count = 7
+             WHERE command_id = 'redeem-1'
+            """,
+            (
+                json.dumps(
+                    {
+                        "chain_truth_resolution": "EXTERNALLY_REDEEMED_ZERO_PAYOUT",
+                        "payout_from_receipt": 0,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _check_redeem_state(trade_db, (), datetime.now(timezone.utc))
+
+    assert result.status == PASS
+    assert "proven_external_zero_payout_review_rows=1" in result.detail
+
+
+def test_release_gate_blocks_unproven_redeem_review(tmp_path: Path) -> None:
+    """REDEEM_REVIEW_REQUIRED without final chain zero-payout proof remains blocking."""
+    trade_db = tmp_path / "zeus_trades.db"
+    _make_trade_db(trade_db, redeem_state="REDEEM_REVIEW_REQUIRED")
+
+    result = _check_redeem_state(trade_db, (), datetime.now(timezone.utc))
+
+    assert result.status == FAIL
+    assert "blocking_redeem_rows" in result.detail
 
 
 # ---------------------------------------------------------------------------

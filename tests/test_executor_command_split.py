@@ -14,6 +14,8 @@ See implementation_plan.md §P1.S3 for the full phase-order spec.
 from __future__ import annotations
 
 import sqlite3
+
+from src.state.collateral_ledger import init_collateral_schema
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch, call
@@ -32,11 +34,13 @@ _NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
 def mem_conn():
     """In-memory DB with full schema (venue_commands + venue_command_events)."""
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_collateral_schema(c)
     yield c
     c.close()
 
@@ -1606,6 +1610,7 @@ class TestLiveOrderCommandSplit:
         db_path = tmp_path / "entry-pre-submit-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
         setup_conn.close()
@@ -1613,6 +1618,7 @@ class TestLiveOrderCommandSplit:
         def _trade_conn():
             conn = get_connection(db_path)
             init_schema(conn)
+            init_collateral_schema(conn)
             return conn
 
         # get_trade_connection_with_world (non-required variant) was deleted from
@@ -1639,6 +1645,7 @@ class TestLiveOrderCommandSplit:
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
                         """
@@ -1704,12 +1711,14 @@ class TestLiveOrderCommandSplit:
         db_path = tmp_path / "entry-caller-conn-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
         setup_conn.close()
 
         submit_conn = get_connection(db_path)
         init_schema(submit_conn)
+        init_collateral_schema(submit_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
         monkeypatch.setattr(
@@ -1725,6 +1734,7 @@ class TestLiveOrderCommandSplit:
             def v2_preflight(self):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
                         """
@@ -2969,6 +2979,7 @@ class TestExitOrderCommandSplit:
         db_path = tmp_path / "exit-caller-conn-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_collateral_schema(setup_conn)
         intent = _make_exit_intent(
             setup_conn,
             trade_id="trd-exit-caller-commit",
@@ -2979,6 +2990,7 @@ class TestExitOrderCommandSplit:
 
         submit_conn = get_connection(db_path)
         init_schema(submit_conn)
+        init_collateral_schema(submit_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
         monkeypatch.setattr(
@@ -2996,6 +3008,7 @@ class TestExitOrderCommandSplit:
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
                         """
@@ -3044,6 +3057,7 @@ class TestExitOrderCommandSplit:
 
             read_conn = get_connection(db_path)
             init_schema(read_conn)
+            init_collateral_schema(read_conn)
             try:
                 command = read_conn.execute(
                     """

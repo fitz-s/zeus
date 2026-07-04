@@ -306,6 +306,92 @@ def test_exact_target_dates_do_not_horizon_admit_wrong_daily_payload(tmp_path: P
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-20")
 
 
+def test_meta_stamped_current_target_horizon_admits_covered_later_day(tmp_path: Path) -> None:
+    """Meta-stamped current-target payloads are multi-day live inputs.
+
+    Live evidence 2026-07-03: 12Z Open-Meteo payloads physically covered day+1,
+    but manifests carried target_dates=[start_day]. Seed discovery then selected
+    the older 00Z day+1 artifact and cycle-advance froze posteriors at 00Z.
+    """
+
+    raw_dir = tmp_path / "raw"
+    precision = _write_file(raw_dir / "precision_metadata.json", {"city": "Paris"})
+    old_payload = _write_file(
+        raw_dir / "old_openmeteo.json",
+        {
+            "hourly": {
+                "time": ["2026-06-20T00:00", "2026-06-20T12:00"],
+                "temperature_2m": [19.0, 24.0],
+            }
+        },
+    )
+    fresh_payload = _write_file(
+        raw_dir / "fresh_openmeteo.json",
+        {
+            "hourly": {
+                "time": ["2026-06-20T12:00", "2026-06-21T00:00", "2026-06-21T12:00"],
+                "temperature_2m": [18.0, 20.0, 25.0],
+            }
+        },
+    )
+    old_manifest = RawForecastArtifactManifest.from_file(
+        old_payload,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-20T00:00:00+00:00",
+        source_available_at="2026-06-20T06:30:00+00:00",
+        captured_at="2026-06-20T06:31:00+00:00",
+        request_url="https://example.invalid/old",
+        request_params={"run": "2026-06-20T00:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "Paris",
+            "city_timezone": "Europe/Paris",
+            "target_date": "2026-06-20",
+            "target_dates": ["2026-06-20"],
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(old_payload),
+            "precision_metadata_json": str(precision),
+        },
+    )
+    fresh_manifest = RawForecastArtifactManifest.from_file(
+        fresh_payload,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-20T12:00:00+00:00",
+        source_available_at="2026-06-20T18:30:00+00:00",
+        captured_at="2026-06-20T18:31:00+00:00",
+        request_url="https://example.invalid/fresh",
+        request_params={"run": "2026-06-20T12:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "standard_api_meta_stamped",
+            "city": "Paris",
+            "city_timezone": "Europe/Paris",
+            "target_date": "2026-06-20",
+            "target_dates": ["2026-06-20"],
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(fresh_payload),
+            "precision_metadata_json": str(precision),
+        },
+    )
+
+    assert _manifest_allows_target_date(fresh_manifest, target_date="2026-06-21")
+    selected = _latest_manifest(
+        (old_manifest, fresh_manifest),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Paris",
+        target_date="2026-06-21",
+        city_timezone="Europe/Paris",
+    )
+
+    assert selected is fresh_manifest
+
+
 def test_latest_manifest_rejects_horizon_admitted_payload_without_target_day_samples(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     payload = _write_file(

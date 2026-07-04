@@ -13,7 +13,6 @@ from typing import Any
 
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
-    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
 )
 
 
@@ -49,12 +48,13 @@ def collect_monitor_cadence_evidence(
 
     position_columns = _table_columns(conn, "position_current")
     event_columns = _table_columns(conn, "position_events")
-    monitored_rows = _monitor_cadence_position_rows(conn, position_columns)
+    now_utc = _ensure_utc(now)
+    monitored_rows = _monitor_cadence_position_rows(conn, position_columns, now_utc=now_utc)
     non_monitor_chain_risk_rows = _non_monitor_chain_risk_position_rows(
         conn,
         position_columns,
+        now_utc=now_utc,
     )
-    now_utc = _ensure_utc(now)
     min_occurred_utc = _ensure_utc(min_occurred_at) if min_occurred_at else None
     stale_or_missing: list[dict[str, Any]] = []
     future_events: list[dict[str, Any]] = []
@@ -173,11 +173,21 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 def _monitor_cadence_position_rows(
     conn: sqlite3.Connection,
     position_columns: set[str],
+    *,
+    now_utc: datetime,
 ) -> list[dict[str, object]]:
     if "position_id" not in position_columns:
         return []
     optional_selects = []
-    for column in ("phase", "shares", "chain_shares", "chain_state", "order_status", "exit_reason"):
+    for column in (
+        "phase",
+        "shares",
+        "chain_shares",
+        "chain_state",
+        "order_status",
+        "exit_reason",
+        "target_date",
+    ):
         optional_selects.append(column if column in position_columns else f"NULL AS {column}")
     rows = conn.execute(
         f"""
@@ -200,6 +210,8 @@ def _monitor_cadence_position_rows(
             phase=phase,
             chain_state=chain_state,
             exposure_positive=exposure_positive,
+            target_date=row["target_date"],
+            now_utc=now_utc,
         ):
             monitored.append(
                 {
@@ -218,6 +230,8 @@ def _position_requires_monitor_cadence(
     phase: str,
     chain_state: str,
     exposure_positive: bool,
+    target_date: object = None,
+    now_utc: datetime | None = None,
 ) -> bool:
     if not exposure_positive:
         return False
@@ -225,20 +239,19 @@ def _position_requires_monitor_cadence(
         return True
     if phase in MONITOR_CADENCE_POSITION_PHASES:
         return True
-    return (
-        phase == "quarantined"
-        and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
-    )
+    return False
 
 
 def _non_monitor_chain_risk_position_rows(
     conn: sqlite3.Connection,
     position_columns: set[str],
+    *,
+    now_utc: datetime,
 ) -> list[dict[str, object]]:
     if "position_id" not in position_columns:
         return []
     optional_selects = []
-    for column in ("phase", "shares", "chain_shares", "chain_state"):
+    for column in ("phase", "shares", "chain_shares", "chain_state", "target_date"):
         optional_selects.append(column if column in position_columns else f"NULL AS {column}")
     rows = conn.execute(
         f"""
@@ -261,6 +274,8 @@ def _non_monitor_chain_risk_position_rows(
             phase=phase,
             chain_state=chain_state,
             exposure_positive=True,
+            target_date=row["target_date"],
+            now_utc=now_utc,
         ):
             continue
         chain_risk_rows.append(
@@ -270,6 +285,7 @@ def _non_monitor_chain_risk_position_rows(
                 "chain_state": chain_state,
                 "shares": _float_or_zero(row["shares"]),
                 "chain_shares": chain_shares,
+                "target_date": str(row["target_date"] or ""),
             }
         )
     return chain_risk_rows

@@ -6407,7 +6407,7 @@ def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recov
     assert result.evidence["settlement_recoverable_positions"][0]["position_id"] == "pos-1"
 
 
-def test_monitor_cadence_restart_evidence_blocks_unmonitored_entry_authority_quarantine(
+def test_monitor_cadence_restart_evidence_reports_entry_authority_quarantine_as_reconciliation_risk(
     monkeypatch, tmp_path
 ):
     trade_db = tmp_path / "zeus_trades.db"
@@ -6418,6 +6418,7 @@ def test_monitor_cadence_restart_evidence_blocks_unmonitored_entry_authority_qua
     conn = _init_trade_db(trade_db)
     conn.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
     now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(days=1)).date().isoformat()
     conn.execute(
         """
         INSERT INTO position_current (
@@ -6428,13 +6429,13 @@ def test_monitor_cadence_restart_evidence_blocks_unmonitored_entry_authority_qua
             last_monitor_market_price, last_monitor_market_price_is_fresh,
             updated_at, chain_state
         ) VALUES (
-            'pos-1', 'quarantined', 'Manila', '2026-07-02', 'high',
+            'pos-1', 'quarantined', 'Manila', ?, 'high',
             'Will the highest temperature in Manila be 32°C on July 2?',
             'buy_yes', 10.0, 10.0, 'filled', NULL, 0, NULL,
             0.0, 1, NULL, 0, ?, 'entry_authority_quarantined'
         )
         """,
-        (now.isoformat(),),
+        (target_date, now.isoformat()),
     )
     _insert_monitor_events(conn, monitor_at=now - timedelta(minutes=20))
     conn.close()
@@ -6445,11 +6446,57 @@ def test_monitor_cadence_restart_evidence_blocks_unmonitored_entry_authority_qua
 
     result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
 
-    assert result.ok is False
-    assert result.detail == "src.main is running but held-position monitor cadence is stale"
-    assert result.evidence["stale_or_missing_position_count"] == 1
-    assert result.evidence["stale_or_missing_positions"][0]["position_id"] == "pos-1"
-    assert result.evidence["non_monitor_chain_risk_position_count"] == 0
+    assert result.ok is True
+    assert result.detail == "no open positions require monitor cadence recovery evidence"
+    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.evidence["non_monitor_chain_risk_position_count"] == 1
+    assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "pos-1"
+
+
+def test_monitor_cadence_restart_evidence_classifies_expired_quarantine_as_reconciliation_risk(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    conn.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
+    now = datetime.now(timezone.utc)
+    expired_target_date = (now - timedelta(days=3)).date().isoformat()
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at, chain_state
+        ) VALUES (
+            'expired-quarantine', 'quarantined', 'Manila', ?, 'high',
+            'Will the highest temperature in Manila be 32°C on July 2?',
+            'buy_yes', 10.0, 10.0, 'filled', NULL, 0, NULL,
+            0.0, 1, NULL, 0, ?, 'entry_authority_quarantined'
+        )
+        """,
+        (expired_target_date, now.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["open_position_count"] == 0
+    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.evidence["non_monitor_chain_risk_position_count"] == 1
+    assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "expired-quarantine"
 
 
 def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
