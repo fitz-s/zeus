@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-04; last_reused=2026-07-04
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-07-04
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -1149,6 +1149,41 @@ def test_live_db_holder_status_allows_riskguard_live_owner(monkeypatch, tmp_path
                 0,
                 "2-00:00:00 /tmp/zeus/.venv/bin/python -m src.riskguard.riskguard\n",
             )
+        return _Result(1, "", "unexpected command")
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", _run)
+
+    result = _ORIGINAL_LIVE_DB_HOLDER_STATUS()
+
+    assert result["ok"] is True
+    assert result["holders"][0]["known_live_owner"] is True
+    assert result["unknown_long_lived_holders"] == []
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "src.ingest.substrate_observer_daemon",
+        "src.ingest.price_channel_daemon",
+        "src.ingest.post_trade_capital_daemon",
+    ],
+)
+def test_live_db_holder_status_allows_declared_split_daemons(monkeypatch, tmp_path, module):
+    db_path = tmp_path / "zeus_trades.db"
+    db_path.write_text("")
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    class _Result:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _run(cmd, *args, **kwargs):
+        if cmd[0] == "lsof":
+            return _Result(0, f"p444\nn{db_path}\n")
+        if cmd[:3] == ["ps", "-p", "444"]:
+            return _Result(0, f"2-00:00:00 /tmp/zeus/.venv/bin/python -m {module}\n")
         return _Result(1, "", "unexpected command")
 
     monkeypatch.setattr(healthcheck.subprocess, "run", _run)

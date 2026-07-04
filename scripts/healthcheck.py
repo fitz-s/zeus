@@ -345,6 +345,9 @@ def _is_known_live_db_holder(command: str) -> bool:
     known_modules = (
         "src.main",
         "src.riskguard.riskguard",
+        "src.ingest.substrate_observer_daemon",
+        "src.ingest.price_channel_daemon",
+        "src.ingest.post_trade_capital_daemon",
     )
     if any(_has_module_launch(command, module) for module in known_modules):
         return True
