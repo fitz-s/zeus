@@ -316,6 +316,57 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert probe_kwargs == [{"advance_cursor": False}]
 
 
+def test_replacement_availability_poll_timeout_keeps_reseed_path_alive(monkeypatch) -> None:
+    """A wedged current-target download must not starve source-clock/reseed forever."""
+    import src.ingest_main as ingest_main
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.runtime.timeout_guard as timeout_guard
+
+    class _NoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": None,
+            }
+
+    ingest_main._replacement_current_target_timeout_suppressed_until = 0.0
+    monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "1")
+    monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV, "60")
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        timeout_guard,
+        "run_with_timeout",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("hung current-target")),
+    )
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", lambda **kwargs: _NoChange())
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda cfg: None)
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda cfg: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 3, "advances_detected": 0},
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
+    assert result["current_target_download"]["status"] == "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+    assert result["cycle_advance_seeds_enqueued"] == 3
+
+    second = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    assert second["current_target_download"]["status"] == "CURRENT_TARGET_TIMEOUT_COOLDOWN_SKIPPED"
+
+
 def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:
     """The heavy source-clock capture must be timeboxed below the next poll tick."""
     import src.ingest_main as ingest_main
