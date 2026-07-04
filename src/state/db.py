@@ -4222,6 +4222,7 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
         "outcome_fact",
         "position_events",
         "position_current",
+        "risk_actions",
     ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
@@ -4619,6 +4620,7 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
         "execution_fact",
         "opportunity_fact",
         "outcome_fact",
+        "risk_actions",
     ):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)

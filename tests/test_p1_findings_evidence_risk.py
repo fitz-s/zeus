@@ -639,6 +639,31 @@ CREATE TABLE outcome_fact (
 )
 """
 
+_STALE_RISK_ACTIONS_DDL = """\
+CREATE TABLE risk_actions (
+    action_id TEXT PRIMARY KEY,
+    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
+        'settlement_capture',
+        'shoulder_sell',
+        'center_buy',
+        'opening_inertia'
+    )),
+    action_type TEXT NOT NULL CHECK (action_type IN (
+        'gate',
+        'allocation_multiplier',
+        'threshold_multiplier',
+        'exit_only'
+    )),
+    value TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    effective_until TEXT,
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('riskguard', 'manual', 'system')),
+    precedence INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked'))
+)
+"""
+
 
 class TestF6StrategyKeyCheckMigration:
     """F6: stale CHECK constraint is removed from both world and trade tables."""
@@ -793,6 +818,90 @@ class TestF6StrategyKeyCheckMigration:
 
         count = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
         assert count == 2
+
+    def test_migrate_trade_removes_risk_actions_strategy_check(self) -> None:
+        """2026-07-04 live incident: RiskGuard tick failed writing a
+        forecast_qkernel_entry gate because live risk_actions still carried
+        the founding-4 CHECK; action_type/source/status CHECKs must survive
+        the rebuild."""
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_RISK_ACTIONS_DDL)
+        conn.execute(
+            "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("a1", "opening_inertia", "gate", "true",
+             "2026-07-04T00:00:00Z", None, "brier_degraded", "riskguard", 50, "active"),
+        )
+        conn.commit()
+
+        _migrate_trade_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("a2", "forecast_qkernel_entry", "gate", "true",
+             "2026-07-04T01:00:00Z", None, "brier_degraded", "riskguard", 50, "active"),
+        )
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM risk_actions").fetchone()[0] == 2
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("a3", "forecast_qkernel_entry", "not_an_action", "true",
+                 "2026-07-04T02:00:00Z", None, "r", "riskguard", 50, "active"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("a4", "forecast_qkernel_entry", "gate", "true",
+                 "2026-07-04T02:00:00Z", None, "r", "not_a_source", 50, "active"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("a5", "forecast_qkernel_entry", "gate", "true",
+                 "2026-07-04T02:00:00Z", None, "r", "riskguard", 50, "not_a_status"),
+            )
+
+    def test_migrate_world_removes_risk_actions_strategy_check(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_RISK_ACTIONS_DDL)
+        conn.execute(
+            "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("a0", "opening_inertia", "gate", "true",
+             "2026-07-03T00:00:00Z", None, "pre_migration_row", "riskguard", 50, "active"),
+        )
+        conn.commit()
+
+        _migrate_world_strategy_key_checks(conn)
+        conn.commit()
+
+        # Pre-existing row survives the table-swap.
+        row = conn.execute(
+            "SELECT strategy_key, reason FROM risk_actions WHERE action_id='a0'"
+        ).fetchone()
+        assert row == ("opening_inertia", "pre_migration_row")
+
+        conn.execute(
+            "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("a1", "day0_nowcast_entry", "gate", "true",
+             "2026-07-04T00:00:00Z", None, "r", "riskguard", 50, "active"),
+        )
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM risk_actions").fetchone()[0] == 2
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("a2", "day0_nowcast_entry", "gate", "true",
+                 "2026-07-04T01:00:00Z", None, "r", "not_a_source", 50, "active"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("a3", "day0_nowcast_entry", "gate", "true",
+                 "2026-07-04T01:00:00Z", None, "r", "riskguard", 50, "not_a_status"),
+            )
 
     def test_architecture_kernel_opportunity_fact_accepts_day0_strategy_key(self) -> None:
         from src.state.ledger import apply_architecture_kernel_schema
