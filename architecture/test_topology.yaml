@@ -484,6 +484,7 @@ test_trust_policy:
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-06-19"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: extended with TestInsertCommandQVersionStamp — q_version write-once stamp, NULL default, whitespace normalization, survives state transitions."}
+    tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}

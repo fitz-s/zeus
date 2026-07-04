@@ -206,6 +206,10 @@ def load_own_open_resting_orders(
         JOIN venue_order_facts vof ON vof.command_id = vc.command_id
         WHERE vc.token_id = ?
           AND vof.state IN ({open_state_placeholders})
+          AND upper(COALESCE(vc.state, '')) NOT IN (
+                'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED',
+                'SUBMIT_REJECTED', 'FILLED'
+          )
           AND vof.local_sequence = (
                 SELECT MAX(vof2.local_sequence)
                 FROM venue_order_facts vof2

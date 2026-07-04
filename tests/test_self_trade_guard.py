@@ -285,6 +285,17 @@ def test_loader_includes_partially_matched_order(mem_db):
     assert result[0].command_id == "cmd-partial"
 
 
+def test_loader_excludes_terminal_command_with_stale_latest_partial_fact(mem_db):
+    _seed_command(mem_db, "cmd-terminal-partial", TOKEN_YES, "BUY", 0.45, state="CANCELLED")
+    _seed_order_fact(mem_db, "order-terminal-partial", "cmd-terminal-partial", "CANCEL_CONFIRMED", 1)
+    _seed_order_fact(mem_db, "order-terminal-partial", "cmd-terminal-partial", "PARTIALLY_MATCHED", 2)
+    mem_db.commit()
+
+    result = load_own_open_resting_orders(mem_db, token_id=TOKEN_YES)
+
+    assert result == []
+
+
 def test_loader_excludes_candidate_command_id(mem_db):
     _seed_command(mem_db, "cmd-self", TOKEN_YES, "SELL", 0.55)
     _seed_order_fact(mem_db, "order-self", "cmd-self", "LIVE", 1)

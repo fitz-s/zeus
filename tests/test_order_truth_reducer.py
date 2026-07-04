@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-05-21; last_reviewed=2026-07-04; last_reused=2026-07-04
 # Purpose: Relationship antibody for monotonic venue order truth reduction.
 # Reuse: Run when changing venue order fact precedence, command recovery,
 #        exchange reconciliation, or terminal/no-fill projection semantics.
@@ -115,6 +115,31 @@ def test_terminal_positive_zero_remainder_does_not_regress_to_later_partial() ->
     assert reduced.proof_class == TERMINAL_PARTIAL
     assert reduced.remaining_size == Decimal("0")
     assert reduced.matched_size == Decimal("100")
+
+
+def test_cancel_confirmed_partial_remainder_is_terminal_no_resting_truth() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {
+                "state": "CANCEL_CONFIRMED",
+                "remaining_size": "15.07",
+                "matched_size": "10",
+            },
+            {
+                "state": "PARTIALLY_MATCHED",
+                "remaining_size": "15.07",
+                "matched_size": "10",
+            },
+        ],
+        trade_filled_size="10",
+        command_size="25.07",
+        open_order_present=True,
+    )
+
+    assert reduced.state == "CANCEL_CONFIRMED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("10")
 
 
 def test_absence_from_open_orders_alone_is_unknown_not_no_exposure() -> None:

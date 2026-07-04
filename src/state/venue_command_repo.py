@@ -198,7 +198,7 @@ _ORDER_FACT_STATES = frozenset(
     }
 )  # HEARTBEAT_CANCEL_SUSPECTED removed 2026-06-29: 0 live rows, no writer (dead value).
 # DB CHECK in db.py still permits it; it is narrowed out in the CHECK-narrowing step.
-_TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES = frozenset(
+_TERMINAL_NO_RESTING_ORDER_FACT_STATES = frozenset(
     {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
@@ -334,6 +334,31 @@ def _prior_terminal_zero_remainder_order_fact(
         (venue_order_id, command_id),
     ).fetchone()
     if row is None or not _decimal_text_is_zero(row["remaining_size"]):
+        return None
+    return row
+
+
+def _prior_terminal_no_resting_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT fact_id, state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+           AND command_id = ?
+           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (venue_order_id, command_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if str(row["state"] or "") == "MATCHED" and not _decimal_text_is_zero(row["remaining_size"]):
         return None
     return row
 
@@ -2963,14 +2988,15 @@ def append_order_fact(
     raw_payload_json_s = _coerce_payload_json(raw_payload_json)
 
     with _savepoint_atomic(conn):
-        if state not in _TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES:
-            prior_terminal = _prior_terminal_zero_remainder_order_fact(
+        if state not in _TERMINAL_NO_RESTING_ORDER_FACT_STATES:
+            prior_terminal = _prior_terminal_no_resting_order_fact(
                 conn,
                 venue_order_id=venue_order_id,
                 command_id=command_id,
             )
             if prior_terminal is not None:
                 from src.execution.order_truth_reducer import (
+                    TERMINAL_FILLED,
                     TERMINAL_PARTIAL,
                     TERMINAL_NO_FILL,
                     VenueOrderTruthReducer,
@@ -2989,7 +3015,7 @@ def append_order_fact(
                     trade_filled_size="0",
                     open_order_present=is_open_order_fact(state),
                 )
-                if reduced.proof_class in {TERMINAL_NO_FILL, TERMINAL_PARTIAL}:
+                if reduced.proof_class in {TERMINAL_FILLED, TERMINAL_NO_FILL, TERMINAL_PARTIAL}:
                     return int(prior_terminal["fact_id"])
         seq = _coerce_local_sequence(
             conn,
