@@ -32,6 +32,7 @@ def conn():
     """In-memory DB with full schema."""
     from src.state.db import init_schema
     from src.state.collateral_ledger import init_collateral_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -289,11 +290,13 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_collateral_schema(seed)
     seed.execute(
         """
         INSERT INTO position_current (
@@ -383,11 +386,13 @@ def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
     from src.execution import venue_sync_contract
     from src.execution.exit_safety import ExitMutex
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-review-mutex.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_collateral_schema(seed)
     _insert(
         seed,
         command_id="cmd-review-exit",
@@ -449,11 +454,13 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-chain-absence.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_collateral_schema(seed)
     seed.execute(
         """
         INSERT INTO position_current (
@@ -546,11 +553,13 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-budget.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_collateral_schema(seed)
     seed.commit()
     seed.close()
 
@@ -1555,6 +1564,7 @@ def _get_events(conn, command_id):
 
 def _connect_file_db(path):
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(path)
     c.row_factory = sqlite3.Row
@@ -1834,11 +1844,13 @@ class TestRecoveryResolutionTable:
     ):
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
 
         db_path = tmp_path / "restart-preflight.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _seed_pending_entry_projection(
             seed,
             position_id="pos-exit",
@@ -3981,11 +3993,13 @@ class TestRecoveryResolutionTable:
         from src.execution import command_recovery
         from src.execution import venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
 
         db_path = tmp_path / "live-tick-terminal-before-snapshot.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _insert(seed)
         _advance_to_cancel_pending(seed, venue_order_id="ord-001")
         _seed_pending_entry_projection(seed)
@@ -5331,12 +5345,14 @@ class TestRecoveryResolutionTable:
         """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / f"{scope}-filled-exit-projection.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _insert(
             seed,
             command_id="cmd-entry",
@@ -5538,12 +5554,14 @@ class TestRecoveryResolutionTable:
         """Narrow live scopes must not leave matched held entries stranded."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / f"{scope}.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
         _advance_to_partial(seed, venue_order_id="ord-001")
@@ -5654,12 +5672,14 @@ class TestRecoveryResolutionTable:
         """Terminal venue order truth plus held chain projection clears review."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / f"{scope}-terminal-positive.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
         _advance_to_partial(seed, venue_order_id="ord-001")
@@ -5769,12 +5789,14 @@ class TestRecoveryResolutionTable:
     ):
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / f"{scope}-terminal-positive-projection.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
         _advance_to_partial(seed, venue_order_id="ord-001")
