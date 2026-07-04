@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfoNotFoundError
@@ -240,6 +240,53 @@ def _openmeteo_payload_covers_target_local_day(
     return True
 
 
+def _openmeteo_manifest_metadata_allows_target_date(
+    metadata: Mapping[str, object],
+    *,
+    target_date: str,
+) -> bool:
+    dates = metadata.get("target_dates")
+    if isinstance(dates, list) and dates:
+        if target_date in {str(item).strip() for item in dates}:
+            return True
+        if str(metadata.get("openmeteo_endpoint") or "") != "standard_api_meta_stamped":
+            return False
+        return _openmeteo_manifest_horizon_allows_target_date(
+            metadata, target_date=target_date
+        )
+    explicit = metadata.get("target_date")
+    if explicit is not None and str(explicit).strip() == target_date:
+        return True
+    return _openmeteo_manifest_horizon_allows_target_date(
+        metadata, target_date=target_date
+    )
+
+
+def _openmeteo_manifest_horizon_allows_target_date(
+    metadata: Mapping[str, object],
+    *,
+    target_date: str,
+) -> bool:
+    if str(metadata.get("artifact_class") or "") != "openmeteo_ecmwf_ifs9_anchor_current_targets":
+        return False
+    endpoint = str(metadata.get("openmeteo_endpoint") or "")
+    if endpoint and endpoint not in {"single_runs_api", "standard_api_meta_stamped"}:
+        return False
+    start_raw = metadata.get("target_date")
+    if start_raw is None or not str(start_raw).strip():
+        return False
+    try:
+        start = date.fromisoformat(str(start_raw).strip())
+        wanted = date.fromisoformat(str(target_date).strip())
+        hours = int(float(metadata.get("forecast_hours") or 0))
+    except Exception:
+        return False
+    if hours <= 0:
+        return False
+    max_extra_days = max(0, (hours + 23) // 24)
+    return start <= wanted <= start + timedelta(days=max_extra_days)
+
+
 def _openmeteo_manifest_coverage(
     conn: sqlite3.Connection,
     *,
@@ -288,14 +335,6 @@ def _openmeteo_manifest_coverage(
                 WHERE value = ?
             )
           )
-          AND (
-            json_extract({metadata_column}, '$.target_date') = ?
-            OR EXISTS (
-                SELECT 1
-                FROM json_each({metadata_column}, '$.target_dates')
-                WHERE value = ?
-            )
-          )
           {cycle_clause}
         """,
         (
@@ -303,8 +342,6 @@ def _openmeteo_manifest_coverage(
             data_version,
             city,
             city,
-            target_date,
-            target_date,
             *cycle_params,
         ),
     ).fetchall()
@@ -314,6 +351,10 @@ def _openmeteo_manifest_coverage(
         if not artifact_path or not os.path.exists(artifact_path):
             continue
         metadata = _json_object(manifest["metadata_json"])
+        if not _openmeteo_manifest_metadata_allows_target_date(
+            metadata, target_date=target_date
+        ):
+            continue
         if not _openmeteo_payload_covers_target_local_day(
             metadata,
             artifact_path=artifact_path,

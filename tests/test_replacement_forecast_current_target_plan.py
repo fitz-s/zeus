@@ -498,6 +498,63 @@ def test_current_target_plan_counts_openmeteo_manifest_with_target_day_samples(t
     assert london.can_seed is True
 
 
+def test_current_target_plan_counts_meta_stamped_horizon_manifest_with_target_day_samples(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    payload = tmp_path / "london_meta_stamped_payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-06-08T12:00", "2026-06-09T00:00", "2026-06-09T12:00"],
+                    "temperature_2m": [13.0, 14.0, 18.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    precision = tmp_path / "precision.json"
+    precision.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "openmeteo_endpoint": "standard_api_meta_stamped",
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-08",
+                        "target_dates": ["2026-06-08"],
+                        "forecast_hours": 120,
+                        "source_cycle_time": "2026-06-07T06:00:00+00:00",
+                        "source_run_id": "openmeteo-current-London",
+                        "openmeteo_payload_json": str(payload),
+                        "precision_metadata_json": str(precision),
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 1
+    assert london.can_seed is True
+
+
 def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_baseline(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
