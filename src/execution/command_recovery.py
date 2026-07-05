@@ -6877,7 +6877,7 @@ def _emit_terminal_no_fill_redecision_from_recovery(
                 pass
 
 
-def _ensure_entry_projection_is_pending_zero_exposure(
+def _ensure_entry_projection_is_zero_exposure(
     conn: sqlite3.Connection,
     *,
     command: dict,
@@ -10589,7 +10589,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                 (cmd.command_id,),
             ).fetchone()
         )
-        if not _ensure_entry_projection_is_pending_zero_exposure(
+        if not _ensure_entry_projection_is_zero_exposure(
             conn,
             command=command,
             order_id=venue_order_id,
@@ -10849,7 +10849,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                     (cmd.command_id,),
                 ).fetchone()
             )
-            if not _ensure_entry_projection_is_pending_zero_exposure(
+            if not _ensure_entry_projection_is_zero_exposure(
                 conn,
                 command=command,
                 order_id=venue_order_id,
