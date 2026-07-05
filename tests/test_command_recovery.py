@@ -2821,6 +2821,40 @@ class TestRecoveryResolutionTable:
             "order_status": "canceled",
         }
 
+    def test_cancel_unknown_terminal_no_fill_with_voided_projection_expires_entry(
+        self, conn, mock_client
+    ):
+        """Live 2026-07-05 shape (commands 12e0ee45e0a44bc8/1a74acd884cf4ba5):
+        the venue canceled a maker rest (zero fill) and the projection lane
+        had already voided the position before command recovery ran. voided
+        + zero shares + zero cost is exactly as zero-exposure as
+        pending_entry; recovery must not strand the command in
+        REVIEW_REQUIRED."""
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-voided")
+        _seed_pending_entry_projection(conn, order_id="ord-voided")
+        conn.execute(
+            "UPDATE position_current SET phase='voided', order_status='canceled' "
+            "WHERE position_id='pos-001'"
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-voided",
+            "status": "CANCELLED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "cancel_unknown_terminal_no_fill"
+
     def test_cancel_unknown_review_required_absent_point_order_no_exposure_expires_entry(
         self, conn, mock_client
     ):

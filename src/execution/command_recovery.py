@@ -6909,8 +6909,11 @@ def _ensure_entry_projection_is_pending_zero_exposure(
             return False
     except ValueError:
         return False
+    # voided is the projection lane's own zero-fill terminal for a canceled
+    # entry (live 2026-07-05: venue-canceled maker rests projected to voided
+    # before command recovery ran) — equally zero-exposure as pending_entry.
     return (
-        str(current.get("phase") or "") == "pending_entry"
+        str(current.get("phase") or "") in ("pending_entry", "voided")
         and _decimal_is_zero(current.get("shares"))
         and _decimal_is_zero(current.get("cost_basis_usd"))
     )
