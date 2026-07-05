@@ -2250,6 +2250,58 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
 
 
+class TestStrategyBrierMinSample:
+    """Per-strategy Brier verdicts need evidence (2026-07-05 live incident:
+    forecast_qkernel_entry was gated on a single confident settled loss —
+    n=1, Brier (0.79-0)^2 = 0.6241 here — while its live candidates carried
+    the book's best positive edges).
+    Below _STRATEGY_BRIER_MIN_SAMPLE the strategy stays visible in
+    by_strategy (thin_sample_no_verdict) but never enters
+    degraded_strategies; the portfolio pool and loss gates still bind."""
+
+    def test_single_loss_does_not_convict_a_strategy(self):
+        rows = [
+            {"strategy": "forecast_qkernel_entry", "p_posterior": 0.79, "outcome": 0},
+        ] + [
+            {"strategy": "center_buy", "p_posterior": 0.80, "outcome": 1}
+            for _ in range(12)
+        ]
+        out = riskguard_module._strategy_brier_breakdown(
+            rows, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        qk = out["by_strategy"]["forecast_qkernel_entry"]
+        assert qk["sample_size"] == 1
+        assert qk["level"] == "GREEN"
+        assert qk["thin_sample_no_verdict"] is True
+        assert "forecast_qkernel_entry" not in out["degraded_strategies"]
+
+    def test_floor_boundary_convicts_at_min_sample(self):
+        n = riskguard_module._STRATEGY_BRIER_MIN_SAMPLE
+        bad = [
+            {"strategy": "opening_inertia", "p_posterior": 0.58, "outcome": 0}
+            for _ in range(n)
+        ]
+        out = riskguard_module._strategy_brier_breakdown(
+            bad, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        oi = out["by_strategy"]["opening_inertia"]
+        assert oi["sample_size"] == n
+        assert oi["level"] != "GREEN"
+        assert "opening_inertia" in out["degraded_strategies"]
+
+    def test_one_below_floor_does_not_convict(self):
+        n = riskguard_module._STRATEGY_BRIER_MIN_SAMPLE - 1
+        bad = [
+            {"strategy": "opening_inertia", "p_posterior": 0.58, "outcome": 0}
+            for _ in range(n)
+        ]
+        out = riskguard_module._strategy_brier_breakdown(
+            bad, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        assert "opening_inertia" not in out["degraded_strategies"]
+        assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
+
+
 class TestRiskGuardExecutionQualityLocalization:
     """Execution-quality localization (2026-07-05 fresh-start deadlock): the
     legacy book's global fill-rate (0.178 over 200 events, almost all
