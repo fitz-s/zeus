@@ -2876,6 +2876,10 @@ def test_reconciliation_restores_synced_state_when_chain_economics_already_match
 
 
 def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
+    """P0b (2026-07-04): a size mismatch with no pre-existing position_current
+    row (legacy/pre-canonical position) is no longer quarantined — chain size
+    is truth, applied in-memory, with no durable row to correct yet (see
+    docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up)."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
     from src.state.portfolio import PortfolioState
@@ -2901,21 +2905,20 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
 
     assert stats["updated"] == 0
     assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
-    assert stats["review_required_persisted"] == 1
-    assert portfolio.positions[0].shares == 20.0
-    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "quarantined"
-    assert [event["event_type"] for event in query_position_events(conn, "rt-pos-1")] == [
-        "REVIEW_REQUIRED"
-    ]
+    assert portfolio.positions[0].shares == 22.0
+    assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
+    assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
 
 def test_reconciliation_size_correction_no_baseline_persists_durable_review():
-    """PR #352 (Part-3 F4): an unresolved size mismatch with NO canonical baseline
-    is no longer dropped (runtime-only). It is persisted durably as a
-    REVIEW_REQUIRED event + a quarantined position_current projection, so the
-    review requirement survives daemon restart. (Pre-F4 this path skipped the
-    canonical write entirely and the review was lost on reload.)"""
+    """P0b (2026-07-04): an unresolved size mismatch with NO canonical baseline
+    at all (no position_current row yet for this position_id) is no longer
+    quarantined nor tagged size_mismatch_unresolved — that invented durable
+    state is retired. Chain size is truth in-memory
+    (corrected.shares == chain.size); there is no durable row to correct, so
+    the chain-mirror-shaped writer legitimately no-ops (returns False) and no
+    event is persisted for a row that was never canonically created."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -2942,21 +2945,17 @@ def test_reconciliation_size_correction_no_baseline_persists_durable_review():
     # Size correction itself still skipped (no canonical baseline to correct).
     assert stats["updated"] == 0
     assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
-    # F4: the review is now durably persisted.
-    assert stats["review_required_persisted"] == 1
-    assert portfolio.positions[0].shares == 20.0
+    assert portfolio.positions[0].shares == 22.0
     event_types = [
         r[0] for r in conn.execute(
             "SELECT event_type FROM position_events WHERE position_id='rt-pos-1'"
         ).fetchall()
     ]
-    assert event_types == ["REVIEW_REQUIRED"]
+    assert event_types == []
     pc = conn.execute(
         "SELECT phase, chain_state FROM position_current WHERE position_id='rt-pos-1'"
     ).fetchone()
-    assert pc is not None, "quarantined review projection must persist for restart survival"
-    assert pc["phase"] == "quarantined"
-    assert pc["chain_state"] == "size_mismatch_unresolved"
+    assert pc is None, "no canonical row existed before reconcile; none is fabricated by it"
     conn.close()
 
 

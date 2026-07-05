@@ -99,7 +99,14 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
-_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES)
+# P0c: "quarantined" retained explicitly — it dropped out of the canonical
+# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
+# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but the orphan-
+# order-ownership query below still must treat a quarantined position as
+# owning its order until the chain-mirror reconciler resolves it. The query's
+# `NOT IN (?, ?, ?, ?)` placeholder count is hardcoded to this frozenset's
+# size (4) — keep them in lockstep.
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES | {"quarantined"})
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
 )

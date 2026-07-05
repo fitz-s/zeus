@@ -37,8 +37,6 @@ from src.execution.exit_lifecycle import (
 from src.state.chain_reconciliation import (
     QUARANTINE_EXPIRED_REVIEW_REQUIRED,
     QUARANTINE_REVIEW_REQUIRED,
-    QUARANTINE_TIMEOUT_HOURS,
-    check_quarantine_timeouts,
 )
 from src.control.control_plane import (
     build_quarantine_clear_command,
@@ -3120,21 +3118,16 @@ def test_collateral_check_blocks_underfunded_sell():
     assert "need $45.00" in reason
 
 
-# ---- Test 8: Quarantine expires after 48h ----
-
-def test_quarantine_expires_after_48h():
-    """Quarantined positions become admin-resolution-eligible after 48 hours."""
-    past_time = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
-    pos = _make_position(
-        chain_state="quarantined",
-        quarantined_at=past_time,
-    )
-    portfolio = _make_portfolio(pos)
-
-    expired = check_quarantine_timeouts(portfolio)
-
-    assert expired == 1
-    assert pos.chain_state == "quarantine_expired"
+# ---- Test 8: Quarantine expiry timer retired (P0b, 2026-07-04) ----
+#
+# test_quarantine_expires_after_48h previously asserted that
+# check_quarantine_timeouts() minted chain_state="quarantine_expired" after
+# 48h. That timer is retired — see
+# docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up — in favor
+# of the chain-mirror reconciler's two-consecutive-mirror-runs force-resolve
+# (runs every ~10 minutes). Read-side handling of a legacy
+# chain_state="quarantine_expired" row is still covered below (this repo does
+# not purge the read-side vocabulary in this slice — blast-radius honesty).
 
 
 def test_quarantine_expired_blocks_new_entries_until_resolved():
@@ -7465,22 +7458,12 @@ def test_day0_refresh_fallback_keeps_probability_non_authoritative(monkeypatch):
     assert "monitor_probability_stale" in pos.applied_validations
 
 
-# ---- Bonus: Quarantine does NOT expire before 48h ----
-
-
-def test_quarantine_does_not_expire_early():
-    """Quarantined positions stay quarantined before 48 hours."""
-    recent_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    pos = _make_position(
-        chain_state="quarantined",
-        quarantined_at=recent_time,
-    )
-    portfolio = _make_portfolio(pos)
-
-    expired = check_quarantine_timeouts(portfolio)
-
-    assert expired == 0
-    assert pos.chain_state == "quarantined"
+# ---- Bonus: Quarantine expiry timer retired (P0b, 2026-07-04) ----
+#
+# test_quarantine_does_not_expire_early previously pinned "stays quarantined
+# before 48h" — now vacuously true for every duration since the timer no
+# longer expires anything. Retired alongside test_quarantine_expires_after_48h
+# above; see docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up.
 
 
 # ---- Bonus: Collateral check fail-closed on API error ----

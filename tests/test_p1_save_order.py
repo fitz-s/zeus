@@ -140,6 +140,14 @@ class TestP1CrashRecoveryDBFirst:
         assert active.state not in INACTIVE_RUNTIME_STATES
 
     def test_terminal_states_constant_covers_all_terminal_phases(self):
-        """Verify _TERMINAL_POSITION_STATES includes all expected terminal states."""
-        expected = {"settled", "voided", "admin_closed", "quarantined"}
+        """Verify _TERMINAL_POSITION_STATES includes all expected terminal states.
+
+        P0c (2026-07-04): "quarantined" dropped out of this canonical set when
+        its fold widened to {QUARANTINED, SETTLED, VOIDED} — see
+        docs/rebuild/chain_mirror_state_model_2026-07-04.md §5. It is no
+        longer terminal, though portfolio.py's own active/inactive filters
+        still treat it as non-active explicitly (see INACTIVE_RUNTIME_STATES,
+        which retains "quarantined" alongside this narrower constant).
+        """
+        expected = {"settled", "voided", "admin_closed"}
         assert expected == _TERMINAL_POSITION_STATES

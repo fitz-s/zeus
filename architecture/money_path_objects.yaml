@@ -186,21 +186,31 @@ state_machines:
     owner: src/state/chain_mirror_reconciler.py
     description: >
       Chain-mirror market-rule classification codes (operator directive
-      2026-07-04; docs/rebuild/chain_mirror_state_model_2026-07-04.md). These
-      are not venue/lifecycle states; they are the reconciler's own
-      diff-outcome vocabulary carried in position_events.payload_json under
-      "chain_mirror_classification" (CLOSED_REDEEMED/CLOSED_WORTHLESS reuse
-      the existing SETTLED event_type; SIZE_CORRECTED reuses the existing
-      CHAIN_SIZE_CORRECTED event_type — no position_events.event_type CHECK
-      widening was needed). REDEEMABLE/REVIEW_OPEN_ABSENT/MISSING_LOCAL_ROW/
-      FOREIGN/UNGRADEABLE/CONSISTENT are report-only findings and never
-      appear in a persisted row.
+      2026-07-04; docs/rebuild/chain_mirror_state_model_2026-07-04.md, §5
+      follow-up P0b 2026-07-04). These are not venue/lifecycle states; they
+      are the reconciler's own diff-outcome vocabulary carried in
+      position_events.payload_json under "chain_mirror_classification"
+      (CLOSED_REDEEMED/CLOSED_WORTHLESS reuse the existing SETTLED
+      event_type; SIZE_CORRECTED reuses the existing CHAIN_SIZE_CORRECTED
+      event_type; CLOSED_EXITED reuses the existing ADMIN_VOIDED event_type
+      — no position_events.event_type CHECK widening was needed for any of
+      them). REVIEW_OPEN_ABSENT persists a phase-preserving REVIEW_REQUIRED
+      marker event (P0b) as the bookkeeping half of the two-consecutive-
+      mirror-runs force-resolve threshold, but never itself changes
+      phase/chain_state. MISSING_LOCAL_ROW/FOREIGN/UNGRADEABLE/CONSISTENT
+      remain report-only findings and never appear in a persisted row.
+      CLOSED_EXITED (P0b) force-resolves an _OPEN_LIKE_PHASES row (including
+      QUARANTINED, legal since P0c widened LEGAL_LIFECYCLE_FOLDS[QUARANTINED])
+      whose held token has been absent across two consecutive mirror runs
+      with market unresolved and zero open orders — folds to VOIDED with
+      chain_state="closed_exited".
     states:
       - CLOSED_REDEEMED
       - CLOSED_WORTHLESS
       - SIZE_CORRECTED
       - REDEEMABLE
       - REVIEW_OPEN_ABSENT
+      - CLOSED_EXITED
       - MISSING_LOCAL_ROW
       - FOREIGN
       - UNGRADEABLE

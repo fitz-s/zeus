@@ -212,8 +212,15 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+# P0c: QUARANTINED is retained explicitly — it dropped out of the canonical
+# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
+# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but the
+# upsert_position_current reopen guard below still must not let a quarantined
+# row silently reopen into a non-absorbing (active) phase. This does not
+# block the mirror's quarantined -> settled/voided fold: that guard only
+# fires when `candidate_phase` itself is non-absorbing.
 _ABSORBING_POSITION_PHASES = frozenset(
-    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.QUARANTINED.value}
 )
 _REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
     {

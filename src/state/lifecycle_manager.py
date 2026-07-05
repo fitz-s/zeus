@@ -75,7 +75,18 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
     ),
     LifecyclePhase.SETTLED: frozenset({LifecyclePhase.SETTLED}),
     LifecyclePhase.VOIDED: frozenset({LifecyclePhase.VOIDED}),
-    LifecyclePhase.QUARANTINED: frozenset({LifecyclePhase.QUARANTINED}),
+    # P0c (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
+    # follow-up): widened from frozenset({QUARANTINED}) so the chain-mirror
+    # reconciler has a legal fold path out of quarantine once chain truth
+    # grades the position — "quarantined" is an investigation status, not a
+    # market state, and must not be a durable dead end. QUARANTINED is
+    # therefore NO LONGER in TERMINAL_STATES (derived below); callers that
+    # need "excluded from active/order-management processing" semantics for
+    # quarantined rows specifically (not just fold-legality) retain an
+    # explicit local QUARANTINED check alongside TERMINAL_STATES.
+    LifecyclePhase.QUARANTINED: frozenset(
+        {LifecyclePhase.QUARANTINED, LifecyclePhase.SETTLED, LifecyclePhase.VOIDED}
+    ),
     LifecyclePhase.ADMIN_CLOSED: frozenset({LifecyclePhase.ADMIN_CLOSED}),
     LifecyclePhase.UNKNOWN: frozenset(
         {
@@ -94,11 +105,16 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
 # consumer-side hardcoded literals. A phase is terminal iff its legal fold
 # is exactly {phase} — i.e., the only legal next state is itself.
 #
-# Currently: SETTLED, VOIDED, QUARANTINED, ADMIN_CLOSED.
+# Currently: SETTLED, VOIDED, ADMIN_CLOSED.
 # Notably NOT terminal: ECONOMICALLY_CLOSED (folds to {ECONOMICALLY_CLOSED,
 # SETTLED, VOIDED}). Pre-B1, src/engine/cycle_runner.py:341 hardcoded a
 # wrong set including economically_closed and excluding quarantined; that
 # semantic bug is fixed by routing through is_terminal_state below.
+#
+# P0c (2026-07-04): QUARANTINED is ALSO no longer terminal — its fold widened
+# to {QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler can legally
+# close a quarantined row once chain truth grades it. See
+# docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
 TERMINAL_STATES: frozenset[str] = frozenset(
     phase.value
     for phase, fold in LEGAL_LIFECYCLE_FOLDS.items()
@@ -309,7 +325,18 @@ def enter_pending_exit_runtime_state(
     # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
     # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
     # must be layered explicitly here as the originally-observed crash case.
-    if current_phase == LifecyclePhase.ECONOMICALLY_CLOSED or is_terminal_state(current_phase):
+    #
+    # P0c (2026-07-04): QUARANTINED is ALSO no longer terminal (folds to
+    # {QUARANTINED, SETTLED, VOIDED}), but for THIS guard's purpose — a
+    # generic quarantined origin with no entry-authority-conflict chain state
+    # (handled above) still has no legal pending_exit fold and must remain a
+    # no-op, not raise. Layered explicitly for the same reason ECONOMICALLY_CLOSED
+    # is: docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
+    if (
+        current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
+        or current_phase == LifecyclePhase.QUARANTINED
+        or is_terminal_state(current_phase)
+    ):
         return current_phase.value
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value
@@ -398,9 +425,12 @@ def enter_settled_runtime_state(
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.ECONOMICALLY_CLOSED,
         LifecyclePhase.PENDING_EXIT,
+        # P0c: the chain-mirror reconciler grades a quarantined row directly
+        # against chain truth — see docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
+        LifecyclePhase.QUARANTINED,
     }:
         raise ValueError(
-            f"settlement requires active/day0/economically_closed/pending_exit runtime phase, "
+            f"settlement requires active/day0/economically_closed/pending_exit/quarantined runtime phase, "
             f"got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
@@ -444,10 +474,14 @@ def enter_voided_runtime_state(
         LifecyclePhase.PENDING_EXIT,
         LifecyclePhase.ECONOMICALLY_CLOSED,
         LifecyclePhase.UNKNOWN,
+        # P0c: the chain-mirror reconciler's force-resolve path (P0b) needs a
+        # legal quarantined -> voided fold — see
+        # docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
+        LifecyclePhase.QUARANTINED,
     }:
         raise ValueError(
-            "void transition requires pending/active/day0/pending_exit/economically_closed/unknown runtime phase, "
-            f"got {current_phase.value!r}"
+            "void transition requires pending/active/day0/pending_exit/economically_closed/unknown/quarantined "
+            f"runtime phase, got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.VOIDED)
     return LifecyclePhase.VOIDED.value

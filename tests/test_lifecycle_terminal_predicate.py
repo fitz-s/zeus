@@ -15,6 +15,11 @@ Also pins the semantic fix anchor: ECONOMICALLY_CLOSED is NOT terminal
 (it folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}). The pre-B1
 cycle_runner.py:341 inline set incorrectly classified it as terminal.
 
+P0c (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5):
+QUARANTINED is ALSO no longer terminal — its fold widened to
+{QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler has a legal
+fold path out of quarantine once chain truth grades the position.
+
 All tests are pure-Python; no DB, no network.
 """
 from __future__ import annotations
@@ -49,9 +54,14 @@ def test_terminal_states_derived_from_folds_invariant():
 
 
 def test_canonical_terminal_membership():
-    """Per LEGAL_LIFECYCLE_FOLDS, exactly 4 phases are terminal."""
+    """Per LEGAL_LIFECYCLE_FOLDS, exactly 3 phases are terminal.
+
+    P0c (2026-07-04): QUARANTINED dropped out of this set when its fold
+    widened to {QUARANTINED, SETTLED, VOIDED} — it now has legal next states,
+    so (like ECONOMICALLY_CLOSED) it is no longer terminal.
+    """
     assert TERMINAL_STATES == frozenset(
-        {"settled", "voided", "quarantined", "admin_closed"}
+        {"settled", "voided", "admin_closed"}
     )
 
 
@@ -61,8 +71,15 @@ def test_canonical_terminal_membership():
 
 
 def test_is_terminal_state_canonical_terminals():
-    for s in ("settled", "voided", "quarantined", "admin_closed"):
+    for s in ("settled", "voided", "admin_closed"):
         assert is_terminal_state(s) is True, f"{s!r} should be terminal"
+
+
+def test_is_terminal_state_quarantined_is_not_terminal():
+    """P0c anchor: QUARANTINED folds to {QUARANTINED, SETTLED, VOIDED} — it
+    has legal next states, so (like ECONOMICALLY_CLOSED) it is NOT terminal."""
+    assert is_terminal_state("quarantined") is False
+    assert is_terminal_state(LifecyclePhase.QUARANTINED) is False
 
 
 def test_is_terminal_state_economically_closed_is_not_terminal():
@@ -83,7 +100,6 @@ def test_is_terminal_state_non_terminals():
 
 def test_is_terminal_state_accepts_enum_members():
     assert is_terminal_state(LifecyclePhase.SETTLED) is True
-    assert is_terminal_state(LifecyclePhase.QUARANTINED) is True
     assert is_terminal_state(LifecyclePhase.ACTIVE) is False
 
 
