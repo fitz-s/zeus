@@ -2205,61 +2205,45 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     return stats
 
 
-QUARANTINE_TIMEOUT_HOURS = 48
 QUARANTINE_REVIEW_REQUIRED = "QUARANTINE_REVIEW_REQUIRED"
 QUARANTINE_EXPIRED_REVIEW_REQUIRED = "QUARANTINE_EXPIRED_REVIEW_REQUIRED"
 
 
 def quarantine_resolution_reason(chain_state: str) -> str:
+    """Still consulted by src.engine.cycle_runtime for any legacy row that
+    already carries chain_state='quarantine_expired' from before P0b
+    (2026-07-04) — see check_quarantine_timeouts for why nothing mints that
+    value going forward."""
     if chain_state == "quarantine_expired":
         return QUARANTINE_EXPIRED_REVIEW_REQUIRED
     return QUARANTINE_REVIEW_REQUIRED
 
 
 def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
-    """Expire quarantined positions after 48 hours.
+    """ChainOnlyFact 48h review escalation only.
 
-    Expired positions remain non-entry-block-cleared, but become eligible for
-    explicit monitor/admin resolution with QUARANTINE_EXPIRED_REVIEW_REQUIRED.
-    Returns: number of positions expired.
+    P0b (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
+    follow-up): the 48h position-quarantine timer that minted
+    chain_state='quarantine_expired' is RETIRED — "a 48h timer on an
+    invented state" (audit verdict). Quarantine's resolution path is now the
+    chain-mirror reconciler's two-consecutive-mirror-runs force-resolve
+    (src.state.chain_mirror_reconciler.classify_local_position /
+    _has_prior_review_open_absent_marker), which runs every ~10 minutes —
+    orders of magnitude faster than a 48h backstop, so the backstop is now
+    strictly worse than the mechanism it was standing in for. No new
+    'quarantine_expired' rows are minted by this function going forward; the
+    literal, quarantine_resolution_reason(), and QUARANTINE_EXPIRED_REVIEW_REQUIRED
+    remain for any legacy row already carrying that chain_state from before
+    this change (blast-radius honesty: this slice stops the writer, it does
+    not purge the read-side vocabulary — see the P0b task's own caution).
+
+    Returns: always 0 (position expiry removed). Retained as a function (not
+    deleted outright) because it still owns the ChainOnlyFact 48h review
+    escalation below, and src.engine.cycle_runner calls it unconditionally
+    every cycle.
     """
     now = datetime.now(timezone.utc)
     expired = 0
-
-    for pos in portfolio.positions:
-        if pos.chain_state != "quarantined":
-            continue
-        if not pos.quarantined_at:
-            # No timestamp at all — treat as maximally stale, force admin review.
-            logger.warning(
-                "QUARANTINE MISSING TIMESTAMP: %s — forcing admin resolution",
-                pos.trade_id,
-            )
-            pos.chain_state = "quarantine_expired"
-            expired += 1
-            continue
-
-        try:
-            quarantined_dt = datetime.fromisoformat(
-                pos.quarantined_at.replace("Z", "+00:00")
-            )
-        except ValueError:
-            logger.warning(
-                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing admin resolution",
-                pos.trade_id, pos.quarantined_at,
-            )
-            pos.chain_state = "quarantine_expired"
-            expired += 1
-            continue
-
-        hours_quarantined = (now - quarantined_dt).total_seconds() / 3600
-        if hours_quarantined > QUARANTINE_TIMEOUT_HOURS:
-            logger.warning(
-                "QUARANTINE EXPIRED: %s held for %.0fh — forcing admin resolution",
-                pos.trade_id, hours_quarantined,
-            )
-            pos.chain_state = "quarantine_expired"
-            expired += 1
 
     # PR #352 (Part-3 audit, Copilot #350 finding): ChainOnlyFact 48h review
     # escalation consumer. Chain-only inventory is NOT a local Position, so the
