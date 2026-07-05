@@ -2067,46 +2067,70 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 else:
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
-                if not _append_canonical_size_correction_if_available(
+                if _append_canonical_size_correction_if_available(
                     corrected,
                     local_shares_before=local_shares,
                 ):
+                    stats["updated"] += 1
+                else:
+                    # P0b (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md
+                    # §5 follow-up): chain size is TRUTH regardless of whether a
+                    # canonical lifecycle baseline exists yet for this position —
+                    # a size divergence is chain evidence, not a lifecycle event,
+                    # and must never mint a durable 'quarantined'/
+                    # 'size_mismatch_unresolved' dead end (the prior behavior:
+                    # this writer minted exactly the invented state the mirror
+                    # exists to drain). Apply the correction through the SAME
+                    # CHAIN_SIZE_CORRECTED event shape the chain-mirror
+                    # reconciler uses — an append-only event plus a chain_shares
+                    # projection update, keeping the position in its CURRENT
+                    # phase (no state/chain_state mutation).
                     logger.warning(
-                        "SIZE MISMATCH UNRESOLVED: %s — no canonical baseline for correction "
-                        "(local=%.4f, chain=%.4f); quarantining position",
+                        "SIZE MISMATCH: %s — no canonical lifecycle baseline yet; "
+                        "applying chain-truth correction via the chain-mirror "
+                        "event shape (local=%.4f, chain=%.4f)",
                         pos.trade_id, local_shares, chain.size,
                     )
-                    # Finding 2 (PR C1, 2026-05-27): the previous string
-                    # "quarantine_size_mismatch" was NOT a member of LifecycleState
-                    # and downstream phase_for_runtime_position() mapped it to
-                    # LifecyclePhase.UNKNOWN — exposure/exit/harvester then saw
-                    # inconsistent phases. The size-mismatch discriminator already
-                    # lives in chain_state (SIZE_MISMATCH_UNRESOLVED); state must
-                    # carry the canonical LifecycleState.QUARANTINED.value.
-                    corrected.state = LifecycleState.QUARANTINED.value
-                    corrected.chain_state = "size_mismatch_unresolved"
-                    corrected.quarantined_at = corrected.quarantined_at or now
-                    if not _size_mismatch_eligible:
-                        corrected.shares = local_shares
-                    else:
-                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
-                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
-                    stats["skipped_size_correction_missing_canonical_baseline"] = (
-                        stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
-                    )
-                    # PR #352 (Part-3 audit Finding 4): persist the review
-                    # requirement durably. Without this, position_current stays
-                    # 'active' on disk and the quarantine/review is lost on the
-                    # next daemon restart — unresolved size mismatch is live
-                    # exposure risk and must survive process lifetime.
-                    if _append_canonical_review_required(
-                        corrected, reason="size_mismatch_unresolved_no_canonical_baseline"
-                    ):
-                        stats["review_required_persisted"] = (
-                            stats.get("review_required_persisted", 0) + 1
+                    wrote_via_mirror_shape = False
+                    if conn is not None:
+                        from src.state.chain_mirror_reconciler import (
+                            SIZE_CORRECTED as _MIRROR_SIZE_CORRECTED,
+                            MirrorFinding as _MirrorFinding,
+                            apply_size_correction_finding as _apply_mirror_size_correction,
                         )
-                else:
-                    stats["updated"] += 1
+
+                        wrote_via_mirror_shape = _apply_mirror_size_correction(
+                            conn,
+                            _MirrorFinding(
+                                classification=_MIRROR_SIZE_CORRECTED,
+                                position_id=pos.trade_id,
+                                asset=tid,
+                                writes=True,
+                                details={
+                                    "chain_size": chain.size,
+                                    "local_shares": local_shares,
+                                    "delta": abs(chain.size - local_shares),
+                                    "no_canonical_baseline": True,
+                                },
+                            ),
+                            now=datetime.now(timezone.utc),
+                        )
+                    if wrote_via_mirror_shape:
+                        stats["updated"] += 1
+                        stats["size_corrected_via_mirror_shape"] = (
+                            stats.get("size_corrected_via_mirror_shape", 0) + 1
+                        )
+                    else:
+                        # No position_current row exists yet at all (e.g. a
+                        # legacy/pre-canonical position never migrated) — the
+                        # in-memory chain-truth correction above still stands
+                        # (corrected.shares == chain.size), but there is no
+                        # durable row to correct. No quarantine, no invented
+                        # state: the next cycle to see a canonical row for
+                        # this position_id will pick the correction back up.
+                        stats["skipped_size_correction_missing_canonical_baseline"] = (
+                            stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
+                        )
             else:
                 # Chain-shares-persist fix (2026-05-31, task #56): matched —
                 # chain.size == local_shares, single-lot (NOT aggregate-backed),

@@ -95,9 +95,13 @@ def _make_in_memory_db_with_chronicle(rows: list[dict] | None = None) -> sqlite3
 # ---------------------------------------------------------------------------
 
 
-def test_reconciliation_size_mismatch_no_baseline_tags_unresolved():
-    """When canonical baseline is missing (conn=None), position is tagged
-    size_mismatch_unresolved and chain-verified fields are still applied."""
+def test_reconciliation_size_mismatch_no_baseline_applies_chain_truth_no_quarantine():
+    """P0b (2026-07-04): when canonical baseline is missing (conn=None), the
+    position is NOT quarantined and chain_state is NOT tagged
+    size_mismatch_unresolved (that invented durable state is retired — see
+    docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up). Chain
+    size is truth regardless: chain-verified fields (including shares) are
+    still applied, and the position stays in its current phase/chain_state."""
     from src.state.chain_reconciliation import reconcile, ChainPosition
 
     pos = _make_position(trade_id="test-pos-1", shares=10.0, chain_state="unknown")
@@ -108,13 +112,17 @@ def test_reconciliation_size_mismatch_no_baseline_tags_unresolved():
         token_id="tok-abc", size=15.0, avg_price=0.55, cost=8.25, condition_id="cond-1",
     )]
 
-    # conn=None makes _append_canonical_size_correction_if_available return False
+    # conn=None makes both _append_canonical_size_correction_if_available and
+    # the chain-mirror-shaped fallback writer return False (no durable row to
+    # correct) — the in-memory chain-truth correction still applies.
     stats = reconcile(portfolio, chain_positions, conn=None)
 
     updated_pos = portfolio.positions[0]
-    assert updated_pos.chain_state == "size_mismatch_unresolved"
+    assert updated_pos.chain_state == "synced"
+    assert updated_pos.state != "quarantined"
     # Chain-verified fields should still be applied (no silent continue)
     assert updated_pos.chain_shares == 15.0
+    assert updated_pos.shares == 15.0
     assert updated_pos.entry_price == 0.55
     assert updated_pos.condition_id == "cond-1"
     assert stats.get("skipped_size_correction_missing_canonical_baseline", 0) >= 1

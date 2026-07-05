@@ -14,6 +14,7 @@ import pytest
 
 from src.contracts.semantic_types import ChainState
 from src.state.chain_mirror_reconciler import (
+    CLOSED_EXITED,
     CLOSED_REDEEMED,
     CLOSED_WORTHLESS,
     CONSISTENT,
@@ -432,8 +433,18 @@ def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
     assert events[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
 
 
-def test_open_phase_absent_token_unresolved_market_never_writes(trades_conn, forecasts_conn):
-    """The Manila ce105753-e91 case must not be auto-closed."""
+def test_open_phase_absent_token_unresolved_market_first_run_marks_review_no_close(
+    trades_conn, forecasts_conn
+):
+    """The Manila ce105753-e91 case must not be auto-closed on a single read.
+
+    P0b (2026-07-04): a single absent read is ambiguous (data-api lag) and
+    must NOT force-close. It DOES persist a durable, phase-preserving
+    REVIEW_REQUIRED marker event (the bookkeeping half of the two-
+    consecutive-mirror-runs threshold — see
+    _has_prior_review_open_absent_marker) — this is evidence, not a
+    lifecycle transition (phase_before == phase_after).
+    """
     _insert_position_current(
         trades_conn, position_id="pos-manila", phase="day0_window",
         city="manila", target_date="2026-07-04", bin_label="33°C",
@@ -443,17 +454,129 @@ def test_open_phase_absent_token_unresolved_market_never_writes(trades_conn, for
 
     report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
 
-    assert report.applied == 0
     row = trades_conn.execute(
-        "SELECT phase FROM position_current WHERE position_id='pos-manila'"
+        "SELECT phase, chain_state FROM position_current WHERE position_id='pos-manila'"
     ).fetchone()
     assert row["phase"] == "day0_window"
+    assert row["chain_state"] == "synced"
     events = trades_conn.execute(
-        "SELECT COUNT(*) AS n FROM position_events WHERE position_id='pos-manila'"
-    ).fetchone()
-    assert events["n"] == 0
+        "SELECT event_type, phase_before, phase_after FROM position_events WHERE position_id='pos-manila'"
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["event_type"] == "REVIEW_REQUIRED"
+    assert events[0]["phase_before"] == "day0_window"
+    assert events[0]["phase_after"] == "day0_window"
     review_findings = [f for f in report.findings if f.classification == REVIEW_OPEN_ABSENT]
     assert len(review_findings) == 1
+
+
+def test_open_phase_absent_token_second_consecutive_run_force_closes(trades_conn, forecasts_conn):
+    """Two independent absent reads ~10min apart (nothing in between) rule out
+    data-api lag — the second run force-resolves to CLOSED_EXITED (VOIDED,
+    chain_state='closed_exited') with dual-read provenance."""
+    _insert_position_current(
+        trades_conn, position_id="pos-manila-2", phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id="tok-manila-no-2", chain_state="synced",
+        chain_shares=11.1, shares=11.1,
+    )
+
+    first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in first.findings)
+    row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-manila-2'"
+    ).fetchone()
+    assert row["phase"] == "day0_window"
+
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    closed_findings = [f for f in second.findings if f.classification == CLOSED_EXITED]
+    assert len(closed_findings) == 1
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id='pos-manila-2'"
+    ).fetchone()
+    assert row["phase"] == "voided"
+    assert row["chain_state"] == CLOSED_EXITED
+    events = trades_conn.execute(
+        "SELECT event_type, phase_before, phase_after FROM position_events "
+        "WHERE position_id='pos-manila-2' ORDER BY sequence_no"
+    ).fetchall()
+    assert len(events) == 2
+    assert events[0]["event_type"] == "REVIEW_REQUIRED"
+    assert events[1]["event_type"] == "ADMIN_VOIDED"
+    assert events[1]["phase_before"] == "day0_window"
+    assert events[1]["phase_after"] == "voided"
+
+
+def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, forecasts_conn):
+    """Token reappears on the second read (present + matching size) — must
+    return to consistent/synced, never force-close, regardless of the first
+    run's REVIEW_OPEN_ABSENT marker."""
+    _insert_position_current(
+        trades_conn, position_id="pos-manila-3", phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id="tok-manila-no-3", chain_state="synced",
+        chain_shares=11.1, shares=11.1,
+    )
+
+    first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in first.findings)
+
+    chain = {"tok-manila-no-3": ChainPositionFact(
+        token_id="tok-manila-no-3", condition_id="cond-1", size=11.1,
+        redeemable=False, current_value=0.0, side="No",
+    )}
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset=chain, apply=True)
+
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    consistent = [f for f in second.findings if f.position_id == "pos-manila-3"]
+    assert len(consistent) == 1
+    assert consistent[0].classification == CONSISTENT
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id='pos-manila-3'"
+    ).fetchone()
+    assert row["phase"] == "day0_window"
+    assert row["chain_state"] == "synced"
+
+
+def test_open_phase_absent_token_second_run_with_open_order_does_not_close(
+    trades_conn, forecasts_conn
+):
+    """A second consecutive absent read must NOT force-close if an order is
+    still open/in-flight for this position — never void out from under a
+    live order."""
+    _insert_position_current(
+        trades_conn, position_id="pos-manila-4", phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id="tok-manila-no-4", chain_state="synced",
+        chain_shares=11.1, shares=11.1,
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (
+            'cmd-1', 'snap-1', 'env-1', 'pos-manila-4', 'dec-1', 'idem-1',
+            'EXIT', 'market-1', 'tok-manila-no-4', 'SELL', 11.1, 0.5,
+            'ACKED', ?, ?
+        )
+        """,
+        ("2026-07-04T00:00:00+00:00", "2026-07-04T00:00:00+00:00"),
+    )
+    trades_conn.commit()
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    review_findings = [f for f in second.findings if f.classification == REVIEW_OPEN_ABSENT]
+    assert len(review_findings) == 1
+    row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-manila-4'"
+    ).fetchone()
+    assert row["phase"] == "day0_window"
 
 
 def test_foreign_and_missing_local_row_findings_never_create_a_local_row(trades_conn, forecasts_conn):
