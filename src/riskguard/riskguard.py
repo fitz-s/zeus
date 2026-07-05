@@ -1145,6 +1145,12 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
     return metric_rows
 
 
+# Below this many settled observations a per-strategy Brier score is noise,
+# not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
+# strategies are still counted in the portfolio pool and the loss gates.
+_STRATEGY_BRIER_MIN_SAMPLE = 10
+
+
 def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
     """Per-strategy probability-quality attribution for localized protection.
 
@@ -1173,11 +1179,27 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         outcomes = list(bucket["o"])  # type: ignore[index]
         score = brier_score(p_values, outcomes)
         level = evaluate_brier(score, thresholds)
+        sample_size = len(p_values)
         payload = {
-            "sample_size": len(p_values),
+            "sample_size": sample_size,
             "brier": round(float(score), 6),
             "level": level.value,
         }
+        # Minimum-evidence floor (2026-07-05): a per-strategy Brier verdict
+        # below n=10 is statistically empty — one bad settlement scores
+        # ~0.8+ and would gate a whole lane on a single coin flip (live
+        # incident: forecast_qkernel_entry gated RED on n=1 while its
+        # candidates showed the book's best positive edges). Thin strategies
+        # stay in by_strategy for observability but never enter
+        # degraded_strategies; portfolio-level Brier (which pools them) and
+        # the loss gates still bind. Same attribute-don't-convict principle
+        # as ORANGE/execution localization; K3's coverage min_n=30 is the
+        # calibration-lane analogue.
+        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+            payload["level"] = RiskLevel.GREEN.value
+            payload["thin_sample_no_verdict"] = True
+            by_strategy[strategy] = payload
+            continue
         by_strategy[strategy] = payload
         if level != RiskLevel.GREEN:
             degraded[strategy] = payload
