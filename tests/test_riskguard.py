@@ -15,15 +15,6 @@ import pytest
 
 import src.riskguard.policy as policy_module
 import src.riskguard.riskguard as riskguard_module
-
-
-def _recent_iso(*, minutes: int) -> str:
-    """occurred_at inside _ENTRY_EXECUTION_LOOKBACK (execution summary is time-bounded)."""
-    from datetime import datetime, timedelta, timezone
-
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
 import src.state.strategy_tracker as strategy_tracker_module
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.metrics import (
@@ -44,6 +35,13 @@ from src.state.portfolio import (
     Position,
     total_exposure_usd,
 )
+
+
+def _recent_iso(*, minutes: int) -> str:
+    """occurred_at inside _ENTRY_EXECUTION_LOOKBACK (execution summary is time-bounded)."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def _policy_conn() -> sqlite3.Connection:

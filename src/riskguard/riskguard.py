@@ -1086,8 +1086,8 @@ def _entry_execution_summary(
                 'ENTRY_ORDER_REJECTED',
                 'ENTRY_ORDER_VOIDED'
             )
-              AND occurred_at >= ?
-            ORDER BY occurred_at DESC
+              AND datetime(occurred_at) >= datetime(?)
+            ORDER BY datetime(occurred_at) DESC
             LIMIT ?
             """,
             (cutoff, limit),
