@@ -2124,7 +2124,7 @@ class TestRiskGuardOrangeLocalization:
         monkeypatch.setattr(
             riskguard_module,
             "_residual_active_portfolio_brier_level",
-            lambda *a, **k: (RiskLevel.ORANGE, 0.31, 10),
+            lambda *a, **k: (RiskLevel.ORANGE, 0.31, 10, []),
         )
 
         level = riskguard_module.tick()
@@ -2255,6 +2255,52 @@ class TestRiskGuardOrangeLocalization:
         )
         assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": False}
         assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
+
+
+class TestResidualBrierMinSample:
+    """Pool edition of the minimum-evidence floor (2026-07-05 live incident):
+    ORANGE localization's residual check let n=1 strategies vote — two
+    single-loss corpses (day0_nowcast 0.92, qkernel 0.79) dragged an
+    otherwise-GREEN residual to YELLOW and kept the whole book frozen."""
+
+    def _row(self, strategy, p, o):
+        return {"strategy": strategy, "p_posterior": p, "outcome": o,
+                "source": "position_events", "metric_ready": True}
+
+    def test_thin_strategies_do_not_vote_in_residual(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = (
+            [self._row("center_buy", 0.12, 0) for _ in range(10)]
+            + [self._row("day0_nowcast_entry", 0.96, 0)]      # n=1 corpse
+            + [self._row("forecast_qkernel_entry", 0.89, 0)]  # n=1 corpse
+        )
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.GREEN
+        assert n == 10
+        assert thin == ["day0_nowcast_entry", "forecast_qkernel_entry"]
+        assert score < 0.25
+
+    def test_thick_degraded_strategy_still_fails_residual(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = [self._row("center_buy", 0.9, 0) for _ in range(10)]
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.RED
+        assert n == 10
+        assert thin == []
+
+    def test_empty_after_thin_exclusion_is_green(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = [self._row("day0_nowcast_entry", 0.96, 0)]
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.GREEN
+        assert n == 0
+        assert thin == ["day0_nowcast_entry"]
 
 
 class TestEntryExecutionSummaryWindow:

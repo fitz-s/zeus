@@ -1378,11 +1378,34 @@ def _residual_active_portfolio_brier_level(
         row for row in brier_metric_rows
         if str(row.get("strategy") or "unclassified") not in excluded_strategies
     ]
-    residual_p = [float(row["p_posterior"]) for row in residual_rows]
-    residual_o = [int(row["outcome"]) for row in residual_rows]
+    # Minimum-evidence floor, pool edition (2026-07-05): a strategy below
+    # _STRATEGY_BRIER_MIN_SAMPLE carries NO verdict (same doctrine as the
+    # per-strategy breakdown) — its rows must not vote in the residual
+    # either. Live incident: two n=1 settled losses (Brier 0.92 / 0.79)
+    # dragged an otherwise-GREEN residual to YELLOW, defeating ORANGE
+    # localization and freezing the whole book on two coin flips — the
+    # exact failure the per-strategy floor fixed, one level up. Thin
+    # strategies remain visible via thin_sample_excluded_strategies; the
+    # daily/weekly realized-loss gates still bind on their outcomes.
+    rows_by_strategy: dict[str, list[dict]] = {}
+    for row in residual_rows:
+        rows_by_strategy.setdefault(str(row.get("strategy") or "unclassified"), []).append(row)
+    thin_excluded = sorted(
+        strategy
+        for strategy, rows in rows_by_strategy.items()
+        if len(rows) < _STRATEGY_BRIER_MIN_SAMPLE
+    )
+    scored_rows = [
+        row
+        for strategy, rows in rows_by_strategy.items()
+        if strategy not in thin_excluded
+        for row in rows
+    ]
+    residual_p = [float(row["p_posterior"]) for row in scored_rows]
+    residual_o = [int(row["outcome"]) for row in scored_rows]
     residual_score = brier_score(residual_p, residual_o) if residual_p else 0.0
     residual_level = evaluate_brier(residual_score, thresholds) if residual_p else RiskLevel.GREEN
-    return residual_level, residual_score, len(residual_p)
+    return residual_level, residual_score, len(residual_p), thin_excluded
 
 
 def _refresh_riskguard_auxiliary_bookkeeping(
@@ -2063,7 +2086,12 @@ def _tick_once() -> RiskLevel:
                 all_gates_confirmed = False
 
             if all_gates_confirmed:
-                residual_level, residual_score, residual_sample_size = _residual_active_portfolio_brier_level(
+                (
+                    residual_level,
+                    residual_score,
+                    residual_sample_size,
+                    residual_thin_excluded,
+                ) = _residual_active_portfolio_brier_level(
                     brier_metric_rows, thresholds, set(orange_gated_strategies),
                 )
                 if residual_level == RiskLevel.GREEN:
@@ -2076,6 +2104,7 @@ def _tick_once() -> RiskLevel:
                         "residual_brier_level": residual_level.value,
                         "residual_brier_score": round(float(residual_score), 6),
                         "residual_sample_size": residual_sample_size,
+                        "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
                 else:
                     brier_level = portfolio_brier_level
@@ -2087,6 +2116,7 @@ def _tick_once() -> RiskLevel:
                         "residual_brier_level": residual_level.value,
                         "residual_brier_score": round(float(residual_score), 6),
                         "residual_sample_size": residual_sample_size,
+                        "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
             else:
                 brier_level = portfolio_brier_level
