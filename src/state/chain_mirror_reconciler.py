@@ -685,11 +685,37 @@ def _apply_settlement_finding(
     if finding.details.get("chain_absent"):
         projection["chain_shares"] = 0.0
 
+    # Canonical position_settled.v1 contract payload: riskguard's
+    # settlement-quality gate (query_authoritative_settlement_rows →
+    # CANONICAL_POSITION_SETTLED_DETAIL_FIELDS) counts a SETTLED event with an
+    # incomplete canonical payload as a DEGRADED row, and >0 degraded rows
+    # flips settlement_quality_level to YELLOW — blocking ALL new entries on
+    # the GREEN-only reactor gate. 2026-07-05 incident: 37 mirror-closed rows
+    # did exactly that. The mirror KNOWS every truth field at close time;
+    # stamp the full contract.
+    _shares = float(current["chain_shares"] or current["shares"] or 0.0)
+    _cost = float(current["cost_basis_usd"] or 0.0)
+    _pnl = (_shares - _cost) if won else -_cost
     payload = json.dumps(
         {
             "reconciler": "chain_mirror",
             "chain_mirror_classification": chain_state_after,
             **finding.details,
+            "contract_version": "position_settled.v1",
+            "position_bin": str(current["bin_label"] or ""),
+            "outcome": 1 if won else 0,
+            "p_posterior": current["p_posterior"],
+            "exit_price": 1.0 if won else 0.0,
+            "pnl": _pnl,
+            "exit_reason": "chain_mirror_settlement",
+            "settlement_authority": "VERIFIED",
+            "settlement_truth_source": "forecasts.settlement_outcomes",
+            "settlement_market_slug": str(finding.details.get("market_slug") or ""),
+            "settlement_temperature_metric": str(
+                getattr(finding, "temperature_metric", None)
+                or current["temperature_metric"]
+                or "high"
+            ),
         },
         default=str,
         sort_keys=True,
