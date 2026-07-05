@@ -70,14 +70,27 @@ ZEUS_FORECASTS_DB_PATH = STATE_DIR / "zeus-forecasts.db"  # K1 split 2026-05-11:
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
-CANONICAL_STRATEGY_KEYS = frozenset(
-    {
-        "settlement_capture",
-        "shoulder_sell",
-        "center_buy",
-        "opening_inertia",
-    }
-)
+def _canonical_strategy_keys_from_registry() -> frozenset[str]:
+    """Live strategy identity comes from the strategy-profile registry, not a
+    hardcoded founding-four set. 2026-07-05 incident: the stale literal made
+    riskguard treat forecast_qkernel_entry / day0_nowcast_entry settled rows
+    as 'unclassified', permanently defeating ORANGE Brier localization and
+    freezing healthy strategies. Falls back to the founding four only if the
+    registry is unimportable (bootstrap ordering)."""
+    try:
+        from src.strategy.strategy_profile import live_safe_keys
+
+        keys = live_safe_keys()
+        if keys:
+            return frozenset(keys)
+    except Exception:
+        pass
+    return frozenset(
+        {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
+    )
+
+
+CANONICAL_STRATEGY_KEYS = _canonical_strategy_keys_from_registry()
 
 _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     {
