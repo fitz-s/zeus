@@ -1053,6 +1053,29 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
 
 _ENTRY_EXECUTION_LOOKBACK = timedelta(hours=48)
 
+# Entry events whose presence proves the order actually reached a terminal
+# outcome (as opposed to POSITION_OPEN_INTENT, which only proves we tried).
+_TERMINAL_ENTRY_COUNTERS = frozenset({"filled", "rejected", "voided"})
+
+# Freshness horizon for the per-strategy execution_decay gate (2026-07-05).
+# The 48h _ENTRY_EXECUTION_LOOKBACK decides which events COUNT toward a
+# strategy's fill-rate; this shorter horizon decides whether that count is a
+# CURRENT verdict. RiskGuard ticks every few minutes and a strategy in live
+# execution produces terminal events far more often than every two hours, so a
+# strategy whose newest terminal event is already older than this has stopped
+# executing — which is exactly what happens the moment the gate itself blocks
+# the lane. Without this bound the gate is self-perpetuating: once a strategy
+# is STRATEGY_POLICY_GATED it emits no new terminal events, its fill-rate
+# window freezes at the tripping ratio, and the gate re-fires every tick for
+# the full 48h lookback, forbidding the very fills that would clear it (live
+# incident: forecast_qkernel_entry, fill_rate=0.1667/observed=12, zero new
+# POSITION_OPEN_INTENT since issuance, effective_until=NULL). Two hours is long
+# enough to ride out a brief quiet spell and short enough that a gated-then-
+# quiet strategy ages out, clears, and re-earns a verdict from fresh evidence.
+# Same current-evidence / walk-forward principle as _STRATEGY_BRIER_MIN_SAMPLE
+# and the 48h lookback itself.
+_EXECUTION_DECAY_FRESH_HORIZON = timedelta(hours=2)
+
 
 def _entry_execution_summary(
     conn: sqlite3.Connection,
@@ -1078,7 +1101,7 @@ def _entry_execution_summary(
     try:
         rows = conn.execute(
             """
-            SELECT event_type, strategy_key
+            SELECT event_type, strategy_key, occurred_at
             FROM position_events
             WHERE event_type IN (
                 'POSITION_OPEN_INTENT',
@@ -1102,6 +1125,7 @@ def _entry_execution_summary(
         "voided": 0,
         "terminal_observed": 0,
         "fill_rate": None,
+        "newest_terminal_at": None,
     }
     by_strategy: dict[str, dict] = {}
     mapping = {
@@ -1125,10 +1149,20 @@ def _entry_execution_summary(
                 "voided": 0,
                 "terminal_observed": 0,
                 "fill_rate": None,
+                "newest_terminal_at": None,
             },
         )
         overall[counter_key] += 1
         bucket[counter_key] += 1
+        if counter_key in _TERMINAL_ENTRY_COUNTERS:
+            # Rows arrive newest-first (ORDER BY datetime(occurred_at) DESC), so
+            # the first terminal event seen is the newest — for the global
+            # overall and for each strategy bucket.
+            occurred_at = str(row["occurred_at"])
+            if overall["newest_terminal_at"] is None:
+                overall["newest_terminal_at"] = occurred_at
+            if bucket["newest_terminal_at"] is None:
+                bucket["newest_terminal_at"] = occurred_at
 
     def _finalize(bucket: dict) -> None:
         terminal_observed = bucket["filled"] + bucket["rejected"] + bucket["voided"]
@@ -1141,6 +1175,32 @@ def _entry_execution_summary(
     for bucket in by_strategy.values():
         _finalize(bucket)
     return {"overall": overall, "by_strategy": by_strategy}
+
+
+def _execution_decay_verdict_is_current(
+    newest_terminal_at: str | None, *, now: datetime
+) -> bool:
+    """Whether a strategy's fill-rate window is fresh enough to gate on.
+
+    The per-strategy execution_decay gate must reflect the CURRENT execution
+    machinery, not a window frozen by the gate itself. Returns True only when
+    the strategy's newest terminal entry event is within
+    ``_EXECUTION_DECAY_FRESH_HORIZON`` of ``now``. A stale window (no terminal
+    event in the horizon — the state a gated strategy is trapped in, because it
+    can no longer place the orders that would produce terminal events) yields
+    no current verdict, so the gate does not re-fire and the strategy can age
+    out, clear, and re-earn admission from fresh evidence. See
+    ``_EXECUTION_DECAY_FRESH_HORIZON`` for the live self-perpetuation incident.
+    """
+    if not newest_terminal_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(newest_terminal_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (now - parsed) <= _EXECUTION_DECAY_FRESH_HORIZON
 
 
 def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SETTLEMENT_LIMIT) -> list[dict]:
@@ -1378,11 +1438,34 @@ def _residual_active_portfolio_brier_level(
         row for row in brier_metric_rows
         if str(row.get("strategy") or "unclassified") not in excluded_strategies
     ]
-    residual_p = [float(row["p_posterior"]) for row in residual_rows]
-    residual_o = [int(row["outcome"]) for row in residual_rows]
+    # Minimum-evidence floor, pool edition (2026-07-05): a strategy below
+    # _STRATEGY_BRIER_MIN_SAMPLE carries NO verdict (same doctrine as the
+    # per-strategy breakdown) — its rows must not vote in the residual
+    # either. Live incident: two n=1 settled losses (Brier 0.92 / 0.79)
+    # dragged an otherwise-GREEN residual to YELLOW, defeating ORANGE
+    # localization and freezing the whole book on two coin flips — the
+    # exact failure the per-strategy floor fixed, one level up. Thin
+    # strategies remain visible via thin_sample_excluded_strategies; the
+    # daily/weekly realized-loss gates still bind on their outcomes.
+    rows_by_strategy: dict[str, list[dict]] = {}
+    for row in residual_rows:
+        rows_by_strategy.setdefault(str(row.get("strategy") or "unclassified"), []).append(row)
+    thin_excluded = sorted(
+        strategy
+        for strategy, rows in rows_by_strategy.items()
+        if len(rows) < _STRATEGY_BRIER_MIN_SAMPLE
+    )
+    scored_rows = [
+        row
+        for strategy, rows in rows_by_strategy.items()
+        if strategy not in thin_excluded
+        for row in rows
+    ]
+    residual_p = [float(row["p_posterior"]) for row in scored_rows]
+    residual_o = [int(row["outcome"]) for row in scored_rows]
     residual_score = brier_score(residual_p, residual_o) if residual_p else 0.0
     residual_level = evaluate_brier(residual_score, thresholds) if residual_p else RiskLevel.GREEN
-    return residual_level, residual_score, len(residual_p)
+    return residual_level, residual_score, len(residual_p), thin_excluded
 
 
 def _refresh_riskguard_auxiliary_bookkeeping(
@@ -1986,28 +2069,48 @@ def _tick_once() -> RiskLevel:
                     else 0
                 ),
             }
-        if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
-            execution_quality_level = RiskLevel.YELLOW
-            _append_reason(
-                recommended_control_reasons,
-                "tighten_risk",
-                f"execution_decay(fill_rate={execution_overall['fill_rate']}, observed={execution_observed})",
-            )
+        # execution_quality_level stays GREEN: a low maker fill-rate is NOT a
+        # risk condition (2026-07-05, INV-05). REMOVED the assignment that set
+        # execution_quality_level=YELLOW + recommended tighten_risk when
+        # overall fill_rate < 0.3. Why: non-fills / voided rests cost $0, and
+        # fill_rate counts deliberate maker-patience pulls as "decay" (see the
+        # per-strategy removal above). Leaving it drove the portfolio to a
+        # STUCK YELLOW -> auto-safe tighten_risk -> DOUBLED edge thresholds
+        # (control_plane), throttling the very entries the loop needs. fill_rate
+        # remains in entry_execution_summary for observability only.
+        # The downstream `if execution_quality_level == RiskLevel.YELLOW`
+        # branches (tighten_risk control append; execution-quality localization;
+        # the YELLOW alert) are now inert — execution_quality_level can no longer
+        # be YELLOW. Collapsing that dead apparatus is tracked as a follow-up.
         strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
         for alert in edge_compression_alerts:
             if not alert.startswith("EDGE_COMPRESSION: "):
                 continue
             strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
             _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
-        for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
-            observed = int(bucket.get("terminal_observed", 0) or 0)
-            fill_rate = bucket.get("fill_rate")
-            if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
-                _append_reason(
-                    recommended_strategy_gate_reasons,
-                    strategy,
-                    f"execution_decay(fill_rate={fill_rate}, observed={observed})",
-                )
+        # execution_decay is NOT a per-strategy selection gate (2026-07-05,
+        # INV-05 advisory-risk-forbidden). REMOVED: the fill-rate loop that
+        # appended execution_decay(...) to recommended_strategy_gate_reasons and
+        # became a risk_action:gate removing candidates before ranking. Why:
+        #   1. Non-fills and voided maker rests cost $0. A fill-rate heuristic is
+        #      not capital protection, so it must not HARD-gate entries — risk
+        #      sweeps (RED) or does not act; it is never advisory (INV-05).
+        #   2. fill_rate = filled / (filled + rejected + voided) counts our own
+        #      DELIBERATE maker-patience pulls (winner's-curse rests we decline
+        #      to overpay; re-decision pulls on book drift) as "decay". It
+        #      penalizes correct behavior — low maker-fill is EXPECTED for a
+        #      maker-patient strategy, not a defect.
+        #   3. Calibration failure (the real risk) is caught by brier_degraded
+        #      (settled Brier) and edge_compression, which STILL gate above.
+        #      execution_decay measured fills, not calibration — orthogonal.
+        #   4. It self-perpetuated: gate -> strategy quiet -> no terminals ->
+        #      frozen window -> re-gate, blocking the only fat-edge strategy
+        #      (forecast_qkernel_entry) every cycle and starving the
+        #      settle->grade->recalibrate loop of the fills that validate q.
+        # fill_rate stays computed in _entry_execution_summary for observability
+        # only; it never gates a strategy nor raises a risk level.
+        # The _execution_decay_verdict_is_current freshness helper (the earlier,
+        # weaker mitigation) is now unwired; removal tracked separately.
         recommended_strategy_gates = sorted(recommended_strategy_gate_reasons)
         recommended_controls = []
         if execution_quality_level == RiskLevel.YELLOW:
@@ -2063,7 +2166,12 @@ def _tick_once() -> RiskLevel:
                 all_gates_confirmed = False
 
             if all_gates_confirmed:
-                residual_level, residual_score, residual_sample_size = _residual_active_portfolio_brier_level(
+                (
+                    residual_level,
+                    residual_score,
+                    residual_sample_size,
+                    residual_thin_excluded,
+                ) = _residual_active_portfolio_brier_level(
                     brier_metric_rows, thresholds, set(orange_gated_strategies),
                 )
                 if residual_level == RiskLevel.GREEN:
@@ -2076,6 +2184,7 @@ def _tick_once() -> RiskLevel:
                         "residual_brier_level": residual_level.value,
                         "residual_brier_score": round(float(residual_score), 6),
                         "residual_sample_size": residual_sample_size,
+                        "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
                 else:
                     brier_level = portfolio_brier_level
@@ -2087,6 +2196,7 @@ def _tick_once() -> RiskLevel:
                         "residual_brier_level": residual_level.value,
                         "residual_brier_score": round(float(residual_score), 6),
                         "residual_sample_size": residual_sample_size,
+                        "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
             else:
                 brier_level = portfolio_brier_level

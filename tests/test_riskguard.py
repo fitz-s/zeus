@@ -2124,7 +2124,7 @@ class TestRiskGuardOrangeLocalization:
         monkeypatch.setattr(
             riskguard_module,
             "_residual_active_portfolio_brier_level",
-            lambda *a, **k: (RiskLevel.ORANGE, 0.31, 10),
+            lambda *a, **k: (RiskLevel.ORANGE, 0.31, 10, []),
         )
 
         level = riskguard_module.tick()
@@ -2257,6 +2257,52 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
 
 
+class TestResidualBrierMinSample:
+    """Pool edition of the minimum-evidence floor (2026-07-05 live incident):
+    ORANGE localization's residual check let n=1 strategies vote — two
+    single-loss corpses (day0_nowcast 0.92, qkernel 0.79) dragged an
+    otherwise-GREEN residual to YELLOW and kept the whole book frozen."""
+
+    def _row(self, strategy, p, o):
+        return {"strategy": strategy, "p_posterior": p, "outcome": o,
+                "source": "position_events", "metric_ready": True}
+
+    def test_thin_strategies_do_not_vote_in_residual(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = (
+            [self._row("center_buy", 0.12, 0) for _ in range(10)]
+            + [self._row("day0_nowcast_entry", 0.96, 0)]      # n=1 corpse
+            + [self._row("forecast_qkernel_entry", 0.89, 0)]  # n=1 corpse
+        )
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.GREEN
+        assert n == 10
+        assert thin == ["day0_nowcast_entry", "forecast_qkernel_entry"]
+        assert score < 0.25
+
+    def test_thick_degraded_strategy_still_fails_residual(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = [self._row("center_buy", 0.9, 0) for _ in range(10)]
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.RED
+        assert n == 10
+        assert thin == []
+
+    def test_empty_after_thin_exclusion_is_green(self):
+        thresholds = {"brier_yellow": 0.25, "brier_orange": 0.3, "brier_red": 0.35}
+        rows = [self._row("day0_nowcast_entry", 0.96, 0)]
+        level, score, n, thin = riskguard_module._residual_active_portfolio_brier_level(
+            rows, thresholds, set()
+        )
+        assert level == RiskLevel.GREEN
+        assert n == 0
+        assert thin == ["day0_nowcast_entry"]
+
+
 class TestEntryExecutionSummaryWindow:
     """Execution quality measures the CURRENT machinery (2026-07-05): events
     older than _ENTRY_EXECUTION_LOOKBACK are excluded. Live incident: a 0.14
@@ -2316,6 +2362,137 @@ class TestEntryExecutionSummaryWindow:
         conn.close()
 
 
+class TestExecutionDecayNotASelectionGate:
+    """execution_decay must NEVER emit a per-strategy selection gate (2026-07-05,
+    INV-05 advisory-risk-forbidden). A fill-rate heuristic is not capital
+    protection: non-fills and voided maker rests cost $0, and the fill_rate
+    denominator (filled / filled+rejected+voided) counts our own DELIBERATE
+    maker-patience pulls as "decay", penalizing correct behavior. The gate
+    self-perpetuated (gate -> quiet -> frozen window -> re-gate), blocking the
+    only fat-edge strategy every cycle and starving the settle->grade loop.
+    Calibration failure — the real risk — is caught by brier_degraded and
+    edge_compression, not by fill rate. fill_rate stays computed for
+    observability and the GLOBAL execution_quality signal; it never gates."""
+
+    def _run_decay_tick(self, monkeypatch, tmp_path, *, minutes_old: int):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+        )
+
+        conn = get_connection(zeus_db)
+        init_schema(conn)
+        # 12 terminal-but-unfilled events for one strategy: fill_rate 0.0,
+        # observed 12 (>= 10 floor). All inside the 48h execution lookback so
+        # they COUNT; minutes_old decides whether they are a CURRENT verdict.
+        for i in range(12):
+            conn.execute(
+                """
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, env, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (f"decay-{i}:ENTRY_ORDER_VOIDED:1", f"decay-{i}", 1, 1,
+                 "ENTRY_ORDER_VOIDED", _recent_iso(minutes=minutes_old + i),
+                 "center_buy", "test", "live", "{}"),
+            )
+        conn.commit()
+        conn.close()
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return level, json.loads(row["details_json"])
+
+    def test_fresh_low_fill_window_does_not_gate(self, monkeypatch, tmp_path):
+        # execution_decay is NOT a selection gate (INV-05). Even a FRESH window
+        # (newest terminal ~1 min old) with 12 voided rests (fill_rate 0.0,
+        # observed 12 >= floor) must NOT emit a per-strategy gate: non-fills cost
+        # $0 and the 12 voids are deliberate maker-patience pulls, not decay.
+        # (Before the removal this asserted the gate fired.)
+        _level, details = self._run_decay_tick(monkeypatch, tmp_path, minutes_old=1)
+        assert "center_buy" not in details["recommended_strategy_gate_reasons"]
+        assert "center_buy" not in details["recommended_strategy_gates"]
+        # fill_rate is still computed for observability — just never gated on.
+        bucket = details["entry_execution_summary"]["by_strategy"]["center_buy"]
+        assert bucket["terminal_observed"] == 12
+        assert bucket["fill_rate"] == 0.0
+
+    def test_stale_frozen_window_does_not_gate(self, monkeypatch, tmp_path):
+        # Same 12 events, newest ~3h old: inside the 48h lookback (still
+        # counted) but outside the 2h fresh horizon. This is the live
+        # forecast_qkernel_entry case — the strategy is quiet BECAUSE it was
+        # gated, so the frozen window must not re-gate it.
+        _level, details = self._run_decay_tick(monkeypatch, tmp_path, minutes_old=180)
+        # The window is still counted (proves it did not simply age out of the
+        # 48h lookback — the summary sees a decayed fill rate)...
+        bucket = details["entry_execution_summary"]["by_strategy"]["center_buy"]
+        assert bucket["terminal_observed"] == 12
+        assert bucket["fill_rate"] == 0.0
+        # ...yet no per-strategy execution_decay gate is emitted (self-heal).
+        assert "center_buy" not in details["recommended_strategy_gate_reasons"]
+        assert "center_buy" not in details["recommended_strategy_gates"]
+
+    def test_overall_summary_records_newest_terminal_at(self, tmp_path):
+        db = tmp_path / "zeus.db"
+        conn = get_connection(db)
+        init_schema(conn)
+        newest_terminal = _recent_iso(minutes=5)
+        # A POSITION_OPEN_INTENT NEWER (1 min) than the terminal void (5 min):
+        # newest_terminal_at must track the terminal event, not the intent.
+        conn.execute(
+            """
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            ("nt-open:POSITION_OPEN_INTENT:1", "nt-open", 1, 1, "POSITION_OPEN_INTENT",
+             _recent_iso(minutes=1), "center_buy", "test", "live", "{}"),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            ("nt-void:ENTRY_ORDER_VOIDED:1", "nt-void", 1, 1, "ENTRY_ORDER_VOIDED",
+             newest_terminal, "center_buy", "test", "live", "{}"),
+        )
+        conn.commit()
+        summary = riskguard_module._entry_execution_summary(conn)
+        assert summary["overall"]["newest_terminal_at"] == newest_terminal
+        assert summary["by_strategy"]["center_buy"]["newest_terminal_at"] == newest_terminal
+        conn.close()
+
+    def test_verdict_current_predicate(self):
+        now = datetime.now(timezone.utc)
+        fresh = (now - timedelta(minutes=30)).isoformat()
+        stale = (now - timedelta(hours=3)).isoformat()
+        assert riskguard_module._execution_decay_verdict_is_current(fresh, now=now) is True
+        assert riskguard_module._execution_decay_verdict_is_current(stale, now=now) is False
+        # A missing window is never a current verdict (fail-safe: do not gate).
+        assert riskguard_module._execution_decay_verdict_is_current(None, now=now) is False
+        # Boundary: exactly at the horizon is still current (<=).
+        boundary = (now - riskguard_module._EXECUTION_DECAY_FRESH_HORIZON).isoformat()
+        assert riskguard_module._execution_decay_verdict_is_current(boundary, now=now) is True
+
+
 class TestStrategyBrierMinSample:
     """Per-strategy Brier verdicts need evidence (2026-07-05 live incident:
     forecast_qkernel_entry was gated on a single confident settled loss —
@@ -2369,14 +2546,13 @@ class TestStrategyBrierMinSample:
 
 
 class TestRiskGuardExecutionQualityLocalization:
-    """Execution-quality localization (2026-07-05 fresh-start deadlock): the
-    legacy book's global fill-rate (0.178 over 200 events, almost all
-    pre-restart) sat below the 0.3 decay threshold and froze ALL entries on
-    the GREEN-only reactor gate — but every low-fill strategy was already
-    held behind a confirmed durable gate, and the admissible (non-gated)
-    portfolio's own fill-rate was healthy. Same admissible-portfolio
-    principle as ORANGE Brier localization: attribute the evidence, never
-    age or window it away."""
+    """Regression guard (2026-07-05, INV-05): fill-rate is no longer a risk
+    input. execution_quality_level is always GREEN, so there is nothing to
+    localize — no matter whether the residual fill-rate is healthy or decayed.
+    Non-fills / voided maker rests cost $0; a low maker fill-rate is expected
+    for a maker-patient strategy, not decay. (These tests previously pinned an
+    execution-quality YELLOW that localized to GREEN by excluding durably-gated
+    low-fill strategies; that whole apparatus is now inert.)"""
 
     def _orange_rows(self) -> list[dict]:
         rows = [
@@ -2458,28 +2634,27 @@ class TestRiskGuardExecutionQualityLocalization:
         ).fetchone()
         return level, json.loads(risk_row["details_json"])
 
-    def test_gated_strategy_fill_decay_localizes_when_residual_healthy(
+    def test_low_fill_rate_does_not_raise_execution_quality(
         self, monkeypatch, tmp_path,
     ):
+        # fill-rate never raises execution_quality_level (INV-05): it is GREEN
+        # regardless, so there is nothing to localize and no tighten_risk to
+        # recommend. Admission stays GREEN via the Brier ORANGE localization.
         level, details = self._run_tick(
             monkeypatch, tmp_path, residual_fill_rate_healthy=True,
         )
         assert details["execution_quality_level"] == "GREEN"
-        assert details["brier_strategy_localization"]["execution_quality_localized"] is True
-        assert details["brier_strategy_localization"]["execution_gated_strategies"] == ["opening_inertia"]
-        assert details["brier_strategy_localization"]["execution_residual_fill_rate"] >= 0.25
+        assert details["brier_strategy_localization"].get("execution_quality_localized") is None
         assert "tighten_risk" not in details.get("recommended_controls", [])
-        # With Brier ORANGE localized AND execution localized, admission is GREEN.
         assert level == RiskLevel.GREEN
 
-    def test_stays_yellow_when_decayed_strategy_gate_not_confirmed(
+    def test_decayed_residual_fill_rate_no_longer_forces_yellow(
         self, monkeypatch, tmp_path,
     ):
-        """A decayed residual strategy whose durable gate did NOT confirm
-        (lock/skip) must keep the global YELLOW: localization's safety
-        precondition is a CONFIRMED gate, exactly as in ORANGE Brier
-        localization. (A confirmed-gated decayed strategy leaves the
-        residual and can no longer enter — that path localizes.)"""
+        # Before 2026-07-05 a decayed RESIDUAL fill-rate whose durable gate did
+        # not confirm kept the portfolio YELLOW. Now fill-rate is not a risk
+        # input at all: execution_quality stays GREEN and admission is not
+        # frozen, so the confirmed-gate localization dance is moot.
         real_confirm = riskguard_module._confirm_active_durable_strategy_gates
 
         def _confirm_without_center_buy(conn, strategies):
@@ -2496,9 +2671,9 @@ class TestRiskGuardExecutionQualityLocalization:
         level, details = self._run_tick(
             monkeypatch, tmp_path, residual_fill_rate_healthy=False,
         )
-        assert details["execution_quality_level"] == "YELLOW"
+        assert details["execution_quality_level"] == "GREEN"
         assert details["brier_strategy_localization"].get("execution_quality_localized") is None
-        assert level == RiskLevel.YELLOW
+        assert "tighten_risk" not in details.get("recommended_controls", [])
 
 
 class TestStrategyPolicyResolver:
@@ -2710,7 +2885,7 @@ class TestStrategyPolicyResolver:
         assert "hard_safety:tighten_risk:2" in policy.sources
         conn.close()
 
-    def test_tick_turns_yellow_on_execution_decay(self, monkeypatch, tmp_path):
+    def test_low_fill_rate_does_not_gate_or_raise_risk(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
@@ -2751,25 +2926,23 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # 2026-07-05 execution-quality localization: the decayed strategy is
-        # identified, a durable gate is emitted AND read-after-write
-        # confirmed in the same tick, and the residual (non-gated) portfolio
-        # is empty — so admission localizes to GREEN instead of freezing
-        # everything. The unconfirmed-gate path staying YELLOW is pinned by
-        # TestRiskGuardExecutionQualityLocalization.
+        # Regression guard (2026-07-05, INV-05): a strategy with a low maker
+        # fill-rate (0.0 over 10 terminal events, all voided/rejected) must NOT
+        # be gated and must NOT raise the risk level. Non-fills cost $0;
+        # fill-rate is observability, never a gate or a YELLOW. Before the
+        # execution_decay removal this asserted the tick gated center_buy and
+        # localized the global YELLOW back to GREEN.
         assert level == RiskLevel.GREEN
         assert row["level"] == RiskLevel.GREEN.value
         assert details["execution_quality_level"] == "GREEN"
-        assert details["recommended_strategy_gates"] == ["center_buy"]
-        assert details["brier_strategy_localization"]["execution_quality_localized"] is True
-        assert details["brier_strategy_localization"]["execution_gated_strategies"] == ["center_buy"]
-        assert "tighten_risk" not in details["recommended_controls"]
-        assert details["recommended_strategy_gate_reasons"]["center_buy"] == [
-            "execution_decay(fill_rate=0.0, observed=10)"
-        ]
-        # tighten_risk is withdrawn when localization clears the global level
-        # (the decayed strategy is durably gated; nothing else needs tightening).
-        assert "tighten_risk" not in details["recommended_control_reasons"]
+        assert "center_buy" not in details["recommended_strategy_gates"]
+        assert "center_buy" not in details.get("recommended_strategy_gate_reasons", {})
+        assert details["brier_strategy_localization"].get("execution_quality_localized") is None
+        assert "tighten_risk" not in details.get("recommended_controls", [])
+        assert "tighten_risk" not in details.get("recommended_control_reasons", {})
+        # fill_rate is still computed for observability — just never gated on.
+        bucket = details["entry_execution_summary"]["by_strategy"]["center_buy"]
+        assert bucket["fill_rate"] == 0.0
 
     def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
