@@ -2250,6 +2250,130 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
 
 
+class TestRiskGuardExecutionQualityLocalization:
+    """Execution-quality localization (2026-07-05 fresh-start deadlock): the
+    legacy book's global fill-rate (0.178 over 200 events, almost all
+    pre-restart) sat below the 0.3 decay threshold and froze ALL entries on
+    the GREEN-only reactor gate — but every low-fill strategy was already
+    held behind a confirmed durable gate, and the admissible (non-gated)
+    portfolio's own fill-rate was healthy. Same admissible-portfolio
+    principle as ORANGE Brier localization: attribute the evidence, never
+    age or window it away."""
+
+    def _orange_rows(self) -> list[dict]:
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}", strategy="opening_inertia",
+                p_posterior=0.58, outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}", strategy="center_buy",
+                p_posterior=0.80, outcome=1,
+            )
+            for i in range(5)
+        ]
+        return rows
+
+    def _exec_summary(self, *, residual_fill_rate_healthy: bool):
+        # opening_inertia (gated): terrible fill rate dominates the overall.
+        # center_buy (non-gated): healthy 0.375 when residual_fill_rate_healthy,
+        # else 0.1 (also decayed) so localization must NOT fire.
+        center_filled = 3 if residual_fill_rate_healthy else 1
+        return {
+            "overall": {
+                "attempted": 55, "filled": 8 + center_filled, "rejected": 0,
+                "voided": 44,
+                "terminal_observed": 52 + (8 if residual_fill_rate_healthy else 10),
+                "fill_rate": 0.18,
+            },
+            "by_strategy": {
+                "opening_inertia": {
+                    "attempted": 47, "filled": 8, "rejected": 0, "voided": 41,
+                    "terminal_observed": 49, "fill_rate": 0.1633,
+                },
+                "center_buy": {
+                    "attempted": 8, "filled": center_filled, "rejected": 0,
+                    "voided": 5,
+                    "terminal_observed": 8 if residual_fill_rate_healthy else 13,
+                    "fill_rate": center_filled / (8 if residual_fill_rate_healthy else 13),
+                },
+            },
+        }
+
+    def _run_tick(self, monkeypatch, tmp_path, *, residual_fill_rate_healthy: bool):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = self._orange_rows()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+        monkeypatch.setattr(
+            riskguard_module,
+            "_entry_execution_summary",
+            lambda *_, **__: self._exec_summary(
+                residual_fill_rate_healthy=residual_fill_rate_healthy
+            ),
+        )
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return level, json.loads(risk_row["details_json"])
+
+    def test_gated_strategy_fill_decay_localizes_when_residual_healthy(
+        self, monkeypatch, tmp_path,
+    ):
+        level, details = self._run_tick(
+            monkeypatch, tmp_path, residual_fill_rate_healthy=True,
+        )
+        assert details["execution_quality_level"] == "GREEN"
+        assert details["brier_strategy_localization"]["execution_quality_localized"] is True
+        assert details["brier_strategy_localization"]["execution_gated_strategies"] == ["opening_inertia"]
+        assert details["brier_strategy_localization"]["execution_residual_fill_rate"] >= 0.25
+        assert "tighten_risk" not in details.get("recommended_controls", [])
+        # With Brier ORANGE localized AND execution localized, admission is GREEN.
+        assert level == RiskLevel.GREEN
+
+    def test_stays_yellow_when_decayed_strategy_gate_not_confirmed(
+        self, monkeypatch, tmp_path,
+    ):
+        """A decayed residual strategy whose durable gate did NOT confirm
+        (lock/skip) must keep the global YELLOW: localization's safety
+        precondition is a CONFIRMED gate, exactly as in ORANGE Brier
+        localization. (A confirmed-gated decayed strategy leaves the
+        residual and can no longer enter — that path localizes.)"""
+        real_confirm = riskguard_module._confirm_active_durable_strategy_gates
+
+        def _confirm_without_center_buy(conn, strategies):
+            out = real_confirm(conn, strategies)
+            if "center_buy" in out:
+                out["center_buy"] = False
+            return out
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "_confirm_active_durable_strategy_gates",
+            _confirm_without_center_buy,
+        )
+        level, details = self._run_tick(
+            monkeypatch, tmp_path, residual_fill_rate_healthy=False,
+        )
+        assert details["execution_quality_level"] == "YELLOW"
+        assert details["brier_strategy_localization"].get("execution_quality_localized") is None
+        assert level == RiskLevel.YELLOW
+
+
 class TestStrategyPolicyResolver:
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)
@@ -2500,17 +2624,25 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
-        assert details["execution_quality_level"] == "YELLOW"
+        # 2026-07-05 execution-quality localization: the decayed strategy is
+        # identified, a durable gate is emitted AND read-after-write
+        # confirmed in the same tick, and the residual (non-gated) portfolio
+        # is empty — so admission localizes to GREEN instead of freezing
+        # everything. The unconfirmed-gate path staying YELLOW is pinned by
+        # TestRiskGuardExecutionQualityLocalization.
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["execution_quality_level"] == "GREEN"
         assert details["recommended_strategy_gates"] == ["center_buy"]
-        assert "tighten_risk" in details["recommended_controls"]
+        assert details["brier_strategy_localization"]["execution_quality_localized"] is True
+        assert details["brier_strategy_localization"]["execution_gated_strategies"] == ["center_buy"]
+        assert "tighten_risk" not in details["recommended_controls"]
         assert details["recommended_strategy_gate_reasons"]["center_buy"] == [
             "execution_decay(fill_rate=0.0, observed=10)"
         ]
-        assert details["recommended_control_reasons"]["tighten_risk"] == [
-            "execution_decay(fill_rate=0.0, observed=10)"
-        ]
+        # tighten_risk is withdrawn when localization clears the global level
+        # (the decayed strategy is durably gated; nothing else needs tightening).
+        assert "tighten_risk" not in details["recommended_control_reasons"]
 
     def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
