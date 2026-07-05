@@ -1712,8 +1712,11 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill clearance requires command venue_order_id")
     if current is None:
         raise ValueError("cancel-unknown no-fill clearance requires position_current")
-    if str(current["phase"] or "") != "pending_entry":
-        raise ValueError("cancel-unknown no-fill clearance requires pending_entry projection")
+    # voided is the projection lane's own zero-fill terminal for a canceled
+    # entry (live 2026-07-05: venue-canceled maker rests projected to voided
+    # before command recovery ran) — equally zero-exposure as pending_entry.
+    if str(current["phase"] or "") not in ("pending_entry", "voided"):
+        raise ValueError("cancel-unknown no-fill clearance requires zero-exposure projection")
     try:
         shares = Decimal(str(current["shares"] or "0"))
         cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))

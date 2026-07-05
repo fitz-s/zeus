@@ -6877,7 +6877,7 @@ def _emit_terminal_no_fill_redecision_from_recovery(
                 pass
 
 
-def _ensure_entry_projection_is_pending_zero_exposure(
+def _ensure_entry_projection_is_zero_exposure(
     conn: sqlite3.Connection,
     *,
     command: dict,
@@ -6909,8 +6909,11 @@ def _ensure_entry_projection_is_pending_zero_exposure(
             return False
     except ValueError:
         return False
+    # voided is the projection lane's own zero-fill terminal for a canceled
+    # entry (live 2026-07-05: venue-canceled maker rests projected to voided
+    # before command recovery ran) — equally zero-exposure as pending_entry.
     return (
-        str(current.get("phase") or "") == "pending_entry"
+        str(current.get("phase") or "") in ("pending_entry", "voided")
         and _decimal_is_zero(current.get("shares"))
         and _decimal_is_zero(current.get("cost_basis_usd"))
     )
@@ -10586,7 +10589,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                 (cmd.command_id,),
             ).fetchone()
         )
-        if not _ensure_entry_projection_is_pending_zero_exposure(
+        if not _ensure_entry_projection_is_zero_exposure(
             conn,
             command=command,
             order_id=venue_order_id,
@@ -10846,7 +10849,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                     (cmd.command_id,),
                 ).fetchone()
             )
-            if not _ensure_entry_projection_is_pending_zero_exposure(
+            if not _ensure_entry_projection_is_zero_exposure(
                 conn,
                 command=command,
                 order_id=venue_order_id,
