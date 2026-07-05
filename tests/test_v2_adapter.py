@@ -2227,3 +2227,41 @@ class TestCancelBatch:
 
         with pytest.raises(TimeoutError, match="cancel_orders timed out"):
             adapter.cancel_batch(["ord-0"])
+
+    def test_live_envelope_shape_maps_canceled_order(self, tmp_path):
+        """2026-07-05 live incident pin: DELETE /orders returns ONE envelope
+        dict for the whole batch. The first live order (0x9df6...) WAS
+        canceled by the venue but the per-item-array mapper failed to
+        attribute it -> BATCH_RESPONSE_UNMAPPED -> REVIEW_REQUIRED."""
+        oid = "0x9df6b4f0b7cd1246f91fec5ba34943c74837284fe5c7c02e53bdc75a4f32939b"
+        fake = FakeBatchTwoStepClient(cancel_orders_response={"canceled": [oid]})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch([oid])
+
+        assert results[0].status == "CANCELED"
+        assert results[0].order_id == oid
+        assert results[0].error_code is None
+
+    def test_live_envelope_not_canceled_maps_with_reason(self, tmp_path):
+        fake = FakeBatchTwoStepClient(
+            cancel_orders_response={
+                "canceled": [],
+                "not_canceled": {"ord-0": "order not found"},
+            }
+        )
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch(["ord-0"])
+
+        assert results[0].status == "NOT_CANCELED"
+        assert "order not found" in (results[0].error_message or "")
+
+    def test_live_envelope_missing_id_stays_unknown_fail_closed(self, tmp_path):
+        fake = FakeBatchTwoStepClient(cancel_orders_response={"canceled": ["other-ord"]})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        results = adapter.cancel_batch(["ord-0"])
+
+        assert results[0].status == "UNKNOWN"
+        assert results[0].error_code == "BATCH_RESPONSE_UNMAPPED"

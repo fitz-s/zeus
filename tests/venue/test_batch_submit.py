@@ -229,3 +229,66 @@ class TestMapBatchItemsCancelCandidateFields:
         )
         assert [m.raw_item["orderID"] for m in mapped] == ["ord-1", "ord-2"]
         assert all(m.source == "echo_id" for m in mapped)
+
+
+# ---------------------------------------------------------------------------
+# map_cancel_envelope -- LIVE-VERIFIED cancel_orders envelope (2026-07-05)
+# ---------------------------------------------------------------------------
+
+class TestMapCancelEnvelope:
+    """Pin the live DELETE /orders response shape observed 2026-07-05 on
+    commands 12e0ee45e0a44bc8 / 1a74acd884cf4ba5: ONE envelope dict
+    {"canceled": [...], "not_canceled": {...}} for the whole batch. The
+    old per-item-array assumption sent a genuinely-canceled first live
+    order to REVIEW_REQUIRED via BATCH_RESPONSE_UNMAPPED."""
+
+    def test_live_shape_single_canceled_order_maps(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        oid = "0x9df6b4f0b7cd1246f91fec5ba34943c74837284fe5c7c02e53bdc75a4f32939b"
+        mapped = map_cancel_envelope({"canceled": [oid]}, [oid])
+        assert mapped is not None
+        assert mapped[0].source == "envelope"
+        assert mapped[0].raw_item["canceled"] == [oid]
+
+    def test_mixed_canceled_and_not_canceled(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        raw = {"canceled": ["ord-0"], "not_canceled": {"ord-1": "order not found"}}
+        mapped = map_cancel_envelope(raw, ["ord-0", "ord-1"])
+        assert mapped[0].source == "envelope"
+        assert mapped[0].raw_item["canceled"] == ["ord-0"]
+        assert mapped[1].source == "envelope"
+        assert mapped[1].raw_item["not_canceled"] == {"ord-1": "order not found"}
+
+    def test_id_in_neither_collection_is_unmapped_fail_closed(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        mapped = map_cancel_envelope({"canceled": ["ord-0"]}, ["ord-0", "ord-ghost"])
+        assert mapped[0].source == "envelope"
+        assert mapped[1].source == "unmapped"
+        assert mapped[1].raw_item is None
+
+    def test_non_envelope_dict_returns_none_for_fallthrough(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        assert map_cancel_envelope({"error": "malformed"}, ["ord-0"]) is None
+        assert map_cancel_envelope([{"orderID": "ord-0"}], ["ord-0"]) is None
+        assert map_cancel_envelope(None, ["ord-0"]) is None
+
+    def test_british_spelling_cancelled_accepted(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        mapped = map_cancel_envelope({"cancelled": ["ord-0"]}, ["ord-0"])
+        assert mapped is not None
+        assert mapped[0].source == "envelope"
+
+    def test_empty_envelope_maps_all_unmapped_not_none(self):
+        from src.venue.batch_submit import map_cancel_envelope
+
+        # {"canceled": []} IS the envelope shape (venue answered, canceled
+        # nothing) -- ids must be unmapped, NOT fall through to index
+        # mapping which could misattribute.
+        mapped = map_cancel_envelope({"canceled": []}, ["ord-0"])
+        assert mapped is not None
+        assert mapped[0].source == "unmapped"
