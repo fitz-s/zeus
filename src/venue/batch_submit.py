@@ -37,11 +37,12 @@ the command journal, or sqlite — they are building blocks the adapter
      (c) unmapped: else (non-list response, length mismatch, or echo-id
          only partially resolves) -- every request in this call is
          unmapped. NEVER guess success for an item we cannot attribute.
-   TODO(W2.1-live-verify): confirm the real post_orders/cancel_orders
-   response shape (array ordering, per-item success signal, echoed
-   identifier field name) against Polymarket CLOB sandbox or docs before
-   the first ARM'd batch submit. Until then, (a) is speculative and (b)/(c)
-   are the load-bearing paths.
+   TODO(W2.1-live-verify): confirm the real post_orders response shape
+   (array ordering, per-item success signal, echoed identifier field name)
+   against Polymarket CLOB sandbox or docs before the first ARM'd batch
+   submit. Until then, (a) is speculative and (b)/(c) are the load-bearing
+   paths. cancel_orders IS live-verified (2026-07-05): it returns a single
+   envelope dict, handled by ``map_cancel_envelope`` before this mapper.
 """
 
 from __future__ import annotations
@@ -197,6 +198,55 @@ CANCEL_ECHO_CANDIDATE_FIELDS: tuple[str, ...] = (
 )
 
 
+def map_cancel_envelope(
+    raw_response: Any, order_ids: Sequence[str]
+) -> Optional[list["BatchMappedItem"]]:
+    """Map the LIVE-VERIFIED cancel_orders envelope response shape.
+
+    Live evidence (2026-07-05, commands 12e0ee45e0a44bc8 / 1a74acd884cf4ba5):
+    DELETE /orders returns ONE dict for the whole batch, not a per-item
+    array::
+
+        {"canceled": ["0x9df6..."], "not_canceled": {"0x...": "reason"}}
+
+    Membership is by exact order id. An id found in neither collection is
+    unmapped (fail-closed, same ruling 1(c) as ``map_batch_items``). Returns
+    ``None`` when ``raw_response`` is not this envelope shape so the caller
+    can fall through to ``map_batch_items``.
+    """
+    if not isinstance(raw_response, dict):
+        return None
+    canceled_raw = raw_response.get("canceled", raw_response.get("cancelled"))
+    not_canceled_raw = raw_response.get(
+        "not_canceled", raw_response.get("not_cancelled")
+    )
+    if canceled_raw is None and not_canceled_raw is None:
+        return None
+    canceled: set[str] = set()
+    if isinstance(canceled_raw, (list, tuple)):
+        canceled = {str(item) for item in canceled_raw if item not in (None, "")}
+    not_canceled: dict[str, Any] = {}
+    if isinstance(not_canceled_raw, dict):
+        not_canceled = {str(k): v for k, v in not_canceled_raw.items()}
+    items: list[BatchMappedItem] = []
+    for i, order_id in enumerate(order_ids):
+        if order_id in canceled:
+            items.append(
+                BatchMappedItem(i, {"orderID": order_id, "canceled": [order_id]}, "envelope")
+            )
+        elif order_id in not_canceled:
+            items.append(
+                BatchMappedItem(
+                    i,
+                    {"orderID": order_id, "not_canceled": {order_id: not_canceled[order_id]}},
+                    "envelope",
+                )
+            )
+        else:
+            items.append(BatchMappedItem(i, None, "unmapped"))
+    return items
+
+
 @dataclass(frozen=True)
 class BatchMappedItem:
     """One request's outcome after mapping a batch response.
@@ -208,7 +258,7 @@ class BatchMappedItem:
 
     index: int
     raw_item: Optional[Any]
-    source: str  # "echo_id" | "index" | "unmapped"
+    source: str  # "echo_id" | "index" | "envelope" | "unmapped"
 
 
 def _echo_identifier(item: Any, candidate_fields: Sequence[str]) -> Optional[str]:

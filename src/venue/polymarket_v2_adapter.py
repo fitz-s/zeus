@@ -50,6 +50,7 @@ from src.venue.batch_submit import (
     MAX_ORDERS_PER_BATCH,
     SUBMIT_ECHO_CANDIDATE_FIELDS,
     map_batch_items,
+    map_cancel_envelope,
 )
 
 logger = logging.getLogger(__name__)
@@ -975,11 +976,17 @@ class PolymarketV2Adapter:
         # a post-call exception is an ambiguous side effect the caller must
         # record, not swallow into a false "rejected".
         raw_response = cancel_orders(list(order_ids))
-        mapped = map_batch_items(
-            raw_response,
-            echo_keys=list(order_ids),
-            echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
-        )
+        # Live-verified envelope shape first (2026-07-05): DELETE /orders
+        # returns one {"canceled": [...], "not_canceled": {...}} dict for
+        # the whole batch, not a per-item array. Fall through to the
+        # per-item-array mapper only when the envelope shape is absent.
+        mapped = map_cancel_envelope(raw_response, list(order_ids))
+        if mapped is None:
+            mapped = map_batch_items(
+                raw_response,
+                echo_keys=list(order_ids),
+                echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
+            )
         results: list[CancelResult] = []
         for i, order_id in enumerate(order_ids):
             item = mapped[i]
