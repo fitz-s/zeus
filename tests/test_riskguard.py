@@ -15,6 +15,15 @@ import pytest
 
 import src.riskguard.policy as policy_module
 import src.riskguard.riskguard as riskguard_module
+
+
+def _recent_iso(*, minutes: int) -> str:
+    """occurred_at inside _ENTRY_EXECUTION_LOOKBACK (execution summary is time-bounded)."""
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 import src.state.strategy_tracker as strategy_tracker_module
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.metrics import (
@@ -1496,28 +1505,28 @@ class TestRiskGuardSettlementSource:
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:intent:1", "exec-1", 1, 1, "POSITION_OPEN_INTENT",
-               "2026-04-01T10:00:00Z", "center_buy", "test", "live", '{}'))
+               _recent_iso(minutes=4), "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:filled:2", "exec-1", 1, 2, "ENTRY_ORDER_FILLED",
-               "2026-04-01T10:01:00Z", "center_buy", "test", "live", '{}'))
+               _recent_iso(minutes=3), "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
-               "2026-04-01T10:02:00Z", "opening_inertia", "test", "live", '{}'))
+               _recent_iso(minutes=2), "opening_inertia", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-3:voided:1", "exec-3", 1, 1, "ENTRY_ORDER_VOIDED",
-               "2026-04-01T10:03:00Z", "opening_inertia", "test", "live", '{}'))
+               _recent_iso(minutes=1), "opening_inertia", "test", "live", '{}'))
         conn.commit()
         conn.close()
 
@@ -2250,6 +2259,65 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
 
 
+class TestEntryExecutionSummaryWindow:
+    """Execution quality measures the CURRENT machinery (2026-07-05): events
+    older than _ENTRY_EXECUTION_LOOKBACK are excluded. Live incident: a 0.14
+    fill rate computed over 07-01..07-03 legacy maker rests kept gating
+    forecast_qkernel_entry after the execution pipeline it measured was
+    rebuilt and redeployed."""
+
+    def test_stale_terminal_events_are_excluded(self, tmp_path):
+        from src.state.db import get_connection, init_schema
+
+        db = tmp_path / "zeus.db"
+        conn = get_connection(db)
+        init_schema(conn)
+        for i in range(10):
+            conn.execute(
+                """
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, env, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (f"stale-{i}:ENTRY_ORDER_VOIDED:1", f"stale-{i}", 1, 1,
+                 "ENTRY_ORDER_VOIDED", "2026-04-01T10:00:00Z",
+                 "forecast_qkernel_entry", "test", "live", "{}"),
+            )
+        conn.commit()
+
+        summary = riskguard_module._entry_execution_summary(conn)
+        assert summary["overall"]["terminal_observed"] == 0
+        assert "forecast_qkernel_entry" not in summary["by_strategy"]
+        conn.close()
+
+    def test_recent_terminal_events_are_counted(self, tmp_path):
+        from src.state.db import get_connection, init_schema
+
+        db = tmp_path / "zeus.db"
+        conn = get_connection(db)
+        init_schema(conn)
+        for i in range(10):
+            conn.execute(
+                """
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, env, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (f"fresh-{i}:ENTRY_ORDER_VOIDED:1", f"fresh-{i}", 1, 1,
+                 "ENTRY_ORDER_VOIDED", _recent_iso(minutes=10 - i),
+                 "forecast_qkernel_entry", "test", "live", "{}"),
+            )
+        conn.commit()
+
+        summary = riskguard_module._entry_execution_summary(conn)
+        bucket = summary["by_strategy"]["forecast_qkernel_entry"]
+        assert bucket["terminal_observed"] == 10
+        assert bucket["fill_rate"] == 0.0
+        conn.close()
+
+
 class TestStrategyBrierMinSample:
     """Per-strategy Brier verdicts need evidence (2026-07-05 live incident:
     forecast_qkernel_entry was gated on a single confident settled loss —
@@ -2674,7 +2742,7 @@ class TestStrategyPolicyResolver:
                  occurred_at, strategy_key, source_module, env, payload_json)
                 VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (f"terminal-{i}:{event_type}:1", f"terminal-{i}", 1, 1,
-                   event_type, "2026-04-01T10:00:00Z",
+                   event_type, _recent_iso(minutes=10 - i),
                    "center_buy", "test", "live", '{}'))
         conn.commit()
         conn.close()

@@ -1051,8 +1051,30 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     return summary
 
 
-def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> dict:
-    """Entry execution summary from canonical position_events."""
+_ENTRY_EXECUTION_LOOKBACK = timedelta(hours=48)
+
+
+def _entry_execution_summary(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+    now: str | None = None,
+) -> dict:
+    """Entry execution summary from canonical position_events.
+
+    Time-bounded (2026-07-05): execution quality measures the CURRENT
+    execution machinery, so evidence older than the lookback is excluded.
+    Without the bound, LIMIT-200 reached back across deploy regimes and a
+    dead pipeline's fill rate (0.14 from 07-01..07-03 legacy rests) kept
+    gating strategies days after the machinery it measured was replaced —
+    the same stale-evidence failure the walk-forward law forbids.
+    """
+    now_dt = (
+        datetime.fromisoformat(now.replace("Z", "+00:00"))
+        if now
+        else datetime.now(timezone.utc)
+    )
+    cutoff = (now_dt - _ENTRY_EXECUTION_LOOKBACK).isoformat()
     try:
         rows = conn.execute(
             """
@@ -1064,10 +1086,11 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
                 'ENTRY_ORDER_REJECTED',
                 'ENTRY_ORDER_VOIDED'
             )
+              AND occurred_at >= ?
             ORDER BY occurred_at DESC
             LIMIT ?
             """,
-            (limit,),
+            (cutoff, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
