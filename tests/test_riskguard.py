@@ -2277,27 +2277,36 @@ class TestRiskGuardExecutionQualityLocalization:
         return rows
 
     def _exec_summary(self, *, residual_fill_rate_healthy: bool):
-        # opening_inertia (gated): terrible fill rate dominates the overall.
-        # center_buy (non-gated): healthy 0.375 when residual_fill_rate_healthy,
-        # else 0.1 (also decayed) so localization must NOT fire.
+        # Buckets honor the production contract terminal_observed ==
+        # filled + rejected + voided (_entry_execution_summary).
+        # opening_inertia (gated): 8/49 fill dominates the overall.
+        # center_buy (non-gated): 3 filled + 5 voided = 8 terminal (0.375,
+        # healthy) when residual_fill_rate_healthy, else 1 filled + 12
+        # voided = 13 terminal (0.077, also decayed) so localization must
+        # NOT fire on the residual.
         center_filled = 3 if residual_fill_rate_healthy else 1
+        center_voided = 5 if residual_fill_rate_healthy else 12
+        center_terminal = center_filled + center_voided
+        overall_filled = 8 + center_filled
+        overall_voided = 41 + center_voided
+        overall_terminal = overall_filled + overall_voided
         return {
             "overall": {
-                "attempted": 55, "filled": 8 + center_filled, "rejected": 0,
-                "voided": 44,
-                "terminal_observed": 52 + (8 if residual_fill_rate_healthy else 10),
-                "fill_rate": 0.18,
+                "attempted": 55, "filled": overall_filled, "rejected": 0,
+                "voided": overall_voided,
+                "terminal_observed": overall_terminal,
+                "fill_rate": overall_filled / overall_terminal,
             },
             "by_strategy": {
                 "opening_inertia": {
                     "attempted": 47, "filled": 8, "rejected": 0, "voided": 41,
-                    "terminal_observed": 49, "fill_rate": 0.1633,
+                    "terminal_observed": 49, "fill_rate": 8 / 49,
                 },
                 "center_buy": {
                     "attempted": 8, "filled": center_filled, "rejected": 0,
-                    "voided": 5,
-                    "terminal_observed": 8 if residual_fill_rate_healthy else 13,
-                    "fill_rate": center_filled / (8 if residual_fill_rate_healthy else 13),
+                    "voided": center_voided,
+                    "terminal_observed": center_terminal,
+                    "fill_rate": center_filled / center_terminal,
                 },
             },
         }
