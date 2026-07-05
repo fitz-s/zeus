@@ -978,8 +978,13 @@ def reconcile(
                 # Bookkeeping marker, dispatched independent of `writes`
                 # (REVIEW_OPEN_ABSENT itself never mutates phase/chain_state —
                 # see classify_local_position's comment on this classification).
-                _apply_review_marker_finding(conn_trades, finding, now=now)
-                report.applied += 1
+                # One marker suffices for the two-run threshold: when the
+                # latest event already IS the marker (token still absent but
+                # CLOSED_EXITED blocked, e.g. in-flight order), re-appending
+                # would only bloat position_events.
+                if not prior_review_open_absent:
+                    _apply_review_marker_finding(conn_trades, finding, now=now)
+                    report.applied += 1
             elif finding.writes:
                 if finding.classification in (CLOSED_REDEEMED, CLOSED_WORTHLESS, REDEEMABLE):
                     _apply_settlement_finding(conn_trades, finding, now=now)
