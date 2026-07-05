@@ -1186,8 +1186,9 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
             "level": level.value,
         }
         # Minimum-evidence floor (2026-07-05): a per-strategy Brier verdict
-        # below n=10 is statistically empty — one bad settlement scores
-        # ~0.8+ and would gate a whole lane on a single coin flip (live
+        # below n=10 is statistically empty — one confident settled loss
+        # scores far above any threshold (p=0.79 loss -> (0.79-0)^2 = 0.6241)
+        # and would gate a whole lane on a single coin flip (live
         # incident: forecast_qkernel_entry gated RED on n=1 while its
         # candidates showed the book's best positive edges). Thin strategies
         # stay in by_strategy for observability but never enter

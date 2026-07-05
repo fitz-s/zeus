@@ -2252,8 +2252,9 @@ class TestRiskGuardOrangeLocalization:
 
 class TestStrategyBrierMinSample:
     """Per-strategy Brier verdicts need evidence (2026-07-05 live incident:
-    forecast_qkernel_entry was gated on a single settled loss — Brier 0.787,
-    n=1 — while its live candidates carried the book's best positive edges).
+    forecast_qkernel_entry was gated on a single confident settled loss —
+    n=1, Brier (0.79-0)^2 = 0.6241 here — while its live candidates carried
+    the book's best positive edges).
     Below _STRATEGY_BRIER_MIN_SAMPLE the strategy stays visible in
     by_strategy (thin_sample_no_verdict) but never enters
     degraded_strategies; the portfolio pool and loss gates still bind."""
