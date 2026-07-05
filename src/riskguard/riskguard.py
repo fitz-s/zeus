@@ -2053,6 +2053,51 @@ def _tick_once() -> RiskLevel:
 
         localized_orange_quarantine = brier_strategy_localization.get("status") == "localized_orange_quarantine"
 
+        # Execution-quality localization (same admissible-portfolio principle
+        # as ORANGE Brier localization): a strategy already held behind a
+        # CONFIRMED durable gate cannot place entries, so its historical
+        # fill-rate must not freeze the strategies that CAN. Recompute the
+        # fill-rate over non-gated strategies only; evidence is never aged
+        # out or windowed away — it is attributed. Falls back to the global
+        # verdict when nothing is gated. A thin residual sample (<10 terminal)
+        # is not evidence of decay: the gate exists to catch DECAY, and a
+        # residual book too new to have terminal outcomes is admitted on the
+        # Brier/loss gates instead.
+        if execution_quality_level == RiskLevel.YELLOW:
+            gated_for_execution = sorted(
+                strategy
+                for strategy, held in _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    sorted(entry_execution_summary.get("by_strategy", {})),
+                ).items()
+                if held
+            )
+            if gated_for_execution:
+                residual_terminal = 0
+                residual_filled = 0
+                for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
+                    if strategy in gated_for_execution:
+                        continue
+                    residual_terminal += int(bucket.get("terminal_observed", 0) or 0)
+                    residual_filled += int(bucket.get("filled", 0) or 0)
+                residual_fill_rate = (
+                    residual_filled / residual_terminal if residual_terminal else None
+                )
+                if residual_terminal < 10 or (
+                    residual_fill_rate is not None and residual_fill_rate >= 0.3
+                ):
+                    execution_quality_level = RiskLevel.GREEN
+                    recommended_control_reasons.pop("tighten_risk", None)
+                    if "tighten_risk" in recommended_controls:
+                        recommended_controls.remove("tighten_risk")
+                    brier_strategy_localization = {
+                        **brier_strategy_localization,
+                        "execution_quality_localized": True,
+                        "execution_gated_strategies": gated_for_execution,
+                        "execution_residual_fill_rate": residual_fill_rate,
+                        "execution_residual_terminal_observed": residual_terminal,
+                    }
+
         total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
         total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
 

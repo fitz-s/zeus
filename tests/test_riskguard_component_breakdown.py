@@ -66,7 +66,9 @@ def test_breakdown_enumerates_every_overall_level_component():
     _, breakdown = _component_breakdown(RiskLevel.GREEN, levels, _details())
     listed = {part.split("=", 1)[0] for part in breakdown.split(" | ")}
     assert listed == set(RISK_COMPONENT_ORDER)
-    # The six components passed positionally to overall_level() in _tick_once.
+    # The components passed positionally to overall_level() in _tick_once.
+    # collateral_identity joined with the W1.1 CAS reservation ledger
+    # (c7e095ee1); this pin was stale until 2026-07-05.
     assert set(RISK_COMPONENT_ORDER) == {
         "brier",
         "settlement_quality",
@@ -74,6 +76,7 @@ def test_breakdown_enumerates_every_overall_level_component():
         "strategy_signal",
         "daily_loss",
         "weekly_loss",
+        "collateral_identity",
     }
 
 
