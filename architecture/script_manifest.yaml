@@ -2417,40 +2417,54 @@ scripts:
     read_targets: [state/zeus-forecasts.db]
     write_targets: [state/zeus-forecasts.db]
     canonical_command: "python scripts/drain_settlement_quarantine.py [--apply] [--json] [--db PATH]"
-    external_inputs: []
+    external_inputs: [Polymarket Gamma API (GET /events?slug=..., read-only)]
     delete_policy: retain_for_audit
     reuse_when: >
-      P0a market-semantics purity plan (2026-07-04): re-resolve settlement_outcomes
-      QUARANTINED rows (383 of 8,527 as of 2026-07-04) and the two known fully-missing
-      markets (Hong Kong 2026-06-25 low, Helsinki 2026-07-02 high) from ALREADY-PERSISTED
-      observations only — never fetches the network. A row VERIFIES only when the city's
-      currently-authorized source has a persisted observation whose SettlementSemantics-
-      rounded value is contained in the market's own recovered bin (provenance_json
-      pm_bin_lo/pm_bin_hi, or nested v1_extra for canonical-backfill-migrated rows).
-      `pc_audit_*`-prefixed quarantine reasons carry prior HUMAN audit judgment and are
-      NEVER auto-reactivated. Repeatable, not one-shot: rerun after any ingest backfill that
-      might add/correct an observation for a quarantined (city, target_date, metric).
-      Idempotent — a VERIFIED row is simply absent from the next WHERE authority='QUARANTINED'
-      scan.
+      P0a market-semantics purity plan (2026-07-04, operator-corrected same day): re-resolve
+      settlement_outcomes QUARANTINED rows (383 of 8,527 as of 2026-07-04) and the two known
+      fully-missing markets (Hong Kong 2026-06-25 low, Helsinki 2026-07-02 high) against the
+      VENUE'S RESOLVED OUTCOME (PAYMENT FACT) — a resolved market has already paid real money
+      on a specific bin; a v1 local-observation-only grading authority recovered 0 of 383 rows
+      and was corrected. Fetches read-only Gamma market facts (src.data.market_scanner._gamma_get)
+      per (city, target_date, metric), classifies via
+      src.execution.harvester._find_winning_market_outcome (fail-closed umaResolutionStatus +
+      binary-outcomePrices gate), and VERIFIES on exactly one resolved winner. The DECLARED-
+      SOURCE observation (city's declared settlement_source_type, re-derived from persisted
+      `observations` via the harvester's own source-family-routed lookup, rounded through
+      SettlementSemantics.for_city — NEVER hand-rounded, per-source rule e.g. HKO
+      oracle_truncate vs wu_icao/noaa wmo_half_up) is recorded alongside as a SEPARATE fact for
+      forecast-skill calibration and never blocks VERIFY; a disagreement is stamped
+      `resolution_conflict='venue_vs_declared_source'` without altering settlement_value away
+      from the payment fact. `pc_audit_*`-prefixed quarantine reasons carry prior HUMAN audit
+      judgment and are NEVER auto-reactivated even when the venue has since resolved (reported
+      separately as `operator_review_venue_resolved`). A Gamma network fault FAILS CLOSED (row
+      stays QUARANTINED, no partial write) — never recorded as unresolved. Repeatable, not
+      one-shot: rerun as new markets resolve on-venue. Idempotent — a VERIFIED row is simply
+      absent from the next WHERE authority='QUARANTINED' scan. Read-only network access only;
+      zero venue mutation (no orders, cancels, or redeems).
     do_not_use_when: >
-      Do not expect this script to resolve genuine settlement ambiguity (recomputed value
-      disagrees with the market's actual resolved bin) or rows with no persisted bin info at
-      all (legacy uma_backfill reconstructions) — those require either a new persisted
-      observation to arrive first, or an operator policy decision on source-authority
-      tie-break; this script reports them, it does not invent resolution.
+      Do not expect this script to resolve a market that has genuinely not yet resolved on the
+      venue (`venue_unresolved` — nothing invented) or a Gamma outage (`venue_fetch_error` —
+      fail-closed, rerun later). Do not treat `resolution_conflict='venue_vs_declared_source'`
+      as an error needing a code fix — it is a real declared-source/payment disagreement
+      recorded for the calibration lanes, not a drain-script defect.
     promotion_barrier: none
     unguarded_write_rationale: >
       Standalone operator-invoked drain using raw sqlite3.connect (allowlisted in
       src/state/db_writer_lock.py SQLITE_CONNECT_ALLOWLIST). DRY-RUN default; --apply writes
       only within a SAVEPOINT (rolled back unless --apply). Narrow UPDATE
       (authority/settlement_value/winning_bin/settlement_unit/provenance_json only —
-      settled_at/market_slug/settlement_source are never touched). Stop ingest daemon before
-      running with --apply.
+      settled_at/market_slug/settlement_source are never touched). Network access is READ-ONLY
+      Gamma market facts (no venue mutation of any kind). Stop ingest daemon before running
+      with --apply.
     required_helpers:
       - src/config.py::load_cities
       - src/contracts/settlement_semantics.py::SettlementSemantics.for_city
       - src/execution/harvester.py::_lookup_settlement_obs
       - src/execution/harvester.py::_canonical_bin_label
+      - src/execution/harvester.py::_find_winning_market_outcome
+      - src/execution/harvester.py::_label_temperature_unit
+      - src/data/market_scanner.py::_gamma_get
     required_tests:
       - tests/scripts/test_drain_settlement_quarantine.py
 
