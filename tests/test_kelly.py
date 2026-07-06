@@ -67,6 +67,51 @@ class TestKellySize:
         )
 
 
+class TestKellyMultiplierRetuneJuly2026:
+    """Pins the 2026-07-06 operator retune: kelly_multiplier 0.02 -> 0.03125 (1/32).
+
+    Regression for the throughput increase past the proving phase (see
+    ``config/settings.json::sizing._kelly_multiplier_note`` 2026-07-06 entry).
+    Confirms (a) the live config value loads at the new rung and stays inside
+    the provenance cascade_bound [0.01, 1.0] (``config/provenance_registry.yaml``
+    ::kelly_mult) and the boot-guard correlated ceiling (kelly_multiplier <=
+    max_correlated_pct); and (b) the live stake formula
+    (kelly_size == bankroll x kelly_multiplier x f*) lands the expected stake
+    at a representative f*=0.40.
+    """
+
+    def test_live_config_kelly_multiplier_is_1_over_32_within_bounds(self):
+        import json
+        from pathlib import Path
+
+        settings_path = Path(__file__).resolve().parents[1] / "config/settings.json"
+        cfg = json.loads(settings_path.read_text())
+        mult = cfg["sizing"]["kelly_multiplier"]
+
+        assert mult == pytest.approx(1.0 / 32.0)
+        assert mult == pytest.approx(0.03125)
+
+        # cascade_bound [0.01, 1.0] -- config/provenance_registry.yaml::kelly_mult
+        assert 0.01 <= mult <= 1.0
+
+        # boot-guard ceiling -- src/main.py::assert_kelly_multiplier_within_correlated_ceiling
+        max_corr = cfg["sizing"]["max_correlated_pct"]
+        assert mult <= max_corr
+
+    def test_live_formula_stake_at_bankroll_1269_f_star_040(self):
+        """f* = (0.64 - 0.40) / (1 - 0.40) = 0.40 exactly.
+
+        stake = bankroll x kelly_multiplier x f* = 1269.0 x 0.03125 x 0.40
+              = 15.8625
+        """
+        bankroll = 1269.0
+        mult = 0.03125
+        size = kelly_size(0.64, _ep(0.40), bankroll, kelly_mult=mult)
+
+        assert size == pytest.approx(bankroll * mult * 0.40, rel=1e-9)
+        assert size == pytest.approx(15.86, abs=0.01)
+
+
 class TestDynamicKellyMult:
     def test_base_unchanged(self):
         """Default params → returns base."""
