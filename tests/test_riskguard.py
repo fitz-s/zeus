@@ -3834,3 +3834,118 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     assert details["strategy_health_rows_written"] == 1
     assert details["strategy_health_snapshot_status"] == "fresh"
     assert details["strategy_health_stale_strategy_keys"] == []
+
+
+# ---------------------------------------------------------------------------
+# Bug-C regression (2026-07-06): _unprojected_entry_fill_equity_usd deduped
+# venue_trade_facts keyed by command_id ALONE (MAX(local_sequence) GROUP BY
+# command_id), silently dropping a command's other trade_ids instead of
+# collapsing lifecycle revisions of the SAME trade_id.
+# ---------------------------------------------------------------------------
+
+
+def _unprojected_equity_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            intent_kind TEXT NOT NULL,
+            side TEXT NOT NULL,
+            state TEXT NOT NULL,
+            venue_order_id TEXT
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            filled_size TEXT NOT NULL,
+            fill_price TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE position_lots (
+            source_command_id TEXT,
+            state TEXT
+        );
+        CREATE TABLE position_current (
+            order_id TEXT,
+            phase TEXT
+        );
+        """
+    )
+
+
+def test_unprojected_entry_fill_equity_usd_sums_all_distinct_trade_ids():
+    """One ENTRY/BUY command (cmd.state='FILLED') with TWO distinct trade_ids:
+    trade-8p1 fills 8.1 shares over 3 lifecycle revisions (MATCHED -> MINED ->
+    CONFIRMED, local_sequence 1..3 — its own per-trade_id counter); trade-5p0
+    fills 5.0 shares over 2 revisions (MATCHED -> CONFIRMED, local_sequence
+    1..2 — its own counter). local_sequence is scoped PER trade_id
+    (src/state/venue_command_repo.py _coerce_local_sequence,
+    where_sql="trade_id = ?"), so the command-wide MAX(local_sequence) is 3,
+    contributed only by trade-8p1 — a command_id-only dedup keeps only that
+    row and silently drops trade-5p0's fill entirely.
+
+    No position_lots / position_current row is projected for this command,
+    so both NOT EXISTS projection-guards pass and the fill counts as
+    unprojected entry-fill equity: must be (8.1+5.0)*price, NOT 8.1*price.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _unprojected_equity_schema(conn)
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, intent_kind, side, state, venue_order_id) "
+        "VALUES ('cmd-multi-trade', 'ENTRY', 'BUY', 'FILLED', 'ord-multi-trade')"
+    )
+    price = "0.37"
+    # trade-8p1: 8.1 shares, 3 revisions, local_sequence 1..3 (own per-trade_id counter)
+    for seq, state in enumerate(("MATCHED", "MINED", "CONFIRMED"), start=1):
+        conn.execute(
+            "INSERT INTO venue_trade_facts "
+            "(trade_id, command_id, state, filled_size, fill_price, local_sequence) "
+            "VALUES (?, 'cmd-multi-trade', ?, '8.1', ?, ?)",
+            ("trade-8p1", state, price, seq),
+        )
+    # trade-5p0: 5.0 shares, 2 revisions, local_sequence 1..2 (own per-trade_id counter)
+    for seq, state in enumerate(("MATCHED", "CONFIRMED"), start=1):
+        conn.execute(
+            "INSERT INTO venue_trade_facts "
+            "(trade_id, command_id, state, filled_size, fill_price, local_sequence) "
+            "VALUES (?, 'cmd-multi-trade', ?, '5.0', ?, ?)",
+            ("trade-5p0", state, price, seq),
+        )
+    conn.commit()
+
+    result = riskguard_module._unprojected_entry_fill_equity_usd(conn)
+
+    expected = round(8.1 * float(price) + 5.0 * float(price), 2)
+    assert result == expected, (
+        f"expected (8.1+5.0)*{price}={expected} (sum across both trade_ids), "
+        f"got {result!r}. A command_id-only dedup guard silently drops "
+        "trade-5p0's fill, under-counting to 8.1*price."
+    )
+
+
+def test_unprojected_entry_fill_equity_usd_single_trade_id_unchanged():
+    """A single-trade_id command must still return the same value after the
+    fix: one canonical row per (command_id, trade_id) is still exactly one
+    row when a command has only one trade_id."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _unprojected_equity_schema(conn)
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, intent_kind, side, state, venue_order_id) "
+        "VALUES ('cmd-single-trade', 'ENTRY', 'BUY', 'FILLED', 'ord-single-trade')"
+    )
+    for seq, state in enumerate(("MATCHED", "MINED", "CONFIRMED"), start=1):
+        conn.execute(
+            "INSERT INTO venue_trade_facts "
+            "(trade_id, command_id, state, filled_size, fill_price, local_sequence) "
+            "VALUES ('trade-only-1', 'cmd-single-trade', ?, '4.2', '0.55', ?)",
+            (state, seq),
+        )
+    conn.commit()
+
+    result = riskguard_module._unprojected_entry_fill_equity_usd(conn)
+
+    assert result == round(4.2 * 0.55, 2)

@@ -293,18 +293,29 @@ def test_f108_latest_trade_fact_cte_deduplicates_revision_rows():
 
 def test_f108_no_bare_sum_filled_size_without_dedup_guard_in_src():
     """F108 SEV-1: any SQL in src/ that aggregates filled_size from venue_trade_facts
-    must include a deduplication guard (latest_trade_fact, MAX(local_sequence),
-    GROUP BY trade_id, or DISTINCT trade_id).
+    must include a deduplication guard (latest_trade_fact, canonical_trade_fact,
+    MAX(local_sequence), GROUP BY trade_id, or DISTINCT trade_id).
 
     A bare SUM(filled_size) over venue_trade_facts will over-count by 1×–4×
     depending on the number of lifecycle revisions per trade_id.
+
+    A SECOND, distinct bug shape (bug-C, 2026-07-06 riskguard fix) evades that
+    over-counting check entirely: a dedup guard whose GROUP BY / PARTITION BY
+    key is command_id ALONE, missing trade_id. local_sequence is scoped PER
+    trade_id (src/state/venue_command_repo.py _coerce_local_sequence,
+    where_sql="trade_id = ?"), so a command's distinct trade_ids independently
+    restart their own local_sequence counters — the command-wide
+    MAX(local_sequence) belongs to only ONE of them. Deduping by command_id
+    alone silently DROPS every other trade_id's fill (under-count), the
+    mirror-image failure of the bare-SUM over-count above.
     """
     # Pattern: SUM(...filled_size...) in a block that also references venue_trade_facts
     # without a dedup keyword nearby
     sum_filled_pattern = re.compile(r"SUM\s*\([^)]*filled_size[^)]*\)", re.IGNORECASE)
     trade_facts_pattern = re.compile(r"venue_trade_facts", re.IGNORECASE)
     dedup_guard_pattern = re.compile(
-        r"latest_trade_fact|MAX\s*\([^)]*local_sequence[^)]*\)|GROUP\s+BY\s+trade_id|DISTINCT\s+trade_id",
+        r"latest_trade_fact|canonical_trade_fact"
+        r"|MAX\s*\([^)]*local_sequence[^)]*\)|GROUP\s+BY\s+trade_id|DISTINCT\s+trade_id",
         re.IGNORECASE,
     )
 
@@ -326,6 +337,59 @@ def test_f108_no_bare_sum_filled_size_without_dedup_guard_in_src():
         "deduplication guard (latest_trade_fact CTE / MAX(local_sequence) / DISTINCT trade_id) "
         "will over-count by 1×–4× due to per-trade lifecycle revisions sharing trade_id.\n"
         "Violations:\n" + "\n".join(violations)
+    )
+
+    # -----------------------------------------------------------------------
+    # F108 bug-C shape: a local_sequence-based dedup guard keyed by command_id
+    # ALONE (no trade_id) silently drops a command's OTHER trade_ids instead
+    # of collapsing revisions of the SAME trade_id. Detect GROUP BY / PARTITION
+    # BY clauses whose column list contains command_id but not trade_id, when
+    # a local_sequence-recency reference sits close by (i.e. this key is
+    # actually being used as a local_sequence dedup, not some unrelated
+    # aggregation over an already-deduped source).
+    # -----------------------------------------------------------------------
+    key_clause_pattern = re.compile(
+        r"(GROUP\s+BY|PARTITION\s+BY)\s+((?:\w+\.)?\w+(?:\s*,\s*(?:\w+\.)?\w+)*)",
+        re.IGNORECASE,
+    )
+    local_sequence_pattern = re.compile(r"local_sequence", re.IGNORECASE)
+
+    command_id_only_violations: list[str] = []
+    for path in _python_files(_SRC_DIR):
+        content = _read_file(path)
+        if not trade_facts_pattern.search(content):
+            continue
+        for match in key_clause_pattern.finditer(content):
+            keyword, column_list = match.group(1), match.group(2)
+            columns = {
+                part.strip().split(".")[-1].lower()
+                for part in column_list.split(",")
+                if part.strip()
+            }
+            if "command_id" not in columns or "trade_id" in columns:
+                continue
+            # Bound the proximity window (chars, not lines) so this only
+            # fires when local_sequence is the recency signal feeding THIS
+            # key, not merely present somewhere else in a large file.
+            window_start = max(0, match.start() - 300)
+            window_end = min(len(content), match.end() + 100)
+            if not local_sequence_pattern.search(content[window_start:window_end]):
+                continue
+            lineno = content.count("\n", 0, match.start()) + 1
+            command_id_only_violations.append(
+                f"{path.relative_to(_REPO_ROOT)}:{lineno}: "
+                f"{keyword.upper()} {column_list.strip()}"
+            )
+
+    assert not command_id_only_violations, (
+        "F108 antibody (bug-C shape): a local_sequence-based dedup guard keyed "
+        "ONLY by command_id (missing trade_id) silently drops a command's OTHER "
+        "trade_ids. local_sequence is scoped PER trade_id "
+        "(src/state/venue_command_repo.py _coerce_local_sequence), so the "
+        "command-wide MAX(local_sequence) belongs to only one trade_id. "
+        "Partition/group by (command_id, trade_id) instead — see "
+        "src.state.fill_dedup.canonical_trade_fact_cte.\n"
+        "Violations:\n" + "\n".join(command_id_only_violations)
     )
 
 

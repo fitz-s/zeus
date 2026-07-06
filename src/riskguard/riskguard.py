@@ -52,6 +52,7 @@ from src.state.db import (
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
+from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.portfolio import (
     ENTRY_ECONOMICS_LEGACY_UNKNOWN,
     FILL_GRADE_ENTRY_AUTHORITIES,
@@ -438,23 +439,12 @@ def _unprojected_entry_fill_equity_usd(conn: sqlite3.Connection) -> float:
 
     try:
         rows = conn.execute(
-            """
-            WITH latest_trade AS (
-              SELECT tf.*
-              FROM venue_trade_facts tf
-              JOIN (
-                SELECT command_id, MAX(local_sequence) AS max_sequence
-                FROM venue_trade_facts
-                GROUP BY command_id
-              ) latest
-                ON latest.command_id = tf.command_id
-               AND latest.max_sequence = tf.local_sequence
-            )
-            SELECT latest_trade.filled_size, latest_trade.fill_price
-            FROM latest_trade
+            "WITH " + canonical_trade_fact_cte() + """
+            SELECT canonical_trade_fact.filled_size, canonical_trade_fact.fill_price
+            FROM canonical_trade_fact
             JOIN venue_commands cmd
-              ON cmd.command_id = latest_trade.command_id
-            WHERE latest_trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+              ON cmd.command_id = canonical_trade_fact.command_id
+            WHERE canonical_trade_fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
               AND cmd.state = 'FILLED'

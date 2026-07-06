@@ -43,6 +43,7 @@ from src.contracts.position_truth import (
     REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
 )
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.state.fill_dedup import canonical_trade_fact_cte
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -4949,7 +4950,7 @@ def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
         ):
             return {}
         rows = conn.execute(
-            """
+            "WITH " + canonical_trade_fact_cte() + """
             SELECT pc.position_id,
                    cmd.command_id,
                    cmd.venue_order_id,
@@ -4964,7 +4965,7 @@ def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
               JOIN venue_commands cmd
                 ON cmd.position_id = pc.position_id
                AND cmd.intent_kind = 'EXIT'
-              JOIN venue_trade_facts tf
+              JOIN canonical_trade_fact tf
                 ON tf.command_id = cmd.command_id
                AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
              WHERE pc.phase = 'pending_exit'

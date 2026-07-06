@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 
 from src.architecture.decorators import capability, protects
+from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.projection import (
     CANONICAL_POSITION_CURRENT_COLUMNS,
     ordered_values,
@@ -466,7 +467,8 @@ def backfill_fill_authority(conn: sqlite3.Connection) -> dict:
     before that migration have NULL authority. This function classifies
     each NULL row into one of four values (first-match wins):
 
-      venue_confirmed_full     — SUM(filled_size) of linked ENTRY/BUY
+      venue_confirmed_full     — deduplicated (one row per command_id+trade_id)
+                                 SUM(filled_size) of linked ENTRY/BUY
                                  venue_trade_facts (MATCHED/MINED/CONFIRMED)
                                  equals or exceeds position_current.shares
       venue_confirmed_partial  — linked trade facts exist and sum > 0 but
@@ -516,17 +518,26 @@ def backfill_fill_authority(conn: sqlite3.Connection) -> dict:
             position_id = row[0]
             position_shares = float(row[1] or 0.0)
 
-            # Rule 1 / 2: sum filled_size from linked ENTRY/BUY trade facts
+            # Rule 1 / 2: sum filled_size from linked ENTRY/BUY trade facts,
+            # deduplicated to one row per (command_id, trade_id) first — F108:
+            # venue_trade_facts stores per-trade lifecycle revisions
+            # (MATCHED/MINED/CONFIRMED) sharing trade_id; a bare SUM over the
+            # raw rows over-counts by 1x-4x.
             fill_sum_row = conn.execute(
-                """
-                SELECT COALESCE(SUM(CAST(tf.filled_size AS REAL)), 0.0)
-                  FROM venue_trade_facts tf
-                  JOIN venue_commands cmd ON cmd.command_id = tf.command_id
-                 WHERE cmd.position_id = ?
-                   AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
-                   AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
-                   AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
-                   AND CAST(tf.filled_size AS REAL) > 0
+                "WITH "
+                + canonical_trade_fact_cte(
+                    source_clause_sql=(
+                        "JOIN venue_commands cmd ON cmd.command_id = fact.command_id "
+                        "WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY' "
+                        "AND UPPER(COALESCE(cmd.side, '')) = 'BUY' "
+                        "AND cmd.position_id = ?"
+                    )
+                )
+                + """
+                SELECT COALESCE(SUM(CAST(filled_size AS REAL)), 0.0)
+                  FROM canonical_trade_fact
+                 WHERE state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(filled_size AS REAL) > 0
                 """,
                 (position_id,),
             ).fetchone()
