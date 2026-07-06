@@ -4326,7 +4326,9 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(mo
             state TEXT,
             filled_size TEXT,
             fill_price TEXT,
-            observed_at TEXT
+            observed_at TEXT,
+            trade_id TEXT,
+            local_sequence INTEGER
         )
         """
     )
@@ -4352,7 +4354,8 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(mo
     trade.execute(
         """
         INSERT INTO venue_trade_facts VALUES (
-            'cmd-exit', 'MATCHED', '15.5', '0.70', '2026-06-24T15:34:59+00:00'
+            'cmd-exit', 'MATCHED', '15.5', '0.70', '2026-06-24T15:34:59+00:00',
+            'trade-exit-1', 1
         )
         """
     )
@@ -4392,7 +4395,9 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_plus_dust_repair_e
             state TEXT,
             filled_size TEXT,
             fill_price TEXT,
-            observed_at TEXT
+            observed_at TEXT,
+            trade_id TEXT,
+            local_sequence INTEGER
         )
         """
     )
@@ -4420,7 +4425,7 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_plus_dust_repair_e
         """
         INSERT INTO venue_trade_facts VALUES (
             'cmd-exit-dust', 'MATCHED', '10.01', '0.009',
-            '2026-07-02T00:10:29+00:00'
+            '2026-07-02T00:10:29+00:00', 'trade-exit-dust-1', 1
         )
         """
     )
@@ -4713,7 +4718,9 @@ def test_preflight_tolerates_pending_exit_phantom_sell_projection(monkeypatch, t
             state TEXT,
             filled_size TEXT,
             fill_price TEXT,
-            observed_at TEXT
+            observed_at TEXT,
+            trade_id TEXT,
+            local_sequence INTEGER
         )
         """
     )
@@ -4821,7 +4828,9 @@ def test_preflight_tolerates_retrying_pending_exit_posted_without_venue_truth(mo
             state TEXT,
             filled_size TEXT,
             fill_price TEXT,
-            observed_at TEXT
+            observed_at TEXT,
+            trade_id TEXT,
+            local_sequence INTEGER
         )
         """
     )
@@ -6822,3 +6831,109 @@ def test_preflight_submit_authority_passes_when_reactor_mode_live_and_real_submi
     submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
     assert submit["ok"] is True
     assert not any(c["name"] == "submit_authority_config" for c in result["blockers"])
+
+
+def test_exit_full_fill_repairable_by_position_excludes_partial_fill_inflated_by_revisions(
+    monkeypatch, tmp_path
+):
+    """Bug-B regression: _exit_full_fill_repairable_by_position summed raw
+    venue_trade_facts (every MATCHED/MINED/CONFIRMED lifecycle revision) with
+    no dedup guard. A pending_exit position genuinely filled only 6.0/10.0
+    shares (residual 4.0, well above DUST_SHARE_LIMIT) must NOT be marked
+    repairable — but the SAME real fill recorded as 2 lifecycle revisions
+    (MATCHED then CONFIRMED, each carrying filled_size='6.0') made the naive
+    SUM double-count to 12.0, clamping residual_shares to 0 and waving an
+    incompletely-filled EXIT through as fully filled.
+
+    A genuinely fully-filled EXIT (single trade_id, single revision) is
+    included as a positive control so the fix does not overcorrect.
+    """
+    trade_db = tmp_path / "trade.db"
+    world_db = tmp_path / "world.db"
+    forecast_db = tmp_path / "forecasts.db"
+
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            venue_order_id TEXT,
+            size REAL
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            filled_size TEXT NOT NULL,
+            fill_price TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL,
+            observed_at TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            chain_shares REAL,
+            shares REAL
+        );
+        """
+    )
+    # Genuinely NOT fully filled: target 10.0, real fill 6.0 (residual 4.0).
+    # Recorded as 2 lifecycle revisions of the SAME trade_id (MATCHED then
+    # CONFIRMED), each carrying the full filled_size='6.0'.
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, venue_order_id, size) "
+        "VALUES ('cmd-exit-partial', 'pos-partial-exit', 'EXIT', 'ord-exit-partial', 10.0)"
+    )
+    conn.execute(
+        "INSERT INTO position_current (position_id, phase, chain_shares, shares) "
+        "VALUES ('pos-partial-exit', 'pending_exit', NULL, 10.0)"
+    )
+    for seq, state, observed_at in (
+        (1, "MATCHED", "2026-07-05T00:00:00+00:00"),
+        (2, "CONFIRMED", "2026-07-05T00:05:00+00:00"),
+    ):
+        conn.execute(
+            "INSERT INTO venue_trade_facts "
+            "(trade_id, command_id, state, filled_size, fill_price, local_sequence, observed_at) "
+            "VALUES ('trade-partial-1', 'cmd-exit-partial', ?, '6.0', '0.30', ?, ?)",
+            (state, seq, observed_at),
+        )
+
+    # Positive control: genuinely fully-filled EXIT (single trade_id, single
+    # revision) must still be marked repairable after the fix.
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, venue_order_id, size) "
+        "VALUES ('cmd-exit-full', 'pos-full-exit', 'EXIT', 'ord-exit-full', 5.0)"
+    )
+    conn.execute(
+        "INSERT INTO position_current (position_id, phase, chain_shares, shares) "
+        "VALUES ('pos-full-exit', 'pending_exit', NULL, 5.0)"
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts "
+        "(trade_id, command_id, state, filled_size, fill_price, local_sequence, observed_at) "
+        "VALUES ('trade-full-1', 'cmd-exit-full', 'CONFIRMED', '5.0', '0.40', 1, '2026-07-05T00:10:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._exit_full_fill_repairable_by_position()
+
+    assert "pos-partial-exit" not in result, (
+        "position filled only 6.0/10.0 (residual 4.0) must NOT be marked "
+        f"repairable; got {result.get('pos-partial-exit')!r}. A bare SUM over "
+        "duplicate lifecycle revisions (MATCHED+CONFIRMED, both filled_size="
+        "6.0) inflates filled_size to 12.0, clamping residual_shares to 0."
+    )
+    assert "pos-full-exit" in result
+    assert result["pos-full-exit"]["filled_size"] == 5.0
+    assert result["pos-full-exit"]["residual_shares"] == 0.0
