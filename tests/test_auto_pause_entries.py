@@ -113,13 +113,18 @@ class TestAutoRauseEntries:
 
     def test_exit_monitor_paths_unaffected(self, monkeypatch):
         """Criterion #5: Monitoring phase still runs and cycle completes
-        (completed_at populated) even when _execute_discovery_phase raises."""
+        (completed_at populated).
+
+        Legacy-pipeline retirement (Phase 2, 2026-07-06): this test previously
+        injected a ValueError into `_execute_discovery_phase` to prove monitor/
+        exit paths were unaffected by an entry-path exception. That function
+        (and the legacy discovery entry path) is deleted; the discovery branch
+        in run_cycle() is now an intentional no-op, so there is no entry-path
+        exception left to inject. The still-meaningful assertions (monitoring
+        phase runs, cycle completes) are retained.
+        """
         monitor_calls = _patch_cycle(monkeypatch)
 
-        def _raise_discovery(*a, **kw):
-            raise ValueError("test_boom")
-
-        monkeypatch.setattr(cr, "_execute_discovery_phase", _raise_discovery)
         monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
 
         summary = cr.run_cycle(DiscoveryMode.OPENING_HUNT)

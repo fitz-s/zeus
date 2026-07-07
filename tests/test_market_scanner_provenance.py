@@ -4614,14 +4614,6 @@ class TestForwardMarketSubstrateProducer:
         verify_conn.close()
         assert count == 0
 
-    def test_cycle_runtime_wires_market_source_contract_topology_writer(self):
-        from src.engine import cycle_runtime
-
-        source = inspect.getsource(cycle_runtime.execute_discovery_phase)
-
-        assert "log_market_source_contract_topology_facts" in source
-        assert "market_source_contract_topology_status" in source
-
     def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
         self, tmp_path, request
     ):

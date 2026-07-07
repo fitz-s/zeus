@@ -6,7 +6,12 @@ Pipeline:
   2. Download current Open-Meteo anchor inputs.
   3. Download source-clock/BPF extra model inputs.
   4. Enqueue and drain replacement materialization seeds.
-  5. Optionally hand off to CycleRunner for the live decision cycle.
+
+Legacy-pipeline retirement (Phase 2, 2026-07-06): this script no longer hands
+off to CycleRunner. The `--run-decision`/`--decision-mode` flags and the
+optional step 5 they drove are removed alongside the deleted legacy discovery
+pipeline (src.engine.cycle_runtime.execute_discovery_phase); order submission
+lives exclusively in the EDLI event-reactor path now.
 """
 
 from __future__ import annotations
@@ -36,7 +41,6 @@ from src.data.source_clock_update_probe import (  # noqa: E402
     probe_openmeteo_source_clock_updates,
     source_clock_scoped_download_allows_cursor_advance,
 )
-from src.engine.discovery_mode import DiscoveryMode  # noqa: E402
 
 
 def _jsonable(value):
@@ -96,16 +100,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     report["materialization_queue"] = materialize.as_dict()
 
-    if args.run_decision:
-        from src.engine.cycle_runner import run_cycle  # noqa: PLC0415
-
-        report["decision_cycle"] = run_cycle(DiscoveryMode(args.decision_mode))
-    else:
-        report["decision_cycle"] = {
-            "status": "SKIPPED",
-            "reason": "pass --run-decision to hand off to live CycleRunner",
-            "decision_mode": args.decision_mode,
-        }
     return report
 
 
@@ -113,12 +107,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-updates-url", default=None)
     parser.add_argument("--no-network", action="store_true", help="Read cached model updates JSONL instead of fetching.")
-    parser.add_argument("--run-decision", action="store_true", help="Run the live CycleRunner decision cycle after materialization.")
-    parser.add_argument(
-        "--decision-mode",
-        default=DiscoveryMode.UPDATE_REACTION.value,
-        choices=[mode.value for mode in DiscoveryMode],
-    )
     parser.add_argument(
         "--out",
         type=Path,

@@ -5720,7 +5720,6 @@ digest_profiles:
     file_patterns:
       - "src/engine/cycle_runtime.py"
       - "src/strategy/family_exclusive_dedup.py"
-      - "tests/test_inv_family_exclusive_cross_module_integration.py"
       - "tests/test_inv_family_exclusive_sizing.py"
     allowed_files:
       - "architecture/topology.yaml"
@@ -5728,7 +5727,6 @@ digest_profiles:
       - "src/engine/cycle_runtime.py"
       - "src/strategy/family_exclusive_dedup.py"
       - "tests/test_digest_profile_matching.py"
-      - "tests/test_inv_family_exclusive_cross_module_integration.py"
       - "tests/test_inv_family_exclusive_sizing.py"
     downstream:
       - "src/execution/executor.py"

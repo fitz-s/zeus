@@ -225,13 +225,6 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
         return False, False
 
     monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor_after_red_sweep)
-    monkeypatch.setattr(
-        cycle_runner,
-        "_execute_discovery_phase",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("RED risk must block entries")
-        ),
-    )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.execution.command_recovery.reconcile_unresolved_commands", lambda *args, **kwargs: {})
     monkeypatch.setattr(

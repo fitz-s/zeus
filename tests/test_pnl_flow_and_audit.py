@@ -941,21 +941,6 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["truth"]["deprecated"] is False
 
 
-def test_inv_run_mode_writes_failure_status(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(main_module, "run_cycle", lambda mode: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(
-        "src.observability.status_summary.write_status",
-        lambda cycle_summary=None: captured.setdefault("summary", cycle_summary),
-    )
-
-    main_module._run_mode(DiscoveryMode.OPENING_HUNT)
-
-    assert captured["summary"]["mode"] == DiscoveryMode.OPENING_HUNT.value
-    assert captured["summary"]["failed"] is True
-    assert captured["summary"]["failure_reason"] == "boom"
-
-
 def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
 
@@ -3716,104 +3701,6 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
     assert details["settlement_sample_size"] == 0
 
 
-def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    conn.close()
-
-    class DummyClob:
-        def __init__(self):
-            pass
-
-    calls: list[dict] = []
-    _allow_entry_gates_for_cycle_test(monkeypatch)
-
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    _market_list = [{
-        "city": NYC,
-        "target_date": "2026-04-01",
-        "outcomes": [],
-        "hours_since_open": 2.0,
-        "hours_to_resolution": 30.0,
-        "temperature_metric": "high",
-    }]
-    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: _market_list)
-    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kwargs: _market_list)
-    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
-    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
-    # DummyClob lacks get_positions_from_api/get_balance → chain sync and wallet fail → entries blocked.
-    # Stub both so chain_ready=True and entry_bankroll is set and discovery phase runs.
-    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
-    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (211.37, {}))
-    # get_last_scan_authority must return "VERIFIED" or cycle_runtime returns early at the
-    # scan_availability_status gate (NEVER_FETCHED → DATA_UNAVAILABLE → early return).
-    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
-    monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
-    monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
-    monkeypatch.setattr(
-        cycle_runner,
-        "evaluate_candidate",
-        lambda *args, **kwargs: [EdgeDecision(
-            should_trade=True,
-            edge=BinEdge(
-                bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
-                direction="buy_yes",
-                edge=0.12,
-                ci_lower=0.05,
-                ci_upper=0.15,
-                p_model=0.60,
-                p_market=0.35,
-                p_posterior=0.47,
-                entry_price=0.35,
-                p_value=0.02,
-                vwmp=0.35,
-                support_index=1,
-            ),
-            tokens={"market_id": "m1", "token_id": "yes123", "no_token_id": "no456"},
-            size_usd=5.0,
-            decision_id="dec1",
-            decision_snapshot_id="snap1",
-            edge_source="opening_inertia",
-            strategy_key="opening_inertia",
-            applied_validations=["ens_fetch"],
-        )],
-    )
-    monkeypatch.setattr(
-        cycle_runner,
-        "create_execution_intent",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        cycle_runner,
-        "execute_intent",
-        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35, shares=14.29, command_state="FILLED"),
-    )
-    monkeypatch.setattr(
-        "src.state.strategy_tracker.StrategyTracker.record_entry",
-        lambda self, pos: calls.append(pos),
-    )
-    # get_mode() always returns "live" in config.py; live path checks snapshot fields
-    # that this test's EdgeDecision.tokens intentionally omits. Route to paper path so
-    # create_execution_intent/execute_intent (already patched above) are reached.
-    monkeypatch.setattr(cycle_runner, "get_mode", lambda: "paper")
-    # _dual_write_canonical_entry_if_available calls build_entry_canonical_write which
-    # validates env via normalize_position_event_env — "paper" is not a valid env value.
-    # Raise RuntimeError so the closure's RuntimeError-catching path logs a warning and
-    # returns False, keeping the SAVEPOINT intact so tracker.record_entry can fire.
-    monkeypatch.setattr(
-        "src.engine.lifecycle_events.build_entry_canonical_write",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("test_stub_no_canonical_write")),
-    )
-
-    cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-
-    assert calls, "StrategyTracker never received the filled trade"
 
 
 def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):

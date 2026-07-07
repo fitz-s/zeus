@@ -419,11 +419,6 @@ def test_cycle_summary_exposes_cutover_state_and_blocks_discovery(monkeypatch, t
     monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob, conn=None: 0)
     monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (100.0, {}))
     monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", lambda *args, **kwargs: (False, False))
-
-    def fail_discovery(*args, **kwargs):
-        raise AssertionError("discovery must be blocked by CutoverGuard")
-
-    monkeypatch.setattr(cycle_runner, "_execute_discovery_phase", fail_discovery)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", lambda: type("DummyClob", (), {"get_balance": lambda self: 100.0})())

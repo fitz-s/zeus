@@ -39,7 +39,6 @@ RED->GREEN protocol (recorded for the opus critic):
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -524,13 +523,6 @@ def test_weather_family_exposure_resolver_merges_trade_truth_and_portfolio_proje
     exposures = WeatherFamilyExposureReducer.merge([trade_exposure], [portfolio_exposure])
 
     assert exposures == [trade_exposure, portfolio_exposure]
-
-
-def test_cycle_runtime_threads_portfolio_exposure_into_family_gate() -> None:
-    """Relationship guard: runtime callsite must supply current exposure state."""
-    source = Path("src/engine/cycle_runtime.py").read_text()
-    assert "resolve_weather_family_exposures" in source
-    assert "existing_exposures=_family_exposures" in source
 
 
 def test_trade_db_family_exposures_include_live_entry_commands(tmp_path) -> None:

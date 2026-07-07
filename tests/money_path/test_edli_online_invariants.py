@@ -264,7 +264,12 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "live_execution_mode == \"legacy_cron\"" in source
     assert "edli_live" in source
     assert "EDLI_EVENT_DRIVEN_MODES" in source
-    for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
+    # Legacy-pipeline retirement (Phase 2, 2026-07-06): opening_hunt/day0_capture/
+    # imminent_open_capture scheduler jobs are deleted along with the legacy_cron
+    # scheduler-registration block (src/engine/cycle_runtime.py execute_discovery_phase
+    # no longer exists for them to drive). market_discovery/harvester remain checked —
+    # unrelated P2/P4 process-topology lifts, not part of this deletion.
+    for existing_job in ("market_discovery", "harvester"):
         assert existing_job in source
 
 
@@ -291,10 +296,15 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
     assert "edli_event_reactor" not in job_ids
     assert "edli_market_channel_ingestor" not in job_ids
     assert "edli_user_channel_reconcile" not in job_ids
-    assert "opening_hunt" in job_ids
-    assert any(job_id.startswith("update_reaction_") for job_id in job_ids)
-    assert "day0_capture" in job_ids
-    assert "imminent_open_capture" in job_ids
+    # Legacy-pipeline retirement (Phase 2, 2026-07-06): the legacy_cron scheduler-
+    # registration block (opening_hunt/update_reaction_*/day0_capture/
+    # imminent_open_capture) is deleted along with cycle_runtime.execute_discovery_phase.
+    # legacy_cron mode no longer registers ANY discovery/entry jobs — it is now inert
+    # for job registration (only the mode-independent baseline jobs below remain).
+    assert "opening_hunt" not in job_ids
+    assert not any(job_id.startswith("update_reaction_") for job_id in job_ids)
+    assert "day0_capture" not in job_ids
+    assert "imminent_open_capture" not in job_ids
     # PROCESS-TOPOLOGY REFACTOR P2 (system_decomposition_plan §8 Step 1): market_discovery
     # is LIFTED to the substrate-observer process and is no longer registered in the order
     # daemon's scheduler — in legacy_cron OR EDLI modes.

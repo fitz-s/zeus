@@ -128,77 +128,14 @@ def test_stale_cache_triggers_refetch():
 # ---------------------------------------------------------------------------
 # T3 — BP-EVAL-BUDGET-EXCLUDES-SCAN-TIME
 # ---------------------------------------------------------------------------
-
-def test_eval_budget_excludes_scan_time():
-    """evaluation_started_at is recorded AFTER find_weather_markets returns.
-
-    BP-EVAL-BUDGET-EXCLUDES-SCAN-TIME: Fix B ensures network I/O does not
-    consume the per-market evaluation budget.  We simulate a 200s scan and
-    verify that evaluation_started_at is at least as late as scan completion.
-    """
-    import src.engine.cycle_runtime as cr
-
-    scan_duration = 200.0
-    monotonic_calls: list[float] = []
-    base_time = 1000.0
-    # Timeline:
-    #   t=0    cycle_runtime called
-    #   t=200  find_weather_markets returns (after 200s scan)
-    #   t=200  evaluation_started_at captured HERE (Fix B)
-    #   t=201  first market evaluated
-    call_times = iter([
-        base_time,            # _monotonic_seconds call inside evaluation loop (market 0)
-    ])
-
-    find_weather_markets_called_at = base_time - scan_duration  # before evaluation_started_at
-
-    deps = MagicMock()
-    deps.MODE_PARAMS = {
-        MagicMock(): {
-            # No evaluation budget — we test timing only.
-        }
-    }
-
-    # We test directly: evaluation_started_at must be >= the time find_weather_markets returns.
-    # The simplest probe: import cycle_runtime and verify the code order via AST or
-    # by running a thin integration with a time-tracking mock.
-
-    import src.engine.cycle_runtime as crt
-    import ast, inspect, textwrap
-
-    source = inspect.getsource(crt.execute_discovery_phase)
-    # Strip leading indent so ast.parse works.
-    source = textwrap.dedent(source)
-    tree = ast.parse(source)
-
-    # Walk the AST to find assignment of evaluation_started_at and call to find_weather_markets.
-    assignments = []
-    calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "evaluation_started_at":
-                    assignments.append(node.lineno)
-        if isinstance(node, (ast.Assign, ast.Expr)):
-            # Look for find_weather_markets call
-            val = getattr(node, "value", None)
-            if val and isinstance(val, ast.Call):
-                func = val.func
-                if isinstance(func, ast.Attribute) and func.attr == "find_weather_markets":
-                    calls.append(node.lineno)
-
-    assert assignments, "evaluation_started_at assignment not found in _run_live_discovery_cycle"
-    assert calls, "find_weather_markets call not found in _run_live_discovery_cycle"
-
-    eval_started_line = min(assignments)
-    scan_call_line = min(calls)
-
-    assert eval_started_line > scan_call_line, (
-        f"evaluation_started_at (line {eval_started_line}) is set BEFORE "
-        f"find_weather_markets (line {scan_call_line}) — Fix B is not applied. "
-        "Network scan time would consume per-market evaluation budget."
-    )
-
+# Legacy-pipeline retirement (Phase 2, 2026-07-06): test_eval_budget_excludes_scan_time
+# removed here. It was a source-inspection antibody over `execute_discovery_phase`
+# itself (`inspect.getsource(crt.execute_discovery_phase)`, AST-walked for
+# evaluation_started_at-after-find_weather_markets ordering), which is deleted
+# alongside the legacy discovery pipeline. T5 below (test_end_to_end_no_backpressure)
+# already covers the same BP-EVAL-BUDGET-EXCLUDES-SCAN-TIME timing invariant via an
+# inline reproduction of the budget-check loop, independent of execute_discovery_phase's
+# source text.
 
 # ---------------------------------------------------------------------------
 # T4 — sed-flip antibody (BP-SED-FLIP)

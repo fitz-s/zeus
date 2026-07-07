@@ -104,63 +104,11 @@ def test_zoneinfo_imported_at_module_level() -> None:
     )
 
 
-def _scheduler_add_job_calls_by_id(tree: ast.Module) -> dict[str, ast.Call]:
-    calls: dict[str, ast.Call] = {}
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_job"
-        ):
-            continue
-        id_kw = next((kw for kw in node.keywords if kw.arg == "id"), None)
-        if id_kw is None or not isinstance(id_kw.value, ast.Constant):
-            continue
-        if isinstance(id_kw.value.value, str):
-            calls[id_kw.value.value] = node
-    return calls
-
-
-def test_interval_discovery_jobs_are_phase_staggered() -> None:
-    """Opening hunt and Day0 must not race on the same interval instant."""
-
-    calls = _scheduler_add_job_calls_by_id(_parse_main())
-    next_run_values: dict[str, ast.expr] = {}
-    for job_id in ("opening_hunt", "day0_capture"):
-        call = calls[job_id]
-        next_run_kw = next((kw for kw in call.keywords if kw.arg == "next_run_time"), None)
-        assert next_run_kw is not None, (
-            f"{job_id} must set next_run_time explicitly. Without a first-run "
-            "phase, opening_hunt and day0_capture share the same 15-minute "
-            "interval instant after daemon restart; the process-local cycle "
-            "lock then drops one live cycle by race."
-        )
-        value = next_run_kw.value
-        assert (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id == "_utc_run_time_after"
-        ), f"{job_id} next_run_time must be computed through _utc_run_time_after(...)."
-        next_run_values[job_id] = value
-
-    opening_delay = next_run_values["opening_hunt"]
-    assert isinstance(opening_delay, ast.Call)
-    assert (
-        len(opening_delay.args) == 1
-        and isinstance(opening_delay.args[0], ast.Name)
-        and opening_delay.args[0].id == "OPENING_HUNT_FIRST_DELAY_SECONDS"
-    )
-
-    day0_delay = next_run_values["day0_capture"]
-    assert isinstance(day0_delay, ast.Call)
-    assert (
-        len(day0_delay.args) == 1
-        and isinstance(day0_delay.args[0], ast.Call)
-        and isinstance(day0_delay.args[0].func, ast.Name)
-        and day0_delay.args[0].func.id == "_day0_first_delay_seconds"
-    )
-
-
-def test_day0_stagger_helper_offsets_by_half_interval() -> None:
-    source = MAIN_FILE.read_text(encoding="utf-8")
-    assert "return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)" in source
+# Legacy-pipeline retirement (Phase 2, 2026-07-06): test_interval_discovery_jobs_are_phase_staggered
+# and test_day0_stagger_helper_offsets_by_half_interval were removed here. Both were
+# structural AST antibodies over the legacy_cron `opening_hunt`/`day0_capture` scheduler.add_job()
+# registrations and the `_day0_first_delay_seconds` stagger helper, all deleted alongside the
+# legacy discovery pipeline (src/engine/cycle_runtime.py `execute_discovery_phase`). The EDLI
+# event-reactor job (`edli_event_reactor`, main.py) has its own single-job cadence with no
+# same-interval sibling to stagger against, so the underlying race this antibody guarded against
+# no longer exists for any live-scheduled job.
