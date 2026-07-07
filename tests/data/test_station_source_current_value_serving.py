@@ -113,3 +113,45 @@ def test_gridded_only_db_unchanged_by_flag():
         source_cycle_time_iso=GRIDDED_CYCLE, include_station_sources=True,
     )
     assert set(off) == set(on) == {"ecmwf_ifs"}
+
+
+# Steady-state mixed case: the ceiling-bound passes (lines ~216-219) ALREADY claimed `out[model]`
+# with a <= ceiling row before the station block runs. The station override must ALWAYS replace
+# that slot with the model's true freshest (no-ceiling) row — this is the case the cold-start-only
+# tests above never exercised (there, cwa_township was ABSENT from `out` when the station block
+# ran, so "skip if already present" never actually got tested against a populated slot).
+STALE_STATION_CYCLE = "2026-06-28T12:00:00+00:00"  # <= GRIDDED_CYCLE ceiling: claimed by ceiling pass first
+STALE_CAP = "2026-06-28T12:00:30+00:00"
+
+
+def test_station_source_override_replaces_stale_ceiling_bound_row_when_opted_in():
+    conn = _conn()
+    _insert(conn, 1, "cwa_township", 34.0, "single_runs", cycle=STALE_STATION_CYCLE, captured=STALE_CAP)
+    _insert(conn, 2, "cwa_township", 36.0, "single_runs", cycle=STATION_CYCLE, captured=CAP)
+
+    served = read_current_instrument_values(
+        conn, city="Taipei", metric="high", target_date=TD,
+        source_cycle_time_iso=GRIDDED_CYCLE, include_station_sources=True,
+    )
+
+    # True freshest (36.0, rid=2) must win, NOT the stale ceiling-bound row (34.0, rid=1) that the
+    # gridded passes already parked in `out` before the station block ran.
+    assert served["cwa_township"].value_c == 36.0
+    assert served["cwa_township"].raw_model_forecast_id == 2
+
+
+def test_station_source_ceiling_bound_unchanged_by_flag_in_mixed_case():
+    # Same mixed seed as above, but include_station_sources=False: the station block must not run
+    # at all, so a station model's gridded ceiling-bound serving stays byte-identical to before
+    # this fix.
+    conn = _conn()
+    _insert(conn, 1, "cwa_township", 34.0, "single_runs", cycle=STALE_STATION_CYCLE, captured=STALE_CAP)
+    _insert(conn, 2, "cwa_township", 36.0, "single_runs", cycle=STATION_CYCLE, captured=CAP)
+
+    served = read_current_instrument_values(
+        conn, city="Taipei", metric="high", target_date=TD,
+        source_cycle_time_iso=GRIDDED_CYCLE, include_station_sources=False,
+    )
+
+    assert served["cwa_township"].value_c == 34.0
+    assert served["cwa_township"].raw_model_forecast_id == 1
