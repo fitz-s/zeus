@@ -422,11 +422,16 @@ compatibility pointers in `docs/operations/`.
 - `task_2026-05-02_hk_paris_release/` — completed HK+Paris release packet;
   implementation landed in commit `c3f9814d`.
 
+**2026-07-07 sweep**:
+
+- `task_2026-05-21_mainline_completion_authority/` — closed (PR #284 merged 2026-05-22); body at `docs/archive/2026-Q2/`.
+- `task_2026-05-23_probability_phantom_edge/` — closed (PR #323 merged 2026-05-24); body at `docs/archive/2026-Q2/`.
+- `.omc/plans/`, `.omc/research/`, `.omx/plans/` planning scratch (109 files, all pre-2026-06-25) — moved to `docs/archive/legacy_archives/omc_planning_20260707/`.
+- Five never-written observation-surface shells (`attribution_drift/`, `calibration_observation/`, `edge_observation/`, `learning_loop_observation/`, `ws_poll_reaction/`) — deleted; writer scripts remain in `scripts/` and mkdir on demand.
+
 **Known-gaps relocation**:
 
-- Active worklist: `docs/to-do-list/known_gaps.md`.
-- Closed antibody archive: `docs/to-do-list/known_gaps_archive.md`.
-- Compatibility pointer: `docs/operations/known_gaps.md`.
+- Worklist: `docs/operations/known_gaps.md` (the former docs/to-do-list/ location no longer exists).
 
 **Remaining live operations surfaces after cleanup** are listed in
 `docs/operations/current_state.md`.

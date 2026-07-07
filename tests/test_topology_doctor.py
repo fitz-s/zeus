@@ -821,9 +821,9 @@ def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):
 
 def test_docs_mode_rejects_non_md_artifact_outside_artifact_subroot(monkeypatch):
     topology = topology_doctor.load_topology()
-    artifact = next(item for item in topology["docs_subroots"] if item["path"] == "docs/to-do-list")
+    artifact = next(item for item in topology["docs_subroots"] if item["path"] == "docs/evidence")
     artifact["allow_non_markdown"] = False
-    visible = "docs/to-do-list/zeus_bug100_reassessment_table.csv"
+    visible = "docs/evidence/zeus_bug100_reassessment_table.csv"
     monkeypatch.setattr(
         topology_doctor,
         "_git_visible_files",
@@ -840,7 +840,7 @@ def test_docs_mode_allows_registered_reports_json(monkeypatch):
     monkeypatch.setattr(
         topology_doctor,
         "_git_visible_files",
-        lambda: ["docs/reports/diagnostic_snapshot.json"],
+        lambda: ["docs/evidence/diagnostic_snapshot.json"],
     )
 
     issues = topology_doctor._check_hidden_docs(topology)

@@ -2417,7 +2417,7 @@ scripts:
     read_targets: [state/zeus-forecasts.db]
     write_targets: [state/zeus-forecasts.db]
     canonical_command: "python scripts/drain_settlement_quarantine.py [--apply] [--json] [--db PATH]"
-    external_inputs: [Polymarket Gamma API (GET /events?slug=..., read-only)]
+    external_inputs: ["Polymarket Gamma API (GET /events?slug=..., read-only)"]
     delete_policy: retain_for_audit
     reuse_when: >
       P0a market-semantics purity plan (2026-07-04, operator-corrected same day): re-resolve

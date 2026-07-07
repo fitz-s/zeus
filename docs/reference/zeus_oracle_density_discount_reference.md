@@ -308,7 +308,7 @@ enter the trigger or floor selection. See §X for the v2 redesign rationale.
 
 **Note on asymmetric loss preferences**: city-specific asymmetric loss preferences
 (e.g. Denver conservative sizing) belong in the Kelly multiplier layer, NOT in
-the floor. See `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
+the floor. See `docs/reference/zeus_kelly_asymmetric_loss_reference.md`.
 
 ```
 DDD_v2(city, track, today) =
@@ -531,7 +531,7 @@ Denver's 0.85 floor was a policy override for asymmetric loss preference
 (operators prefer conservative sizing on Denver LOW due to convective risk).
 This is a correct preference but the wrong mechanism. A floor override lies
 about the physical baseline. The right place for sizing preferences is the
-Kelly multiplier layer. See `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
+Kelly multiplier layer. See `docs/reference/zeus_kelly_asymmetric_loss_reference.md`.
 
 ### Why the 5-segment curve was replaced
 
@@ -545,7 +545,7 @@ support. A single-parameter linear formula is more defensible.
 ### What is deferred
 
 - **Comprehensive backtest validation of α=0.20**: operator will run separately.
-- **Kelly layer implementation**: hand-off at `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
+- **Kelly layer implementation**: hand-off at `docs/reference/zeus_kelly_asymmetric_loss_reference.md`.
 - **Live wiring into `src/engine/evaluator.py`**: separate workstream.
 - **Paris floor**: pending workstream A DB resync.
 

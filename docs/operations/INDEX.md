@@ -1,248 +1,41 @@
 # `docs/operations/` — Authoritative Index
 
-**Purpose:** every directory and top-level file under `docs/operations/`
-must be registered here.  If it isn't on this page, it's a candidate
-for archival — see `POLICY.md` for the closeout rule.
+**Purpose:** every directory and top-level file under `docs/operations/` must be registered here. Not on this page → archival candidate (see `POLICY.md`).
 
-**Last reviewed:** 2026-05-22.
+**Last reviewed:** 2026-07-07 (rewritten against disk state; prior index was ~90% dead rows pointing at archived/deleted files — full history in git).
 
----
-
-## Permanent observation surfaces (long-lived, no merge tied)
-
-These directories collect rolling operational data and are not
-expected to close out.  Keep them under their existing names.
-
-| Surface | Owner | Purpose |
-|---|---|---|
-| `activation/` | runtime | Activation evidence captures (rollout gating). |
-| `attribution_drift/` | runtime | Drift attribution snapshots per cycle. |
-| `calibration_observation/` | runtime | Live calibration sample log. |
-| `edge_observation/` | runtime | Edge-decision rejection counters per stage. |
-| `learning_loop_observation/` | runtime | Feedback loop instrumentation outputs. |
-| `ws_poll_reaction/` | runtime | Websocket-vs-poll reaction-time evidence. |
-
-## Permanent reference docs (top-level .md, semi-stable)
-
-| File | Status | Purpose |
-|---|---|---|
-| `AGENTS.md` | active | Scoped agent rules for `docs/operations/`. |
-| `current_state.md` | active | Live operational state checkpoint. |
-| `current_data_state.md` | active | Data-side state checkpoint. |
-| `current_source_validity.md` | active | Source-validity status (what's hot/cold). |
-| `packet_scope_protocol.md` | active | Packet scope conventions. |
-| `tigge_daemon_integration.md` | active | TIGGE daemon wiring reference. |
-| `live_rescue_ledger_2026-05-04.md` | **review** | Per-day live-rescue log; needs rotation policy if this grows. |
-| `P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md` | active | P0 authority doc: PR-A snapshot ORDER BY fix, PR-B Day0 HIGH physical law, PR-C observation reader Root C, PR-D probability sanity gate, PR-E decision_integrity_quarantine. PR #309. |
-| `review5_23_findings.md` | active | review5.23 findings catalogue (P0-1, P1-1 through P1-8, P2-1 through P2-3). Authority for PR #326 fix scope. |
-| `review5_23_triage.md` | active | review5.23 triage status — per-finding fix status, PR anchors, open items. Updated by PR #326. |
-| `EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md` | active | Root-cause report: stale executable snapshot at submit (discovery→reprice latency > 30s). Authority for exec-freshness re-capture design. PR #330. |
-| `ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md` | active | ENS new-city data parity audit (Jinan/Zhengzhou vs. 52 established cities): per-city artifact coverage on live trade-decision path. |
-| `LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md` | active | EDLI no-cap regression evidence: current no-cap law, stale authority sources removed, verification targets, and shadow will-trade receipt guardrails. PR #397. |
-
-## Task directories — closeout status
-
-A task directory captures a finite operation with a known closeout
-trigger (PR merge or operator declaration).  After closeout, the
-directory should EITHER be moved under `archive/` OR keep a
-`STATUS.md` with the closeout receipt — see `POLICY.md`.
-
-| Directory | Anchor PR / commit | Status | Last touched |
-|---|---|---|---|
-| `task_2026-04-26_ultimate_plan/` | (multi-commit) `2cb1c421` | **closed** — pre-PR-37 ingest plan, completed | 2026-04 |
-| `task_2026-05-02_live_entry_data_contract/` | (planning artifacts) `2cb1c421` | **review** — multiple PLAN_v[1,2,3] suggest abandoned drafts | 2026-05-02 |
-| `task_2026-05-03_ddd_implementation_plan/` | DDD v2 commits `650136bd` etc. | **closed** — DDD v2 redesign live-wired, 38 docs is excessive — needs INDEX of its own or pruning | 2026-05-04 |
-| `task_2026-05-05_topology_noise_repair/` | `dfb1451af6` | **closed** — topology boot-profile and script-route noise repair, completed | 2026-05-05 |
-| `task_2026-05-05_object_invariance_mainline/` | `7357aac7ef..e0b4c00276` | **closed** — object-meaning invariance mainline closeout ledger | 2026-05-05 |
-| `task_2026-05-05_object_invariance_wave5/` through `wave8/`, `wave11/`–`wave21/` | `dfb1451af6` | **closed** — object-meaning invariance remediation waves 5-21 | 2026-05-05 |
-| `task_2026-05-06_calibration_quality_blockers/` | `ff5c09f283..be302b9111` | **closed** — calibration quality launch-blocker (12 quarantined Platts + fit-time guard) | 2026-05-06 |
-| `task_2026-05-06_hook_redesign/` | superseded | **archived** — moved to archive/2026-Q2/ — hook redesign v1; superseded by v2 | 2026-05-06 |
-| `task_2026-05-06_topology_redesign/` | superseded | **closed** — topology redesign v1; superseded by v2 | 2026-05-06 |
-| ~~`task_2026-05-07_hook_redesign_v2/`~~ | `d99bbf9500` | **dir absent** — hook ecosystem v2 merged into main `.claude/settings.json`; directory no longer exists | 2026-05-07 |
-| `task_2026-05-07_navigation_topology_v2/` | `fe8d0d79a5` | **closed** — topology v2 navigation upgrade, merged | 2026-05-07 |
-| `task_2026-05-07_recalibration_after_low_high_alignment/` | `1d9859d90a` | **closed** — LOW/HIGH recalibration recovery, merged | 2026-05-07 |
-| `task_2026-05-07_object_invariance_wave24/`–`wave26/` | `d7db6ba2ef` | **closed** — object-meaning invariance waves 24-26 | 2026-05-07 |
-| `task_2026-05-08_deep_alignment_audit/` | pre-PR #88 | **archived** — moved to archive/2026-Q2/ — deep alignment audit, findings drove repair | 2026-05-08 |
-| `task_2026-05-08_alignment_safe_implementation/` | `2f436a6b21` | **archived** — moved to archive/2026-Q2/ — alignment repair implementation, merged | 2026-05-08 |
-| ~~`task_2026-05-08_alignment_repair_workflow/`~~ | workflow record | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| ~~`task_2026-05-08_100_blocked_horizon_audit/`~~ | diagnostic | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| `task_2026-05-08_262_london_f_to_c/` | `9cc3d5fefd` | **closed** — London °F→°C settlement semantics fix, merged | 2026-05-08 |
-| ~~`task_2026-05-08_ecmwf_publication_strategy/`~~ | evidence packet | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| ~~`task_2026-05-08_ecmwf_step_grid_scientist_eval/`~~ | evidence packet | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| `task_2026-05-08_f1_subprocess_hardening/` | `7e727b1f49` | **closed** — F1 subprocess hardening, merged | 2026-05-08 |
-| ~~`task_2026-05-08_low_recalibration_residue_pr/`~~ | `2f436a6b21` | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| `task_2026-05-08_obs_outside_bin_audit/` | evidence packet | **closed** — observations-outside-bin audit | 2026-05-08 |
-| ~~`task_2026-05-08_phase_b_download_root_cause/`~~ | evidence packet | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| ~~`task_2026-05-08_post_merge_full_chain/`~~ | post-merge checks | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| `task_2026-05-08_topology_redesign_completion/` | `b9b93da6ee` | **closed** — topology redesign completion, merged | 2026-05-08 |
-| ~~`task_2026-05-08_track_a6_run/`~~ | evidence packet | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
-| `task_2026-05-08_object_invariance_wave27/`–`wave42/` | `214a805ef2` | **closed** — object-meaning invariance waves 27-42 | 2026-05-08 |
-| `task_2026-05-08_object_invariance_remaining_mainline/` | `e0b4c00276` | **closed** — remaining mainline invariance closeout | 2026-05-08 |
-| `task_2026-05-09_copilot_agent_sync/` | planning packet | **archived** — moved to archive/2026-Q2/ — Copilot/VS Code agent sync planning; open for implementation | 2026-05-09 |
-| ~~`task_2026-05-09_daemon_restart_and_backfill/`~~ | operations run | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-09 |
-| `task_2026-05-09_post_s4_residuals_topology/` | evidence packet | **closed** — post-S4 topology residuals audit | 2026-05-09 |
-| `task_2026-05-09_pr_workflow_failure/` | incident record | **closed** — PR workflow failure, resolved | 2026-05-09 |
-| ~~`task_2026-05-09_workflow_redesign_plan/`~~ | `f6a796b966..2f436a6b21` | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-09 |
-| `task_2026-05-11_ecmwf_download_replacement/` | `eba80d2b9d` | **closed** — ECMWF download replacement, merged | 2026-05-11 |
-| `task_2026-05-11_tigge_vm_to_zeus_db/` | `eba80d2b9d` | **closed** — TIGGE VM-to-Zeus DB wiring, merged | 2026-05-11 |
-| `task_2026-05-14_attach_path_index_fix/` | `eba80d2b9d` | **closed** — K1 attach-path index fix, merged | 2026-05-14 |
-| `task_2026-05-14_data_daemon_live_efficiency/` | `eba80d2b9d` | **archived** — moved to archive/2026-Q2/ — data-daemon live-efficiency refactor, merged | 2026-05-14 |
-| `task_2026-05-14_k1_followups/` | `2e00271cee` | **archived** — moved to archive/2026-Q2/ — K1 followup seam repairs, merged | 2026-05-14 |
-| `task_2026-05-15_data_pipeline_live_rootfix/` | `595be616e3` | **archived** — moved to archive/2026-Q2/ — live data pipeline root-cause fix, merged | 2026-05-15 |
-| `task_2026-05-15_live_order_e2e_goal/` | branch: feat/live-order-e2e | **archived** — moved to archive/2026-Q2/ — live order E2E proof: data→evaluator→executor→venue record | 2026-05-15 |
-| `task_2026-05-15_live_order_e2e_verification/` | evidence packet | **archived** — moved to archive/2026-Q2/ — E2E verification plan and critic approval | 2026-05-15 |
-| ~~`task_2026-05-15_p_drift_remediation/`~~ | `3f73872236` | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-15 |
-| `task_2026-05-15_p1_topology_v_next_additive/` | `7235165807..1ebf1a7079` | **archived** — moved to archive/2026-Q2/ — topology v-next additive phase 1, merged | 2026-05-15 |
-| `task_2026-05-15_p2_companion_required_mechanism/` | `1f2158a14e..16690c36f6` | **archived** — moved to archive/2026-Q2/ — companion-required mechanism, merged | 2026-05-15 |
-| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | `95617f5300..010d930941` | **archived** — moved to archive/2026-Q2/ — topology v-next phase 2 shadow mode, merged | 2026-05-15 |
-| `task_2026-05-15_p5_maintenance_worker_core/` | `8f2eddf3d0..ea857404d5` | **archived** — moved to archive/2026-Q2/ — maintenance worker core scaffold, merged | 2026-05-15 |
-| `task_2026-05-15_p8_authority_drift_3_blocking/` | `89ac23f7f1` | **archived** — moved to archive/2026-Q2/ — authority drift blocking fixes, merged | 2026-05-15 |
-| `task_2026-05-15_p9_authority_inventory_v2/` | `3262f2c080..8f54c8392c` | **archived** — moved to archive/2026-Q2/ — authority inventory v2, merged | 2026-05-15 |
-| `task_2026-05-15_p10_module_consolidation_planning/` | planning packet | **archived** — moved to archive/2026-Q2/ — module consolidation planning; open for implementation | 2026-05-15 |
-| `task_2026-05-15_runtime_improvement_engineering_package/` | `d6eac5d21a..44b12a372b` | **active** — runtime improvement engineering package; ACTIVE_LAW | 2026-05-15 |
-| `task_2026-05-15_autonomous_agent_runtime_audit/` | audit packet | **archived** — moved to archive/2026-Q2/ — autonomous agent runtime audit; IN_PROGRESS | 2026-05-15 |
-| ~~`task_2026-05-15_claude_md_drift_audit/`~~ | audit packet | **deleted 2026-05-17** — closed, 0 refs | 2026-05-15 |
-| `task_2026-05-16_deep_alignment_audit/` | audit packet | **archived** — moved to archive/2026-Q2/ — post-PR-#121 deep alignment audit; findings applied | 2026-05-16 |
-| `task_2026-05-16_doc_alignment_plan/` | this PR (feat/doc-alignment-2026-05-16) | **archived** — moved to archive/2026-Q2/ — post-PR-#119 authority doc + semantic drift refresh (大扫除) | 2026-05-16 |
-| `task_2026-05-16_live_continuous_run_package/` | `feat/live-continuous-run-2026-05-16` | **archived** — moved to archive/2026-Q2/ — live continuous-run package plan + critic approval, merged PR #123 | 2026-05-16 |
-| `task_2026-05-17_docs_taxonomy_design/` | `feat/docs-taxonomy-design-2026-05-17` | **archived** — moved to archive/2026-Q2/ — docs taxonomy design + W1-W6 execution + PR #136 merge | 2026-05-17 |
-| `task_2026-05-17_reference_authority_docs_phase/` | audit packet | **archived** — moved to archive/2026-Q2/ — reference + authority docs citation audit phase (drift repair) | 2026-05-17 |
-| `2026-05-18_worktree_create_hook_cwd_leakage/` | PR #153 | **active** — incident packet: WorktreeCreate hook cwd-leakage fix + committed snapshot + antibody test | 2026-05-18 |
-| `task_2026-05-19_strategy_vnext_phase1/` | PR #214 (T1-A), PR #215 (T1-B) | **active** — Phase 1 T1: decision_events table + natural-key writer + backfill + antibody (PHASE_1_ULTRAPLAN.md Path D v3) | 2026-05-19 |
-| `task_2026-05-20_strategy_vnext_phase2/` | PR #220 (T1) | **active** — Phase 2 T1: book_hash_transitions table + writer + producer wiring + antibody (PHASE_2_ULTRAPLAN.md v3.1, SCHEMA_VERSION 14) | 2026-05-20 |
-| `task_2026-05-20_live_substrate_bookhash_ownership/` | PR #223 | **archived** — moved to archive/2026-Q2/ — live substrate ownership repair: co-locate executable_market_snapshots and book_hash_transitions on trade DB | 2026-05-20 |
-| `task_2026-05-21_live_family_vector_fill_model/` | PR #252 | **archived** — moved to archive/2026-Q2/ — remaining family vector, passive fill model, topology, order reducer, source-quality and liveness fixes after #246/#249 | 2026-05-21 |
-| `task_2026-05-21_live_contract_authority_pass/` | PR #253 | **archived** — moved to archive/2026-Q2/ — contract authority pass for tradability, passive EV, order truth, family exposure, and business-plane health after endpoint-asymmetry review | 2026-05-21 |
-| `task_2026-05-21_money_path_semantic_ci/` | PR #257 | **archived** — moved to archive/2026-Q2/ — money-path semantic CI object registry, classifier, invariant coverage, and test-quality gate | 2026-05-21 |
-| `task_2026-05-21_live_release_proof_p0p3/` | branch: `fix/live-release-proof-p0p3-20260521` | **active** — P0-P3 live release proof blockers: release gate, schema fail-closed, negRisk tradeability, lifecycle replay, redeem semantics, Kelly proof, required money-path CI | 2026-05-21 |
-| `current/plans/data_temporal_kernel/` | PR #329 | **active** — data-collection temporal control plane (8-PR program: TemporalPolicy view + coherence lint + frontier + job registry + ownership singleton + watermarks + scheduler executor classes + provenance contract); advisory/flag-gated, operator-gated deferrals (PR2b persisted table, scheduler/schema/worker activation) | 2026-05-24 |
-| `current/plans/zeus_home_repo_migration/` + `current/plans/zeus_home_repo_migration.md` | PR #394 | **active** — standalone `/Users/leofitz/zeus` checkout migration plan, path-retarget scope, cutover gates, rollback, and shadow/no-submit runtime validation | 2026-06-05 |
-| `task_2026-05-21_evidence_tier_tribunal_authority/` | PR #279 | **archived** — moved to archive/2026-Q2/ — EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet | 2026-05-21 |
-| `task_2026-05-22_live_math_frontier/` | PR #285 | **archived** — moved to archive/2026-Q2/ — live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair | 2026-05-22 |
-| `task_2026-05-22_crosscheck_valid_window/` | PR #287 | **archived** — moved to archive/2026-Q2/ — executable forecast valid-window provenance repair for crosscheck comparability | 2026-05-22 |
-| `task_2026-05-21_mainline_completion_authority/` | PR #284 | **active** — Phase 1-7 mainline completion authority package: closure verdict, promotion-validator critic, completion report, and #77 promotion-readiness validator | 2026-05-22 |
-| `task_2026-05-23_probability_phantom_edge/` | PR #323 | **active** — LIVE-PROB-P0 metric-only apply enforcement + market-deference doc + DAY0 parity residual (post PR-2 correctness follow-up) | 2026-05-23 |
-
-## Active operation (only one allowed unless explicit branching)
-
-If you are starting a new operation, add a row here BEFORE creating the
-directory (see POLICY.md §3).  When the operation closes, move the row
-to the table above and either archive or annotate its dir with
-`STATUS.md`.
-
-| Operation | Started | Trigger | Anchor PR / branch |
-|---|---|---|---|
-| `task_2026-05-16_doc_alignment_plan/` | 2026-05-16 | post-PR-#119 authority refresh + 大扫除 | feat/doc-alignment-2026-05-16 |
-
-## Archived
-
-These items have been moved to `docs/archive/` (outside operations/) per `POLICY.md`.
-
-| Item | Status | Purpose |
-|---|---|---|
-| `observations_k1_migration.md` | archived | K1 schema migration was one-shot. |
-| `pr39_source_contract_artifact_audit.md` | archived | PR #39 audit; PR is merged. |
-| `PROPOSALS_2026-05-04.md` | archived | Operational improvement proposals. |
-| `task_2026-04-28_contamination_remediation/` | archived | contamination pass, completed |
-| `task_2026-04-29_design_simplification_audit/` | archived | design audit, completed |
-| `task_2026-05-01_tigge_5_01_backfill/` | archived | TIGGE 5.01 backfill, completed |
-| `task_2026-05-01_ultrareview25_remediation/` | archived | ultrareview-25 remediation, completed |
-| `task_2026-05-02_data_daemon_readiness/` | archived | data daemon readiness substrate, completed |
-| `task_2026-05-02_full_launch_audit/` | archived | full launch audit, multi-PR completed |
-| `task_2026-05-02_oracle_lifecycle/` | archived | oracle resilience review fixes, completed |
-| `task_2026-05-02_review_crash_remediation/` | archived | live entry guards + ENS snapshot, merged |
-| `task_2026-05-02_settlement_pipeline_audit/` | archived | settlement audit, completed |
-| `task_2026-05-02_strategy_update_execution_plan/` | archived | promotion-evidence guard, completed |
-| `task_2026-05-04_live_block_root_cause/` | archived | live-block antibodies + EntriesBlockRegistry, merged |
-| `task_2026-05-04_oracle_kelly_evidence_rebuild/` | archived | oracle/kelly evidence rebuild, merged 2026-05-04 |
-| `task_2026-05-04_strategy_redesign_day0_endgame/` | archived | Day0-as-endgame strategy redesign, merged |
-| `task_2026-05-04_tigge_ingest_resilience/` | archived | TIGGE 12z resilience, merged 2026-05-04 |
-| `task_2026-05-04_zeus_may3_review_remediation/` | archived | empty, archived for naming-collision avoidance |
-
-## Cross-references (artifacts that live outside `docs/operations/`)
+## Top-level files
 
 | File | Purpose |
 |---|---|
-| `architecture/improvement_backlog.yaml` | Typed registry for capsule-emitted improvement insights (P3 V1).  Capsule writes here instead of leaving lessons in chat history. |
-| `scripts/check_pr_identity_collisions.py` + `.github/workflows/pr_identity_collision_check.yml` | Pre-merge identity-collision detection (P1).  Posts an advisory comment when two open PRs both add a class with the same name in identity-bearing files. |
-| `src/state/schema_introspection.py` | `has_columns()` helper (P2) — call this from any code path that depends on a column added by a staged migration. |
-| `src/runtime/clock_skew_probe.py` | NTP-style clock skew probe vs Polymarket REST Date: header. Caches result 60s. Returns int ms (local − venue) or None on probe failure. PR 6. |
-| `scripts/verify_forecast_bundle_selection.py` | Read-only operator diagnostic (P0 follow-up §7). Per city/date, compares the SELECTED forecast bundle (contributor-first ranking across all cycles) vs the LATEST snapshot; prints contributes flag, member-max, observed high, bias. SameSnap=False = bundle layer chose an earlier contributing cycle (cold-bias fix). |
+| `AGENTS.md` | Scoped agent rules for `docs/operations/`. |
+| `POLICY.md` | Packet lifecycle + closeout rules. |
+| `INDEX.md` | This file. |
+| `current_state.md` | Single live control pointer (thin; rewritten 2026-07-07). |
+| `current_data_state.md` | Data posture — trust only within its own Last-audited header. |
+| `current_source_validity.md` | Source posture — same rule. |
+| `known_gaps.md` | Known-gap worklist. |
+| `packet_scope_protocol.md` | Packet scope conventions. |
 
-| `task_2026-05-06_hook_redesign/` | archived | hook redesign v1, superseded by v2 |
-| `task_2026-05-08_alignment_safe_implementation/` | archived | alignment repair implementation, merged |
-| `task_2026-05-08_deep_alignment_audit/` | archived | deep alignment audit, findings applied |
-| `task_2026-05-09_copilot_agent_sync/` | archived | Copilot agent sync planning |
-| `task_2026-05-14_data_daemon_live_efficiency/` | archived | data-daemon live-efficiency refactor, merged |
-| `task_2026-05-14_k1_followups/` | archived | K1 followup seam repairs, merged |
-| `task_2026-05-15_autonomous_agent_runtime_audit/` | archived | autonomous agent runtime audit |
-| `task_2026-05-15_data_pipeline_live_rootfix/` | archived | live data pipeline root-cause fix, merged |
-| `task_2026-05-15_live_order_e2e_goal/` | archived | live order E2E proof goal packet |
-| `task_2026-05-15_live_order_e2e_verification/` | archived | E2E verification plan and critic approval |
-| `task_2026-05-15_p10_module_consolidation_planning/` | archived | module consolidation planning |
-| `task_2026-05-15_p1_topology_v_next_additive/` | archived | topology v-next additive phase 1, merged |
-| `task_2026-05-15_p2_companion_required_mechanism/` | archived | companion-required mechanism, merged |
-| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | archived | topology v-next phase 2 shadow mode, merged |
-| `task_2026-05-15_p5_maintenance_worker_core/` | archived | maintenance worker core scaffold, merged |
-| `task_2026-05-15_p8_authority_drift_3_blocking/` | archived | authority drift blocking fixes, merged |
-| `task_2026-05-15_p9_authority_inventory_v2/` | archived | authority inventory v2, merged |
-| `task_2026-05-16_deep_alignment_audit/` | archived | post-PR-#121 deep alignment audit, findings applied |
-| `task_2026-05-16_doc_alignment_plan/` | archived | post-PR-#119 authority doc refresh (大扫除) |
-| `task_2026-05-16_live_continuous_run_package/` | archived | live continuous-run package, merged PR #123 |
-| `task_2026-05-16_post_pr126_audit/` | archived | post-PR-#126 audit |
-| `task_2026-05-17_docs_taxonomy_design/` | archived | docs taxonomy design, PR #136 merged |
-| `task_2026-05-17_f109_fix/` | archived | F109 consolidator boot wire fix |
-| `task_2026-05-17_live_order_survival/` | archived | live order survival engineering |
-| `task_2026-05-17_post_karachi_remediation/` | archived | post-Karachi DST remediation |
-| `task_2026-05-17_reference_authority_docs_phase/` | archived | reference + authority docs citation audit |
-| `task_2026-05-17_strategy_vnext_phase0/` | archived | strategy v-next Phase 0 scaffold |
-| `task_2026-05-18_live_reduce_only_reconcile_loop/` | archived | live reduce-only reconcile loop fix |
-| `task_2026-05-18_wave3_dispatches/` | archived | Wave 3 dispatch coordination |
-| `task_2026-05-20_live_substrate_bookhash_ownership/` | archived | live substrate ownership repair, merged PR #223 |
-| `task_2026-05-20_pr221_review_fixes/` | archived | PR #221 review fixes |
-| `task_2026-05-21_evidence_tier_tribunal_authority/` | archived | EvidenceTier, Tribunal, no-trade provenance, merged PR #279 |
-| `task_2026-05-21_live_authority_shadow_risk_followup/` | archived | live authority shadow risk followup |
-| `task_2026-05-21_live_contract_authority_pass/` | archived | contract authority pass, merged PR #253 |
-| `task_2026-05-21_live_entry_order_management/` | archived | live entry order management |
-| `task_2026-05-21_live_family_selection_complete/` | archived | live family selection completion |
-| `task_2026-05-21_live_family_selection_economic_floor/` | archived | live family selection economic floor |
-| `task_2026-05-21_live_family_vector_fill_model/` | archived | live family vector fill model, merged PR #252 |
-| `task_2026-05-21_live_side_specific_entry_authority/` | archived | live side-specific entry authority |
-| `task_2026-05-21_money_path_semantic_ci/` | archived | money-path semantic CI, merged PR #257 |
-| `task_2026-05-22_crosscheck_valid_window/` | archived | executable forecast valid-window provenance repair, merged PR #287 |
-| `task_2026-05-22_live_math_frontier/` | archived | live math-frontier edge trace, merged PR #285 |
-## Triage backlog (one-time cleanup, 2026-05-04)
+## Directories
 
-Items above marked **review** or **archive candidate** need an
-operator decision in the next housekeeping pass:
+| Directory | Status | Purpose |
+|---|---|---|
+| `current/` | active | Active packets, plans (`current/plans/INDEX.md`), evidence, reports. |
+| `activation/` | active | Activation evidence captures (rollout gating). |
+| `edli_v1/` | keep | EDLI v1 design/evidence packet. |
+| `live_egress/` | keep | Live egress evidence. |
+| `sd3_validation_evidence/` | keep | SD3 validation evidence. |
+| `before_after_fixture_2026-05-29/` | closed-evidence | Dated fixture; archive candidate on next sweep. |
+| `tribunal_verification_2026-05-29/` | closed-evidence | Dated verification packet; archive candidate on next sweep. |
+| `task_2026-05-21_mainline_completion_authority/` | closed (PR #284 merged) | Archive on next sweep. |
+| `task_2026-05-23_probability_phantom_edge/` | closed (PR #323 merged) | Archive on next sweep. |
+| `task_2026-06-14_percity_representativeness_debias/` | open | Per-city representativeness de-bias plan. |
 
-1. `task_2026-05-02_live_entry_data_contract/` — multiple PLAN_v[1,2,3]
-   files suggest abandoned drafts; either anchor to a merged PR or
-   delete.
-2. `task_2026-05-03_ddd_implementation_plan/` — 38 docs in one task
-   dir is a smell; needs an internal INDEX or thinning.
-3. `live_rescue_ledger_2026-05-04.md` — needs a per-day rotation
-   policy or it'll keep growing.
+## Removed 2026-07-07
 
-## Registered model-layer artifacts (2026-05-24)
-- `ENS_REFIT_PLAN_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT architecture plan: isolated staging DB design, correctness proof, flag-gated rebuild+refit pipeline (model layer; not live-wired).
+Five never-written "permanent observation surface" shells (`attribution_drift/`, `calibration_observation/`, `edge_observation/`, `learning_loop_observation/`, `ws_poll_reaction/`) deleted — registered as active rolling evidence since 2026-04/05, zero data files ever written. Their weekly writer scripts remain in `scripts/` and `mkdir -p` their own output if ever scheduled.
 
-## Session handoff and plan docs (2026-05-29 – 2026-05-31, PR #364)
+## Archive
 
-- `LIVE_SHADOW_SEAMHUNT_HANDOFF_2026-05-29.md` — Seamhunt session handoff 2026-05-29: EDLI shadow investigation, observed_members bug root-cause, FSR PARTIAL veto chain, and unshadow gate checklist.
-- `HANDOFF_2026-05-30_FULL_REMAINING.md` — Full remaining work handoff 2026-05-30: TOPOLOGY_CLOCK_MISSING gate fix, Run #24 bin-bias gate, live-halt recovery steps, and continuous re-decision plan scope.
-- `LIVE_HALT_RECOVERY_HANDOFF_2026-05-30.md` — Live halt recovery handoff 2026-05-30: step-by-step operator recovery sequence for TOPOLOGY_CLOCK_MISSING live halt, backfill and restart checklist.
-- `PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md` — Continuous re-decision max-alpha plan 2026-05-31: design for per-cycle cheap-screen re-evaluation (cache + screen + enqueue), Platt 49-city OOS scope, and shadow integration plan. Authority for PR #364.
-
-## Registered full_transport ship artifacts (2026-05-25)
-- `FT_SHIP_EXECUTION_LEDGER_2026-05-25.md` — PR #342 full_transport → live ship execution ledger: task status, key paths, finished phases, open items. Authority: Zeus #64 live-ship program.
-
-## Registered full_transport refit + ship evidence (2026-05-25, PR #349)
-- `ENS_REFIT_REFINEMENT_ROADMAP_2026-05-25.md` — Post-refit refinement roadmap: math-first gated improvement routes (Routes 1–6) with ship criteria.
-- `ENS_REFIT_VALIDATION_2026-05-25_results.md` — ENS refit validation results (2026-05-25): post-audit proper-score output from audit_refit_proper_scores.py.
-- `ENS_ROUTE6_TRANSPORT_BETA_2026-05-25.md` — ENS Route 6 experiment: day-specific Δ transport β analysis and preliminary results.
-- `V1V2_SUFFIX_INVENTORY_2026-05-25.md` — v1/v2 suffix inventory: eradication feasibility analysis; live-DB + grep cross-check against db_table_ownership.yaml.
-
-## Registered honest-q + settlement-unit artifacts (2026-06-03, PR #380)
-
-- `com.zeus.d7-bias.plist` — launchd plist for the D-7 rolling EDLI bias producer daemon. Runs `scripts/write_d7_rolling_edli_bias.py --commit` on a daily schedule to keep model_bias_ens current with the trailing 7 settled days. Authority: PR #380.
+Closed packet bodies live untracked under `docs/archive/` — lookup via `docs/archive_registry.md`.

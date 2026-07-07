@@ -96,7 +96,6 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `ddd_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |
 | `drop_world_ghost_tables.py` | Repair: drop ghost tables from zeus-world.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P3 D2 (dry-run/apply; created 2026-05-14) |
 | `expire_auto_pause.sh` | Operator tool: expire auto-pause state; sister script of arm_live_mode.sh, runs only step 3 (created 2026-05-01) |
-| `force_cycle_with_healthy_gates.py` | Operator tool: force a cycle tick with all gates healthy; runtime support (created 2026-05-16) |
 | `live_health_monitor.sh` | Polls live_health_probe.py every 60s; emits one line per state change; runtime support (created 2026-05-11) |
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |
@@ -109,7 +108,6 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `pre-commit-capability-gate.sh` | Pre-commit enforcement gate for capability declarations; runs on staged changes (created 2026-05-06) |
 | `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |
 | `replay_correctness_gate.py` | Enforcement gate for replay correctness per IMPLEMENTATION_PLAN Phase 0.G + ADR-5 (created 2026-05-14) |
-| `repro_antibodies.py` | Antibody reproduction diagnostic; verifies antibody tests catch their target defect (created 2026-05-03) |
 | `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; diagnostic_report_writer (created 2026-05-06) |
 | `zeus_blocks.py` | Zeus block state diagnostic; reads and reports current block conditions (created 2026-05-04) |
 | `doc_citation_lint.py` | Citation-rot detector for Zeus docs; scans .md/.py/.yaml/.json for broken doc references per SCAFFOLD §4 FM-01/FM-04 (created 2026-05-17) |

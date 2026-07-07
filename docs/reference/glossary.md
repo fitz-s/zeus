@@ -186,9 +186,9 @@ input yields no trade. "Full Kelly" is the theoretical optimal, but it maximizes
 expected log-growth only in the limit and is reckless under parameter uncertainty;
 the multiplier cascade produces a practical fraction (typically 20–50% of full
 Kelly). Per-city asymmetric loss preferences enter as additional Kelly multipliers,
-not as DDD floor overrides (see `zeus_kelly_asymmetric_loss_handoff.md`).
+not as DDD floor overrides (see `zeus_kelly_asymmetric_loss_reference.md`).
 
-**Authoritative source:** [`docs/reference/zeus_kelly_asymmetric_loss_handoff.md`](zeus_kelly_asymmetric_loss_handoff.md); [`docs/authority/exit_portfolio_execution_authority_2026-06-13.md`](../authority/exit_portfolio_execution_authority_2026-06-13.md)  
+**Authoritative source:** [`docs/reference/zeus_kelly_asymmetric_loss_reference.md`](zeus_kelly_asymmetric_loss_reference.md); [`docs/authority/exit_portfolio_execution_authority_2026-06-13.md`](../authority/exit_portfolio_execution_authority_2026-06-13.md)  
 **Implementation:** `src/strategy/kelly.py`  
 **Related:** `README.md` §"Fractional Kelly, multiplied down"
 

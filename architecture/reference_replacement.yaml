@@ -300,7 +300,7 @@ entries:
       Conditional load for calibration/Platt/LOW-track work. AGENTS.md conditional
       reads block already listed this doc correctly.
 
-  - path: docs/reference/zeus_kelly_asymmetric_loss_handoff.md
+  - path: docs/reference/zeus_kelly_asymmetric_loss_reference.md
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false

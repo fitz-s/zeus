@@ -70,24 +70,6 @@ coverage_roots:
     zone: docs_operations
     authority_role: operations_pointer
     orientation_note: "active work/evidence, not architecture law"
-  - path: "docs/runbooks"
-    status: active
-    scope: scoped
-    zone: docs_runbooks
-    authority_role: runtime_support
-    orientation_note: Runbooks guide operators; they do not outrank code or manifests.
-  - path: "docs/reports"
-    status: active
-    scope: scoped
-    zone: docs_reports
-    authority_role: derived_diagnostic
-    orientation_note: Generated reports are evidence only and must not be treated as authority.
-  - path: "docs/to-do-list"
-    status: active
-    scope: scoped
-    zone: docs_todo
-    authority_role: derived_diagnostic
-    orientation_note: Checklist workbooks are task inventories/evidence, not authority.
   - path: "docs/artifacts"
     status: active
     scope: scoped
@@ -515,9 +497,6 @@ registry_directories:
   - path: "docs/reference"
   - path: "docs/reference/modules"
   - path: "docs/operations"
-  - path: "docs/runbooks"
-  - path: "docs/reports"
-  - path: "docs/to-do-list"
   - path: "docs/artifacts"
   - path: "docs/archives"
   - path: "config"
@@ -531,6 +510,7 @@ docs_root_allowed_files:
   - docs/AGENTS.md
   - docs/README.md
   - docs/archive_registry.md
+  - docs/polyweather_city_source_overlay_verified.csv
 
 active_operations_registry:
   current_state: docs/operations/current_state.md
@@ -590,7 +570,8 @@ docs_subroots:
   - path: "docs/authority"
     role: authority
     requires_agents: true
-    allow_non_markdown: false
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".txt"]
   - path: "docs/reference"
     role: reference
     requires_agents: true
@@ -607,21 +588,34 @@ docs_subroots:
     role: operations
     requires_agents: true
     allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql", ".mmd", ".fixed", ".mjs"]
-  - path: "docs/runbooks"
-    role: runbook
+    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql", ".mmd", ".fixed", ".mjs", ".log", ".jsonl", ".csv"]
+  - path: "docs/evidence"
+    role: generated_report
+    requires_agents: false
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".json", ".csv", ".txt", ".yaml", ".yml", ".py", ".sql", ".patch", ".png"]
+  - path: "docs/rebuild"
+    role: generated_report
+    requires_agents: false
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".json", ".csv", ".txt", ".yaml", ".yml", ".py", ".sql"]
+  - path: "docs/lore"
+    role: generated_report
+    requires_agents: false
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".json"]
+  - path: "docs/review"
+    role: reference
     requires_agents: true
     allow_non_markdown: false
-  - path: "docs/reports"
-    role: generated_report
-    requires_agents: true
-    allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".csv"]
-  - path: "docs/to-do-list"
-    role: checklist_evidence
-    requires_agents: true
-    allow_non_markdown: true
-    allowed_extensions: [".xlsx", ".csv", ".json"]
+  - path: "docs/architecture"
+    role: reference
+    requires_agents: false
+    allow_non_markdown: false
+  - path: "docs/methodology"
+    role: reference
+    requires_agents: false
+    allow_non_markdown: false
   - path: "docs/archive/cold"
     role: historical_archive
     visibility: historical_cold_storage
@@ -1166,9 +1160,6 @@ digest_profiles:
       - "docs/operations/current_state.md"
       - "docs/operations/AGENTS.md"
       - "docs/operations/known_gaps.md"
-      - "docs/to-do-list/AGENTS.md"
-      - "docs/to-do-list/known_gaps.md"
-      - "docs/to-do-list/known_gaps_archive.md"
       - "docs/archive_registry.md"
       - "architecture/docs_registry.yaml"
       - "tests/test_topology_doctor.py"

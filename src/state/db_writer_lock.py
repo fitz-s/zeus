@@ -766,8 +766,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
         "scripts/probe_favorite_capture.py",            # read_only_ro_uri: opens zeus-forecasts.db + zeus_trades.db via file:...?mode=ro URI; SELECT-only over forecast_posteriors + executable_market_snapshots + venue_commands + settlement_outcomes; writes docs/evidence/favorite_capture/ + /tmp/ only; favorite-capture miss quantification (operator critique 2026-06-12)
         "scripts/probe_lib.py",                         # read_only_ro_uri: shared probe helper (ro() opens any live DB mode=ro; iso_cutoff/guarded-watch encode the T-separator + lock-false-positive laws; session retrospective 2026-06-12)
-        # --- repro_antibodies.py: mixed; all sites verified safe ---
-        "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
         # --- K1 migration scripts: operator-mediated, not runtime daemon ---
         "scripts/migrate_world_to_forecasts.py",            # k1_migration: operator-mediated bulk copy to zeus-forecasts.db
         "scripts/migrate_world_observations_to_forecasts.py",  # k1_p0_migration: operator-mediated; copies stale obs rows
@@ -797,7 +795,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
         "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
-        "scripts/force_cycle_with_healthy_gates.py",        # already_guarded: writes under db_writer_lock(BULK)
         "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)
         "scripts/nuke_rebuild_projections.py",              # already_guarded: writes under db_writer_lock(BULK)

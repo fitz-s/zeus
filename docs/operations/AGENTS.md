@@ -94,7 +94,7 @@ Use the active packet plan/work log to determine which package inputs matter.
 
 Active routing summary (machine-routable via architecture/docs_registry.yaml):
 
-- Active task ledger: `docs/operations/current/task.md`
+- Work journal: `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md`
 - Active package: `docs/operations/current/package.yaml`
 - Legacy packets: see operations packet inventory report (T4)
 - Archive: `docs/archive/<quarter>/INDEX.md`
@@ -146,7 +146,7 @@ repo root (`*PLAN*.md`, `*GOAL*.md`, `*SCAFFOLD*.md`). Fix: move to `docs/operat
 
 **H8 (`session_goal_not_in_current`)**: fires RED when `current/package.yaml` exists but
 `current/GOAL.md` is absent, or when a `GOAL.md`/`OBJECTIVE.md` lives outside `current/`.
-Fix: create `docs/operations/current/GOAL.md` seeded from `package.yaml` + `task.md`.
+Fix: create `docs/operations/current/GOAL.md` seeded from `package.yaml`.
 
 Use `python scripts/zpkt.py start <slug>` to create a new plan — it writes the flat
 `current/plans/<slug>.md` and `current/GOAL.md` (if not present) automatically.

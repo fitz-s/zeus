@@ -88,7 +88,7 @@ Use the narrowest authoritative surface that can prove the claim.
 | References | `docs/reference/**`, module books | dense domain explanation | reference docs do not authorize runtime or packet state |
 | Derived context | topology digests, Code Review Graph, reports, `architecture/history_lore.yaml` | routing, review, lessons | derived context answers where to inspect, not what is true |
 | History/archive | `docs/archive_registry.md`, archive bodies | provenance and lessons | archives are cold storage, not default boot context |
-| Scratch/runtime | local scratch, shadow worktrees, dumps | session context | scratch is not durable plan, audit, or authority evidence |
+| Scratch/runtime | local scratch, linked worktrees, dumps | session context | scratch is not durable plan, audit, or authority evidence |
 
 `docs/operations/current_state.md` is a live control pointer. It may point at active work and current-fact companions, but it is not proof of live SHA, daemon liveness, submit posture, source validity, or DB truth until those claims are rechecked on live surfaces.
 
@@ -174,7 +174,7 @@ Chain reconciliation order: `Chain (Polymarket CLOB) > Chronicler (event log) > 
 Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
-- Live may act; backtest may evaluate; shadow is observe-only.
+- Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.
 - Authority loss degrades monitor/exit lanes to read-only; it does not kill the cycle.

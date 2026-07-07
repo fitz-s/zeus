@@ -62,10 +62,11 @@ To keep "which law is in force" answerable at a glance:
 | `ARCHIVAL_RULES.md` | ACTIVE | Active archival rules for workspace packets and operations hygiene |
 | `replacement_final_form_2026_06_09.md` | ACTIVE | Probability strategy of record — the replacement_forecast chain |
 | `regime_unification_2026-06-12.md` | ACTIVE | Single-q regime law (one live probability authority) |
-| `statistical_calibration_authority_2026-06-12.txt` + `_README.md` | ACTIVE | Calibration authority (base) |
+| `statistical_calibration_authority_2026-06-12.txt` | ACTIVE | Calibration authority (base) |
+| `statistical_calibration_authority_2026-06-12_README.md` | ACTIVE | Calibration authority README |
 | `statistical_calibration_addendum_2026-06-13.md` | ACTIVE | Calibration authority extension to the 2026-06-12 base |
 | `exit_portfolio_execution_authority_2026-06-13.md` | ACTIVE | Exit / portfolio-Kelly / dynamic-execution math |
 | `consult2_crossvalidation_fable5_2026-06-13.md`, `statistical_calibration_crossvalidation_fable5_2026-06-12.md` | ARCHIVED_REFERENCE | Cross-validation evidence behind the calibration authority |
 
-Historical architecture/design files live in `docs/reports/authority_history/`
-or the archive interface. They are evidence, not active law.
+Historical architecture/design files live behind the archive interface
+(`docs/archive_registry.md`). They are evidence, not active law.

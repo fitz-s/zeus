@@ -60,7 +60,7 @@ Latest observed during planning:
   - `docs/operations/HANDOFF_2026-06-04_live_restart_arm.md`
   - `scripts/emos_settled_diag.py`
   - `scripts/ops/candidate_fill_monitor.py`
-- Active linked worktrees include repo-local `.claude/worktrees/wf_71a29a11-132-*`.
+- Linked agent worktrees live repo-local (enumerate at read time; names rot).
 
 Treat this snapshot as stale after any new commit, daemon restart, or live-path
 operation. Re-freeze before execution.

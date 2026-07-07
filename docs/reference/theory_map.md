@@ -62,7 +62,7 @@ on disagreement).
 
 | Doc | Description | Status |
 |-----|-------------|--------|
-| [`docs/reference/zeus_kelly_asymmetric_loss_handoff.md`](zeus_kelly_asymmetric_loss_handoff.md) | Fractional Kelly sizing and per-city asymmetric loss: the ruling that asymmetric loss preferences must be expressed as per-city Kelly multipliers (NOT DDD floor overrides). Lists affected cities with recommended multipliers. Landed 2026-05-03 in `src/strategy/kelly.py`; evaluator wiring is operator-owned. | `[ref]` durable |
+| [`docs/reference/zeus_kelly_asymmetric_loss_reference.md`](zeus_kelly_asymmetric_loss_reference.md) | Fractional Kelly sizing and per-city asymmetric loss: the ruling that asymmetric loss preferences must be expressed as per-city Kelly multipliers (NOT DDD floor overrides). Lists affected cities with recommended multipliers. Landed 2026-05-03 in `src/strategy/kelly.py`; evaluator wiring is operator-owned. | `[ref]` durable |
 | [`docs/reference/zeus_risk_strategy_reference.md`](zeus_risk_strategy_reference.md) | Risk levels, strategy taxonomy, Kelly dynamics. See §3. | `[ref]` durable |
 | [`docs/authority/exit_portfolio_execution_authority_2026-06-13.md`](../authority/exit_portfolio_execution_authority_2026-06-13.md) | Sizing and exit authority. See §3. | `[authority]` |
 | [`docs/reference/zeus_math_spec.md`](zeus_math_spec.md) | Kelly sizing math and fail-closed discipline. See §1. | `[ref]` durable |
@@ -121,7 +121,7 @@ Key books: `state.md`, `engine.md`, `data.md`, `execution.md`, `venue.md`, `inge
 
 **Reviewing execution or lifecycle?** `zeus_execution_lifecycle_reference.md` → `lifecycle_grammar.md` → `zeus_failure_modes_reference.md`
 
-**Working on Kelly sizing?** `zeus_kelly_asymmetric_loss_handoff.md` → `zeus_risk_strategy_reference.md` → `exit_portfolio_execution_authority_2026-06-13.md`
+**Working on Kelly sizing?** `zeus_kelly_asymmetric_loss_reference.md` → `zeus_risk_strategy_reference.md` → `exit_portfolio_execution_authority_2026-06-13.md`
 
 **Reviewing settlement math?** `zeus_market_settlement_reference.md` → `zeus_math_spec.md` §3 → `zeus_current_architecture.md` §SettlementSemantics
 

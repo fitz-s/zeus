@@ -88,8 +88,6 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         "scripts/state_census.py",
         "scripts/topology_doctor_code_review_graph.py",
         "scripts/ws_poll_reaction_weekly.py",
-        # scripts: mixed (already_guarded + read_only + in_memory_only)
-        "scripts/repro_antibodies.py",
         # scripts: promote (RO inspect / RW with --commit)
         "scripts/promote_platt.py",
         "scripts/promote_calibration.py",
@@ -173,7 +171,6 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/backfill_wu_daily_all.py",
         "scripts/cleanup_ghost_positions.py",
         "scripts/fill_obs_dst_gaps.py",
-        "scripts/force_cycle_with_healthy_gates.py",
         "scripts/hko_ingest_tick.py",
         "scripts/ingest_grib_to_snapshots.py",
         "scripts/nuke_rebuild_projections.py",

@@ -1,22 +1,19 @@
 # Plans Index
 
-Plans under `docs/operations/current/plans/`. Status inferred from each plan's own Status line; `UNKNOWN` if none found.
+Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk + git state; superseded/merged plans removed (bodies in git history).
 
 | Plan | Status | Purpose |
 |------|--------|---------|
-| [`live_redecision_repair/PLAN.md`](live_redecision_repair/PLAN.md) | ACTIVE | Repair live-only redecision and entry flow decoupling |
-| [`live_release_blocker_repair/PLAN.md`](live_release_blocker_repair/PLAN.md) | ACTIVE | Clear live-release blockers blocking current live recovery |
-| [`crosscheck_valid_window/PLAN.md`](crosscheck_valid_window/PLAN.md) | ACTIVE | Add a validity-window check to evaluator source comparability |
-| [`data_temporal_kernel/PLAN.md`](data_temporal_kernel/PLAN.md) | ACTIVE | Establish temporal control plane for data ingest and collection |
-| [`live_math_frontier/PLAN.md`](live_math_frontier/PLAN.md) | ACTIVE | Advance evaluator math and strategy to the current frontier |
-| [`real_live_hotfix_allocator_reconcile.md`](real_live_hotfix_allocator_reconcile.md) | ACTIVE | Hotfix allocator and reconcile blockers in live trading path |
-| [`zeus_home_repo_migration.md`](zeus_home_repo_migration.md) | ACTIVE | Migrate Zeus to the home repo at `/Users/leofitz/zeus` |
-| [`live_family_qkernel_repair_2026-06-18.md`](live_family_qkernel_repair_2026-06-18.md) | COMPLETED | Fix live family selection and qkernel repair (PR #412 merged) |
-| [`2026-06-13_horse_race_kelly.md`](2026-06-13_horse_race_kelly.md) | UNKNOWN | Evidence plan for horse-race Kelly consult-3 Q2/P1 |
-| [`edli_training_cutoff_receipt_starvation.md`](edli_training_cutoff_receipt_starvation.md) | UNKNOWN | Hotfix for EDLI training cutoff receipt starvation |
-| [`pr332_remaining_live_safety_fixes.md`](pr332_remaining_live_safety_fixes.md) | UNKNOWN | Remaining live safety fixes from PR #332 |
-| [`pr332_semantic_gate_and_live_build_rollback.md`](pr332_semantic_gate_and_live_build_rollback.md) | UNKNOWN | Semantic gate repair and live build rollback for PR #332 |
-| [`ci_topology_refactor_refined.md`](ci_topology_refactor_refined.md) | PAUSED | CI topology refactor (proposed; awaiting operator sign-off) |
-| [`zeus_home_repo_migration/PLAN.md`](zeus_home_repo_migration/) | UNKNOWN | Subdir variant of home repo migration plan (no PLAN.md present) |
+| [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
+| [`gate_stack_simplification_2026-07-06.md`](gate_stack_simplification_2026-07-06.md) | EXECUTING | Gate collapse; Phase 1+2 deployed 2026-07-07, C1 sole-authority design pass open |
+| [`allday_improvement_loop_design_2026-07-06.md`](allday_improvement_loop_design_2026-07-06.md) | PROPOSED | 24/7 two-layer autonomous improvement loop (v2 minimal) |
+| [`order_engine_rebuild_execution_plan_2026-07-02.md`](order_engine_rebuild_execution_plan_2026-07-02.md) | OPEN | Order-engine v2 execution packets (authority chain in docs/rebuild/) |
+| [`../../../rebuild/EXECUTION_MASTER_2026-07-07.md`](../../../rebuild/EXECUTION_MASTER_2026-07-07.md) | READY | 重构执行总纲:compact 后重对齐入口(§A),R0-R8 packet 队列 + 拓扑 + 验收模板;待操作员三开关(§I)|
+| [`../../../rebuild/whole_system_first_principles_2026-07-07.md`](../../../rebuild/whole_system_first_principles_2026-07-07.md) | PROPOSED | 全系统第一性原理蓝图:8 子系统判决 + 疤痕根除审计(§7)+ consult 对撞(§8);执行细节看 EXECUTION_MASTER |
+| [`percity_representativeness_debias.md`](percity_representativeness_debias.md) | OPEN | Per-city representativeness de-bias |
+| [`live_redecision_repair/PLAN.md`](live_redecision_repair/PLAN.md) | IMPLEMENTING | Held-position redecision + exit readiness repair |
+| [`data_temporal_kernel/PLAN.md`](data_temporal_kernel/PLAN.md) | DORMANT | Ingest temporal control plane (additive; no commits since 2026-06) |
+| [`ci_topology_refactor_refined.md`](ci_topology_refactor_refined.md) | DORMANT | CI topology refactor (proposed 2026-05-26, untouched since) |
+| [`zeus_home_repo_migration.md`](zeus_home_repo_migration.md) | DONE-EXCEPT | Migration complete (daemons run from ~/zeus); one residue: heartbeat-sensor plist still points at old workspace-venus/bin |
 
-> Paths verified as of index creation. `zeus_home_repo_migration/` directory exists but contains no `PLAN.md`.
+Removed 2026-07-07: ../live-redecision-f109-repair/ (F109 consolidator fix landed; antibody test tests/state/test_f109_consolidator_boot_wire.py is the durable record); live_math_frontier/, crosscheck_valid_window/, live_release_blocker_repair/ (targeted the legacy discovery pipeline deleted in Phase 2 — opening_hunt/SOURCE_COMPARABILITY narratives are dead code paths); pr332_* (PR #332 merged 2026-05-28); live_family_qkernel_repair (PR #412 merged); edli_training_cutoff, horse_race_kelly, real_live_hotfix_allocator_reconcile (work landed in June commits; see git).

@@ -36,7 +36,7 @@ machine manifests, tests, and executable source.
   discovery (T3), Shenzhen-class onboarding (T4), or vendor outage (T5).
   Encodes the 14-layer dependency surface and per-trigger response playbook;
   any cutover work MUST cite the relevant §3 layer and §4 playbook
-- `zeus_kelly_asymmetric_loss_handoff.md` when working on Kelly sizing,
+- `zeus_kelly_asymmetric_loss_reference.md` when working on Kelly sizing,
   per-city asymmetric loss preferences, or DDD ↔ Kelly composition; encodes
   the authority that asymmetric loss must be expressed as per-city Kelly
   multipliers (NOT as DDD floor overrides); LANDED 2026-05-03 in
@@ -69,6 +69,11 @@ which module reference matters.
 | File | Purpose |
 |------|---------|
 | `zeus_domain_model.md` | Short domain model and first conceptual reference |
+| `glossary.md` | Canonical term definitions with links to authoritative sources |
+| `theory_map.md` | Navigation index for theory and reference docs |
+| `schema_cheatsheet.md` | Generated live-DB schema names cheatsheet (regenerate via scripts/generate_schema_cheatsheet.py) |
+| `rule_surface_map.md` | Where each class of rule/law lives; maps to root AGENTS.md precedence |
+| `zeus_strategy_spec.md` | Strategy math spec — probability law superseded 2026-06-09 (see header); diagnostic/provenance only |
 | `zeus_architecture_reference.md` | Durable descriptive architecture reference |
 | `zeus_execution_lifecycle_reference.md` | Lifecycle state machine (10 phases, fold table), chain reconciliation (3-state classifier, 3 rules), order execution (share quantization, mode timeouts), exit triggers (8-layer evaluation), monitor refresh (2 signal paths), settlement harvest (3-layer dedup, P&L, redemption) |
 | `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), 6 risk inputs to tick(), trailing loss computation, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
@@ -77,7 +82,7 @@ which module reference matters.
 | `zeus_failure_modes_reference.md` | Code-grounded failure modes with invariant anchors: settlement/rounding, probability chain, lifecycle/state, data ingestion, execution — each with exact failure mechanism, preventing contract, and code anchor |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
 | `zeus_calibration_weighting_authority.md` | Mathematical authority for calibration weight semantics (LOW track binary→continuous, per-city eligibility, ΔT-magnitude forbidden in production); empirical basis PoC v4+v5 on 1.7M pairs |
-| `zeus_kelly_asymmetric_loss_handoff.md` | Per-city asymmetric loss preferences via Kelly multipliers (NOT DDD floor); LANDED 2026-05-03 in `src/strategy/kelly.py`; open wiring at evaluator.py is operator-owned deliberate two-stage rollout |
+| `zeus_kelly_asymmetric_loss_reference.md` | Per-city asymmetric loss preferences via Kelly multipliers (NOT DDD floor); LANDED 2026-05-03 in `src/strategy/kelly.py`; open wiring at evaluator.py is operator-owned deliberate two-stage rollout |
 | `zeus_vendor_change_response_registry.md` | 14-layer vendor dependency surface map + T1-T5 response playbooks for PM source switch, WU silent mutation, Lagos-class failure, Shenzhen-class onboarding, vendor outage |
 | `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |

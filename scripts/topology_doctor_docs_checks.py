@@ -100,16 +100,24 @@ STALE_TRUTH_PATTERNS = (
 DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/task_*/",
     "docs/operations/*_package_*/",
-    "docs/operations/*_observation/",
-    "docs/operations/ws_poll_reaction/",
-    "docs/operations/attribution_drift/",
     # date-prefixed incident/operation packets (e.g. 2026-05-18_*)
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
     # active operations package (file_arrangement.yaml canonical path)
     "docs/operations/current/",
-    "docs/reports/authority_history/",
-    "docs/to-do-list/",
-    "docs/runbooks/",
+    "docs/operations/edli_v1/",
+    "docs/evidence/",
+    "docs/rebuild/",
+    "docs/lore/",
+    "docs/review/",
+    "docs/architecture/",
+    "docs/methodology/",
+    "docs/operations/",
+    "docs/operations/edli_v1/",
+    "docs/operations/activation/",
+    "docs/operations/live_egress/",
+    "docs/operations/sd3_validation_evidence/",
+    "docs/operations/tribunal_verification_2026-05-29/",
+    "docs/operations/before_after_fixture_2026-05-29/",
     "docs/reference/legacy/",
 )
 
@@ -174,7 +182,7 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
             )
         spec = subroots.get(subroot, {})
         suffix = path.suffix.lower()
-        if suffix != ".md":
+        if suffix != ".md" and rel not in allowed_root_files:
             allowed = set(str(item).lower() for item in spec.get("allowed_extensions") or [])
             if not spec.get("allow_non_markdown") or suffix not in allowed:
                 issues.append(
@@ -1290,7 +1298,7 @@ _PLAN_SCAN_RELPATHS = (
     ".omc/plans",
     ".omc/research",
     ".claude/plans",
-    ".omx",
+    ".omx/plans",
 )
 
 
@@ -1405,6 +1413,9 @@ def check_session_goal_not_in_current(api: Any, topology: dict[str, Any]) -> lis
             continue
         if p.name not in _GOAL_FILENAMES:
             continue
+        rel_parts = p.relative_to(root).parts
+        if ".claude" in rel_parts or ".git" in rel_parts:
+            continue  # linked agent worktrees mirror the main tree; reporting them is noise
         if p in seen:
             continue
         seen.add(p)

@@ -16,14 +16,5 @@ Live control pointer: docs/operations/current_state.md
 | closeouts/ | Closeout records (required fields in package.yaml) |
 | agent_runtime/ | Agent runtime capsules; non-authority scratch |
 
-## Monitoring surfaces (not moved here)
-
-See docs/operations/current_state.md Active monitoring surfaces table.
-Observation dirs (edge_observation, attribution_drift, ws_poll_reaction,
-calibration_observation, learning_loop_observation) remain at their
-existing paths under docs/operations/.
-
-## Legacy packets
-
-Legacy task_YYYY-MM-DD_*/  dirs remain at their existing paths.
-See package.yaml supersedes field for the two currently-active subtask packets.
+Work journal: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
+Plan index: docs/operations/current/plans/INDEX.md
