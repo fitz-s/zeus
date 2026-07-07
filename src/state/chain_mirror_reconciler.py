@@ -696,6 +696,15 @@ def _apply_settlement_finding(
     _shares = float(current["chain_shares"] or current["shares"] or 0.0)
     _cost = float(current["cost_basis_usd"] or 0.0)
     _pnl = (_shares - _cost) if won else -_cost
+    # Bug B (truth-path PnL booking, 2026-07-07): _pnl above was already
+    # computed correctly for the audit payload below, but `projection` (built
+    # by copying pre-transition columns forward) never carried it into the
+    # durable realized_pnl_usd / exit_price columns -- a chain-mirror-graded
+    # settlement left those NULL even though the payload's own "pnl"/
+    # "exit_price" fields were right. settlement_price (below) is a distinct
+    # column holding a raw temperature value; do not touch it.
+    projection["realized_pnl_usd"] = round(_pnl, 2)
+    projection["exit_price"] = 1.0 if won else 0.0
     payload = json.dumps(
         {
             "reconciler": "chain_mirror",

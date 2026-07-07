@@ -323,6 +323,7 @@ def _insert_position_current(
     condition_id: str = "cond-1",
     chain_shares: float | None = None,
     shares: float | None = None,
+    cost_basis_usd: float | None = None,
     strategy_key: str = "edli",
     updated_at: str = "2026-07-04T00:00:00+00:00",
 ) -> None:
@@ -331,13 +332,13 @@ def _insert_position_current(
         INSERT INTO position_current (
             position_id, phase, trade_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
-            chain_shares, shares, strategy_key, updated_at, temperature_metric
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            chain_shares, shares, cost_basis_usd, strategy_key, updated_at, temperature_metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             position_id, phase, position_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
-            chain_shares, shares, strategy_key, updated_at, temperature_metric,
+            chain_shares, shares, cost_basis_usd, strategy_key, updated_at, temperature_metric,
         ),
     )
     conn.commit()
@@ -405,6 +406,70 @@ def test_apply_closes_absent_loser_to_settled_closed_worthless(trades_conn, fore
     ).fetchone()
     assert row["phase"] == "settled"
     assert row["chain_state"] == CLOSED_WORTHLESS
+
+
+# -----------------------------------------------------------------------------
+# Bug B antibody (2026-07-07): _apply_settlement_finding computes _pnl for the
+# position_settled.v1 audit payload but never overwrites realized_pnl_usd /
+# exit_price on `projection` -- those two columns keep whatever pre-transition
+# value position_current already had (NULL for a position settling for the
+# first time), so a chain-mirror-graded close is invisible to Zeus's own P&L
+# accounting even though _pnl was computed correctly.
+# -----------------------------------------------------------------------------
+
+
+def test_apply_closes_absent_winner_projects_realized_pnl(trades_conn, forecasts_conn):
+    _insert_position_current(
+        trades_conn, position_id="pos-win-pnl", phase="quarantined",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_yes", token_id="tok-milan-yes-pnl",
+        chain_shares=10.0, shares=10.0, cost_basis_usd=4.0,
+    )
+    _insert_settlement(forecasts_conn, city="milan", target_date="2026-06-23", winning_bin="40°C")
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert report.applied == 1
+    row = trades_conn.execute(
+        "SELECT realized_pnl_usd, exit_price FROM position_current WHERE position_id='pos-win-pnl'"
+    ).fetchone()
+    # won: _pnl = shares - cost_basis_usd = 10.0 - 4.0 = 6.0
+    assert row["realized_pnl_usd"] is not None, (
+        "BUG B: chain-mirror settlement must project realized_pnl_usd, got NULL"
+    )
+    assert row["realized_pnl_usd"] == pytest.approx(6.0), (
+        f"expected realized_pnl_usd 6.0, got {row['realized_pnl_usd']}"
+    )
+    assert row["exit_price"] == pytest.approx(1.0), (
+        f"expected exit_price 1.0 for a winning settlement, got {row['exit_price']}"
+    )
+
+
+def test_apply_closes_absent_loser_projects_negative_realized_pnl(trades_conn, forecasts_conn):
+    _insert_position_current(
+        trades_conn, position_id="pos-lose-pnl", phase="quarantined",
+        city="seoul", target_date="2026-06-21", bin_label="24°C",
+        direction="buy_yes", token_id="tok-seoul-yes-pnl",
+        chain_shares=8.0, shares=8.0, cost_basis_usd=3.2,
+    )
+    _insert_settlement(forecasts_conn, city="seoul", target_date="2026-06-21", winning_bin="20°C")
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert report.applied == 1
+    row = trades_conn.execute(
+        "SELECT realized_pnl_usd, exit_price FROM position_current WHERE position_id='pos-lose-pnl'"
+    ).fetchone()
+    # lost: _pnl = -cost_basis_usd = -3.2
+    assert row["realized_pnl_usd"] is not None, (
+        "BUG B: chain-mirror settlement must project realized_pnl_usd, got NULL"
+    )
+    assert row["realized_pnl_usd"] == pytest.approx(-3.2), (
+        f"expected realized_pnl_usd -3.2, got {row['realized_pnl_usd']}"
+    )
+    assert row["exit_price"] == pytest.approx(0.0), (
+        f"expected exit_price 0.0 for a losing settlement, got {row['exit_price']}"
+    )
 
 
 def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
