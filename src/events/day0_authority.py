@@ -229,12 +229,48 @@ def assert_live_day0_probability_authority(
         )
 
 
+# Legitimate bases for a Day0 candidate's q_lcb/selection guard fields.
+# ``DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS`` is the genuine hard-fact recompute grant
+# (an already-impossible/already-certain monotone fact -- family_decision_engine's
+# ``_apply_day0_observed_boundary_guard``, is_hard_fact=True branch). The rest are the
+# empirical OOF q_lcb reliability guard's OWN verdict vocabulary
+# (src/decision/qlcb_reliability_guard.py ``apply_guard``): a Day0 candidate the
+# hard-fact function refused to certify (is_hard_fact=False) is routed through that
+# SAME guard non-Day0 candidates use, and carries its basis instead. "INERT" (no OOF
+# artifact -- pass-through) and "OOF_WILSON_95" / "OOF_WILSON_95_POOLED_TAIL" (a real
+# cell licensed the candidate, deflated or not) are non-abstaining verdicts a
+# positive-edge trade may legitimately carry. Aligned with the sibling allowlist
+# ``_GUARDED_FALSE_EDGE_RATE_95_BASES`` (src/engine/qkernel_spine_bridge.py:2110) minus
+# its SELECTION_* entries (that guard never runs on a Day0 candidate) plus "INERT" (the
+# OOF artifact is not always present; an inert pass-through is the same no-artifact
+# posture a non-Day0 candidate already gets). "OOF_WILSON_95_MISSING_CELL" and any
+# guard-internal error basis are deliberately excluded -- both always pair with
+# ``abstained=True`` in the guard's own verdict construction, so they must fail here
+# too, not be waved through.
+_DAY0_GUARDED_QLCB_BASES = frozenset(
+    {
+        DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS,
+        "INERT",
+        "OOF_WILSON_95",
+        "OOF_WILSON_95_POOLED_TAIL",
+    }
+)
+
+
 def assert_live_day0_qkernel_guard_authority(
     economics: Mapping[str, object],
     *,
     probability_payload: Mapping[str, object] | None = None,
 ) -> None:
-    """Fail closed unless Day0 entry qkernel evidence uses remaining-day guard law.
+    """Fail closed unless Day0 entry qkernel evidence uses a legitimate guard basis.
+
+    A hard-fact-certified candidate carries ``DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS``
+    unchanged. A candidate the hard-fact function could NOT certify
+    (is_hard_fact=False) is routed through the empirical OOF q_lcb reliability guard
+    (the SAME guard non-Day0 candidates use) and carries THAT guard's own basis
+    instead -- see ``_DAY0_GUARDED_QLCB_BASES``. Both are legitimate live authority;
+    only an empty basis, the retired ``DAY0_OBSERVED_BOUNDARY`` hard-fact-without-guard
+    stamp, or an abstained/unrecognized-basis verdict are rejected.
 
     ``DAY0_OBSERVED_BOUNDARY`` is a hard-fact observation boundary. It can rule out
     already-impossible outcomes, but it cannot by itself license an entry on a
@@ -247,9 +283,9 @@ def assert_live_day0_qkernel_guard_authority(
             raise Day0AuthorityError(f"{field_name} missing")
         if basis == DAY0_OBSERVED_BOUNDARY_GUARD_BASIS:
             raise Day0AuthorityError(f"{field_name} cannot be DAY0_OBSERVED_BOUNDARY")
-        if basis != DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS:
+        if basis not in _DAY0_GUARDED_QLCB_BASES:
             raise Day0AuthorityError(
-                f"{field_name} must be {DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS}"
+                f"{field_name} must be one of {sorted(_DAY0_GUARDED_QLCB_BASES)}"
             )
     for field_name in ("q_lcb_guard_abstained", "selection_guard_abstained"):
         if economics.get(field_name) is not False:

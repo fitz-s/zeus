@@ -968,6 +968,133 @@ def test_pre_submit_rejects_day0_observed_boundary_guard_without_remaining_windo
         )
 
 
+def test_pre_submit_accepts_day0_non_hard_fact_candidate_inert_oof_guard():
+    """RED-on-revert: a Day0 non-hard-fact candidate the OOF guard passed through INERT
+
+    (no reliability artifact present) must clear the live pre-submit authority gate --
+    not just the decision-engine object (see
+    test_day0_finite_boundary_yes_routes_through_qlcb_reliability_guard in
+    tests/decision/test_family_decision_engine.py, which selects exactly this basis).
+    Before this fix, ``assert_live_day0_qkernel_guard_authority`` hard-required
+    ``q_lcb_guard_basis``/``selection_guard_basis`` to literally equal
+    ``DAY0_REMAINING_DAY_Q_LCB``, so this legitimately-guarded, positive-edge
+    candidate was rejected at submit -- fail-closed, but it silently killed ALL Day0
+    non-hard-fact trading instead of letting cost decide after deflation.
+    """
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_day0_pre_submit_payload(
+            qkernel_execution_economics={
+                **_day0_qkernel_economics(),
+                "q_lcb_guard_basis": "INERT",
+                "q_lcb_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
+                "selection_guard_basis": "INERT",
+                "selection_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
+    economics = pre_submit.payload["qkernel_execution_economics"]
+    assert economics["q_lcb_guard_basis"] == "INERT"
+    assert economics["selection_guard_basis"] == "INERT"
+
+
+def test_pre_submit_accepts_day0_non_hard_fact_candidate_licensed_oof_deflation():
+    """RED-on-revert: a Day0 non-hard-fact candidate the OOF guard deflated-but-cleared
+
+    cost (a real reliability cell licensed it, ``OOF_WILSON_95``) must clear the live
+    pre-submit authority gate. Before this fix this basis was rejected exactly like the
+    INERT case above -- any basis other than the literal Day0 hard-fact stamp failed.
+    """
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_day0_pre_submit_payload(
+            qkernel_execution_economics={
+                **_day0_qkernel_economics(),
+                "q_lcb_guard_basis": "OOF_WILSON_95",
+                "q_lcb_guard_cell_key": "high|L1|YES|modal|qb10|coarse_global",
+                "selection_guard_basis": "OOF_WILSON_95",
+                "selection_guard_cell_key": "high|L1|YES|modal|qb10|coarse_global",
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
+    economics = pre_submit.payload["qkernel_execution_economics"]
+    assert economics["q_lcb_guard_basis"] == "OOF_WILSON_95"
+    assert economics["selection_guard_basis"] == "OOF_WILSON_95"
+
+
+def test_pre_submit_rejects_day0_non_hard_fact_candidate_abstained_by_oof_reliability():
+    """A Day0 non-hard-fact candidate the OOF guard could not grade (no cell -- an
+
+    active artifact abstain, ``OOF_WILSON_95_MISSING_CELL``) must still be rejected at
+    the live pre-submit authority gate -- caught here by the generic (Day0-agnostic)
+    ``selection_guard_abstained`` check that runs before the Day0-specific authority
+    function even executes. Widening the Day0 basis check to admit legitimate OOF
+    guard verdicts must not also admit an abstained one: this basis always pairs with
+    ``abstained=True`` in the guard's own verdict construction and is deliberately
+    excluded from the accepted-basis set, so it would fail the Day0-specific check too
+    if it were ever reached.
+    """
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="selection_guard_abstained"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                qkernel_execution_economics={
+                    **_day0_qkernel_economics(),
+                    "q_lcb_guard_basis": "OOF_WILSON_95_MISSING_CELL",
+                    "q_lcb_guard_abstained": True,
+                    "q_lcb_guard_cell_key": "high|L1|YES|modal|qb19|coarse_global",
+                    "selection_guard_basis": "OOF_WILSON_95_MISSING_CELL",
+                    "selection_guard_abstained": True,
+                    "selection_guard_cell_key": "high|L1|YES|modal|qb19|coarse_global",
+                    "selection_guard_q_safe": 0.0,
+                    "edge_lcb": -0.60,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
 def test_pre_submit_rejects_day0_missing_remaining_window_probability_authority():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
