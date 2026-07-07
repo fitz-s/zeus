@@ -312,9 +312,9 @@ def _openmeteo_manifest_coverage(
     city_timezone: str | None = None,
     required_source_cycle_time: str | None = None,
     minimum_source_cycle_time: str | None = None,
-) -> tuple[int, str | None]:
+) -> tuple[int, str | None, str | None]:
     if metadata_column is None:
-        return 0, None
+        return 0, None, None
     optional_columns = [
         col
         for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")
@@ -402,9 +402,9 @@ def _openmeteo_manifest_coverage(
             )
         )
     if not candidates:
-        return 0, None
+        return 0, None, None
     latest = max(candidates, key=lambda item: item[0])
-    return len(candidates), latest[1]
+    return len(candidates), latest[1], latest[0][0]
 
 
 def _replacement_coverage_counts_for_dependencies(
@@ -931,9 +931,10 @@ def build_replacement_forecast_current_target_plan(
             )
             openmeteo_count = 0
             openmeteo_source_run_id = None
+            openmeteo_resolved_cycle: str | None = None
             fusion_current_count = 0
             if metadata_column is not None:
-                openmeteo_count, openmeteo_source_run_id = _openmeteo_manifest_coverage(
+                openmeteo_count, openmeteo_source_run_id, openmeteo_resolved_cycle = _openmeteo_manifest_coverage(
                     conn,
                     raw_artifact_columns=raw_artifact_columns,
                     metadata_column=metadata_column,
@@ -974,7 +975,9 @@ def build_replacement_forecast_current_target_plan(
                     city=city,
                     target_date=target_date,
                     temperature_metric=metric,
-                    source_cycle_time=required_openmeteo_cycle_for_row or baseline_source_cycle_time,
+                    source_cycle_time=required_openmeteo_cycle_for_row
+                    or openmeteo_resolved_cycle
+                    or baseline_source_cycle_time,
                 )
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
