@@ -958,7 +958,9 @@ class FamilyDecisionEngine:
             # monotone hard-fact payoff lower bound implied by that running extreme:
             # already-impossible finite bins and already-absorbed shoulders are valid
             # hard facts; a finite point/range that merely contains the current running
-            # extreme is not settled and must not inherit a near-1 lower bound.
+            # extreme is not settled and must not inherit a near-1 lower bound -- it is
+            # routed through the SAME q_lcb empirical OOF reliability guard non-Day0
+            # candidates get (below), never a raw unchecked pass-through.
             guarded = self._apply_day0_observed_boundary_guard(
                 scored=pre_coherence_scored,
                 case=case,
@@ -966,6 +968,7 @@ class FamilyDecisionEngine:
                 omega=omega,
                 joint_q=joint_q,
                 band=band,
+                forecast_bin=forecast_bin,
                 matrix=matrix,
                 exposure=portfolio,
                 sizing_candidates=sizing_candidates,
@@ -1293,20 +1296,24 @@ class FamilyDecisionEngine:
         omega: OutcomeSpace,
         joint_q: JointQ,
         band: JointQBand,
+        forecast_bin: str,
         matrix: FamilyPayoffMatrix,
         exposure: PortfolioExposureVector,
         sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
         max_stake_usd: Optional[Decimal],
     ) -> tuple[CandidateDecision, ...]:
-        """Stamp Day0 monotone hard-fact lower-bound provenance.
+        """Stamp Day0 monotone hard-fact lower-bound provenance; guard the remainder.
 
         A running HIGH max can only rise, and a running LOW min can only fall.
         Therefore Day0 can prove hard lower bounds only for monotone facts:
         an already-passed finite bin makes YES impossible / NO certain, and an
         already-entered open shoulder makes YES certain / NO impossible. A finite
         bin that currently contains the observed extreme is not a hard fact; the
-        day can still move out of that bin. That state keeps the remaining-day
-        qLCB rather than inheriting a near-1 hard-fact lower bound.
+        day can still move out of that bin -- that candidate earns no hard-fact
+        exemption and is routed through the SAME empirical q_lcb OOF reliability
+        guard every non-Day0 candidate passes through
+        (``_apply_qlcb_reliability_guard``), instead of keeping an unchecked
+        raw-model remaining-day qLCB.
         """
 
         observed = getattr(getattr(predictive, "day0", None), "observed_extreme_native", None)
@@ -1420,7 +1427,41 @@ class FamilyDecisionEngine:
             elif is_hard_fact:
                 economics = _recomputed_hard_fact_economics(d, q_safe=q_safe)
             else:
-                economics = d.economics
+                # Structurally NOT a hard fact: a finite point/interior bin the observed
+                # running extreme merely CONTAINS (or a shoulder it has not yet entered)
+                # cannot be foreclosed by monotonicity alone, so it earns no hard-fact
+                # exemption. Route it through the IDENTICAL empirical q_lcb OOF
+                # reliability guard every non-Day0 candidate passes through
+                # (single-serving-rule flow §6) instead of granting an unchecked
+                # raw-model remaining-day qLCB pass-through. INERT when the OOF artifact
+                # is absent; abstains/deflates exactly as it would outside Day0.
+                reliability_guarded = self._apply_qlcb_reliability_guard(
+                    scored=(d,),
+                    case=case,
+                    joint_q=joint_q,
+                    band=band,
+                    forecast_bin=forecast_bin,
+                    matrix=matrix,
+                    exposure=exposure,
+                    sizing_candidates=sizing_candidates,
+                    max_stake_usd=max_stake_usd,
+                )[0]
+                # Mirror the one verdict this Day0 path applied into both the q_lcb-guard
+                # and selection-guard field sets -- the same mirroring the hard-fact
+                # branch below performs -- so live pre-submit provenance checks
+                # (selection_guard_basis non-empty / not abstained / q_safe in (0,1])
+                # see the real guard's verdict instead of the unset dataclass defaults.
+                guarded.append(
+                    replace(
+                        reliability_guarded,
+                        selection_guard_basis=reliability_guarded.q_lcb_guard_basis,
+                        selection_guard_abstained=reliability_guarded.q_lcb_guard_abstained,
+                        selection_guard_cell_key=reliability_guarded.q_lcb_guard_cell_key,
+                        selection_guard_n=0,
+                        selection_guard_q_safe=reliability_guarded.economics.payoff_q_lcb,
+                    )
+                )
+                continue
             guarded.append(
                 replace(
                     d,
