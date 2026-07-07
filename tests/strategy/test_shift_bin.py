@@ -32,6 +32,11 @@ def _base(**over):
         old_leg_residual_usd=4.0,          # old leg still live
         has_unowned_pending_or_unknown_entry=False,
         old_leg_dust_floor_usd=1.0,        # below this == proven closed (dust)
+        # Default belief is already WEAKENED so tests unrelated to the belief gate
+        # (residual/dust-floor/blocking) keep exercising EXIT_OLD_LEG unchanged.
+        # Tests targeting the belief gate itself override these two explicitly.
+        old_leg_q_current_lcb=0.20,
+        old_leg_q_entry_lcb=0.80,
     )
     kw.update(over)
     return kw
@@ -107,3 +112,86 @@ def test_blocking_takes_priority_over_entry_when_old_leg_closed():
     d = decide_shift_bin(**_base(old_leg_residual_usd=0.0, has_unowned_pending_or_unknown_entry=True))
     assert d.phase == "BLOCKED"
     assert d.allow_entry is False
+
+
+# ---------------------------------------------------------------------------
+# VALUE/BELIEF GATE — mirrors decide_fill_up's inverse (belief WEAKENED, not
+# strengthened). A live old leg must NOT be dumped just because a fresh
+# redecision named a different sibling bin; only a genuinely weakened belief
+# may exit it.
+# ---------------------------------------------------------------------------
+def test_shift_denied_when_old_leg_belief_not_weakened():
+    """Old leg belief UNCHANGED/strong (current == entry) → HOLD, do not churn."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=0.83,
+        old_leg_q_entry_lcb=0.83,
+    ))
+    assert d.phase == "NOT_SHIFT_BIN"
+    assert d.allow_entry is False
+    assert "BELIEF_NOT_WEAKENED" in d.reason.upper()
+
+
+def test_shift_allowed_when_old_leg_belief_weakened():
+    """Old leg belief genuinely WEAKENED relative to entry → EXIT_OLD_LEG preserved."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=0.23,
+        old_leg_q_entry_lcb=0.87,
+    ))
+    assert d.phase == "EXIT_OLD_LEG"
+    assert d.allow_entry is False
+
+
+def test_shift_denied_when_old_leg_belief_unknown_fail_closed():
+    """Missing current belief on a live old leg → fail closed, HOLD (do not churn)."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=None,
+        old_leg_q_entry_lcb=0.83,
+    ))
+    assert d.phase == "NOT_SHIFT_BIN"
+    assert d.allow_entry is False
+    assert "BELIEF_UNKNOWN" in d.reason.upper()
+
+
+def test_shift_denied_when_old_leg_entry_belief_unknown_fail_closed():
+    """Missing entry belief on a live old leg → fail closed, HOLD (do not churn)."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=0.23,
+        old_leg_q_entry_lcb=None,
+    ))
+    assert d.phase == "NOT_SHIFT_BIN"
+    assert d.allow_entry is False
+    assert "BELIEF_UNKNOWN" in d.reason.upper()
+
+
+def test_shift_belief_weakening_floor_hysteresis():
+    """With a hysteresis floor, a marginal weakening below the floor is denied."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=0.79,
+        old_leg_q_entry_lcb=0.83,
+        shift_belief_weakening_floor=0.10,
+    ))
+    assert d.phase == "NOT_SHIFT_BIN"  # 0.83 - 0.79 = 0.04 < 0.10 floor
+    d2 = decide_shift_bin(**_base(
+        old_leg_residual_usd=10.0,
+        old_leg_q_current_lcb=0.70,
+        old_leg_q_entry_lcb=0.83,
+        shift_belief_weakening_floor=0.10,
+    ))
+    assert d2.phase == "EXIT_OLD_LEG"  # 0.83 - 0.70 = 0.13 >= 0.10 floor
+
+
+def test_enter_new_bin_unchanged_when_residual_already_dust_regardless_of_belief():
+    """ENTER_NEW_BIN (residual proven zero/dust) is not a churn sell — belief gate
+    must not apply once the old leg is already closed."""
+    d = decide_shift_bin(**_base(
+        old_leg_residual_usd=0.0,
+        old_leg_q_current_lcb=None,
+        old_leg_q_entry_lcb=None,
+    ))
+    assert d.phase == "ENTER_NEW_BIN"
+    assert d.allow_entry is True

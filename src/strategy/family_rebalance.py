@@ -101,6 +101,9 @@ def decide_shift_bin(
     old_leg_residual_usd: float,
     has_unowned_pending_or_unknown_entry: bool,
     old_leg_dust_floor_usd: float = 0.0,
+    old_leg_q_current_lcb: float | None = None,
+    old_leg_q_entry_lcb: float | None = None,
+    shift_belief_weakening_floor: float = 0.0,
 ) -> ShiftBinDecision:
     """Pure close-before-open predicate for a sibling-different-bin redecision.
 
@@ -111,11 +114,19 @@ def decide_shift_bin(
       2. BLOCKED        — ANY unowned pending/unknown/partial family command. Fail
          closed BEFORE any exit/entry decision (dominates the entry path even when
          the old leg looks closed).
-      3. EXIT_OLD_LEG   — the old held leg still has live exposure at/above the dust
-         floor. Close it FIRST; no counter-entry this cycle.
-      4. ENTER_NEW_BIN  — the old leg residual is proven ZERO or below the dust/min-
+      3. NOT_SHIFT_BIN (VALUE/BELIEF GATE) — the old leg still has live exposure but
+         its belief has NOT genuinely weakened relative to its entry certification
+         (mirrors ``decide_fill_up``'s strengthening check, inverted). A fresh
+         redecision naming a different sibling bin is not, by itself, grounds to
+         dump a still-strongly-believed leg — HOLD it instead (no churn). Fails
+         CLOSED (HOLD) when either belief is unavailable.
+      4. EXIT_OLD_LEG   — the old held leg still has live exposure at/above the dust
+         floor AND its belief has genuinely weakened. Close it FIRST; no
+         counter-entry this cycle.
+      5. ENTER_NEW_BIN  — the old leg residual is proven ZERO or below the dust/min-
          order floor. The counter-entry may proceed (the reactor's fresh selection on
-         current books is the recompute that decides the actual stake).
+         current books is the recompute that decides the actual stake). Not a churn
+         sell, so the belief gate does not apply here.
 
     The dust floor models "economically closed" (a sub-min-order remainder that can
     never be sold and is not live tradable exposure). At/above the floor is treated
@@ -139,6 +150,15 @@ def decide_shift_bin(
     if float(old_leg_residual_usd) >= max(float(old_leg_dust_floor_usd), 0.0) and (
         float(old_leg_residual_usd) > 0.0
     ):
+        # VALUE/BELIEF GATE: never churn-sell a still-strongly-believed leg just
+        # because a fresh redecision named a different sibling bin. Only a
+        # genuinely WEAKENED old-leg belief may exit it. Fail closed (HOLD) when
+        # either belief is unavailable — matches decide_fill_up's ENTRY_Q_LCB_MISSING
+        # fail-closed posture.
+        if old_leg_q_entry_lcb is None or old_leg_q_current_lcb is None:
+            return deny("NOT_SHIFT_BIN", "SHIFT_OLD_LEG_BELIEF_UNKNOWN")
+        if old_leg_q_current_lcb >= old_leg_q_entry_lcb - float(shift_belief_weakening_floor):
+            return deny("NOT_SHIFT_BIN", "SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED")
         return deny("EXIT_OLD_LEG", "SHIFT_EXIT_OLD_LEG_RESIDUAL_LIVE")
     return ShiftBinDecision(
         phase="ENTER_NEW_BIN",

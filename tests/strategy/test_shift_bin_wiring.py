@@ -40,7 +40,7 @@ CREATE TABLE position_current (
     target_date TEXT, temperature_metric TEXT, p_posterior REAL,
     entry_ci_width REAL, cost_basis_usd REAL, chain_cost_basis_usd REAL,
     shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT,
-    chain_state TEXT
+    chain_state TEXT, last_monitor_prob REAL, last_monitor_prob_is_fresh INTEGER
 )
 """
 
@@ -100,6 +100,12 @@ def _insert_held(
     city="Tokyo",
     target_date="2026-06-23",
     metric="high",
+    # p_posterior=0.50, entry_ci_width=0.20 (below) => entry_q_lcb = 0.40. Default
+    # last_monitor_prob is WEAKENED relative to that entry certification so existing
+    # residual/dust/blocking-focused tests keep exercising EXIT_OLD_LEG unchanged —
+    # tests targeting the belief gate itself override these two explicitly.
+    last_monitor_prob=0.10,
+    last_monitor_prob_is_fresh=1,
 ):
     conn.execute(
         """
@@ -107,13 +113,13 @@ def _insert_held(
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
             entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
-            size_usd, updated_at, chain_state
+            size_usd, updated_at, chain_state, last_monitor_prob, last_monitor_prob_is_fresh
         ) VALUES (?, ?, ?, ?, ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
-                  ?, '2026-06-22T06:00:00', ?)
+                  ?, '2026-06-22T06:00:00', ?, ?, ?)
         """,
         (position_id, phase, token_id, no_token_id, bin_label, direction, city, target_date,
          metric, cost_basis_usd, chain_cost_basis_usd, chain_shares, cost_basis_usd,
-         chain_state),
+         chain_state, last_monitor_prob, last_monitor_prob_is_fresh),
     )
 
 
@@ -254,6 +260,8 @@ def test_active_shift_lease_for_family_reads_existing_shift_before_fill_up():
             bin_label="60-61F",
             direction="buy_yes",
             current_live_usd=4.0,
+            entry_q_lcb=0.80,   # weakened belief so the live residual still exits
+            current_q_lcb=0.20,
         ),
         old_leg_residual_usd=4.0,
         has_unowned_pending_or_unknown_entry=False,

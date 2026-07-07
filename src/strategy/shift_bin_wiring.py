@@ -90,6 +90,16 @@ class HeldSiblingExposure:
     ``position_current.token_id``; for buy_no positions it is ``no_token_id``. The
     shift-bin exit path sells this token, so using the condition/YES token for buy_no
     rows creates a false collateral miss even when chain/local shares are synced.
+
+    ``entry_q_lcb`` / ``current_q_lcb`` back the VALUE/BELIEF GATE in
+    ``decide_shift_bin`` (do not churn-sell a still-strongly-believed leg). Sourced
+    the SAME way ``fill_up_wiring.HeldSameTokenExposure.entry_q_lcb`` is: the entry CI
+    lower bound (``p_posterior - entry_ci_width/2``) captured at position-open time.
+    ``current_q_lcb`` is the position's own freshest monitored belief
+    (``last_monitor_prob``, gated on ``last_monitor_prob_is_fresh`` — the same K1
+    single-belief-authority field every held-position monitor refresh writes; see
+    ``src/engine/position_belief.py`` and ``src/engine/monitor_refresh.py``). Both are
+    None when unavailable — the gate fails CLOSED (HOLD) on either being None.
     """
 
     position_id: str
@@ -97,6 +107,8 @@ class HeldSiblingExposure:
     bin_label: str
     direction: str
     current_live_usd: float
+    entry_q_lcb: Optional[float] = None
+    current_q_lcb: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -249,7 +261,8 @@ def read_held_sibling_exposure(
     selected_names = (
         "position_id", "token_id", "no_token_id", "bin_label", "direction",
         "chain_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_shares",
-        "chain_state", metric_col,
+        "chain_state", metric_col, "p_posterior", "entry_ci_width",
+        "last_monitor_prob", "last_monitor_prob_is_fresh",
     )
     select_cols = []
     for name in selected_names:
@@ -308,8 +321,41 @@ def read_held_sibling_exposure(
             bin_label=bin_label,
             direction=direction,
             current_live_usd=current_live,
+            entry_q_lcb=_entry_q_lcb_from_row(_g),
+            current_q_lcb=_current_q_lcb_from_row(_g),
         )
     return None
+
+
+def _entry_q_lcb_from_row(get) -> float | None:
+    """Entry CI lower bound the same way ``fill_up_wiring`` computes it for the SAME
+    row shape: ``p_posterior - entry_ci_width / 2``. None when either is missing."""
+
+    p_posterior = get("p_posterior")
+    entry_ci_width = get("entry_ci_width")
+    if p_posterior is None or entry_ci_width is None:
+        return None
+    try:
+        return float(p_posterior) - float(entry_ci_width) / 2.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_q_lcb_from_row(get) -> float | None:
+    """The old leg's OWN freshest monitored belief (K1 single-belief-authority field),
+    gated on its freshness flag. None (fail closed) when stale, missing, or unparsable
+    — the caller (``decide_shift_bin``'s value/belief gate) must never treat a stale
+    monitor snapshot as proof the belief is still strong."""
+
+    if not bool(get("last_monitor_prob_is_fresh") or False):
+        return None
+    raw = get("last_monitor_prob")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _chain_collateral_available_shares(
@@ -534,6 +580,7 @@ def plan_shift_bin(
     has_unowned_pending_or_unknown_entry: bool,
     now_iso: str,
     old_leg_dust_floor_usd: float = 0.0,
+    shift_belief_weakening_floor: float = 0.0,
 ) -> ShiftBinPlan:
     """Orchestrate the SHIFT_BIN lease acquire + ``decide_shift_bin``.
 
@@ -542,8 +589,12 @@ def plan_shift_bin(
     concurrency guard): a concurrent same-family lease => acquire returns None => ABORT
     with no order and no second lease. With the lease held, runs ``decide_shift_bin``:
     EXIT_OLD_LEG advances the lease EXIT_SUBMITTED and returns the old-leg identity;
-    ENTER_NEW_BIN advances ENTRY_SUBMITTED and admits the counter-entry; BLOCKED
-    advances the lease ABORTED and returns ABORT (no exit, no order).
+    ENTER_NEW_BIN advances ENTRY_SUBMITTED and admits the counter-entry; BLOCKED and the
+    VALUE/BELIEF GATE (NOT_SHIFT_BIN — old leg still live but belief not genuinely
+    weakened, or belief unavailable) both advance the lease ABORTED and return ABORT
+    (no exit, no order) — the same "release the family, no side effect" handling
+    NOT_SHIFT_BIN already gets below. The old leg's entry/current belief come from
+    ``held.entry_q_lcb`` / ``held.current_q_lcb`` (see ``HeldSiblingExposure``).
     """
     # Not a shift-bin: leave the fresh-entry + D1 fill-up paths completely untouched.
     if not is_redecision_event or held is None or not str(held.position_id or ""):
@@ -578,6 +629,9 @@ def plan_shift_bin(
         old_leg_residual_usd=float(old_leg_residual_usd),
         has_unowned_pending_or_unknown_entry=bool(has_unowned_pending_or_unknown_entry),
         old_leg_dust_floor_usd=float(old_leg_dust_floor_usd),
+        old_leg_q_current_lcb=held.current_q_lcb,
+        old_leg_q_entry_lcb=held.entry_q_lcb,
+        shift_belief_weakening_floor=float(shift_belief_weakening_floor),
     )
 
     if decision.phase == "BLOCKED":
@@ -588,8 +642,11 @@ def plan_shift_bin(
         return ShiftBinPlan(kind="ABORT", lease_intent_id=lease_intent_id, reason=decision.reason)
 
     if decision.phase == "NOT_SHIFT_BIN":
-        # Defensive: decide_shift_bin disagreed with read_held_sibling_exposure (e.g.
-        # a same-token row slipped through). Release the lease, no order.
+        # Either a defensive mismatch (decide_shift_bin disagreed with
+        # read_held_sibling_exposure, e.g. a same-token row slipped through) OR the
+        # VALUE/BELIEF GATE denied a live old leg whose belief has not genuinely
+        # weakened (SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED / _UNKNOWN). Either way: release
+        # the lease, no order, HOLD the leg for a later cycle to re-evaluate.
         advance_rebalance_lease(
             conn, lease_intent_id, status="ABORTED", now_iso=now_iso,
             abort_reason=decision.reason,
