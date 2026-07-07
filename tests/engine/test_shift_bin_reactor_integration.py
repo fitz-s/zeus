@@ -39,7 +39,8 @@ CREATE TABLE position_current (
     bin_label TEXT, direction TEXT, condition_id TEXT, city TEXT,
     target_date TEXT, temperature_metric TEXT, p_posterior REAL,
     entry_ci_width REAL, cost_basis_usd REAL, chain_cost_basis_usd REAL,
-    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
+    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT,
+    last_monitor_prob REAL, last_monitor_prob_is_fresh INTEGER
 )
 """
 _LIVE_CAP_DDL = """
@@ -69,19 +70,25 @@ def _conn() -> sqlite3.Connection:
 def _insert_held(conn, *, position_id="p-old", token_id="tok-A", phase="active",
                  bin_label="60-61F", direction="buy_yes", cost_basis_usd=4.0,
                  chain_cost_basis_usd=None, shares=10.0, city="Tokyo",
-                 target_date="2026-06-23", metric="high"):
+                 target_date="2026-06-23", metric="high",
+                 # p_posterior=0.50, entry_ci_width=0.20 => entry_q_lcb = 0.40. Default
+                 # last_monitor_prob is WEAKENED relative to that so existing
+                 # residual/dust/blocking-focused tests keep exercising EXIT_OLD_LEG
+                 # unchanged (belief-gate tests live in tests/strategy/test_shift_bin.py).
+                 last_monitor_prob=0.10, last_monitor_prob_is_fresh=1):
     conn.execute(
         """
         INSERT INTO position_current (
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
             entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
-            size_usd, updated_at
+            size_usd, updated_at, last_monitor_prob, last_monitor_prob_is_fresh
         ) VALUES (?, ?, ?, '', ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, ?, ?, ?,
-                  '2026-06-22T06:00:00')
+                  '2026-06-22T06:00:00', ?, ?)
         """,
         (position_id, phase, token_id, bin_label, direction, city, target_date,
-         metric, cost_basis_usd, chain_cost_basis_usd, shares, shares, cost_basis_usd),
+         metric, cost_basis_usd, chain_cost_basis_usd, shares, shares, cost_basis_usd,
+         last_monitor_prob, last_monitor_prob_is_fresh),
     )
 
 
