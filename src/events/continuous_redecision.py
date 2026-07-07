@@ -205,9 +205,11 @@ class RecentNoValueEventRefutation:
 
 @dataclass(frozen=True)
 class RepriceDecision:
-    """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is one of
-    {CANCEL_REPLACE, CANCEL_EXIT}; ``reason`` is the evidence class. Submit-safe: the
-    reactor routes this back through the existing cert path; this module never submits."""
+    """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is
+    always ``CANCEL_REPLACE`` (the exit-side ``CANCEL_EXIT`` action was removed in W3
+    (#133) along with ``screen_exit``/``screen_exit_cancel`` — no live code constructs
+    it); ``reason`` is the evidence class. Submit-safe: the reactor routes this back
+    through the existing cert path; this module never submits."""
     family_id: str
     bin_label: str
     side: str
