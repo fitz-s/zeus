@@ -241,6 +241,14 @@ def read_current_instrument_values(
             ).fetchall()
         except Exception:
             station_rows = []
+        # This is an OVERRIDE tier, not a first-match-wins fallback: a station model's own-cycle
+        # freshest row must ALWAYS replace whatever the ceiling-bound passes above already parked
+        # in `out` (even a stale <= ceiling row) — gating on `model in out` here was the steady-
+        # state bug (2026-07 silent no-op): once any ceiling-bound row existed for the model, the
+        # override could never fire again. `_station_served` instead guards ONLY within this loop,
+        # so an older row for the SAME model later in the (freshest-first-ordered) result set can't
+        # clobber the freshest one already applied.
+        _station_served: set[str] = set()
         for row in station_rows:
             try:
                 rid = int(row[0])
@@ -254,8 +262,9 @@ def read_current_instrument_values(
             # Match the materializer's station-family convention exactly (cwa_/hko_ prefixes); the
             # broad SQL LIKE is narrowed here so a hypothetical non-station "cwa…"/"hko…" name cannot
             # leak in.
-            if not model.startswith(("cwa_", "hko_")) or model in out:
+            if not model.startswith(("cwa_", "hko_")) or model in _station_served:
                 continue
+            _station_served.add(model)
             _age = _age_hours_or_none(captured, served_cycle)
             out[model] = ServedInstrumentValue(
                 value_c=value, raw_model_forecast_id=rid, served_via=SERVED_VIA_SINGLE_RUNS,
