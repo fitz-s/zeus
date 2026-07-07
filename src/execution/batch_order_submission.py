@@ -5,11 +5,20 @@
 #   W2 packet ("W2.1 batch submit/cancel wrapper ... lands INERT — no
 #   production call site yet") + architecture/invariants.yaml INV-28
 #   (persist-before-side-effect) applied at batch shape.
-"""W2.1 batch submit/cancel journal orchestrator (inert -- no production
-call site). Extends the single-order INV-28 sequence (the reference is
-execute_exit_order, src/execution/executor.py:4394-4476: persist
-INTENT_CREATED + SUBMIT_REQUESTED, COMMIT, THEN the one SDK call, THEN ack)
-to N orders sharing ONE SDK call per chunk.
+"""W2.1 batch cancel journal orchestrator. Extends the single-order INV-28
+sequence (the reference is execute_exit_order,
+src/execution/executor.py:4394-4476: persist INTENT_CREATED +
+SUBMIT_REQUESTED, COMMIT, THEN the one SDK call, THEN ack) to N orders
+sharing ONE SDK call per chunk.
+
+The W2.1 packet also built a batch SUBMIT orchestrator (``submit_orders_
+batch``) alongside ``cancel_commands_batch`` below; it was deleted as dead
+code in the gate-stack simplification (Phase 1, 2026-07-06) -- it had zero
+live callers and was never wired to a production submit path.
+``BatchSubmitRequest``/``BatchSubmitOutcome`` remain as inert leftover types
+from that removal. Only ``cancel_commands_batch`` is live today (wired by
+``src.execution.staleness_cancel``); the design notes below describe the
+shared batch shape both orchestrators used.
 
 Persist-before-side-effect at batch shape (design decision, documented per
 the W2.1 packet brief's open tension -- INV-28's text is singular and does
@@ -27,11 +36,10 @@ not natively address batching):
   an UNREACHED chunk (because an earlier chunk's SDK call raised, or a rate
   budget denied it) is simply never persisted: there is no orphan
   INTENT_CREATED row to clean up, and the caller can retry those requests
-  fresh (new command_ids/idempotency_keys) via another submit_orders_batch
-  call. This was chosen over "persist all N chunks upfront, then work
-  through them" specifically to avoid a batch-wide half-submitted journal
-  state whose resolution would otherwise require new recovery-loop
-  machinery this inert packet does not build.
+  fresh via another batch call. This was chosen over "persist all N chunks
+  upfront, then work through them" specifically to avoid a batch-wide
+  half-submitted journal state whose resolution would otherwise require new
+  recovery-loop machinery this inert packet does not build.
 
   A chunk HALTS further processing (later chunks become "not_attempted")
   only on an AMBIGUOUS outcome: the SDK call itself raising (side effect
@@ -46,34 +54,17 @@ not natively address batching):
 from __future__ import annotations
 
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from src.contracts.execution_intent import ExecutionIntent
-from src.execution.command_bus import IdempotencyKey, IntentKind
-from src.execution.self_trade_guard import SelfTradeCheckResult, SelfTradeVerdict
+from src.execution.command_bus import IntentKind
 from src.venue.batch_submit import MAX_ORDERS_PER_BATCH, chunk_orders
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _default_execution_capability_payload() -> dict:
-    # ENTRY SUBMIT_REQUESTED events are validated against a specific
-    # economics-proof schema (venue_command_repo._validate_entry_submit_
-    # payload / _ENTRY_SUBMIT_REQUIRED_COMPONENTS) that only the real entry
-    # decision path can populate (q_live, expected_edge, etc.) -- solving
-    # that is W3's job, out of scope here. EXIT/CANCEL have no such
-    # validator (early-return in _validate_entry_submit_payload), so a
-    # minimal always-allowed shape is sufficient there. Callers submitting
-    # ENTRY intents MUST supply their own execution_capability_payload via
-    # BatchSubmitRequest; leaving it unset for ENTRY fails loud (ValueError
-    # from append_event), not silently.
-    return {"allowed": True, "components": []}
 
 
 @dataclass(frozen=True)
@@ -109,273 +100,6 @@ class BatchSubmitOutcome:
     error_message: Optional[str] = None
 
 
-_SUBMIT_STATUS_TO_EVENT = {
-    "accepted": "SUBMIT_ACKED",
-    "rejected": "SUBMIT_REJECTED",
-    "unmapped": "SUBMIT_UNKNOWN",
-}
-_SUBMIT_STATUS_TO_OUTCOME = {
-    "accepted": "acked",
-    "rejected": "rejected",
-    "unmapped": "unknown",
-}
-
-
-def submit_orders_batch(
-    conn: sqlite3.Connection,
-    adapter: Any,
-    client: Any,
-    requests: Sequence[BatchSubmitRequest],
-    *,
-    rate_budget: Any = None,
-    self_trade_verdicts: Optional[Mapping[int, SelfTradeCheckResult]] = None,
-) -> list[BatchSubmitOutcome]:
-    """Submit ``requests`` in chunks of at most MAX_ORDERS_PER_BATCH.
-
-    ``adapter`` builds envelopes (create_submission_envelope, FC-03).
-    ``client`` is the INV-24 gateway (place_limit_orders_batch) -- NOT the
-    adapter directly; this module is on the INV-24 allowlist precisely so
-    it may call that gateway.
-
-    ``rate_budget`` (optional, ``src.venue.rate_budget.VenueRateBudget``):
-    when provided, checked once per chunk (RequestClass.SUBMIT) before that
-    chunk's persist phase. Absent -> today's behavior (no rate gating here).
-
-    ``self_trade_verdicts`` (optional): maps a request's position in
-    ``requests`` (0-based index, matching the returned outcome's
-    ``request_index``) to a pre-computed ``SelfTradeCheckResult``. A
-    non-CLEAR verdict (WOULD_SELF_CROSS or INDETERMINATE -- fail closed)
-    blocks only that one request before persistence; the rest of its chunk
-    proceeds normally. Absent -> today's behavior (no self-trade gating
-    here); wiring the real guard is W3's job.
-
-    Returns exactly one outcome per input request, in input order.
-    """
-    from src.venue.rate_budget import RequestClass
-
-    outcomes: list[Optional[BatchSubmitOutcome]] = [None] * len(requests)
-    should_continue = True
-    verdicts = self_trade_verdicts or {}
-
-    for chunk in chunk_orders(list(enumerate(requests)), MAX_ORDERS_PER_BATCH):
-        if not should_continue:
-            for idx, _req in chunk:
-                outcomes[idx] = BatchSubmitOutcome(request_index=idx, status="not_attempted")
-            continue
-
-        accepted: list[tuple[int, BatchSubmitRequest]] = []
-        for idx, req in chunk:
-            verdict = verdicts.get(idx)
-            if verdict is not None and verdict.verdict != SelfTradeVerdict.CLEAR:
-                outcomes[idx] = BatchSubmitOutcome(
-                    request_index=idx,
-                    status="rejected",
-                    error_code="SELF_TRADE_GUARD_BLOCKED",
-                    error_message=f"verdict={verdict.verdict.value} reason={verdict.reason}",
-                )
-                continue
-            accepted.append((idx, req))
-
-        if not accepted:
-            continue
-
-        if rate_budget is not None:
-            budget_result = rate_budget.try_acquire(RequestClass.SUBMIT)
-            if not budget_result.granted:
-                for idx, _req in accepted:
-                    outcomes[idx] = BatchSubmitOutcome(
-                        request_index=idx,
-                        status="rate_limited",
-                        error_code=f"RATE_BUDGET_{budget_result.decision.value.upper()}",
-                        error_message=f"retry_after={budget_result.wait_seconds:.2f}s",
-                    )
-                should_continue = False
-                continue
-
-        # --- persist phase: N commands + N SUBMIT_REQUESTED events, ONE
-        # transaction, committed BEFORE the chunk's SDK call. -----------
-        now = _now()
-        persisted: list[tuple[int, BatchSubmitRequest, str, str, Any]] = []
-        try:
-            for idx, req in accepted:
-                envelope = adapter.create_submission_envelope(
-                    req.intent, req.snapshot, req.order_type, req.post_only
-                )
-                # Canonicalize price/size to float precision BEFORE
-                # persisting anything: insert_command's price/size columns
-                # are float-typed (matching the single-order path's plain
-                # float arithmetic), while envelope.price/size come from
-                # create_submission_envelope's Decimal division
-                # (_size_from_intent) which can be a repeating decimal
-                # (e.g. 10/0.11). Persisting the EXACT Decimal into
-                # venue_submission_envelopes and a float-rounded value into
-                # venue_commands would make _assert_envelope_gate's
-                # cross-check fail on the rounding difference. Round once,
-                # consistently, and persist the SAME rounded value to both
-                # tables.
-                envelope = envelope.with_updates(
-                    price=Decimal(str(float(envelope.price))),
-                    size=Decimal(str(float(envelope.size))),
-                )
-                command_id = uuid.uuid4().hex[:16]
-                envelope_id = f"batch:{command_id}"
-                from src.state.venue_command_repo import insert_submission_envelope
-
-                insert_submission_envelope(conn, envelope, envelope_id=envelope_id)
-
-                idem = IdempotencyKey.from_inputs(
-                    decision_id=req.decision_id,
-                    token_id=str(envelope.selected_outcome_token_id),
-                    side=str(envelope.side),
-                    price=float(envelope.price),
-                    size=float(envelope.size),
-                    intent_kind=req.intent_kind,
-                )
-
-                from src.state.venue_command_repo import insert_command
-
-                insert_command(
-                    conn,
-                    command_id=command_id,
-                    snapshot_id=req.intent.executable_snapshot_id,
-                    envelope_id=envelope_id,
-                    position_id=req.position_id,
-                    decision_id=req.decision_id,
-                    idempotency_key=idem.value,
-                    intent_kind=req.intent_kind.value,
-                    market_id=req.intent.market_id,
-                    token_id=str(envelope.selected_outcome_token_id),
-                    side=str(envelope.side),
-                    size=float(envelope.size),
-                    price=float(envelope.price),
-                    created_at=now,
-                    snapshot_checked_at=now,
-                    expected_min_tick_size=req.intent.executable_snapshot_min_tick_size,
-                    expected_min_order_size=req.intent.executable_snapshot_min_order_size,
-                    expected_neg_risk=req.intent.executable_snapshot_neg_risk,
-                )
-
-                from src.state.venue_command_repo import append_event
-
-                capability_payload = (
-                    req.execution_capability_payload
-                    if req.execution_capability_payload is not None
-                    else _default_execution_capability_payload()
-                )
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REQUESTED",
-                    occurred_at=now,
-                    payload={
-                        "order_type": req.order_type,
-                        "execution_capability": capability_payload,
-                        "batch": True,
-                    },
-                )
-                persisted.append((idx, req, command_id, idem.value, envelope))
-        except Exception as exc:
-            # Any request's persist failure invalidates the WHOLE chunk's
-            # submission attempt -- fail closed rather than partially
-            # commit a chunk whose journal wouldn't match what gets sent
-            # to the SDK. Roll back; nothing in this chunk was committed.
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            for idx, _req in accepted:
-                outcomes[idx] = BatchSubmitOutcome(
-                    request_index=idx,
-                    status="rejected",
-                    error_code="BATCH_PERSIST_FAILED",
-                    error_message=str(exc),
-                )
-            should_continue = False
-            continue
-        conn.commit()
-
-        # --- SDK call: ONE call for the whole chunk. --------------------
-        try:
-            legacy_results = client.place_limit_orders_batch([envelope for *_rest, envelope in persisted])
-        except Exception as exc:
-            ack_time = _now()
-            from src.state.venue_command_repo import append_event
-
-            for idx, _req, command_id, idem_value, _envelope in persisted:
-                try:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                        occurred_at=ack_time,
-                        payload={
-                            "reason": "post_submit_exception_possible_side_effect",
-                            "exception_type": type(exc).__name__,
-                            "exception_message": str(exc),
-                            "idempotency_key": idem_value,
-                            "batch": True,
-                        },
-                    )
-                except Exception:
-                    pass
-                outcomes[idx] = BatchSubmitOutcome(
-                    request_index=idx,
-                    status="unknown_side_effect",
-                    command_id=command_id,
-                    idempotency_key=idem_value,
-                    error_code="V2_BATCH_SUBMIT_EXCEPTION",
-                    error_message=str(exc),
-                )
-            conn.commit()
-            should_continue = False
-            continue
-
-        # --- ack phase: one event per order, from the ONE response. ----
-        ack_time = _now()
-        from src.state.venue_command_repo import append_event
-
-        for (idx, _req, command_id, idem_value, _envelope), legacy_result in zip(persisted, legacy_results):
-            success = bool((legacy_result or {}).get("success"))
-            error_code = (legacy_result or {}).get("errorCode")
-            error_message = (legacy_result or {}).get("errorMessage")
-            order_id = (legacy_result or {}).get("orderID")
-            if success:
-                submit_status = "accepted"
-            elif error_code == "BATCH_RESPONSE_UNMAPPED":
-                # Stable signal set verbatim by
-                # polymarket_v2_adapter._unmapped_submit_result -- the
-                # fail-closed mapping branch (ruling 1(c)), distinct from an
-                # ordinary deterministic rejection.
-                submit_status = "unmapped"
-            else:
-                submit_status = "rejected"
-            event_type = _SUBMIT_STATUS_TO_EVENT[submit_status]
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type=event_type,
-                occurred_at=ack_time,
-                payload={
-                    "order_id": order_id,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                    "batch": True,
-                },
-            )
-            outcomes[idx] = BatchSubmitOutcome(
-                request_index=idx,
-                status=_SUBMIT_STATUS_TO_OUTCOME[submit_status],
-                command_id=command_id,
-                idempotency_key=idem_value,
-                order_id=order_id,
-                error_code=error_code,
-                error_message=error_message,
-            )
-        conn.commit()
-
-    return [o for o in outcomes if o is not None]
-
-
 @dataclass(frozen=True)
 class BatchCancelOutcome:
     request_index: int
@@ -407,7 +131,8 @@ def cancel_commands_batch(
     venue_order_id) is skipped with status "not_requestable" WITHOUT
     blocking the rest of its chunk. Only an ambiguous outcome (the SDK
     call itself raising, a CutoverPending block, or rate-budget denial)
-    halts later chunks, mirroring submit_orders_batch.
+    halts later chunks (the module docstring's shared halt-on-ambiguous
+    design).
     """
     from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
     from src.control.cutover_guard import CutoverPending

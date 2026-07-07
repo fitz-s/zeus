@@ -536,21 +536,6 @@ class RedecisionEngine:
                 ),
             )
 
-        # Gate 4: family rank reversed — abort this submit, defer to full re-rank
-        # (§5 AbortOrSwitchOnlyAfterFullRerank). The engine NEVER switches inline.
-        if inputs.family_rank_reversed:
-            return SubmitRecaptureDecision(
-                state=CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED,
-                may_submit=False,
-                reversal_reason=ReversalReason.FAMILY_RANK,
-                recaptured_all_in_cost=all_in_cost,
-                recaptured_edge_lcb=edge_lcb,
-                detail=(
-                    "family rank reversed at recapture; abort and defer to full "
-                    "re-rank (no inline switch)"
-                ),
-            )
-
         # All gates passed: the candidate remains primary with positive utility.
         # Record price-move provenance so settlement attribution can measure whether
         # entries that proceeded despite an adverse recapture (maker rested at the

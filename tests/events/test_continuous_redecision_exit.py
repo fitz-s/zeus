@@ -11,8 +11,11 @@ These pin the ANTI-TWITCH invariant as a cross-module property, not a single fun
   - A quote priced off a dead book (stale) is pulled regardless of belief (it's not a belief move,
     it's a "this order's price is meaningless now" cancel — re-decide next cycle on fresh price).
 
-RED until §4.5 (screen_reprice + stale cancel) and §4.6 (CI-separation, EVIDENCE_UNAVAILABLE,
-screen_exit_cancel, select_exit_order_mode) land in continuous_redecision.
+§4.5 (screen_reprice + stale cancel) and §4.6 6b (select_exit_order_mode) are LIVE and covered
+below. §4.6's CI-separation / EVIDENCE_UNAVAILABLE / screen_exit_cancel exit-discriminator
+hardening never landed — screen_exit/screen_exit_cancel were deleted as dead code in W3 (#133)
+before those tests could go green; that permanently-skipped coverage was removed in the
+gate-stack simplification (Phase 1, 2026-07-06) rather than carried forward indefinitely.
 """
 from __future__ import annotations
 
@@ -23,20 +26,6 @@ import pytest
 cr = pytest.importorskip(
     "src.events.continuous_redecision",
     reason="continuous_redecision module not yet authored — relationship contract is RED",
-)
-
-# W3 (#133) removed ONLY screen_exit / screen_exit_cancel from
-# continuous_redecision (zero live callers). screen_reprice and
-# select_exit_order_mode were NOT removed — they still exist. Scope the skip to
-# JUST the tests that call the deleted exit-screen API, so the reprice / stale-
-# quote-cancel / exit-order-mode coverage in this same module keeps running
-# (a module-level skipif would silently drop that live-API coverage too —
-# review 2026-06-05). Skip transparently (NOT a silent pass) instead of failing
-# on AttributeError.
-_skip_deleted_exit_api = pytest.mark.skipif(
-    not hasattr(cr, "screen_exit"),
-    reason="screen_exit/screen_exit_cancel deleted in W3 (#133); these exit-screen "
-    "tests reference removed API — rewrite to new exit path pending",
 )
 
 
@@ -142,134 +131,6 @@ def test_belief_improving_does_not_pull_order():
         belief_reprice_delta=0.03,
     )
     assert decision is None, "favorable belief move must not trigger a WORSENING cancel"
-
-
-# ===========================================================================
-# §4.6 — Exit discriminator hardening (Dimension 6) + EVIDENCE_UNAVAILABLE
-# ===========================================================================
-
-# --- CI-separation: exit on separated evidence, not a single noisy snapshot -------------------
-@_skip_deleted_exit_api
-def test_exit_ci_separated_reversal_exits():
-    """SD-7: exit fires when the new belief's CI EXCLUDES the entry belief (separated evidence).
-    Entry YES-belief 0.90 [0.86, 0.94]; current YES-belief 0.70 [0.66, 0.74] — the CIs are disjoint
-    (0.74 < 0.86) → CI-separated reversal → EXIT, even though Δ0.20 alone would already pass 0.15."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
-    decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-        entry_ci=(0.86, 0.94), current_ci=(0.66, 0.74),
-    )
-    assert decision is not None
-    assert decision.reason in {"BELIEF_EDGE_REVERSAL", "CI_SEPARATED_REVERSAL"}
-
-
-@_skip_deleted_exit_api
-def test_exit_sub_ci_noisy_reversal_holds():
-    """A large POINT move (Δ0.20, would pass the flat 0.15) but the current CI still OVERLAPS the
-    entry CI (wide/noisy snapshot) → HOLD. CI-separation is STRICTER than the flat threshold: a
-    single noisy snapshot must not exit. This is the core SD-7 hardening."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
-    decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-        entry_ci=(0.80, 1.00),       # entry CI is wide
-        current_ci=(0.55, 0.92),     # current CI overlaps entry (0.92 > 0.80) → NOT separated
-    )
-    assert decision is None, "a point move whose CI still overlaps entry must NOT exit (noisy snapshot)"
-
-
-@_skip_deleted_exit_api
-def test_exit_flat_floor_fallback_when_no_ci():
-    """Back-compat: when CI inputs are unavailable, fall back to the flat reversal_belief_delta floor
-    (the pre-hardening behavior). Δ0.30 ≥ 0.15 → EXIT; Δ0.04 < 0.15 → HOLD."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_yes_belief(conn, p_posterior_yes=0.60, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
-    exited = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-    )
-    assert exited is not None, "flat-floor fallback: Δ0.30 ≥ 0.15 must still exit when no CI given"
-
-    conn2 = _mem_world()
-    _cache_yes_belief(conn2, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_yes_belief(conn2, p_posterior_yes=0.86, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
-    held = cr.screen_exit(
-        conn2, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-    )
-    assert held is None, "flat-floor fallback: Δ0.04 < 0.15 must hold"
-
-
-# --- EVIDENCE_UNAVAILABLE: degraded day0/obs math → third state -------------------------------
-@_skip_deleted_exit_api
-def test_exit_evidence_unavailable_third_state():
-    """SD-7 / plan v2.B: when the belief is UNAVAILABLE (degraded day0 absorbing-mask / obs math —
-    belief can't be computed, distinct from belief-reversed), screen_exit returns a THIRD state
-    EVIDENCE_UNAVAILABLE → flag for the 守护 heartbeat. Do NOT exit on price, do NOT blindly hold."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-        belief_available=False,   # day0 math degraded → belief is unavailable, NOT reversed
-    )
-    assert decision is not None, "degraded belief must NOT silently hold (None) — it is a first-class state"
-    assert decision.reason == "EVIDENCE_UNAVAILABLE"
-    assert getattr(decision, "side", None) == "buy_yes"
-
-
-@_skip_deleted_exit_api
-def test_exit_evidence_unavailable_is_not_an_exit_on_price():
-    """EVIDENCE_UNAVAILABLE must be distinguishable from an actual EXIT so the caller does NOT route
-    it through the exit-submit path (it's a heartbeat flag, not a sell)."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15, belief_available=False,
-    )
-    assert decision.reason == "EVIDENCE_UNAVAILABLE"
-    assert decision.reason != "BELIEF_EDGE_REVERSAL"
-    assert decision.reason != "CI_SEPARATED_REVERSAL"
-
-
-# --- Exit re-reversal before fill → CANCEL pending exit (symmetric anti-twitch) ----------------
-@_skip_deleted_exit_api
-def test_exit_re_reversal_cancels_pending_exit():
-    """Symmetric anti-twitch: a pending exit was placed on a CI-separated reversal; before it fills,
-    the belief RE-reverses back (current CI re-OVERLAPS the entry CI) → the reversal was noise →
-    CANCEL the pending exit."""
-    conn = _mem_world()
-    # Latest belief has recovered back toward entry (YES-belief 0.88, CI overlapping entry).
-    _cache_yes_belief(conn, p_posterior_yes=0.88, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
-    decision = cr.screen_exit_cancel(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-        entry_ci=(0.86, 0.94), current_ci=(0.84, 0.92),  # re-overlaps entry → noise
-    )
-    assert decision is not None
-    assert decision.action == "CANCEL_EXIT"
-    assert decision.reason == "EXIT_RE_REVERSAL_NOISE"
-
-
-@_skip_deleted_exit_api
-def test_exit_re_reversal_does_not_cancel_when_still_separated():
-    """If the belief is STILL CI-separated from entry (reversal sustained), the pending exit must NOT
-    be cancelled — let it fill. Cancel only when the reversal proved to be noise."""
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
-    decision = cr.screen_exit_cancel(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
-        entry_posterior=0.90, reversal_belief_delta=0.15,
-        entry_ci=(0.86, 0.94), current_ci=(0.66, 0.74),  # still separated → reversal sustained
-    )
-    assert decision is None, "a sustained (still-separated) reversal must NOT cancel the pending exit"
 
 
 # ===========================================================================
