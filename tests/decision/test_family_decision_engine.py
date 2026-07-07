@@ -1260,8 +1260,17 @@ def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
     assert engine._direction_admitted(nonmodal_yes) is True
 
 
-def test_day0_finite_boundary_yes_keeps_remaining_day_q_lcb(monkeypatch):
-    """Day0 finite-bin YES uses remaining-window qLCB, not a hard-fact override."""
+def test_day0_finite_boundary_yes_routes_through_qlcb_reliability_guard(monkeypatch):
+    """Day0 finite-bin YES uses remaining-window qLCB, not a hard-fact override --
+
+    and (fix for the Wellington/Manila buy_yes point-bin losses) that remaining-window
+    candidate is NOT a hard fact, so it is routed through the SAME empirical q_lcb OOF
+    reliability guard every non-Day0 candidate passes through, instead of an unchecked
+    raw-model pass-through. With no OOF artifact present (this suite's autouse fixture
+    keeps the artifact path absent) the guard is INERT -- the numeric economics are
+    unchanged from the pre-guard remaining-day qLCB, but the provenance now reflects the
+    real guard verdict (``INERT``), not the Day0-only hard-fact stamp.
+    """
 
     case = _case()
     space = _outcome_space(case)
@@ -1284,13 +1293,17 @@ def test_day0_finite_boundary_yes_keeps_remaining_day_q_lcb(monkeypatch):
     assert pd.day0.active is True
     assert forecast_bin_id(jq) == "b25"
 
-    def _offline_qlcb_guard_must_not_run(**_kwargs):
-        raise AssertionError("forecast OOF q_lcb guard must not run for active Day0")
+    calls: list[str] = []
+    real_apply_qlcb_guard = fde_mod._apply_qlcb_guard
+
+    def _spy_apply_qlcb_guard(**kwargs):
+        calls.append(kwargs["bin_position"])
+        return real_apply_qlcb_guard(**kwargs)
 
     def _selection_guard_must_not_run(**_kwargs):
         raise AssertionError("forecast selection calibrator must not run for active Day0")
 
-    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _offline_qlcb_guard_must_not_run)
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _spy_apply_qlcb_guard)
     monkeypatch.setattr(
         fde_mod, "apply_selection_calibrator", _selection_guard_must_not_run
     )
@@ -1351,15 +1364,241 @@ def test_day0_finite_boundary_yes_keeps_remaining_day_q_lcb(monkeypatch):
     assert decision.selected.candidate_id == selected_decision.economics.candidate_id
     assert selected_decision.route.side == "YES"
     assert selected_decision.route.bin_id == "b25"
-    assert selected_decision.q_lcb_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
-    assert selected_decision.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert "modal" in calls, "the b25 YES candidate must reach the real q_lcb OOF guard"
+    assert selected_decision.q_lcb_guard_basis == "INERT", (
+        "b25 YES is not hard-fact-certified -- it must show the real (INERT, no "
+        "artifact) OOF reliability guard verdict, not the Day0 hard-fact stamp"
+    )
+    assert selected_decision.q_lcb_guard_abstained is False
+    assert selected_decision.selection_guard_basis == "INERT"
+    assert selected_decision.selection_guard_abstained is False
     assert selected_decision.selection_guard_n == 0
-    assert selected_decision.selection_guard_cell_key == "day0_remaining_day_q_lcb"
     assert selected_decision.selection_guard_q_safe == pytest.approx(
         selected_decision.economics.payoff_q_lcb
     )
     assert 0.0 < selected_decision.economics.payoff_q_lcb < 1.0
     assert selected_decision.economics.edge_lcb > 0.0
+
+
+def test_day0_non_hard_fact_boundary_yes_deflated_by_miscalibrated_qlcb_cell(monkeypatch):
+    """RED-on-revert regression for the Wellington/Manila buy_yes point-bin losses.
+
+    Wellington (position ``142ee1d2-688``) and Manila (``5e36a294-907``) were both
+    Day0-active buy_yes POINT bins where the observed running extreme sat inside (not
+    beyond) the bin -- ``is_hard_fact=False`` -- yet the family-scoped Day0 dispatch
+    skipped ``_apply_qlcb_reliability_guard`` entirely and kept the raw
+    FORECAST_BOOTSTRAP q_lcb (~0.96, ``q_lcb_guard_basis`` stamped as the Day0
+    remaining-day basis, ``abstained=False``) with zero empirical check. This
+    reproduces the same shape with the proven Tokyo b25 harness (a point bin the
+    observed extreme sits exactly on the boundary of, without foreclosing it) and
+    proves that once the fix routes it through ``_apply_qlcb_reliability_guard``, an
+    injected miscalibrated OOF cell can now reach -- and kill -- the trade.
+
+    Before the fix: the injected miscalibrated table is never consulted for a Day0
+    candidate, so b25 YES keeps ``q_lcb_guard_basis == DAY0_REMAINING_DAY_Q_LCB`` and a
+    positive edge -> RED (this assertion fails on unfixed code).
+    After the fix: b25 YES is routed through the real OOF guard, which finds the
+    injected cell and deflates its served q_lcb far below cost -> GREEN.
+    """
+
+    case = _case()
+    space = _outcome_space(case)
+    obs = Day0ObservationState(
+        observed=True,
+        station_id=STATION,
+        source="wu_icao",
+        samples_count=8,
+        latest_observed_at_utc=_CAPTURED,
+        observed_high_native=25.0,
+        observed_low_native=None,
+        observed_extreme_native=25.0,
+        raw_observation_hash="day0-observed-boundary",
+    )
+    model_set = _model_set([24.9, 25.0, 25.1], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, obs, has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    assert pd.day0.active is True
+    assert forecast_bin_id(jq) == "b25"
+
+    # A deliberately miscalibrated OOF table: every high|L1 YES cell (any q_lcb bucket,
+    # either bin position, either precision class) has a deep (n=500 >= N_MIN) but very
+    # LOW realized hit-rate (0.05). If `_apply_qlcb_guard` is honestly consulted for the
+    # b25 YES candidate this must deflate its served q_lcb far below the route's cost,
+    # regardless of which exact bucket the candidate's raw q_lcb lands in.
+    bad_table: dict[str, tuple[int, float]] = {}
+    for pos in ("modal", "nonmodal"):
+        for precision in ("fine_nest", "coarse_global"):
+            for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                bad_table[f"high|L1|YES|{pos}|qb{qb}|{precision}"] = (500, 0.05)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", bad_table)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+
+    def factory(bin_id: str) -> MarketBook:
+        fair = min(max(jq.q_by_bin_id.get(bin_id, 0.0), 0.02), 0.98)
+        ya = _tick(max(fair * 0.55, 0.002))
+        yb = _tick(max(ya - 0.01, 0.001))
+        return _market_book(
+            bin_id,
+            yes_bid=yb,
+            yes_ask=ya,
+            no_bid=_tick(1 - ya),
+            no_ask=_tick(1 - yb),
+            size=5000.0,
+        )
+
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    route_set = build_negrisk_route_set(
+        fb, shares=Decimal("100"), enable_negrisk_routes=False
+    )
+    sizing: dict[tuple[str, str], NativeSideCandidate] = {}
+    for b in space.bins:
+        if not b.executable:
+            continue
+        route = route_set.direct_yes.get(b.bin_id)
+        if route is None or not route.executable:
+            continue
+        q_point = float(jq.q_by_bin_id[b.bin_id])
+        sizing[(b.bin_id, "YES")] = _yes_sizing(
+            space,
+            b.bin_id,
+            q_point=q_point,
+            q_lcb=max(q_point - 0.03, 0.0),
+            price=str(round(float(route.avg_cost.value), 3)),
+        )
+
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=obs, family_book=fb)
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    b25_yes = next(
+        d
+        for d in decision.candidate_decisions
+        if d.route.side == "YES" and d.route.bin_id == "b25"
+    )
+    assert b25_yes.q_lcb_guard_basis != fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS, (
+        "b25 YES is not hard-fact-certified (the observed extreme merely touches its "
+        "boundary, it does not foreclose it) -- it must not keep the raw Day0 "
+        "remaining-day passthrough"
+    )
+    assert b25_yes.q_lcb_guard_basis == "OOF_WILSON_95", (
+        "the injected miscalibrated OOF cell must be the one actually consulted"
+    )
+    assert b25_yes.economics.edge_lcb <= 0.0, (
+        "a miscalibrated OOF cell must deflate the raw q_lcb below the route's cost -- "
+        "b25 YES must not keep a positive edge from its raw, unchecked q_lcb"
+    )
+    assert (
+        decision.selected is None
+        or decision.selected.candidate_id != b25_yes.economics.candidate_id
+    ), "b25 YES must not be selected once its edge is honestly deflated by the OOF guard"
+
+
+def test_day0_hard_fact_certain_candidate_still_skips_qlcb_reliability_guard(monkeypatch):
+    """PRESERVE: a genuinely-foreclosed Day0 candidate keeps its hard-fact grant.
+
+    A running HIGH max that has already passed a finite bin's upper edge makes NO on
+    that bin a monotone hard fact (``is_hard_fact=True``, ``yes_hard=0.0`` ->
+    ``q_safe=1.0`` for NO) -- the same monotone-foreclosure family as an
+    already-entered open shoulder. That grant must NOT be routed through the q_lcb
+    empirical OOF reliability guard; it earned the hard-fact exemption and keeps the
+    current recompute path unchanged.
+    """
+
+    case = _case()
+    space = _outcome_space(case)
+    obs = Day0ObservationState(
+        observed=True,
+        station_id=STATION,
+        source="wu_icao",
+        samples_count=8,
+        latest_observed_at_utc=_CAPTURED,
+        # Already PAST b24's upper edge (24.0): a running HIGH max can only rise, so
+        # NO on b24 ("exactly 24C") is a monotone hard fact, not a remaining-day guess.
+        observed_high_native=25.0,
+        observed_low_native=None,
+        observed_extreme_native=25.0,
+        raw_observation_hash="day0-observed-already-passed",
+    )
+    model_set = _model_set([24.9, 25.0, 25.1], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, obs, has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    band = build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05)
+    assert pd.day0.active is True
+    assert forecast_bin_id(jq) == "b25"
+
+    route = _hand_route(space, side="NO", bin_id="b24", cost=0.40)
+    candidate = CandidateDecision(
+        route=route,
+        economics=CandidateEconomics(
+            candidate_id=route.candidate_id,
+            point_ev=0.30,
+            edge_lcb=0.20,
+            delta_u_at_min=0.01,
+            optimal_stake_usd=Decimal("50"),
+            optimal_delta_u=0.05,
+            q_dot_payoff=0.60,
+            cost=route.route_cost.avg_cost,
+            route_id=route.route_cost.route_id,
+            payoff_q_lcb=0.60,
+        ),
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.20,
+    )
+
+    def _guard_must_not_run(**_kwargs):
+        raise AssertionError(
+            "the q_lcb reliability guard must not run for a hard-fact-certified "
+            "Day0 candidate"
+        )
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _guard_must_not_run)
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(model_set),
+        day0_reader=_Day0Reader(obs),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    guarded = engine._apply_day0_observed_boundary_guard(
+        scored=(candidate,),
+        case=case,
+        predictive=pd,
+        omega=space,
+        joint_q=jq,
+        band=band,
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=exposure,
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(space, "b24", q_point=0.999, q_lcb=0.999, price="0.40"),
+        },
+        max_stake_usd=Decimal("1000"),
+    )
+
+    result = guarded[0]
+    assert result.q_lcb_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert result.q_lcb_guard_abstained is False
+    assert result.economics.payoff_q_lcb == pytest.approx(1.0)
+    assert result.economics.edge_lcb > 0.0
+    assert result.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
+    assert result.selection_guard_abstained is False
+    assert result.selection_guard_q_safe == pytest.approx(1.0)
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
