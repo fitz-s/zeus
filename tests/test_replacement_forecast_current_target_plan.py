@@ -326,6 +326,130 @@ def test_current_target_plan_does_not_seed_when_fusion_current_values_are_missin
     assert download_plan["seedable_targets"] == []
 
 
+def test_current_target_plan_seeds_when_openmeteo_cycle_outruns_lagging_baseline(tmp_path) -> None:
+    """Regression: baseline (ECMWF-Open-Data, 00Z/12Z cadence) can lag behind a
+    finer-cadence (00/06/12/18Z) openmeteo/BAYES_PRECISION_FUSION anchor manifest. The
+    fusion current-value ceiling must be checked against the OPENMETEO MANIFEST'S OWN
+    resolved cycle, not the baseline's cycle -- otherwise a scope with real captured
+    fusion rows at the newer openmeteo cycle is wrongly blocked (count 0 ->
+    missing_fusion_current_values -> can_seed False) even though the data is genuinely
+    servable at the manifest's own resolved cycle."""
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        # London's OpenMeteo anchor manifest resolves to an 18Z cycle -- newer than the
+        # baseline's 06Z source_run cycle (baseline has not published its next cycle yet).
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "source_cycle_time": "2026-06-07T18:00:00+00:00",
+                        "source_run_id": "openmeteo-18z-London",
+                    }
+                ),
+            ),
+        )
+        # The captured fusion current-value row exists ONLY at the newer 18Z cycle -- the
+        # baseline's 06Z cycle (the pre-fix ceiling) has nothing at or before it.
+        conn.execute("DELETE FROM raw_model_forecasts WHERE city = 'London'")
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                city, metric, target_date, model, forecast_value_c, lead_days,
+                source_cycle_time, captured_at, endpoint
+            ) VALUES ('London', 'high', '2026-06-09', 'gfs_global', 21.0, 0,
+                '2026-06-07T18:00:00+00:00',
+                '2026-06-07T19:00:00+00:00',
+                'single_runs')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 19, 30, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.baseline_source_cycle_time == "2026-06-07T06:00:00+00:00"
+    assert london.openmeteo_manifest_count == 1
+    assert london.fusion_current_value_count > 0
+    assert london.missing_fusion_current_values is False
+    assert london.can_seed is True
+
+
+def test_current_target_plan_still_blocks_when_no_row_at_openmeteo_resolved_cycle(tmp_path) -> None:
+    """Invariant: even with the manifest's-own-cycle fix, a scope with NO captured fusion
+    row at (or before) the openmeteo manifest's resolved cycle must still be blocked. This
+    guards against the fix over-admitting -- e.g. degenerating into an unconditional pass
+    -- by proving the ceiling semantics still exclude a row from a cycle strictly newer
+    than the manifest's own resolved cycle."""
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "source_cycle_time": "2026-06-07T18:00:00+00:00",
+                        "source_run_id": "openmeteo-18z-London",
+                    }
+                ),
+            ),
+        )
+        # Only a row from the NEXT cycle after the manifest's resolved 18Z cycle exists --
+        # strictly newer than the ceiling under either the old (baseline) or new (manifest)
+        # resolved cycle, so it must not be servable under the ceiling semantics either way.
+        conn.execute("DELETE FROM raw_model_forecasts WHERE city = 'London'")
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                city, metric, target_date, model, forecast_value_c, lead_days,
+                source_cycle_time, captured_at, endpoint
+            ) VALUES ('London', 'high', '2026-06-09', 'gfs_global', 21.0, 0,
+                '2026-06-08T00:00:00+00:00',
+                '2026-06-08T01:00:00+00:00',
+                'single_runs')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 19, 30, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 1
+    assert london.fusion_current_value_count == 0
+    assert london.missing_fusion_current_values is True
+    assert london.can_seed is False
+
+
 def test_current_target_plan_can_require_openmeteo_manifest_cycle(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
