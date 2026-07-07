@@ -36,11 +36,6 @@ def _read_replay_source() -> str:
     return p.read_text(encoding="utf-8")
 
 
-def _read_cycle_runtime_source() -> str:
-    p = PROJECT_ROOT / "src" / "engine" / "cycle_runtime.py"
-    return p.read_text(encoding="utf-8")
-
-
 def _read_store_source() -> str:
     p = PROJECT_ROOT / "src" / "calibration" / "store.py"
     return p.read_text(encoding="utf-8")
@@ -472,17 +467,13 @@ class TestRCUReplayRoundFnAllowlist:
 
 
 class TestRCVSavepointPattern:
-    """R-CV.1/2: SAVEPOINT/RELEASE/ROLLBACK in cycle_runtime.py execute_discovery_phase."""
-
-    def test_r_cv_1_ast_savepoint_pattern_present(self):
-        """R-CV.1: AST confirms SAVEPOINT/RELEASE/ROLLBACK pattern in cycle_runtime.py."""
-        source = _read_cycle_runtime_source()
-
-        # Check for SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT strings
-        assert "SAVEPOINT" in source, "R-CV.1: 'SAVEPOINT' not found in cycle_runtime.py"
-        assert "RELEASE SAVEPOINT" in source, "R-CV.1: 'RELEASE SAVEPOINT' not found in cycle_runtime.py"
-        assert "ROLLBACK TO SAVEPOINT" in source, "R-CV.1: 'ROLLBACK TO SAVEPOINT' not found in cycle_runtime.py"
-        assert "sp_candidate_" in source, "R-CV.1: 'sp_candidate_' SAVEPOINT prefix not found"
+    """R-CV.2: SAVEPOINT/RELEASE/ROLLBACK pattern (legacy-pipeline retirement,
+    Phase 2, 2026-07-06: R-CV.1's AST source-text check against
+    cycle_runtime.py::execute_discovery_phase was removed here — that
+    function, and the SAVEPOINT pattern it used for atomic trade-entry
+    writes, is deleted. R-CV.2 below reproduces the SAVEPOINT/ROLLBACK
+    invariant standalone against an in-memory DB and needs no change.
+    """
 
     def test_r_cv_2_savepoint_rollback_on_exception(self):
         """R-CV.2: monkeypatch log_execution_report raises → log_trade_entry rolled back (no orphan)."""

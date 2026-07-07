@@ -568,37 +568,6 @@ def _execute_monitoring_phase(
     )
 
 
-def _execute_discovery_phase(
-    conn,
-    clob,
-    portfolio,
-    artifact: CycleArtifact,
-    tracker,
-    limits,
-    mode,
-    summary: dict,
-    entry_bankroll: float,
-    decision_time: datetime,
-    *,
-    env: str,
-    edli_event_context: dict | None = None,
-):
-    return _runtime.execute_discovery_phase(
-        conn,
-        clob,
-        portfolio,
-        artifact,
-        tracker,
-        limits,
-        mode,
-        summary,
-        entry_bankroll,
-        decision_time,
-        env=env,
-        deps=sys.modules[__name__],
-    )
-
-
 def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) -> dict:
     decision_time = _utcnow()
     summary = {
@@ -1085,27 +1054,15 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         exposure_gate_hit=exposure_gate_hit,
         entries_paused=entries_paused,
     ):
-        try:
-            p_dirty, t_dirty = _execute_discovery_phase(
-                conn,
-                clob,
-                portfolio,
-                artifact,
-                tracker,
-                limits,
-                mode,
-                summary,
-                entry_bankroll,
-                decision_time,
-                env=get_mode(),
-                edli_event_context=edli_event_context,
-            )
-            portfolio_dirty = portfolio_dirty or p_dirty
-            tracker_dirty = tracker_dirty or t_dirty
-        except Exception as exc:
-            # Gate-purge 2026-05-04: auto-pause streak machinery retired.
-            # Log the full traceback for diagnostics; daemon does NOT self-pause.
-            logger.error("Entry path raised: %s", exc, exc_info=True)
+        # Legacy discovery phase deleted 2026-07-06 (legacy-pipeline retirement,
+        # Phase 2): the EDLI event-reactor path is the sole live entry mechanism
+        # now (see src/main.py `_edli_event_reactor_cycle`). This branch is
+        # intentionally a no-op — `_discovery_gates_allow_entries()` above and
+        # the `entries_blocked_reason`/`entries_paused` bookkeeping in the else
+        # branch below remain the tested single-authority surface for
+        # legacy_cron-mode entry-gating parity, but there is no discovery
+        # mechanism left to invoke when the gate is clear.
+        pass
     else:
         if entries_paused:
             summary["entries_paused"] = True

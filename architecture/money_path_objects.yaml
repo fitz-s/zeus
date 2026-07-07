@@ -455,7 +455,6 @@ state_machines:
       - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
     invariant_tests:
       - tests/test_inv_family_exclusive_sizing.py
-      - tests/test_inv_family_exclusive_cross_module_integration.py
       - tests/test_executor.py
       - tests/money_path/test_edli_live_readiness.py
   business_plane_health:

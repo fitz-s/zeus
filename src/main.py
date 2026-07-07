@@ -1,7 +1,10 @@
 """Zeus main entry point — trading daemon only (Phase 3).
 
-All discovery modes go through the same CycleRunner with different DiscoveryMode values.
-The lifecycle is identical for all modes — only scanner parameters differ.
+Live entries run through the EDLI event-reactor path (`_edli_event_reactor_cycle`)
+only. The legacy `legacy_cron`/DiscoveryMode scheduler path and its manual
+entrypoints (`_run_mode`, `run_single_cycle`/`--once`) were retired 2026-07-06
+(legacy discovery pipeline deletion) — see src/engine/cycle_runtime.py history
+for the deleted `execute_discovery_phase`.
 
 Phase 3: K2 ingest jobs removed. src/ingest_main.py owns all K2 ticks,
 etl_recalibrate, ecmwf_open_data, automation_analysis, hole_scanner,
@@ -56,7 +59,6 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 
 from src.config import cities_by_name, get_mode, settings
 from src.contracts.canonical_lifecycle import VenueOrderStatus
-from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.runtime import bankroll_provider
 from src.state.db import (
@@ -356,13 +358,6 @@ def _utc_run_time_after(seconds: float) -> datetime:
     """Return a UTC first-run time for APScheduler interval jobs."""
 
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
-
-
-def _day0_first_delay_seconds(discovery: dict) -> float:
-    """Stagger Day0 away from opening_hunt so equal-interval jobs do not race."""
-
-    interval_seconds = float(discovery["day0_interval_min"]) * 60.0
-    return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
@@ -1267,90 +1262,6 @@ def _scheduler_job(job_name: str):
     return _decorator
 
 
-@_scheduler_job("run_mode")
-def _run_mode(mode: DiscoveryMode):
-    """Wrapper with error handling and cycle lock for scheduler.
-
-    Dual-signal observability: this wrapper writes to ``status_summary.json``
-    via status_summary.write_status (the legacy mode-specific channel) AND
-    the ``@_scheduler_job`` decorator independently writes to
-    ``scheduler_jobs_health.json`` (B047 uniform channel). Non-conflicting.
-    """
-    acquired = _cycle_lock.acquire(blocking=False)
-    if not acquired:
-        logger.warning("%s skipped: another cycle is still running", mode.value)
-        _write_scheduler_health(
-            f"run_mode:{mode.value}",
-            failed=False,
-            skipped=True,
-            skip_reason="cycle_lock_busy",
-        )
-        return
-    try:
-        from src.engine.cycle_runner import run_cycle
-
-        _write_scheduler_health(
-            f"run_mode:{mode.value}",
-            failed=False,
-            started=True,
-        )
-        summary = run_cycle(mode)
-        logger.info("%s: %s", mode.value, summary)
-        _write_scheduler_health(
-            f"run_mode:{mode.value}",
-            failed=False,
-            extra=_run_mode_business_liveness(mode, summary),
-        )
-    except Exception as e:
-        logger.error("%s failed: %s", mode.value, e, exc_info=True)
-        _write_scheduler_health(
-            f"run_mode:{mode.value}",
-            failed=True,
-            reason=str(e),
-        )
-        try:
-            from src.observability.status_summary import write_status
-
-            write_status(
-                {
-                    "mode": mode.value,
-                    "failed": True,
-                    "failure_reason": str(e),
-                }
-            )
-        except Exception:
-            logger.debug("failed to write error status for %s", mode.value, exc_info=True)
-    finally:
-        _cycle_lock.release()
-
-
-def _run_mode_business_liveness(mode: DiscoveryMode, summary: object) -> dict:
-    """Extract mode-specific business-plane counters from a cycle summary."""
-
-    if not isinstance(summary, dict):
-        return {
-            "last_completed_at": datetime.now(timezone.utc).isoformat(),
-            "last_mode": mode.value,
-        }
-    frontier = summary.get("money_path_frontier")
-    if not isinstance(frontier, dict):
-        frontier = {}
-    return {
-        "last_completed_at": datetime.now(timezone.utc).isoformat(),
-        "last_mode": mode.value,
-        "last_candidates": int(summary.get("candidates", 0) or 0),
-        "last_no_trades": int(summary.get("no_trades", 0) or 0),
-        "last_final_intent_built": int(summary.get("final_intents_built", 0) or 0),
-        "last_submit_attempts": int(summary.get("submit_attempts", 0) or 0),
-        "last_venue_acks": int(summary.get("venue_acks", 0) or 0),
-        "last_entry_orders_submitted": int(summary.get("entry_orders_submitted", 0) or 0),
-        "last_terminal_classification": str(
-            frontier.get("terminal_classification") or ""
-        ),
-    }
-
-
-
 
 
 
@@ -1557,16 +1468,6 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
             f"src/main.py OR remove the contract entry in "
             f"architecture/cascade_liveness_contract.yaml."
         )
-
-
-def run_single_cycle():
-    """Run one complete cycle of all modes. For testing, not production."""
-    logger.info("=== SINGLE CYCLE TEST ===")
-    for mode in DiscoveryMode:
-        logger.info("[%s]...", mode.value)
-        _run_mode(mode)
-    _harvester_cycle()
-    logger.info("=== SINGLE CYCLE COMPLETE ===")
 
 
 _heartbeat_fails = 0
@@ -10967,7 +10868,6 @@ def main():
 
         BlockingScheduler = _BlockingScheduler
     mode = get_mode()
-    once = "--once" in sys.argv
 
     # --validate-boot: read-only pre-restart smoke (W0-T3, 2026-06-03).
     # Runs EVERY boot guard (calibration pin shape, staleness, schema, registry)
@@ -11019,7 +10919,7 @@ def main():
         ),
     )
 
-    logger.info("Zeus starting in %s mode%s", mode, " (single cycle)" if once else "")
+    logger.info("Zeus starting in %s mode", mode)
 
     # PR-S6: capture deployment snapshot for freshness gate.
     # Must run early (before any blocking I/O) so uptime accounting is accurate.
@@ -11199,10 +11099,6 @@ def main():
     # never blocks scheduler startup. Fail-open; no on-chain side effect.
     _edli_boot_settlement_redeem_recovery()
 
-    if once:
-        run_single_cycle()
-        return
-
     # APScheduler loop mode.
     # P0 invariant: scheduler MUST run in UTC. Cron expressions like
     # ``hour=7,9,19,21`` for update_reaction_times_utc are written
@@ -11232,9 +11128,7 @@ def main():
             raise
 
     scheduler = BlockingScheduler(**scheduler_kwargs)
-    discovery = settings["discovery"]
 
-    # All modes use the SAME CycleRunner with different DiscoveryMode values
     # max_instances=1: prevent concurrent execution if previous cycle still running
     edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
@@ -11245,36 +11139,6 @@ def main():
     # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
     # is now an unconditional logged no-op (not applicable under single-truth).
     _assert_calibration_coverage_contract(edli_cfg)
-    if live_execution_mode == "legacy_cron":
-        scheduler.add_job(
-            lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
-            minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS),
-            max_instances=1, coalesce=True,
-        )
-        for time_str in discovery["update_reaction_times_utc"]:
-            h, m = time_str.split(":")
-            scheduler.add_job(
-                lambda: _run_mode(DiscoveryMode.UPDATE_REACTION), "cron",
-                hour=int(h), minute=int(m), id=f"update_reaction_{time_str}",
-                max_instances=1, coalesce=True,
-            )
-        scheduler.add_job(
-            lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
-            minutes=discovery["day0_interval_min"], id="day0_capture",
-            next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
-            max_instances=1, coalesce=True,
-        )
-        # imminent_open_capture: fires every 5 min to catch re-opened or D+1 markets
-        # in the 0-24h window that fall below opening_hunt's min_hours_to_resolution:24
-        # threshold. Fail-closed on stale data (same freshness gate as day0_capture).
-        scheduler.add_job(
-            lambda: _run_mode(DiscoveryMode.IMMINENT_OPEN_CAPTURE), "interval",
-            minutes=discovery.get("imminent_open_capture_interval_min", 5),
-            id="imminent_open_capture",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
-            max_instances=1, coalesce=True,
-        )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
         # W4.3 liveness analysis (2026-07-03, scan demotion packet): process_pending
         # (src/events/reactor.py:907) is the SOLE consumer of the opportunity_events queue —

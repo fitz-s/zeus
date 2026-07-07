@@ -450,11 +450,6 @@ class TestRunCycleFreshnessIntegration:
         from src.runtime import posture as _posture_mod
         _posture_mod._clear_cache()
         monkeypatch.setattr(_posture_mod, "read_runtime_posture", lambda: "NORMAL")
-        monkeypatch.setattr(
-            cr_module,
-            "_execute_discovery_phase",
-            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degraded freshness must block entries")),
-        )
 
         result = cr_module.run_cycle(DiscoveryMode.OPENING_HUNT)
 

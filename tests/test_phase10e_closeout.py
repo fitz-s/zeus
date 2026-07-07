@@ -349,36 +349,10 @@ def test_r_df_4_nc08_no_bare_temperature_threshold_comparisons():
     )
 
 
-def test_r_df_5_savepoint_integration_execute_discovery_phase():
-    """R-DF.5: SAVEPOINT integration — log_execution_report raising mid-transaction
-    causes log_trade_entry row to be rolled back.
-    """
-    import sqlite3
-    import types
-    from unittest.mock import patch
-
-    from src.state.db import init_schema
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-
-    # Verify the SAVEPOINT logic exists in cycle_runtime
-    cycle_runtime_py = PROJECT_ROOT / "src" / "engine" / "cycle_runtime.py"
-    if not cycle_runtime_py.exists():
-        pytest.skip("cycle_runtime.py not found")
-
-    source = cycle_runtime_py.read_text()
-    assert "SAVEPOINT" in source, (
-        "R-DF.5: cycle_runtime.py must use SAVEPOINT for atomic trade entry writes"
-    )
-    assert "ROLLBACK TO SAVEPOINT" in source, (
-        "R-DF.5: cycle_runtime.py must have ROLLBACK TO SAVEPOINT on failure path"
-    )
-    assert "log_trade_entry" in source, (
-        "R-DF.5: log_trade_entry must be within the SAVEPOINT guard"
-    )
-    conn.close()
+# Legacy-pipeline retirement (Phase 2, 2026-07-06): test_r_df_5_savepoint_integration_execute_discovery_phase
+# removed here. It statically checked cycle_runtime.py's source text for the
+# SAVEPOINT/ROLLBACK TO SAVEPOINT/log_trade_entry pattern that guarded atomic
+# trade-entry writes inside the now-deleted execute_discovery_phase.
 
 
 def test_r_df_6_dual_write_canonical_logs_warning_not_debug():
