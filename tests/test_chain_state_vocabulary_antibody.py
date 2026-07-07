@@ -91,6 +91,26 @@ def test_entry_authority_quarantined_round_trips_through_position():
     assert pos.chain_state == VenueVisibilityStatus.ENTRY_AUTHORITY_QUARANTINED
 
 
+def test_closed_exited_round_trips_through_position():
+    """Chain-mirror force-resolve terminal-close state must coerce.
+
+    Antibody for the 2026-07-04 P0b class: src.state.chain_mirror_reconciler
+    writes chain_state="closed_exited" as a force-resolve fold-to-VOIDED
+    terminal close (_apply_closed_exited_finding), but the value escaped the
+    ChainState enum and load_portfolio -> Position.__post_init__ ->
+    VenueVisibilityStatus(value) POISON-quarantined every affected row.
+    """
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="t-closed-exited", market_id="m", city="Hong Kong", cluster="HK",
+        target_date="2026-06-09", bin_label="b", direction="buy_no",
+        unit="C", temperature_metric="high",
+        chain_state="closed_exited",
+    )
+    assert pos.chain_state == VenueVisibilityStatus.CLOSED_EXITED
+
+
 def test_constant_mediated_chain_state_writers_are_declared_members():
     """The literal-only antibody above misses chain_state assigned via a named
     constant (e.g. `corrected.chain_state = SOME_TYPED_CHAIN_STATE`).

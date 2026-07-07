@@ -92,6 +92,13 @@ class ChainState(str, Enum):
     # (__post_init__ -> VenueVisibilityStatus(value)) sees them.
     CLOSED_REDEEMED = "closed_redeemed"
     CLOSED_WORTHLESS = "closed_worthless"
+    # Chain-mirror force-resolve terminal-close class (2026-07-04 P0b,
+    # src.state.chain_mirror_reconciler._apply_closed_exited_finding): held
+    # token absent across two consecutive mirror runs, market unresolved, no
+    # open orders — folds to VOIDED with chain_state="closed_exited" recording
+    # why. Writer-set MUST be a subset of this enum (same contract as
+    # CLOSED_REDEEMED/CLOSED_WORTHLESS above).
+    CLOSED_EXITED = "closed_exited"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.
