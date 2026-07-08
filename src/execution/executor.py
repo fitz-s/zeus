@@ -202,6 +202,9 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
 _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
+_ENTRY_REPRICE_CANCEL_REASONS = frozenset(
+    {"BOOK_MOVED", "CONFIRMED_VALUE_REFRESH", "FAMILY_OPTIMUM_SHIFT"}
+)
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -340,6 +343,42 @@ def _entry_terminal_command_has_no_fill_exposure(
     if state_text in {"CANCELLED", "EXPIRED"}:
         return _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
     return True
+
+
+def _entry_reprice_cancel_reason(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> str | None:
+    if not command_id or not _table_exists(conn, "venue_command_events"):
+        return None
+    order_column = "rowid"
+    if "sequence_no" in _table_column_names(conn, "venue_command_events"):
+        order_column = "sequence_no"
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type IN ('CANCEL_ACKED', 'CANCEL_REQUESTED')
+             ORDER BY {order_column} DESC
+             LIMIT 4
+            """,
+            (command_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        raw_payload = row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]
+        try:
+            payload = json.loads(str(raw_payload or "{}"))
+        except (TypeError, ValueError):
+            continue
+        reason = str(payload.get("cancel_reason") or "").strip().upper()
+        if reason in _ENTRY_REPRICE_CANCEL_REASONS:
+            return reason
+    return None
 
 
 def _pending_entry_terminal_no_fill_allows_entry(
@@ -1397,37 +1436,42 @@ def _entry_same_token_cooldown_component(
     ] | None = None
     for row in rows:
         if isinstance(row, sqlite3.Row):
-            command_id = str(row["command_id"])
-            position_id = str(row["position_id"])
-            state = str(row["state"])
-            created_at = row["created_at"]
-            updated_at = row["updated_at"]
+            row_command_id = str(row["command_id"])
+            row_position_id = str(row["position_id"])
+            row_state = str(row["state"])
+            row_created_at = row["created_at"]
+            row_updated_at = row["updated_at"]
             row_price = row["price"] if has_price_size else None
             row_size = row["size"] if has_price_size else None
         else:
-            command_id = str(row[0])
-            position_id = str(row[1])
-            state = str(row[2])
-            created_at = row[3]
-            updated_at = row[4]
+            row_command_id = str(row[0])
+            row_position_id = str(row[1])
+            row_state = str(row[2])
+            row_created_at = row[3]
+            row_updated_at = row[4]
             row_price = row[5] if has_price_size else None
             row_size = row[6] if has_price_size else None
         if _entry_terminal_command_has_no_fill_exposure(
             conn,
-            command_id=command_id,
-            state=state,
+            command_id=row_command_id,
+            state=row_state,
         ):
             if terminal_no_fill_row is None:
                 terminal_no_fill_row = (
-                    command_id,
-                    position_id,
-                    state,
-                    created_at,
-                    updated_at,
+                    row_command_id,
+                    row_position_id,
+                    row_state,
+                    row_created_at,
+                    row_updated_at,
                     row_price,
                     row_size,
                 )
             continue
+        command_id = row_command_id
+        position_id = row_position_id
+        state = row_state
+        created_at = row_created_at
+        updated_at = row_updated_at
         prior_price = row_price
         prior_size = row_size
         break
@@ -1467,12 +1511,79 @@ def _entry_same_token_cooldown_component(
         command_id=command_id,
         state=state,
     )
+    reprice_cancel_reason = (
+        _entry_reprice_cancel_reason(conn, command_id=command_id)
+        if terminal_no_fill
+        else None
+    )
     cooldown_seconds = (
         _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS
         if terminal_no_fill
         else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
     )
     remaining_seconds = cooldown_seconds - age_seconds
+    if terminal_no_fill and reprice_cancel_reason:
+        existing_price = _decimal_or_none(prior_price)
+        candidate_price = _decimal_or_none(limit_price)
+        if existing_price is None or candidate_price is None:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_reprice_evidence_missing",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+                "rest_pull_cancel_reason": reprice_cancel_reason,
+            }
+        reprice_delta = abs(candidate_price - existing_price)
+        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": False,
+                "reason": "same_token_terminal_no_fill_requires_reprice",
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_updated_at": str(updated_at or ""),
+                "existing_created_at": str(created_at or ""),
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+                "reprice_delta": str(reprice_delta),
+                "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+                "rest_pull_cancel_reason": reprice_cancel_reason,
+            }
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_no_fill_rest_pull_reprice",
+            "cooldown_seconds": cooldown_seconds,
+            "age_seconds": int(age_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+            "reprice_delta": str(reprice_delta),
+            "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
+            "rest_pull_cancel_reason": reprice_cancel_reason,
+        }
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
@@ -2131,8 +2242,15 @@ def _refresh_exit_collateral_snapshot_for_submit(
 ) -> dict:
     """Refresh CTF inventory truth before exit sell preflight."""
     from src.execution.collateral import refresh_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
 
-    _ = shares
+    if token_id and shares is not None:
+        try:
+            CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+        except CollateralInsufficient as exc:
+            reason = str(exc)
+            if reason.startswith(("ctf_tokens_insufficient", "ctf_allowance_insufficient")):
+                raise
     return refresh_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
@@ -2256,6 +2374,243 @@ def _entry_decision_source_component(intent: ExecutionIntent) -> dict:
         "decision_source_integrity",
         **details,
     )
+
+
+def _entry_replacement_family_from_snapshot(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+) -> tuple[str, str, str] | None:
+    """Resolve a live executable snapshot to its forecast family."""
+
+    if not str(snapshot_id or "").strip():
+        return None
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, snapshot_id)
+    condition_id = str(getattr(snapshot, "condition_id", "") or "").strip()
+    if not condition_id:
+        return None
+
+    from src.state.db import get_forecasts_connection_read_only
+
+    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        row = forecasts_conn.execute(
+            """
+            SELECT city, target_date, temperature_metric
+              FROM market_events
+             WHERE condition_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (condition_id,),
+        ).fetchone()
+    finally:
+        forecasts_conn.close()
+    if row is None:
+        return None
+    city, target_date, metric = str(row[0] or ""), str(row[1] or ""), str(row[2] or "")
+    if not city or not target_date or not metric:
+        return None
+    return city, target_date, metric
+
+
+def _entry_replacement_input_hwm_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+) -> dict:
+    """Reject replacement entries when live inputs have outrun the posterior."""
+
+    context = getattr(intent, "decision_source_context", None)
+    if context is None or (
+        hasattr(context, "is_day0_observation_context")
+        and context.is_day0_observation_context()
+    ):
+        return _capability_component(
+            "replacement_input_hwm",
+            reason="not_applicable",
+        )
+    source_id = str(getattr(context, "source_id", "") or "").strip()
+    if source_id != "openmeteo_ecmwf_ifs9_bayes_fusion":
+        return _capability_component(
+            "replacement_input_hwm",
+            reason="not_applicable_non_replacement_source",
+            source_id=source_id,
+        )
+
+    family = _entry_replacement_family_from_snapshot(
+        conn,
+        str(getattr(intent, "executable_snapshot_id", "") or ""),
+    )
+    details: dict[str, object] = {
+        "source_id": source_id,
+        "snapshot_id": str(getattr(intent, "executable_snapshot_id", "") or ""),
+        "posterior_source_cycle_time": str(getattr(context, "forecast_issue_time", "") or ""),
+        "posterior_computed_at": str(getattr(context, "forecast_fetch_time", "") or ""),
+    }
+    if family is None:
+        return _capability_component(
+            "replacement_input_hwm",
+            allowed=False,
+            reason="family_unresolved",
+            **details,
+        )
+    city, target_date, metric = family
+    details.update({"city": city, "target_date": target_date, "metric": metric})
+
+    decision_time = _parse_sqlite_timestamp(getattr(context, "decision_time", None))
+    if decision_time is None:
+        return _capability_component(
+            "replacement_input_hwm",
+            allowed=False,
+            reason="decision_time_unparseable",
+            **details,
+        )
+
+    from src.data import replacement_input_hwm
+    from src.state.db import get_forecasts_connection_read_only
+
+    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        lag_reason = replacement_input_hwm.replacement_live_input_lag_reason(
+            forecasts_conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_source_cycle_time=getattr(context, "forecast_issue_time", ""),
+            posterior_computed_at=getattr(context, "forecast_fetch_time", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - live submit must fail closed.
+        return _capability_component(
+            "replacement_input_hwm",
+            allowed=False,
+            reason="hwm_check_unavailable",
+            **{**details, "error": f"{type(exc).__name__}:{exc}"},
+        )
+    finally:
+        forecasts_conn.close()
+    if lag_reason:
+        return _capability_component(
+            "replacement_input_hwm",
+            allowed=False,
+            reason="live_input_lag",
+            **{**details, "lag_reason": lag_reason},
+        )
+    return _capability_component(
+        "replacement_input_hwm",
+        **details,
+    )
+
+
+def _entry_q_version_from_authority(
+    intent: ExecutionIntent,
+    actionable_payload: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the posterior identity that authorized this entry, when present."""
+
+    context = getattr(intent, "decision_source_context", None)
+    context_q_version = _nonempty_q_identity(
+        getattr(context, "posterior_identity_hash", None)
+    )
+    if context_q_version:
+        return context_q_version
+    if (
+        context is not None
+        and hasattr(context, "is_day0_observation_context")
+        and context.is_day0_observation_context()
+    ):
+        day0_q_version = str(getattr(context, "raw_payload_hash", "") or "").strip()
+        if day0_q_version:
+            return day0_q_version
+    forecast_context_q_version = _forecast_entry_raw_hash_q_version_from_context(
+        context
+    )
+    if forecast_context_q_version:
+        return forecast_context_q_version
+    if isinstance(actionable_payload, Mapping):
+        payload_q_version = _q_version_from_actionable_payload(actionable_payload)
+        if payload_q_version:
+            return payload_q_version
+    return None
+
+
+def _nonempty_q_identity(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _hash_like_q_identity(value: Any) -> str | None:
+    text = _nonempty_q_identity(value)
+    if (
+        text is not None
+        and len(text) == 64
+        and all(ch in "0123456789abcdefABCDEF" for ch in text)
+    ):
+        return text
+    return None
+
+
+def _context_attr_text(context: object, name: str) -> str:
+    value = getattr(context, name, None)
+    value = getattr(value, "value", value)
+    return str(value or "").strip()
+
+
+def _forecast_entry_raw_hash_q_version_from_context(context: object | None) -> str | None:
+    if context is None:
+        return None
+    if (
+        hasattr(context, "is_day0_observation_context")
+        and context.is_day0_observation_context()
+    ):
+        return None
+    if _context_attr_text(context, "forecast_source_role").lower() != "entry_primary":
+        return None
+    if _context_attr_text(context, "authority_tier").upper() != "FORECAST":
+        return None
+    if _context_attr_text(context, "degradation_level").upper() != "OK":
+        return None
+    return _hash_like_q_identity(getattr(context, "raw_payload_hash", None))
+
+
+def _mapping_text(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key)
+    value = getattr(value, "value", value)
+    return str(value or "").strip()
+
+
+def _forecast_entry_raw_hash_q_version_from_mapping(
+    payload: Mapping[str, Any],
+) -> str | None:
+    if _mapping_text(payload, "forecast_source_role").lower() != "entry_primary":
+        return None
+    if _mapping_text(payload, "authority_tier").upper() != "FORECAST":
+        return None
+    if _mapping_text(payload, "degradation_level").upper() != "OK":
+        return None
+    return _hash_like_q_identity(payload.get("raw_payload_hash"))
+
+
+def _q_version_from_actionable_payload(payload: Mapping[str, Any]) -> str | None:
+    direct_q_version = _nonempty_q_identity(payload.get("posterior_identity_hash"))
+    if direct_q_version:
+        return direct_q_version
+    for nested_key in ("decision_source_context", "source_context", "forecast"):
+        nested = payload.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        nested_q_version = _nonempty_q_identity(
+            nested.get("posterior_identity_hash")
+        )
+        if nested_q_version:
+            return nested_q_version
+        nested_raw_hash_q_version = _forecast_entry_raw_hash_q_version_from_mapping(
+            nested
+        )
+        if nested_raw_hash_q_version:
+            return nested_raw_hash_q_version
+    return _forecast_entry_raw_hash_q_version_from_mapping(payload)
 
 
 def _corrected_entry_identity_details(intent: ExecutionIntent) -> dict[str, str] | None:
@@ -3814,9 +4169,20 @@ def _recapture_fresh_entry_snapshot_if_needed(
     if conn is None:
         return legacy_intent
     snapshot = get_snapshot(conn, legacy_intent.executable_snapshot_id)
-    if snapshot is None or is_fresh(snapshot, datetime.now(timezone.utc)):
+    requires_fresh_taker_depth = (
+        not bool(getattr(final_intent, "post_only", False))
+        and str(getattr(final_intent, "order_policy", "") or "") == "marketable_limit_depth_bound"
+        and str(getattr(final_intent, "order_type", "") or "").upper() in {"FOK", "FAK"}
+    )
+    if snapshot is None:
+        if requires_fresh_taker_depth:
+            raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE:snapshot_missing")
+        return legacy_intent
+    if is_fresh(snapshot, datetime.now(timezone.utc)) and not requires_fresh_taker_depth:
         return legacy_intent
     if os.environ.get("ZEUS_REPRICE_RECAPTURE_DISABLED"):
+        if requires_fresh_taker_depth:
+            raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_DISABLED")
         return legacy_intent
     from types import SimpleNamespace
     from src.data.market_scanner import capture_executable_market_snapshot
@@ -3845,6 +4211,8 @@ def _recapture_fresh_entry_snapshot_if_needed(
     fresh_id = str(fields.get("executable_snapshot_id") or "")
     fresh = get_snapshot(conn, fresh_id) if fresh_id else None
     if fresh is None or not is_fresh(fresh, captured_at):
+        if requires_fresh_taker_depth:
+            raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE:fresh_snapshot_missing")
         return legacy_intent
     if fresh.selected_outcome_token_id != final_intent.selected_token_id:
         raise ValueError("recaptured executable snapshot selected token mismatch")
@@ -5670,6 +6038,67 @@ def _live_order(
                 intent_id=None,
                 idempotency_key=idem.value,
             )
+        replacement_input_hwm_component = _entry_replacement_input_hwm_component(
+            conn,
+            intent,
+        )
+        if not replacement_input_hwm_component.get("allowed"):
+            reason = str(
+                replacement_input_hwm_component.get("reason")
+                or "replacement_input_hwm_blocked"
+            )
+            details = replacement_input_hwm_component.get("details") or {}
+            lag_reason = ""
+            if isinstance(details, Mapping):
+                lag_reason = str(details.get("lag_reason") or "").strip()
+            if lag_reason:
+                reason = f"{reason}:{lag_reason}"
+            logger.warning(
+                "_live_order: replacement input HWM blocked entry submit for "
+                "trade_id=%s: %s",
+                trade_id,
+                reason,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"replacement_input_hwm:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+            )
+
+        # Live ENTRY commands must be bound to the q identity that authorized
+        # the decision before any venue side effect is attempted. Repository
+        # writes may still allow NULL q_version for recovery/backfill rows, but
+        # a fresh live submit without q identity cannot be staleness-cancelled
+        # or audited against the forecast posterior that produced it.
+        entry_q_version = _entry_q_version_from_authority(
+            intent,
+            actionable_payload,
+        )
+        if entry_q_version is None:
+            logger.warning(
+                "_live_order: missing entry q_version blocked before command "
+                "persistence for trade_id=%s token=%s decision_id=%s",
+                trade_id,
+                intent.token_id,
+                effective_decision_id,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="entry_q_version:missing_decision_q_identity",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
+            )
 
         try:
             collateral_refresh_component = _refresh_entry_collateral_snapshot_for_submit(conn)
@@ -5706,22 +6135,6 @@ def _live_order(
                 conn,
                 pre_submit_envelope,
                 command_id=command_id,
-            )
-            # SCH-W1.2-ORDER-STATE: stamp the decision-basis q_version from the
-            # already-verified actionable certificate's forecast section. NULL
-            # when the certificate's forecast authority is not posterior-provenance
-            # (ensemble-sourced entries carry no posterior_identity_hash) — a
-            # defined semantic ("no posterior identity for this decision"), not
-            # missing data.
-            entry_forecast_section = (
-                actionable_payload.get("forecast")
-                if isinstance(actionable_payload, dict)
-                else None
-            )
-            entry_q_version = (
-                entry_forecast_section.get("posterior_identity_hash")
-                if isinstance(entry_forecast_section, dict)
-                else None
             )
             insert_command(
                 conn,
@@ -5785,6 +6198,7 @@ def _live_order(
                             cooldown_component,
                             duplicate_same_token_component,
                             decision_source_component,
+                            replacement_input_hwm_component,
                             corrected_identity_component,
                             _capability_component("executable_snapshot_gate"),
                         ],

@@ -154,8 +154,8 @@ import time as _time
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from collections.abc import Mapping
-from typing import Any, Callable, Iterable, get_args
+from collections.abc import Iterable, Mapping
+from typing import Any, Callable, get_args
 
 import numpy as np
 
@@ -725,6 +725,189 @@ def _adapter_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     except sqlite3.Error:
         return False
     return False
+
+
+_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
+_ENTRY_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
+    {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}
+)
+_ENTRY_TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
+
+
+def _entry_command_has_positive_trade_fact(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    if not command_id or not _adapter_table_exists(conn, "venue_trade_facts"):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _entry_command_has_terminal_zero_fill_order_fact(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    if not command_id or not _adapter_table_exists(conn, "venue_order_facts"):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT state, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND UPPER(COALESCE(state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+             ORDER BY local_sequence DESC, observed_at DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    matched_size = row["matched_size"] if isinstance(row, sqlite3.Row) else row[1]
+    try:
+        return Decimal(str(matched_size or "0")) == Decimal("0")
+    except Exception:  # noqa: BLE001 - malformed venue facts are not early-block evidence.
+        return False
+
+
+def _terminal_entry_command_has_no_fill_exposure(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    state: str,
+) -> bool:
+    state_text = str(state or "").strip().upper()
+    if state_text not in _ENTRY_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+        return False
+    if _entry_command_has_positive_trade_fact(conn, command_id):
+        return False
+    if state_text in {"CANCELLED", "CANCELED", "EXPIRED"}:
+        return _entry_command_has_terminal_zero_fill_order_fact(conn, command_id)
+    return True
+
+
+def _same_token_terminal_no_fill_reprice_suppression_reason(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+    limit_price: object,
+) -> str | None:
+    """Return executor-equivalent no-fill reprice suppression before EDLI append.
+
+    This is a read-only optimization guard at the decision seam. The executor
+    remains the final authority; on unreadable state this helper returns ``None``
+    so the existing pre-submit gate still blocks fail-closed.
+    """
+
+    if conn is None or not _adapter_table_exists(conn, "venue_commands"):
+        return None
+    token = str(token_id or "").strip()
+    position_id = str(candidate_position_id or "").strip()
+    if not token or not position_id:
+        return None
+    try:
+        candidate_price = Decimal(str(limit_price))
+    except Exception:  # noqa: BLE001 - executor will reject missing malformed price.
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT command_id, position_id, state, price, size, created_at, updated_at
+              FROM venue_commands
+             WHERE UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(side, '')) = 'BUY'
+               AND token_id = ?
+               AND position_id != ?
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (token, position_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+
+    command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
+    state = str(row["state"] if isinstance(row, sqlite3.Row) else row[2] or "")
+    if not _terminal_entry_command_has_no_fill_exposure(
+        conn,
+        command_id=command_id,
+        state=state,
+    ):
+        return None
+    prior_price_raw = row["price"] if isinstance(row, sqlite3.Row) else row[3]
+    try:
+        prior_price = Decimal(str(prior_price_raw))
+    except Exception:  # noqa: BLE001 - executor will handle missing reprice evidence.
+        return None
+    reprice_delta = abs(candidate_price - prior_price)
+    if reprice_delta >= _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+        return None
+    existing_position_id = str(
+        row["position_id"] if isinstance(row, sqlite3.Row) else row[1] or ""
+    )
+    updated_at = str(row["updated_at"] if isinstance(row, sqlite3.Row) else row[6] or "")
+    return (
+        "ENTRY_COOLDOWN_TERMINAL_NO_FILL_REPRICE_REQUIRED:"
+        f"token_id={token}:existing_command_id={command_id}:"
+        f"existing_position_id={existing_position_id}:existing_command_state={state}:"
+        f"existing_price={prior_price}:candidate_price={candidate_price}:"
+        f"reprice_delta={reprice_delta}:"
+        f"min_reprice_tick={_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK}:"
+        f"existing_updated_at={updated_at}"
+    )
+
+
+def _entry_global_submit_suppression_reason() -> str | None:
+    """Return current global entry-submit denial before EDLI append/cap.
+
+    The executor remains the final submit authority. This preflight is only an
+    early no-side-effect classifier for an already-configured risk allocator;
+    cold/unconfigured test runtimes fall through to the existing executor gate.
+    """
+
+    try:
+        from src.risk_allocator import assert_global_submit_allows
+        from src.risk_allocator import summary as risk_allocator_summary
+    except Exception:  # noqa: BLE001 - final executor gate remains authoritative.
+        return None
+    try:
+        summary_payload = risk_allocator_summary()
+    except Exception:  # noqa: BLE001 - final executor gate remains authoritative.
+        return None
+    if not isinstance(summary_payload, dict) or not summary_payload.get("configured"):
+        return None
+    try:
+        assert_global_submit_allows(reduce_only=False)
+    except Exception as exc:  # noqa: BLE001 - preserve exact denial text for ops evidence.
+        entry = summary_payload.get("entry") if isinstance(summary_payload.get("entry"), dict) else {}
+        reason = str(entry.get("reason") or exc or "entry_unavailable")
+        reduce_only = bool(summary_payload.get("reduce_only", False))
+        kill_reason = summary_payload.get("kill_switch_reason")
+        return (
+            "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
+            f"reason={reason}:reduce_only={reduce_only}:kill_switch_reason={kill_reason}"
+        )
+    return None
 
 
 _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
@@ -2769,6 +2952,18 @@ def _assert_receipt_qkernel_execution_economics(
         raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_LIVE_DECISION")
     if str(selected_candidate.get("live_selection_authority") or "").strip() != "qkernel_spine":
         raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_QKERNEL_AUTHORITY")
+    selected_missing_reason = str(selected_candidate.get("missing_reason") or "").strip()
+    if selected_missing_reason:
+        raise ValueError(
+            "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
+            f"{selected_missing_reason}"
+        )
+    selected_trade_score = _optional_float(selected_candidate.get("trade_score"))
+    if selected_trade_score is not None and selected_trade_score <= 0.0:
+        raise ValueError(
+            "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_NON_POSITIVE_SCORE:"
+            f"trade_score={selected_trade_score:.9f}"
+        )
     book_cert = _valid_qkernel_execution_economics_payload(
         selected_candidate.get("qkernel_execution_economics"),
         direction=receipt.direction,
@@ -3034,6 +3229,119 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     if state.get("status") != "ok":
         return f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
     return _pause_reason_from_state(state)
+
+
+_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES = (
+    "heartbeat",
+    "venue_heartbeat",
+    "runtime_code",
+    "main_daemon",
+    "process_code",
+    "run_mode",
+    "forecast_pipeline",
+    "forecast_event_bridge",
+    "entry_q_version",
+    "pending_exit_release_loop",
+    "monitor_probability_freshness",
+    "day0_decision_trace",
+    "status_summary",
+    "execution_capability",
+)
+_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY = "_entry_live_health_provider_error"
+
+
+def _entry_live_health_max_age_seconds() -> float:
+    raw = os.environ.get("ZEUS_ENTRY_LIVE_HEALTH_MAX_AGE_SECONDS")
+    if raw in (None, ""):
+        return 300.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 300.0
+    return value if value > 0.0 else 300.0
+
+
+def _read_entry_live_health_composite() -> Mapping[str, object]:
+    try:
+        from src.config import state_path
+
+        return json.loads(state_path("live_health_composite.json").read_text())
+    except FileNotFoundError:
+        return {_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY: "COMPOSITE_MISSING"}
+    except json.JSONDecodeError:
+        return {_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY: "COMPOSITE_UNPARSEABLE"}
+    except Exception as exc:  # noqa: BLE001 - entry authority fails closed.
+        return {_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY: f"COMPOSITE_UNREADABLE:{type(exc).__name__}"}
+
+
+def _entry_live_health_authority_block_reason(
+    provider: Callable[[], Mapping[str, object] | None] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Return why live ENTRY authority is degraded, or None when entry may proceed.
+
+    This gate deliberately ignores the live-health ``business_plane`` surface:
+    no candidates/no capital flow is an observability signal, not an input that
+    may self-lock future entries. All required provenance, code, forecast,
+    lifecycle, monitor, and execution-capability surfaces must be present,
+    fresh, and individually OK before a new ENTRY can reach command build.
+    """
+
+    try:
+        composite = provider() if provider is not None else _read_entry_live_health_composite()
+    except Exception as exc:  # noqa: BLE001 - injected providers are authority inputs.
+        return f"provider_unreadable:{type(exc).__name__}"
+    if not isinstance(composite, Mapping):
+        return "composite_invalid"
+
+    provider_error = composite.get(_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY)
+    if provider_error:
+        return str(provider_error)
+
+    computed_at = _parse_iso_optional(composite.get("computed_at"))
+    if computed_at is None:
+        return "computed_at_missing_or_invalid"
+    if computed_at.tzinfo is None:
+        computed_at = computed_at.replace(tzinfo=UTC)
+    checked_at = (now or datetime.now(UTC)).astimezone(UTC)
+    age_seconds = (checked_at - computed_at.astimezone(UTC)).total_seconds()
+    if age_seconds < -10.0:
+        return f"computed_at_in_future:age_seconds={age_seconds:.0f}"
+    max_age_seconds = _entry_live_health_max_age_seconds()
+    if age_seconds > max_age_seconds:
+        return (
+            "composite_stale:"
+            f"age_seconds={age_seconds:.0f}:max_age_seconds={max_age_seconds:.0f}"
+        )
+
+    surfaces = composite.get("surfaces")
+    if not isinstance(surfaces, Mapping):
+        return "surfaces_missing"
+    missing = [
+        surface
+        for surface in _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES
+        if surface not in surfaces
+    ]
+    if missing:
+        return "missing_surfaces=" + ",".join(missing)
+
+    failing_surfaces_raw = composite.get("failing_surfaces")
+    failing_surfaces: set[str] = set()
+    if isinstance(failing_surfaces_raw, Iterable) and not isinstance(failing_surfaces_raw, (str, bytes)):
+        failing_surfaces = {str(surface) for surface in failing_surfaces_raw}
+    required_failing = sorted(failing_surfaces.intersection(_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES))
+    if required_failing:
+        return "failing_surfaces=" + ",".join(required_failing)
+
+    for surface in _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES:
+        detail = surfaces.get(surface)
+        if not isinstance(detail, Mapping):
+            return f"surface_invalid={surface}"
+        if detail.get("ok") is not True:
+            issue = str(detail.get("issue") or "DEGRADED")
+            return f"surface_degraded={surface}:issue={issue}"
+    return None
 
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
@@ -3404,6 +3712,7 @@ def event_bound_live_adapter_from_trade_conn(
     operator_arm: "OperatorArm | None" = None,
     edli_live_scope: str = "forecast_plus_day0",
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
+    entry_live_health_authority_provider: Callable[[], Mapping[str, object] | None] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -3523,6 +3832,18 @@ def event_bound_live_adapter_from_trade_conn(
                     event.event_id,
                     event.causal_snapshot_id,
                     reason=f"entries_paused:{entries_pause_reason}",
+                    proof_accepted=False,
+                )
+            live_health_block_reason = _entry_live_health_authority_block_reason(
+                entry_live_health_authority_provider,
+                now=decision_time,
+            )
+            if live_health_block_reason is not None:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=f"live_health_entry_authority:{live_health_block_reason}",
                     proof_accepted=False,
                 )
         no_submit_receipt = build_event_bound_no_submit_receipt(
@@ -3660,6 +3981,25 @@ def event_bound_live_adapter_from_trade_conn(
                         submitted=False,
                         side_effect_status="NO_SUBMIT",
                         reason=f"entries_paused:{entries_pause_reason}",
+                        proof_accepted=False,
+                    )
+                live_health_block_reason = _entry_live_health_authority_block_reason(
+                    entry_live_health_authority_provider,
+                    now=decision_time,
+                )
+                if live_health_block_reason is not None:
+                    _abort_family_rebalance_entry_payloads_after_no_submit(
+                        trade_conn,
+                        fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                        shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                        now_iso=decision_time.astimezone(UTC).isoformat(),
+                        reason=f"live_health_entry_authority:{live_health_block_reason}",
+                    )
+                    return dataclass_replace(
+                        no_submit_receipt,
+                        submitted=False,
+                        side_effect_status="NO_SUBMIT",
+                        reason=f"live_health_entry_authority:{live_health_block_reason}",
                         proof_accepted=False,
                     )
                 _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
@@ -5337,6 +5677,19 @@ def _build_event_bound_no_submit_receipt_core(
                     proof = None
                     _spine_fact_decision = None
                     _spine_no_trade_reason = _near_day0_qkernel_reason
+                    break
+                _rest_then_cross_not_actionable_reason = (
+                    _qkernel_rest_then_cross_not_actionable_reason(
+                        proof,
+                        getattr(proof, "qkernel_execution_economics", None),
+                    )
+                    if proof is not None
+                    else None
+                )
+                if _rest_then_cross_not_actionable_reason is not None:
+                    proof = None
+                    _spine_fact_decision = None
+                    _spine_no_trade_reason = _rest_then_cross_not_actionable_reason
                     break
                 _fill_up_unactionable_reason = None
                 if proof is not None and _selection_scope_allows_same_family_monitor_owned:
@@ -9085,6 +9438,17 @@ def _build_live_execution_command_certificates(
             live_cap_conn,
             phase="active_duplicate_read",
         )
+        entry_global_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        if entry_global_submit_suppression_reason is not None:
+            raise _LiveOpportunityAlreadyLocked(entry_global_submit_suppression_reason)
+        terminal_no_fill_reprice_reason = _same_token_terminal_no_fill_reprice_suppression_reason(
+            live_cap_conn,
+            token_id=str(final_intent.payload.get("token_id") or ""),
+            candidate_position_id=str(final_intent.payload.get("final_intent_id") or ""),
+            limit_price=final_intent.payload.get("limit_price"),
+        )
+        if terminal_no_fill_reprice_reason is not None:
+            raise _LiveOpportunityAlreadyLocked(terminal_no_fill_reprice_reason)
         # FIX A (#125): live-order-state duplicate lock. Suppress THIS submit only
         # while an order for the same (token, direction) is genuinely ACTIVE on the
         # venue (open/pending/in-flight/unknown). After a TERMINAL unfilled cancel
@@ -11270,6 +11634,7 @@ def _final_intent_decision_source_context_payload(
         "model": f"day0_observed_probability:{base_model or 'base_forecast'}",
         "model_family": f"day0_observed_probability:{base_model or 'base_forecast'}",
         "raw_payload_hash": raw_payload_hash,
+        "posterior_identity_hash": raw_payload_hash,
         "degradation_level": "OK",
         "forecast_source_role": "day0_live_observation",
         "authority_tier": "OBSERVATION",
@@ -11279,6 +11644,7 @@ def _final_intent_decision_source_context_payload(
         "decision_source_basis": "day0_live_observation_over_base_forecast",
         "base_forecast_source_id": base_source_id,
         "base_forecast_model_family": base_model,
+        "base_posterior_identity_hash": forecast_payload.get("posterior_identity_hash"),
         "forecast_authority_certificate_hash": forecast_authority.certificate_hash,
         "day0_authority_certificate_hash": day0_authority.certificate_hash,
         "absorbing_boundary_certificate_hash": absorbing_boundary.certificate_hash,
@@ -11467,6 +11833,16 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         persisted_at=_parse_utc(event.created_at) or decision_time,
     )
     decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
+    bound_forecast_posterior_id = (
+        proof.posterior_id
+        if str(getattr(proof, "probability_authority", "") or "") == "replacement_0_1"
+        else None
+    )
+    if (
+        str(getattr(proof, "probability_authority", "") or "") == "replacement_0_1"
+        and bound_forecast_posterior_id is None
+    ):
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior_id")
     quote_clock = _evidence_clock_from_row(selected_snapshot_row, fallback=decision_time)
     forecast_payload, forecast_clock = _forecast_authority_payload_and_clock(
         forecast_conn,
@@ -11474,6 +11850,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         family=family,
         payload=payload,
         decision_time=decision_time,
+        bound_posterior_id=bound_forecast_posterior_id,
     )
     calibration_payload, calibration_clock = _calibration_authority_payload_and_clock(
         calibration_conn,
@@ -11940,6 +12317,7 @@ def _replacement_live_input_lag_reason(
     family,
     decision_time: datetime,
     posterior_source_cycle_time: object,
+    posterior_computed_at: object | None = None,
 ) -> str | None:
     return _replacement_input_hwm.replacement_live_input_lag_reason(
         conn,
@@ -11948,6 +12326,7 @@ def _replacement_live_input_lag_reason(
         metric=family.metric,
         decision_time=decision_time,
         posterior_source_cycle_time=posterior_source_cycle_time,
+        posterior_computed_at=posterior_computed_at,
     )
 
 
@@ -11958,6 +12337,7 @@ def _forecast_authority_payload_from_posterior(
     family,
     payload: dict[str, object],
     decision_time: datetime,
+    bound_posterior_id: int | None = None,
 ) -> tuple[dict[str, Any], EvidenceClock] | None:
     """GATE-1 C: build the no-submit cert's FORECAST_AUTHORITY payload + clock from
     ``forecast_posteriors`` + ``raw_model_forecasts`` (mx2t3-independent), NOT ensemble_snapshots.
@@ -11985,6 +12365,18 @@ def _forecast_authority_payload_from_posterior(
     if posterior_table is None:
         return None
     _decision_iso = decision_time.astimezone(UTC).isoformat()
+    posterior_id_filter = ""
+    params: list[object] = [
+        _REPLACEMENT_0_1_PRODUCT_ID,
+        family.city,
+        family.target_date,
+        family.metric,
+        _decision_iso,
+        _decision_iso,
+    ]
+    if bound_posterior_id is not None:
+        posterior_id_filter = "AND posterior_id = ?"
+        params.append(bound_posterior_id)
     try:
         prow = conn.execute(
             f"""
@@ -11996,17 +12388,11 @@ def _forecast_authority_payload_from_posterior(
                AND (source_available_at IS NULL OR source_available_at <= ?)
                AND (computed_at IS NULL OR computed_at <= ?)
                AND datetime(source_available_at) <= datetime(computed_at)
+               {posterior_id_filter}
              ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
              LIMIT 1
             """,
-            (
-                _REPLACEMENT_0_1_PRODUCT_ID,
-                family.city,
-                family.target_date,
-                family.metric,
-                _decision_iso,
-                _decision_iso,
-            ),
+            tuple(params),
         ).fetchone()
     except Exception:  # noqa: BLE001 — fall back to the ensemble path on any read fault
         return None
@@ -12027,6 +12413,7 @@ def _forecast_authority_payload_from_posterior(
         family=family,
         decision_time=decision_time,
         posterior_source_cycle_time=p_source_cycle_time,
+        posterior_computed_at=p_computed_at,
     )
     if raw_lag_reason is not None:
         raise ValueError(f"REPLACEMENT_LIVE_INPUT_LAG:{raw_lag_reason}")
@@ -12171,6 +12558,7 @@ def _forecast_authority_payload_and_clock(
     family,
     payload: dict[str, object],
     decision_time: datetime,
+    bound_posterior_id: int | None = None,
 ) -> tuple[dict[str, Any], EvidenceClock]:
     # mx2t3 carrier-decouple (GATE-1 C): under the replacement lane the no-submit cert's forecast
     # authority is built from forecast_posteriors + raw_model_forecasts (mx2t3-independent) instead
@@ -12184,7 +12572,12 @@ def _forecast_authority_payload_and_clock(
         and event.event_type not in _DAY0_LANE_EVENT_TYPES
     ):
         posterior = _forecast_authority_payload_from_posterior(
-            conn, event=event, family=family, payload=payload, decision_time=decision_time
+            conn,
+            event=event,
+            family=family,
+            payload=payload,
+            decision_time=decision_time,
+            bound_posterior_id=bound_posterior_id,
         )
         if posterior is not None:
             return posterior
@@ -13287,17 +13680,73 @@ def _qkernel_cert_served_belief_rejection_reason(
     if not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0):
         return "QKERNEL_SERVED_BELIEF_INVALID"
     tolerance = 1e-6
+    day0_hard_fact_override = _qkernel_day0_monotone_hard_fact_override_allowed(
+        cert,
+        qkernel_q_point=payoff_q_point,
+        qkernel_q_lcb=payoff_q_lcb,
+        tolerance=tolerance,
+    )
     if not math.isclose(payoff_q_point, proof_q_point, rel_tol=1e-9, abs_tol=tolerance):
+        if day0_hard_fact_override:
+            return None
         return (
             "QKERNEL_SERVED_BELIEF_POINT_MISMATCH:"
             f"payoff_q_point={payoff_q_point:.9f}:served_q_point={proof_q_point:.9f}"
         )
     if payoff_q_lcb > proof_q_lcb + tolerance:
+        if day0_hard_fact_override:
+            return None
         return (
             "QKERNEL_SERVED_BELIEF_LCB_LOOSENED:"
             f"payoff_q_lcb={payoff_q_lcb:.9f}:served_q_lcb={proof_q_lcb:.9f}"
         )
     return None
+
+
+def _qkernel_day0_monotone_hard_fact_override_allowed(
+    cert: Mapping[str, Any],
+    *,
+    qkernel_q_point: float,
+    qkernel_q_lcb: float,
+    tolerance: float = 1e-6,
+) -> bool:
+    """Allow the explicit Day0 monotone hard-fact guard to replace proof q."""
+
+    if (
+        str(cert.get("q_lcb_guard_basis") or "").strip()
+        != "DAY0_REMAINING_DAY_Q_LCB"
+        or str(cert.get("selection_guard_basis") or "").strip()
+        != "DAY0_REMAINING_DAY_Q_LCB"
+    ):
+        return False
+    if (
+        str(cert.get("q_lcb_guard_cell_key") or "").strip()
+        != "day0_monotone_hard_fact_q_lcb"
+        or str(cert.get("selection_guard_cell_key") or "").strip()
+        != "day0_monotone_hard_fact_q_lcb"
+    ):
+        return False
+
+    def _explicit_false(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value is False
+        if value in (None, ""):
+            return False
+        return str(value).strip().lower() in {"0", "false", "no"}
+
+    for key in ("q_lcb_guard_abstained", "selection_guard_abstained"):
+        if not _explicit_false(cert.get(key)):
+            return False
+    if not (
+        math.isfinite(qkernel_q_point)
+        and math.isfinite(qkernel_q_lcb)
+        and math.isclose(qkernel_q_point, qkernel_q_lcb, rel_tol=1e-9, abs_tol=tolerance)
+    ):
+        return False
+    return (
+        math.isclose(qkernel_q_point, 0.0, rel_tol=0.0, abs_tol=tolerance)
+        or math.isclose(qkernel_q_point, 1.0, rel_tol=0.0, abs_tol=tolerance)
+    )
 
 
 def _qkernel_execution_float(
@@ -14036,6 +14485,9 @@ def _live_selection_rejection_reason(
         return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
     if str(cert.get("source") or "").strip() != "qkernel_spine":
         return None
+    rest_policy_reason = _qkernel_rest_then_cross_not_actionable_reason(proof, cert)
+    if rest_policy_reason is not None:
+        return rest_policy_reason
     if _valid_qkernel_execution_economics_payload(
         cert,
         direction=str(getattr(proof, "direction", "") or ""),
@@ -14051,6 +14503,25 @@ def _live_selection_rejection_reason(
     )
     if final_floor_reason is not None:
         return final_floor_reason
+    return None
+
+
+_QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE_POLICIES = frozenset(
+    {"MAKER_TAKER_FORBIDDEN", "HOLD_REST_IN_PROGRESS"}
+)
+
+
+def _qkernel_rest_then_cross_not_actionable_reason(
+    proof: _CandidateProof,
+    cert: Mapping[str, Any] | None = None,
+) -> str | None:
+    rest_policy = str(
+        getattr(proof, "rest_then_cross_policy", None)
+        or (cert.get("rest_then_cross_policy") if isinstance(cert, Mapping) else None)
+        or ""
+    ).strip().upper()
+    if rest_policy in _QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE_POLICIES:
+        return f"QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy={rest_policy}"
     return None
 
 
@@ -14753,24 +15224,41 @@ def _opportunity_book_from_proofs(
     # ΔU trade decision — it must NOT be recorded as the book's selected candidate
     # (else the receipt would claim a non-tradeable leg was selected). Record a
     # selection only for a genuinely-priced ΔU winner.
-    decided_candidate_id = (
+    selected_candidate_id_raw = (
         _candidate_evaluation_id(selected_proof)
         if selected_proof is not None
         and getattr(selected_proof, "execution_price", None) is not None
         else None
     )
+    selected_evaluation = None
+    if selected_candidate_id_raw is not None:
+        for evaluation in evaluations:
+            if evaluation.candidate_id == selected_candidate_id_raw:
+                selected_evaluation = evaluation
+                break
+    decided_candidate_id = (
+        selected_candidate_id_raw
+        if selected_evaluation is not None and selected_evaluation.admitted
+        else None
+    )
     selection_authority = None
     selected_qkernel_execution_economics = None
-    if selected_proof is not None and decided_candidate_id is not None:
-        if _proof_uses_qkernel_spine(selected_proof):
+    selected_book_proof = None
+    if decided_candidate_id is not None:
+        for book_proof in book_proofs:
+            if _candidate_evaluation_id(book_proof) == decided_candidate_id:
+                selected_book_proof = book_proof
+                break
+    if selected_book_proof is not None:
+        if _proof_uses_qkernel_spine(selected_book_proof):
             selection_authority = "qkernel_spine"
         else:
             selection_authority = (
-                str(selected_proof.selection_authority_applied)
-                if selected_proof.selection_authority_applied is not None
+                str(selected_book_proof.selection_authority_applied)
+                if selected_book_proof.selection_authority_applied is not None
                 else "robust_marginal_utility"
             )
-        selected_qkernel_execution_economics = selected_proof.qkernel_execution_economics
+        selected_qkernel_execution_economics = selected_book_proof.qkernel_execution_economics
     cache_summary: dict[str, Any] = {
         "belief_cache": "source_run_bound",
         "price_cache": "snapshot_rows_refreshed_for_family",
@@ -18321,6 +18809,7 @@ def _replacement_authority_probability_and_fdr_proof(
         family=family,
         decision_time=decision_time,
         posterior_source_cycle_time=replacement_bundle.source_cycle_time,
+        posterior_computed_at=replacement_bundle.computed_at,
     )
     if raw_lag_reason is not None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_INPUT_LAG:{raw_lag_reason}")

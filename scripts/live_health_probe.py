@@ -52,23 +52,58 @@ VOLATILE_CODE_PLANE_DIRTY_PATHS = frozenset({
     "station_migration_alerts.json",
     "state/station_migration_alerts.json",
 })
+REQUIRED_LIVE_HEALTH_SURFACES = (
+    "heartbeat",
+    "venue_heartbeat",
+    "runtime_code",
+    "main_daemon",
+    "process_code",
+    "run_mode",
+    "forecast_pipeline",
+    "forecast_event_bridge",
+    "entry_q_version",
+    "pending_exit_release_loop",
+    "monitor_probability_freshness",
+    "day0_decision_trace",
+    "status_summary",
+    "execution_capability",
+)
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
+ENTRY_Q_VERSION_LOOKBACK_SECONDS = 2 * 3600
+ENTRY_Q_VERSION_SAMPLE_LIMIT = 8
 PROCESS_CODE_SURFACES = {
     "daemon": (
         "src/main.py",
+        "src/control/cutover_guard.py",
+        "src/control/heartbeat_supervisor.py",
+        "src/control/live_health.py",
+        "src/control/runtime_code_plane.py",
         "src/engine/cycle_runner.py",
+        "src/engine/cycle_runtime.py",
         "src/engine/evaluator.py",
+        "src/engine/event_reactor_adapter.py",
+        "src/engine/monitor_refresh.py",
+        "src/engine/position_belief.py",
         "src/contracts/no_trade_reason.py",
         "src/contracts/executable_market_snapshot.py",
         "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
         "src/data/market_scanner.py",
+        "src/events/event_store.py",
+        "src/events/reactor.py",
         "src/execution/command_recovery.py",
         "src/execution/exchange_reconcile.py",
         "src/execution/executor.py",
+        "src/execution/exit_lifecycle.py",
+        "src/execution/exit_safety.py",
         "src/execution/harvester_pnl_resolver.py",
+        "src/execution/staleness_cancel.py",
         "src/data/polymarket_client.py",
+        "src/observability/status_summary.py",
+        "src/state/chain_reconciliation.py",
+        "src/state/chain_mirror_reconciler.py",
+        "src/state/db.py",
     ),
     "forecast_live": (
         "src/ingest/forecast_live_daemon.py",
@@ -417,6 +452,167 @@ def _git_runtime_identity(root=ROOT):
         "matches_expected": bool(head and expected_commit and head == expected_commit),
     }
 
+def _table_columns(conn, table):
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+def _entry_q_version_status(root):
+    """Read-only proof that live entry commands retain q-authority identity."""
+
+    trade_db = os.path.join(root, "state/zeus_trades.db")
+    if not os.path.exists(trade_db):
+        return {"ok": True, "evaluated": False, "issue": "TRADE_DB_MISSING"}
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "evaluated": True,
+            "issue": f"ENTRY_Q_VERSION_READ_UNAVAILABLE:{exc}",
+        }
+    try:
+        command_columns = _table_columns(conn, "venue_commands")
+        if not command_columns:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_Q_VERSION_TABLE_MISSING:venue_commands",
+            }
+        required_command_columns = {
+            "command_id",
+            "position_id",
+            "intent_kind",
+            "state",
+            "created_at",
+            "q_version",
+        }
+        missing_command = sorted(required_command_columns - command_columns)
+        if missing_command:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_Q_VERSION_COLUMN_MISSING:" + ",".join(missing_command),
+            }
+
+        active_missing = 0
+        active_sample = []
+        position_columns = _table_columns(conn, "position_current")
+        if position_columns:
+            required_position_columns = {
+                "position_id",
+                "phase",
+                "order_status",
+                "shares",
+                "chain_shares",
+            }
+            missing_position = sorted(required_position_columns - position_columns)
+            if missing_position:
+                return {
+                    "ok": False,
+                    "evaluated": True,
+                    "issue": "ENTRY_Q_VERSION_COLUMN_MISSING:" + ",".join(missing_position),
+                }
+            active_missing = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT pc.position_id)
+                      FROM position_current pc
+                      JOIN venue_commands vc
+                        ON vc.position_id = pc.position_id
+                     WHERE vc.intent_kind = 'ENTRY'
+                       AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                       AND (
+                           COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                           OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                       )
+                       AND (vc.q_version IS NULL OR TRIM(CAST(vc.q_version AS TEXT)) = '')
+                    """
+                ).fetchone()[0]
+                or 0
+            )
+            active_sample = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT pc.position_id, pc.phase, pc.order_status,
+                           pc.shares, pc.chain_shares,
+                           vc.command_id, vc.state, vc.created_at
+                      FROM position_current pc
+                      JOIN venue_commands vc
+                        ON vc.position_id = pc.position_id
+                     WHERE vc.intent_kind = 'ENTRY'
+                       AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                       AND (
+                           COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                           OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                       )
+                       AND (vc.q_version IS NULL OR TRIM(CAST(vc.q_version AS TEXT)) = '')
+                     ORDER BY datetime(vc.created_at) DESC, vc.command_id DESC
+                     LIMIT ?
+                    """,
+                    (ENTRY_Q_VERSION_SAMPLE_LIMIT,),
+                ).fetchall()
+            ]
+
+        recent_missing = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND datetime(created_at) >= datetime('now', ?)
+                   AND (q_version IS NULL OR TRIM(CAST(q_version AS TEXT)) = '')
+                """,
+                (f"-{ENTRY_Q_VERSION_LOOKBACK_SECONDS} seconds",),
+            ).fetchone()[0]
+            or 0
+        )
+        recent_sample = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT command_id, position_id, state, created_at
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND datetime(created_at) >= datetime('now', ?)
+                   AND (q_version IS NULL OR TRIM(CAST(q_version AS TEXT)) = '')
+                 ORDER BY datetime(created_at) DESC, command_id DESC
+                 LIMIT ?
+                """,
+                (
+                    f"-{ENTRY_Q_VERSION_LOOKBACK_SECONDS} seconds",
+                    ENTRY_Q_VERSION_SAMPLE_LIMIT,
+                ),
+            ).fetchall()
+        ]
+        detail = {
+            "ok": active_missing == 0 and recent_missing == 0,
+            "evaluated": True,
+            "active_missing_q_version_count": active_missing,
+            "active_missing_q_version_sample": active_sample,
+            "recent_missing_q_version_count": recent_missing,
+            "recent_missing_q_version_sample": recent_sample,
+            "lookback_seconds": ENTRY_Q_VERSION_LOOKBACK_SECONDS,
+        }
+        if active_missing > 0:
+            detail["issue"] = f"ENTRY_Q_VERSION_MISSING_ACTIVE_EXPOSURE:n={active_missing}"
+        elif recent_missing > 0:
+            detail["issue"] = f"ENTRY_Q_VERSION_MISSING_RECENT_ENTRY:n={recent_missing}"
+        else:
+            detail["issue"] = None
+        return detail
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "evaluated": True,
+            "issue": f"ENTRY_Q_VERSION_READ_UNAVAILABLE:{exc}",
+        }
+    finally:
+        conn.close()
+
 def _classify_alerts(report, ss_age):
     alerts = []
     code_plane = report.get("code_plane", {})
@@ -447,10 +643,24 @@ def _classify_alerts(report, ss_age):
     settlement_truth = report.get("settlement_truth", {})
     if settlement_truth.get("ok") is not True:
         alerts.append(settlement_truth.get("issue") or "SETTLEMENT_TRUTH_UNHEALTHY")
+    entry_q_version = report.get("entry_q_version", {})
+    if entry_q_version.get("ok") is False:
+        alerts.append(entry_q_version.get("issue") or "ENTRY_Q_VERSION_UNHEALTHY")
     status_process = report.get("status_process", {})
     if status_process.get("ok") is False:
         alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
     composite = report.get("live_health_composite") or {}
+    if composite and "error" not in composite:
+        surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
+        missing_surfaces = [
+            surface for surface in REQUIRED_LIVE_HEALTH_SURFACES
+            if surface not in surfaces
+        ]
+        if missing_surfaces:
+            alerts.append(
+                "LIVE_HEALTH_COMPOSITE_SURFACES_MISSING="
+                + "|".join(missing_surfaces[:8])
+            )
     if composite.get("status") == "DEGRADED" or composite.get("healthy") is False:
         surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
         failing = composite.get("failing_surfaces") or []
@@ -498,6 +708,7 @@ def main():
     report["code_plane"] = _git_runtime_identity(ROOT)
     report["process_code"] = _process_loaded_code_status(report["procs"], ROOT)
     report["settlement_truth"] = _settlement_truth_status(ROOT)
+    report["entry_q_version"] = _entry_q_version_status(ROOT)
 
     # Status summary
     ss_path = os.path.join(ROOT, "state/status_summary.json")

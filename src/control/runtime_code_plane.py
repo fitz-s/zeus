@@ -68,6 +68,43 @@ def current_git_head(repo_root: Path, *, timeout: float = 2.0) -> str | None:
     return head or None
 
 
+def dirty_runtime_worktree_paths(repo_root: Path, *, timeout: float = 2.0) -> tuple[str, ...]:
+    """Return dirty runtime-plane paths from git status."""
+
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=str(Path(repo_root)),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ):
+        return ()
+    if proc.returncode != 0:
+        return ()
+
+    paths: list[str] = []
+    for line in proc.stdout.splitlines():
+        if not line:
+            continue
+        raw_path = line[3:].strip().replace("\\", "/")
+        candidates = (
+            [part.strip() for part in raw_path.split(" -> ", 1)]
+            if " -> " in raw_path
+            else [raw_path]
+        )
+        for candidate in candidates:
+            if candidate and _is_runtime_code_path(candidate) and candidate not in paths:
+                paths.append(candidate)
+    return tuple(paths)
+
+
 def runtime_code_plane_diff(
     repo_root: Path,
     *,

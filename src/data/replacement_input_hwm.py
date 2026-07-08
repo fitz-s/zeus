@@ -10,7 +10,10 @@ raw-input tripwire without a private cross-module import. Compares the latest
 raw ``raw_model_forecasts`` / ``raw_forecast_artifacts`` ``source_cycle_time``
 available by ``decision_time`` against a served posterior's
 ``source_cycle_time``; a newer raw input than the posterior means the
-posterior is stale and must not be served for a live trade decision.
+posterior is stale and must not be served for a live trade decision. For
+used-model rows from the same cycle, a raw capture/available timestamp newer
+than the posterior ``computed_at`` is also stale: the posterior did not see the
+latest executable row for its own model family.
 
 ``event_reactor_adapter.py`` keeps thin delegating wrappers with identical
 names and signatures (``family=...``) so its existing call sites and tests
@@ -19,6 +22,7 @@ names and signatures (``family=...``) so its existing call sites and tests
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -37,6 +41,12 @@ def _parse_source_cycle_utc(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _latest_utc_timestamp(*values: object) -> datetime | None:
+    parsed = [_parse_source_cycle_utc(value) for value in values]
+    present = [value for value in parsed if value is not None]
+    return max(present) if present else None
 
 
 def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
@@ -193,6 +203,187 @@ def latest_raw_artifact_input_cycle(
     return _parse_source_cycle_utc(raw_value)
 
 
+def _posterior_used_models_for_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    posterior_source_cycle_time: object,
+) -> frozenset[str]:
+    table_ref = _authority_table_ref(conn, "forecast_posteriors")
+    if table_ref is None:
+        return frozenset()
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"city", "target_date", "temperature_metric", "source_cycle_time", "provenance_json"}
+    if not required.issubset(columns):
+        return frozenset()
+    order_terms = []
+    if "computed_at" in columns:
+        order_terms.append("datetime(computed_at) DESC")
+    if "posterior_id" in columns:
+        order_terms.append("posterior_id DESC")
+    order_sql = ", ".join(order_terms) if order_terms else "rowid DESC"
+    try:
+        row = conn.execute(
+            f"""
+            SELECT provenance_json
+              FROM {table_ref}
+             WHERE city = ?
+               AND target_date = ?
+               AND temperature_metric = ?
+               AND datetime(source_cycle_time) = datetime(?)
+             ORDER BY {order_sql}
+             LIMIT 1
+            """,
+            (city, target_date, metric, str(posterior_source_cycle_time)),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+        return frozenset()
+    if row is None:
+        return frozenset()
+    try:
+        raw = row["provenance_json"]
+    except Exception:  # noqa: BLE001
+        raw = row[0]
+    try:
+        provenance = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(provenance, dict):
+        return frozenset()
+
+    candidates: list[object] = []
+    candidates.append(provenance.get("used_models"))
+    fusion = provenance.get("bayes_precision_fusion")
+    if isinstance(fusion, dict):
+        candidates.append(fusion.get("used_models"))
+        source_clock = fusion.get("source_clock_one_scheme")
+        if isinstance(source_clock, dict):
+            candidates.append(source_clock.get("used_weights"))
+            candidates.append(source_clock.get("configured_sources"))
+    models: set[str] = set()
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            values = candidate.keys()
+        elif isinstance(candidate, (list, tuple, set)):
+            values = candidate
+        else:
+            continue
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                models.add(text)
+    return frozenset(models)
+
+
+def latest_used_raw_model_input_mark(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+) -> tuple[datetime, datetime | None] | None:
+    """Latest used-model raw cycle plus latest row evidence timestamp."""
+
+    used_models = _posterior_used_models_for_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+    )
+    if not used_models:
+        return None
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
+    if not required.issubset(columns):
+        return None
+    predicates = ["city = ?", "target_date = ?", "metric = ?"]
+    params: list[object] = [city, target_date, metric]
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    if "endpoint" in columns:
+        predicates.append("endpoint = 'single_runs'")
+    if "coverage_status" in columns:
+        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
+    if "captured_at" in columns:
+        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
+        params.append(decision_iso)
+    if "source_available_at" in columns:
+        predicates.append(
+            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
+        )
+        params.append(decision_iso)
+    placeholders = ",".join("?" for _ in used_models)
+    params.extend(sorted(used_models))
+    captured_select = "captured_at" if "captured_at" in columns else "NULL AS captured_at"
+    available_select = (
+        "source_available_at"
+        if "source_available_at" in columns
+        else "NULL AS source_available_at"
+    )
+    evidence_order_terms = ["datetime(source_cycle_time)"]
+    if "captured_at" in columns:
+        evidence_order_terms.append("COALESCE(datetime(captured_at), '0001-01-01 00:00:00')")
+    if "source_available_at" in columns:
+        evidence_order_terms.append("COALESCE(datetime(source_available_at), '0001-01-01 00:00:00')")
+    evidence_order_sql = "MAX(" + ", ".join(evidence_order_terms) + ")"
+    try:
+        row = conn.execute(
+            f"""
+            SELECT source_cycle_time, {captured_select}, {available_select}
+              FROM {table_ref}
+             WHERE {' AND '.join(predicates)}
+               AND model IN ({placeholders})
+               AND datetime(source_cycle_time) <= datetime(?)
+             ORDER BY datetime(source_cycle_time) DESC, {evidence_order_sql} DESC
+             LIMIT 1
+            """,
+            tuple([*params, decision_iso]),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+        return None
+    if row is None:
+        return None
+    try:
+        raw_value = row["source_cycle_time"]
+        captured_at = row["captured_at"]
+        source_available_at = row["source_available_at"]
+    except Exception:  # noqa: BLE001
+        raw_value = row[0]
+        captured_at = row[1] if len(row) > 1 else None
+        source_available_at = row[2] if len(row) > 2 else None
+    raw_cycle = _parse_source_cycle_utc(raw_value)
+    if raw_cycle is None:
+        return None
+    return raw_cycle, _latest_utc_timestamp(captured_at, source_available_at)
+
+
+def latest_used_raw_model_input_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+) -> datetime | None:
+    mark = latest_used_raw_model_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+    )
+    return mark[0] if mark is not None else None
+
+
 def latest_live_input_cycle(
     conn: sqlite3.Connection,
     *,
@@ -229,14 +420,54 @@ def replacement_live_input_lag_reason(
     metric: str,
     decision_time: datetime,
     posterior_source_cycle_time: object,
+    posterior_computed_at: object | None = None,
 ) -> str | None:
     posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
-    latest_raw_cycle, basis = latest_live_input_cycle(
-        conn, city=city, target_date=target_date, metric=metric, decision_time=decision_time
+    posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
+    used_raw_mark = latest_used_raw_model_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=posterior_source_cycle_time,
     )
+    candidates = [
+        latest_live_input_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+        ),
+        (
+            used_raw_mark[0] if used_raw_mark is not None else None,
+            "source_cycle_time_used_raw_model_forecasts_lag",
+        ),
+    ]
+    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
+    if not candidates:
+        return None
+    latest_raw_cycle, basis = max(candidates, key=lambda item: item[0])
     if latest_raw_cycle is None or latest_raw_cycle <= posterior_cycle:
+        if (
+            used_raw_mark is not None
+            and posterior_computed is not None
+            and used_raw_mark[0] == posterior_cycle
+            and used_raw_mark[1] is not None
+            and used_raw_mark[1] > posterior_computed
+        ):
+            lag_seconds = (used_raw_mark[1] - posterior_computed).total_seconds()
+            return (
+                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                f"latest_raw_cycle={used_raw_mark[0].isoformat()}:"
+                f"posterior_cycle={posterior_cycle.isoformat()}:"
+                f"latest_raw_input_at={used_raw_mark[1].isoformat()}:"
+                f"posterior_computed_at={posterior_computed.isoformat()}:"
+                f"lag_s={lag_seconds:.0f}"
+            )
         return None
     lag_hours = (latest_raw_cycle - posterior_cycle).total_seconds() / 3600.0
     return (

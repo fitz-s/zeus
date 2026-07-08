@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-04; last_reused=2026-07-04
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-04
+# Last reused/audited: 2026-07-08
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -19,6 +19,12 @@ _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
+_ORIGINAL_MONITOR_PROBABILITY_FRESHNESS_STATUS = (
+    healthcheck._monitor_probability_freshness_status
+)
+_ORIGINAL_MAIN_DAEMON_ATTESTATION_SURFACE = (
+    healthcheck._main_daemon_attestation_surface
+)
 _ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS = healthcheck._venue_commands_schema_status
 _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS = (
     healthcheck._terminal_entry_command_venue_fact_conflicts_status
@@ -1032,13 +1038,22 @@ def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     live_paths = set(healthcheck.PROCESS_CODE_SURFACES["live_trading"])
 
     assert "src/engine/evaluator.py" in live_paths
+    assert "src/control/live_health.py" in live_paths
+    assert "src/control/runtime_code_plane.py" in live_paths
+    assert "src/engine/cycle_runtime.py" in live_paths
+    assert "src/engine/event_reactor_adapter.py" in live_paths
+    assert "src/engine/monitor_refresh.py" in live_paths
     assert "src/contracts/executable_market_snapshot.py" in live_paths
     assert "src/contracts/execution_intent.py" in live_paths
     assert "src/data/market_scanner.py" in live_paths
     assert "src/data/polymarket_client.py" in live_paths
     assert "src/control/ws_gap_guard.py" in live_paths
+    assert "src/events/reactor.py" in live_paths
     assert "src/execution/command_recovery.py" in live_paths
     assert "src/execution/exchange_reconcile.py" in live_paths
+    assert "src/execution/exit_lifecycle.py" in live_paths
+    assert "src/execution/staleness_cancel.py" in live_paths
+    assert "src/state/chain_mirror_reconciler.py" in live_paths
     assert "src/strategy/selection_family.py" in live_paths
     assert "src/strategy/family_exclusive_dedup.py" in live_paths
 
@@ -1265,6 +1280,109 @@ def test_position_current_schema_status_accepts_monitor_freshness_cols(
     assert result["missing_columns"] == []
 
 
+def _write_monitor_freshness_position_db(
+    db_path: Path,
+    *,
+    is_fresh: int,
+    phase: str = "active",
+) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            order_status TEXT,
+            shares REAL,
+            chain_shares REAL,
+            last_monitor_prob REAL,
+            last_monitor_prob_is_fresh INTEGER,
+            updated_at TEXT,
+            city TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, order_status, shares, chain_shares,
+            last_monitor_prob, last_monitor_prob_is_fresh, updated_at,
+            city, target_date, bin_label, direction
+        ) VALUES (
+            'pos-monitor', ?, 'filled', 10.0, 10.0,
+            0.81, ?, '2026-07-08T20:25:00+00:00',
+            'Seoul', '2026-07-10',
+            'Will the highest temperature in Seoul be 28°C on July 10?',
+            'buy_no'
+        )
+        """,
+        (phase, is_fresh),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_monitor_probability_freshness_status_rejects_active_stale_projection(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _write_monitor_freshness_position_db(db_path, is_fresh=0)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_main_daemon_attestation_surface",
+        lambda: {"ok": True, "issue": None, "attested": True, "pid": 1234},
+    )
+
+    result = _ORIGINAL_MONITOR_PROBABILITY_FRESHNESS_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_PROBABILITY_STALE_CURRENT:n=1"
+    assert result["current_stale_projection_count"] == 1
+    assert result["current_stale_projection_sample"][0]["position_id"] == "pos-monitor"
+
+
+def test_monitor_probability_freshness_status_accepts_active_fresh_projection(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _write_monitor_freshness_position_db(db_path, is_fresh=1)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_main_daemon_attestation_surface",
+        lambda: {"ok": True, "issue": None, "attested": True, "pid": 1234},
+    )
+
+    result = _ORIGINAL_MONITOR_PROBABILITY_FRESHNESS_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["current_stale_projection_count"] == 0
+
+
+def test_monitor_probability_freshness_status_skips_without_daemon_attestation(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _write_monitor_freshness_position_db(db_path, is_fresh=0)
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_main_daemon_attestation_surface",
+        lambda: {"ok": True, "issue": None, "attested": False, "pid": None},
+    )
+
+    result = _ORIGINAL_MONITOR_PROBABILITY_FRESHNESS_STATUS()
+
+    assert result["ok"] is True
+    assert result["evaluated"] is False
+    assert result["issue"] == "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED"
+
+
 def test_venue_commands_schema_status_rejects_missing_q_version(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus_trades.db"
     conn = sqlite3.connect(str(db_path))
@@ -1308,6 +1426,65 @@ def test_venue_commands_schema_status_accepts_q_version(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["missing_columns"] == []
+
+
+def test_venue_commands_schema_status_rejects_active_entry_missing_q_version(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            q_version TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, intent_kind, state, created_at, q_version
+        ) VALUES (
+            'cmd-no-q', 'pos-no-q', 'ENTRY', 'FILLED',
+            '2026-07-08T18:26:41+00:00', ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, chain_shares
+        ) VALUES (
+            'pos-no-q', 'active', 18.44, 18.44
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_VENUE_COMMANDS_SCHEMA_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "VENUE_COMMANDS_ENTRY_Q_VERSION_MISSING_ACTIVE_EXPOSURE"
+    assert result["missing_columns"] == []
+    assert result["active_missing_q_version_count"] == 1
+    assert result["active_missing_q_version_sample"][0]["position_id"] == "pos-no-q"
 
 
 def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state: str) -> None:

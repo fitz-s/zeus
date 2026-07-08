@@ -7,6 +7,7 @@ scan -> classify -> cancel -> confirm -> reconciled re-solve orchestration."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -38,6 +39,7 @@ def _entry(command_id: str, *, q_version, age_minutes: float, family=FAMILY) -> 
         "q_version": q_version,
         "fact_state": "LIVE",
         "matched_size": "0",
+        "min_order_size": "5",
     }
 
 
@@ -120,6 +122,38 @@ class TestQVersionStaleCancel:
         )
         assert cancel_set == []
 
+    @pytest.mark.parametrize(
+        "age_minutes,current_q",
+        [
+            (5.0, "q-new"),
+            (DEADLINE_MIN + 5, "q-old"),
+        ],
+    )
+    def test_sub_min_partial_fill_is_not_cancelled_by_staleness_or_ttl(
+        self, age_minutes, current_q
+    ):
+        entry = _entry("c1", q_version="q-old", age_minutes=age_minutes)
+        entry["matched_size"] = "1"
+        entry["min_order_size"] = "5"
+
+        cancel_set = classify_cancel_set(
+            [entry], {"c1": FAMILY}, {FAMILY: current_q}, now=NOW, deadline_minutes=DEADLINE_MIN
+        )
+
+        assert cancel_set == []
+
+    def test_partial_fill_at_or_above_minimum_still_cancels_when_stale(self):
+        entry = _entry("c1", q_version="q-old", age_minutes=5.0)
+        entry["matched_size"] = "5"
+        entry["min_order_size"] = "5"
+
+        cancel_set = classify_cancel_set(
+            [entry], {"c1": FAMILY}, {FAMILY: "q-new"}, now=NOW, deadline_minutes=DEADLINE_MIN
+        )
+
+        assert len(cancel_set) == 1
+        assert cancel_set[0]["cancel_reason"] == "Q_VERSION_STALE"
+
 
 # ---------------------------------------------------------------------------
 # find_open_entry_rests / resolve_order_families / read_current_family_q_versions
@@ -153,6 +187,9 @@ def _seed_open_entry(
     q_version: str | None,
     created_at: datetime = NOW - timedelta(minutes=30),
     fact_state: str = "LIVE",
+    matched_size: str = "0",
+    remaining_size: str = "10",
+    min_order_size: Decimal = Decimal("5"),
 ) -> None:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
@@ -185,7 +222,7 @@ def _seed_open_entry(
             market_close_at=None,
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
-            min_order_size=Decimal("5"),
+            min_order_size=min_order_size,
             fee_details={"bps": 0, "builder_fee_bps": 0},
             token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
             rfqe=None,
@@ -238,7 +275,55 @@ def _seed_open_entry(
     conn.execute(
         "INSERT INTO venue_order_facts (venue_order_id, command_id, state, remaining_size, matched_size, "
         "source, observed_at, local_sequence, raw_payload_hash) VALUES (?, ?, ?, ?, ?, 'REST', ?, 0, ?)",
-        (venue_order_id, command_id, fact_state, "10", "0", now, "f" * 64),
+        (venue_order_id, command_id, fact_state, remaining_size, matched_size, now, "f" * 64),
+    )
+    conn.commit()
+
+
+def _seed_submit_requested_forecast_q_payload(
+    conn,
+    *,
+    command_id: str,
+    q_version: str,
+    source_id: str = "openmeteo_ecmwf_ifs9_bayes_fusion",
+    authority_tier: str = "FORECAST",
+    forecast_source_role: str = "entry_primary",
+) -> None:
+    sequence = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM venue_command_events WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?, ?, ?, 'SUBMIT_REQUESTED', ?, ?, 'SUBMITTING')
+        """,
+        (
+            f"{command_id}:submit_requested:{sequence}",
+            command_id,
+            sequence,
+            NOW.isoformat(),
+            json.dumps(
+                {
+                    "execution_capability": {
+                        "components": [
+                            {
+                                "component": "decision_source_integrity",
+                                "details": {
+                                    "source_id": source_id,
+                                    "authority_tier": authority_tier,
+                                    "forecast_source_role": forecast_source_role,
+                                    "raw_payload_hash": q_version,
+                                },
+                            }
+                        ]
+                    }
+                },
+                sort_keys=True,
+            ),
+        ),
     )
     conn.commit()
 
@@ -252,18 +337,48 @@ def _seed_market_event(conn, *, token_id: str, city: str, target_date: str, metr
     conn.commit()
 
 
-def _seed_posterior(conn, *, family, posterior_identity_hash: str, source_cycle_time: str) -> None:
+def _seed_posterior(
+    conn,
+    *,
+    family,
+    posterior_identity_hash: str,
+    source_cycle_time: str,
+    provenance_json: str = "{}",
+) -> None:
     city, target_date, metric = family
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date, temperature_metric,
             source_cycle_time, source_available_at, computed_at, q_json, posterior_method,
-            posterior_identity_hash
-        ) VALUES ('openmeteo', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'v1', ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?)
+            posterior_identity_hash, provenance_json
+        ) VALUES ('openmeteo', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'v1', ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?)
         """,
         (city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
-         posterior_identity_hash),
+         posterior_identity_hash, provenance_json),
+    )
+    conn.commit()
+
+
+def _seed_raw_model_forecast(
+    conn,
+    *,
+    family,
+    model: str,
+    source_cycle_time: str,
+    source_available_at: str,
+    captured_at: str,
+) -> None:
+    city, target_date, metric = family
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c,
+            endpoint, coverage_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 30.0, 'single_runs', 'COVERED')
+        """,
+        (model, city, target_date, metric, source_cycle_time, source_available_at, captured_at),
     )
     conn.commit()
 
@@ -278,6 +393,43 @@ class TestFindOpenEntryRests:
         assert len(entries) == 1
         assert entries[0]["command_id"] == "c1"
         assert entries[0]["q_version"] == "q-old"
+        assert entries[0]["min_order_size"] == "5"
+
+    def test_legacy_null_q_forecast_rest_recovers_q_from_submit_payload(self):
+        conn = _trade_db()
+        q_version = "a" * 64
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version=None)
+        _seed_submit_requested_forecast_q_payload(
+            conn,
+            command_id="c1",
+            q_version=q_version,
+        )
+
+        entries = find_open_entry_rests(conn)
+
+        assert len(entries) == 1
+        assert entries[0]["q_version"] == q_version
+        assert entries[0]["q_version_source"] == "submit_requested_decision_source"
+
+    def test_legacy_null_q_day0_or_external_rest_stays_null(self):
+        conn = _trade_db()
+        q_version = "b" * 64
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version=None)
+        _seed_submit_requested_forecast_q_payload(
+            conn,
+            command_id="c1",
+            q_version=q_version,
+            source_id="ecmwf_open_data",
+            authority_tier="OBSERVATION",
+            forecast_source_role="day0_live_observation",
+        )
+
+        entries = find_open_entry_rests(conn)
+
+        assert len(entries) == 1
+        assert entries[0]["q_version"] is None
+        assert entries[0]["q_version_authority"] == "day0_observation"
+        assert "q_version_source" not in entries[0]
 
     def test_pre_migration_schema_treats_q_version_as_null(self):
         conn = sqlite3.connect(":memory:")
@@ -413,6 +565,33 @@ class TestReadCurrentFamilyQVersions:
         result = read_current_family_q_versions(conn, [FAMILY])
         assert result[FAMILY] is None
 
+    def test_hwm_stale_posterior_returns_blocked_q_sentinel(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn,
+            family=FAMILY,
+            posterior_identity_hash="q-old",
+            source_cycle_time="2026-07-03T00:00:00+00:00",
+        )
+        for model in ("ecmwf_ifs", "icon_global"):
+            _seed_raw_model_forecast(
+                conn,
+                family=FAMILY,
+                model=model,
+                source_cycle_time="2026-07-03T06:00:00+00:00",
+                source_available_at="2026-07-03T07:00:00+00:00",
+                captured_at="2026-07-03T07:10:00+00:00",
+            )
+
+        result = read_current_family_q_versions(
+            conn,
+            [FAMILY],
+            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
+        )
+
+        assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
+        assert "latest_raw_cycle=2026-07-03T06:00:00+00:00" in result[FAMILY]
+
 
 # ---------------------------------------------------------------------------
 # run_c3_staleness_cancel_cycle: end-to-end orchestration
@@ -460,6 +639,121 @@ class TestRunC3StalenessCancelCycle:
         assert result["confirmed_families"] == {FAMILY}
         assert conn_state(trade_conn, "c1") == "CANCELLED"
 
+    def test_hwm_blocked_family_cancels_legacy_null_q_forecast_rest(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        q_version = "a" * 64
+        _seed_open_entry(
+            trade_conn,
+            command_id="c1",
+            token_id="tok1",
+            venue_order_id="v1",
+            q_version=None,
+            created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_submit_requested_forecast_q_payload(
+            trade_conn,
+            command_id="c1",
+            q_version=q_version,
+        )
+        _seed_market_event(
+            forecasts_conn,
+            token_id="tok1",
+            city=FAMILY[0],
+            target_date=FAMILY[1],
+            metric=FAMILY[2],
+        )
+        _seed_posterior(
+            forecasts_conn,
+            family=FAMILY,
+            posterior_identity_hash=q_version,
+            source_cycle_time="2026-07-03T00:00:00+00:00",
+        )
+        for model in ("ecmwf_ifs", "icon_global"):
+            _seed_raw_model_forecast(
+                forecasts_conn,
+                family=FAMILY,
+                model=model,
+                source_cycle_time="2026-07-03T06:00:00+00:00",
+                source_available_at="2026-07-03T07:00:00+00:00",
+                captured_at="2026-07-03T07:10:00+00:00",
+            )
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn,
+            trade_conn,
+            forecasts_conn,
+            client,
+            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+
+        assert result["cancel_set_size"] == 1
+        assert client.cancel_calls == [["v1"]]
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+
+    def test_hwm_blocked_sub_min_partial_fill_is_not_cancelled(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        q_version = "a" * 64
+        _seed_open_entry(
+            trade_conn,
+            command_id="c1",
+            token_id="tok1",
+            venue_order_id="v1",
+            q_version=None,
+            created_at=NOW - timedelta(minutes=5),
+            matched_size="1",
+            remaining_size="9",
+            min_order_size=Decimal("5"),
+        )
+        _seed_submit_requested_forecast_q_payload(
+            trade_conn,
+            command_id="c1",
+            q_version=q_version,
+        )
+        _seed_market_event(
+            forecasts_conn,
+            token_id="tok1",
+            city=FAMILY[0],
+            target_date=FAMILY[1],
+            metric=FAMILY[2],
+        )
+        _seed_posterior(
+            forecasts_conn,
+            family=FAMILY,
+            posterior_identity_hash=q_version,
+            source_cycle_time="2026-07-03T00:00:00+00:00",
+        )
+        for model in ("ecmwf_ifs", "icon_global"):
+            _seed_raw_model_forecast(
+                forecasts_conn,
+                family=FAMILY,
+                model=model,
+                source_cycle_time="2026-07-03T06:00:00+00:00",
+                source_available_at="2026-07-03T07:00:00+00:00",
+                captured_at="2026-07-03T07:10:00+00:00",
+            )
+        client = _FakeGatewayClient(cancel_responses=[])
+
+        entries = find_open_entry_rests(trade_conn)
+        assert entries[0]["matched_size"] == "1"
+        assert entries[0]["min_order_size"] == "5"
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn,
+            trade_conn,
+            forecasts_conn,
+            client,
+            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+
+        assert result["cancel_set_size"] == 0
+        assert client.cancel_calls == []
+        assert conn_state(trade_conn, "c1") == "ACKED"
+
     def test_fresh_matching_q_order_is_never_touched(self):
         trade_conn = _trade_db()
         forecasts_conn = _forecasts_db()
@@ -475,6 +769,54 @@ class TestRunC3StalenessCancelCycle:
 
         assert result["cancel_set_size"] == 0
         assert result["confirmed_families"] == set()
+        assert client.cancel_calls == []
+        assert conn_state(trade_conn, "c1") == "ACKED"
+
+    def test_day0_observation_q_is_not_compared_to_forecast_family_q(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        day0_q = "d" * 64
+        _seed_open_entry(
+            trade_conn,
+            command_id="c1",
+            token_id="tok1",
+            venue_order_id="v1",
+            q_version=day0_q,
+            created_at=NOW - timedelta(minutes=5),
+        )
+        _seed_submit_requested_forecast_q_payload(
+            trade_conn,
+            command_id="c1",
+            q_version=day0_q,
+            source_id="day0_live_observation:London:2026-07-08:high:station",
+            authority_tier="OBSERVATION",
+            forecast_source_role="day0_live_observation",
+        )
+        _seed_market_event(
+            forecasts_conn,
+            token_id="tok1",
+            city=FAMILY[0],
+            target_date=FAMILY[1],
+            metric=FAMILY[2],
+        )
+        _seed_posterior(
+            forecasts_conn,
+            family=FAMILY,
+            posterior_identity_hash="forecast-q-different",
+            source_cycle_time=NOW.isoformat(),
+        )
+        client = _FakeGatewayClient(cancel_responses=[])
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn,
+            trade_conn,
+            forecasts_conn,
+            client,
+            now=NOW,
+            affected_cities=frozenset({FAMILY[0]}),
+        )
+
+        assert result["cancel_set_size"] == 0
         assert client.cancel_calls == []
         assert conn_state(trade_conn, "c1") == "ACKED"
 

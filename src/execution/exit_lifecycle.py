@@ -690,6 +690,9 @@ def place_sell_order(
 FILL_STATUSES = frozenset({"CONFIRMED"})
 PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY_MATCHED"})
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
+EXIT_TRADE_FACT_CLOSE_STATES = frozenset({"CONFIRMED"})
+EXIT_TRADE_FACT_CLOSE_COMMAND_STATES = frozenset({"ACKED", "POST_ACKED", "PARTIAL", "FILLED"})
+EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})
 # FIX 2a (2026-06-20): an exit order that is already on the book. The still-held
@@ -1008,12 +1011,34 @@ def _mark_pending_exit(position: Position) -> None:
     )
 
 
+def _exit_context_is_after_settlement_or_market_closed(exit_context: ExitContext) -> bool:
+    reason = str(getattr(exit_context, "exit_reason", "") or "").upper()
+    if "MARKET_CLOSED" in reason or "CLOSED_MARKET" in reason:
+        return True
+    hours_to_settlement = getattr(exit_context, "hours_to_settlement", None)
+    if hours_to_settlement is None:
+        return False
+    try:
+        hours = float(hours_to_settlement)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(hours) and hours <= 0.0
+
+
+def _market_closed_hold_reason_from_exit_context(exit_context: ExitContext) -> str:
+    reason = str(getattr(exit_context, "exit_reason", "") or "").upper()
+    if "DAY0_HARD_FACT_BIN_DEAD" in reason:
+        return "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+    return "MARKET_CLOSED_AWAITING_SETTLEMENT"
+
+
 def mark_market_closed_hold_to_settlement(
     position: Position,
     *,
     reason: str = "MARKET_CLOSED_AWAITING_SETTLEMENT",
     error: str = "market_closed_non_accepting_orders",
     conn: sqlite3.Connection | None = None,
+    preserve_exit_reason: bool = False,
 ) -> None:
     """Record a market-closed hold without manufacturing a sell failure.
 
@@ -1048,7 +1073,8 @@ def mark_market_closed_hold_to_settlement(
         "sell_placed",
     }:
         position.order_status = "filled"
-    position.exit_reason = reason
+    if not preserve_exit_reason:
+        position.exit_reason = reason
     position.last_exit_error = f"{reason}:{error}"[:500]
     monitor_provenance = str(position.selected_method or position.entry_method or "")
     if not bool(getattr(position, "last_monitor_prob_is_fresh", False)) or not monitor_provenance:
@@ -1070,6 +1096,7 @@ def mark_market_closed_hold_to_settlement(
         position,
         reason=reason,
         error=error,
+        preserve_exit_reason=preserve_exit_reason,
     )
 
 
@@ -1152,6 +1179,7 @@ def _dual_write_market_closed_hold_if_available(
     *,
     reason: str,
     error: str,
+    preserve_exit_reason: bool = False,
 ) -> bool:
     """Persist a no-transition Day0 monitor hold for closed markets."""
 
@@ -1160,10 +1188,23 @@ def _dual_write_market_closed_hold_if_available(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
+    idempotency_key = _market_closed_hold_idempotency_key(
+        trade_id=trade_id,
+        reason=reason,
+        error=error,
+    )
     try:
         from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
         from src.state.db import append_many_and_project
 
+        if _has_equivalent_market_closed_hold(
+            conn,
+            trade_id,
+            reason=reason,
+            error=error,
+            idempotency_key=idempotency_key,
+        ):
+            return False
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
         _restore_last_monitor_snapshot_for_closed_hold(conn, position)
@@ -1190,16 +1231,26 @@ def _dual_write_market_closed_hold_if_available(
         )
         event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
         event["caused_by"] = "market_closed_hold_to_settlement"
+        event["idempotency_key"] = idempotency_key
         event["occurred_at"] = occurred_at
         event["venue_status"] = None
         event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
         projection["updated_at"] = occurred_at
         projection["phase"] = phase_after
         projection["order_status"] = getattr(position, "order_status", "") or "filled"
-        projection["exit_reason"] = reason
+        projection["exit_reason"] = (
+            getattr(position, "exit_reason", "") or ""
+            if preserve_exit_reason
+            else reason
+        )
         projection["exit_retry_count"] = 0
         projection["next_exit_retry_at"] = ""
-        append_many_and_project(conn, [event], projection)
+        try:
+            append_many_and_project(conn, [event], projection)
+        except sqlite3.IntegrityError as exc:
+            if _is_position_event_idempotency_collision(exc):
+                return False
+            raise
         return True
     except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
         logger.warning(
@@ -1208,6 +1259,108 @@ def _dual_write_market_closed_hold_if_available(
             exc,
         )
         return False
+
+
+def _has_equivalent_market_closed_hold(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    reason: str,
+    error: str,
+    idempotency_key: str | None = None,
+) -> bool:
+    """Return true when the same closed-market hold is already recorded."""
+
+    try:
+        if idempotency_key:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND idempotency_key = ?
+                 LIMIT 1
+                """,
+                (position_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                return True
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+             ORDER BY sequence_no DESC
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        try:
+            raw_payload = row["payload_json"]
+        except Exception:
+            raw_payload = row[0] if row else None
+        try:
+            payload = json.loads(str(raw_payload or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("semantic_event") != "MARKET_CLOSED_HOLD_TO_SETTLEMENT":
+            continue
+        return (
+            str(payload.get("hold_reason") or "") == reason
+            and str(payload.get("market_closed_error") or "") == error
+            and payload.get("exit_order_submitted") is False
+            and payload.get("exit_failure") is False
+        )
+    return False
+
+
+def _semantic_position_event_idempotency_key(prefix: str, *parts: object) -> str:
+    canonical = json.dumps(
+        [str(part if part is not None else "") for part in parts],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return f"{prefix}:{digest}"
+
+
+def _market_closed_hold_idempotency_key(
+    *,
+    trade_id: str,
+    reason: str,
+    error: str,
+) -> str:
+    return _semantic_position_event_idempotency_key(
+        "market_closed_hold",
+        trade_id,
+        reason,
+        error,
+    )
+
+
+def _chain_dust_projection_idempotency_key(
+    *,
+    trade_id: str,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+) -> str:
+    return _semantic_position_event_idempotency_key(
+        "chain_dust_projection_corrected",
+        trade_id,
+        chain_balance_units,
+        str(chain_balance_shares),
+        asset_id,
+    )
+
+
+def _is_position_event_idempotency_collision(exc: sqlite3.IntegrityError) -> bool:
+    return "position_events.idempotency_key" in str(exc)
 
 
 def release_market_closed_pending_exit_hold(
@@ -1260,6 +1413,183 @@ def release_market_closed_pending_exit_hold(
     return True
 
 
+def _exit_token_id(position: Position) -> str:
+    direction = getattr(position, "direction", "")
+    direction = str(getattr(direction, "value", direction) or "")
+    token_id = (
+        getattr(position, "token_id", "")
+        if direction == "buy_yes"
+        else getattr(position, "no_token_id", "")
+    )
+    return str(token_id or "").strip()
+
+
+def _is_below_latest_snapshot_min_order(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+) -> bool:
+    if conn is None:
+        return False
+    token_id = _exit_token_id(position)
+    shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if shares is None:
+        shares = _positive_decimal(getattr(position, "shares", None))
+    if not token_id or shares is None:
+        return False
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT min_order_size
+              FROM executable_market_snapshots
+             WHERE selected_outcome_token_id = ?
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (token_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.row_factory = saved
+    min_order = _positive_decimal(row["min_order_size"] if row is not None else None)
+    return min_order is not None and shares < min_order
+
+
+def _dust_evidence_marks_non_executable(evidence: str) -> bool:
+    return (
+        "[DUST:" in evidence
+        or "EXIT_CHAIN_DUST_STILL_HELD" in evidence
+        or (
+            "executable_snapshot_gate:" in evidence
+            and "min_order_size" in evidence
+        )
+    )
+
+
+def _is_non_executable_dust_hold(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """True for dust/min-size holds that redecision cannot make executable."""
+
+    if _runtime_state_value(position) != "pending_exit":
+        return False
+    exit_state = getattr(position, "exit_state", "")
+    exit_state = getattr(exit_state, "value", exit_state)
+    if str(exit_state or "") != "backoff_exhausted":
+        return False
+    if _is_below_latest_snapshot_min_order(position, conn=conn):
+        return True
+    reason = str(getattr(position, "exit_reason", "") or "")
+    last_error = str(getattr(position, "last_exit_error", "") or "")
+    return _dust_evidence_marks_non_executable(f"{reason} {last_error}")
+
+
+def _canonical_non_executable_dust_hold(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    now: datetime | None = None,
+) -> tuple[str, str] | None:
+    """Return current canonical dust-hold evidence even if the runtime object is stale.
+
+    A historical ``[DUST: ...]`` reason is not enough to suppress a fresh exit:
+    min-order and chain balance are time-varying. Suppression requires a fresh
+    executable snapshot proving the canonical shares remain below min order.
+    """
+
+    if conn is None:
+        return None
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not trade_id:
+        return None
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT phase,
+                   order_status,
+                   exit_reason,
+                   shares,
+                   chain_shares,
+                   direction,
+                   token_id,
+                   no_token_id
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.row_factory = saved
+    if row is None:
+        return None
+    phase = str(row["phase"] or "")
+    order_status = str(row["order_status"] or "")
+    if phase != "pending_exit" or order_status != "backoff_exhausted":
+        return None
+
+    reason = str(row["exit_reason"] or "")
+
+    direction = str(row["direction"] or "")
+    token_id = str(row["token_id"] or "")
+    no_token_id = str(row["no_token_id"] or "")
+    selected_token_id = token_id if direction == "buy_yes" else no_token_id or token_id
+    if not selected_token_id:
+        return None
+    shares = _positive_decimal(row["chain_shares"])
+    if shares is None:
+        shares = _positive_decimal(row["shares"])
+    if shares is None:
+        return None
+
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        snapshot = conn.execute(
+            """
+            SELECT min_order_size
+              FROM executable_market_snapshots
+             WHERE selected_outcome_token_id = ?
+               AND (freshness_deadline IS NULL OR datetime(freshness_deadline) >= datetime(?))
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (selected_token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.row_factory = saved
+    min_order = _positive_decimal(snapshot["min_order_size"] if snapshot is not None else None)
+    if min_order is None or shares >= min_order:
+        return None
+    error = f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
+    return reason or f"CANONICAL_DUST_HOLD [DUST: {error}]", error
+
+
+def _sync_runtime_to_canonical_dust_hold(
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+) -> None:
+    _mark_pending_exit(position)
+    position.exit_state = "backoff_exhausted"
+    position.order_status = "backoff_exhausted"
+    position.next_exit_retry_at = ""
+    position.exit_reason = reason
+    position.last_exit_error = (error or reason)[:500]
+
+
 def release_backoff_exhausted_pending_exit_for_redecision(
     position: Position,
     *,
@@ -1279,6 +1609,8 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     exit_state = getattr(position, "exit_state", "")
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
+        return False
+    if _is_non_executable_dust_hold(position, conn=conn):
         return False
     chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
     shares = _positive_decimal(getattr(position, "effective_shares", None))
@@ -1370,6 +1702,7 @@ def _dual_write_canonical_economic_close_if_available(
     position: Position,
     *,
     phase_before: str,
+    command_id: str | None = None,
 ) -> bool:
     if conn is None:
         return False
@@ -1449,6 +1782,10 @@ def _dual_write_canonical_economic_close_if_available(
             phase_before=phase_before,
             source_module="src.execution.exit_lifecycle",
         )
+        if command_id:
+            for event in exit_events:
+                if event.get("event_type") == "EXIT_ORDER_FILLED":
+                    event["command_id"] = command_id
         all_events = entry_events + exit_events
         append_many_and_project(conn, all_events, projection)
     except Exception as exc:
@@ -1660,6 +1997,21 @@ def _write_chain_dust_projection_correction(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
+    idempotency_key = _chain_dust_projection_idempotency_key(
+        trade_id=trade_id,
+        chain_balance_units=chain_balance_units,
+        chain_balance_shares=chain_balance_shares,
+        asset_id=asset_id,
+    )
+    if _chain_dust_projection_correction_already_recorded(
+        conn,
+        trade_id=trade_id,
+        chain_balance_units=chain_balance_units,
+        chain_balance_shares=chain_balance_shares,
+        asset_id=asset_id,
+        idempotency_key=idempotency_key,
+    ):
+        return False
     try:
         from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
         from src.state.db import append_many_and_project
@@ -1674,6 +2026,7 @@ def _write_chain_dust_projection_correction(
         )
         event = events[0]
         event["caused_by"] = "chain_dust_projection_corrected"
+        event["idempotency_key"] = idempotency_key
         payload = json.loads(str(event.get("payload_json") or "{}"))
         payload.update(
             {
@@ -1685,7 +2038,12 @@ def _write_chain_dust_projection_correction(
             }
         )
         event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
-        append_many_and_project(conn, events, projection)
+        try:
+            append_many_and_project(conn, events, projection)
+        except sqlite3.IntegrityError as exc:
+            if _is_position_event_idempotency_collision(exc):
+                return False
+            raise
         return True
     except Exception as exc:  # noqa: BLE001 - fail closed to in-memory dust hold
         logger.warning(
@@ -1694,6 +2052,68 @@ def _write_chain_dust_projection_correction(
             exc,
         )
         return False
+
+
+def _chain_dust_projection_correction_already_recorded(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+    idempotency_key: str | None = None,
+) -> bool:
+    try:
+        if idempotency_key:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND idempotency_key = ?
+                 LIMIT 1
+                """,
+                (trade_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                return True
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_dust_projection_corrected'
+             ORDER BY sequence_no DESC
+            """,
+            (trade_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    expected_units = str(chain_balance_units)
+    expected_shares = str(chain_balance_shares)
+    expected_asset = str(asset_id or "")
+    for row in rows:
+        try:
+            raw_payload = row["payload_json"]
+        except Exception:
+            raw_payload = row[0] if row else None
+        try:
+            payload = json.loads(str(raw_payload or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_units = payload.get("chain_balance_units")
+        payload_shares = payload.get("chain_balance_shares")
+        payload_asset = payload.get("asset_id")
+        if (
+            str(payload_units if payload_units is not None else "") == expected_units
+            and str(payload_shares if payload_shares is not None else "") == expected_shares
+            and str(payload_asset if payload_asset is not None else "") == expected_asset
+        ):
+            return True
+    return False
 
 
 def _asset_id_for_position(position: Position) -> str:
@@ -2125,14 +2545,16 @@ def _mark_exit_dust_hold(
     """Hold a non-executable dust exit to settlement instead of retrying."""
     normalized_error = (error or "below_min_order_size")[:500]
     local_shares_before: float | None = None
+    chain_projection_changed = False
     projection_changed = False
     if chain_balance_units is not None and chain_balance_shares is not None:
-        local_shares_before, projection_changed = _sync_position_to_chain_dust(
+        local_shares_before, chain_projection_changed = _sync_position_to_chain_dust(
             position,
             chain_balance_units=chain_balance_units,
             chain_balance_shares=chain_balance_shares,
             asset_id=asset_id,
         )
+        projection_changed = chain_projection_changed
         normalized_error = (getattr(position, "last_exit_error", "") or normalized_error)[:500]
     already_held = (
         str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
@@ -2149,7 +2571,12 @@ def _mark_exit_dust_hold(
     position.last_exit_error = normalized_error
     event_already_recorded = _dust_hold_event_already_recorded(conn, position, reason=reason)
     if already_held or event_already_recorded:
-        if projection_changed and event_already_recorded:
+        if (
+            chain_projection_changed
+            and event_already_recorded
+            and chain_balance_units is not None
+            and chain_balance_shares is not None
+        ):
             _write_chain_dust_projection_correction(
                 conn,
                 position,
@@ -2191,6 +2618,20 @@ def _below_snapshot_min_order_error(position: Position, snapshot_context: dict[s
     if min_order is None or shares is None or shares >= min_order:
         return ""
     return f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
+
+
+def _latest_snapshot_min_order_dust_error(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+) -> str:
+    token_id = _exit_token_id(position)
+    snapshot_context = _latest_exit_snapshot_context(
+        conn,
+        token_id,
+        require_sell_bid=False,
+    )
+    return _below_snapshot_min_order_error(position, snapshot_context)
 
 
 def _exit_no_executable_bid_error(
@@ -2391,10 +2832,29 @@ def execute_exit(
             return "exit_blocked: TOKEN_AGGREGATE_BLOCKED_PENDING_RESOLUTION"
 
     if exit_context.current_market_price is None:
+        if (
+            not is_red_force_exit
+            and _exit_context_is_after_settlement_or_market_closed(exit_context)
+        ):
+            mark_market_closed_hold_to_settlement(
+                position,
+                reason=_market_closed_hold_reason_from_exit_context(exit_context),
+                error="missing_current_market_price_after_settlement",
+                conn=conn,
+            )
+            return "exit_blocked: market_closed_hold_to_settlement"
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
     if not is_red_force_exit and not exit_context.current_market_price_is_fresh:
+        if _exit_context_is_after_settlement_or_market_closed(exit_context):
+            mark_market_closed_hold_to_settlement(
+                position,
+                reason=_market_closed_hold_reason_from_exit_context(exit_context),
+                error="stale_current_market_price_after_settlement",
+                conn=conn,
+            )
+            return "exit_blocked: market_closed_hold_to_settlement"
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
         _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
         return "exit_blocked: stale_market_price"
@@ -2426,6 +2886,20 @@ def _execute_live_exit(
     if conn is not None:
         from src.state.db import log_exit_attempt_event, log_exit_fill_event, log_exit_retry_event
         from src.state.db import log_pending_exit_recovery_event
+
+    canonical_dust = _canonical_non_executable_dust_hold(position, conn=conn, now=_utcnow())
+    if canonical_dust is not None:
+        dust_reason, dust_error = canonical_dust
+        _sync_runtime_to_canonical_dust_hold(
+            position,
+            reason=dust_reason,
+            error=dust_error,
+        )
+        logger.info(
+            "EXIT DUST HOLD %s already canonical; suppressing duplicate exit intent.",
+            position.trade_id,
+        )
+        return f"sell_blocked_dust: existing_canonical_dust_hold: {dust_error or dust_reason}"
 
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
@@ -3761,6 +4235,272 @@ def _last_exit_order_id(
     return fallback if order_status.startswith("sell_") else ""
 
 
+def _canonical_exit_trade_fact_cte(cte_name: str = "canonical_exit_trade_fact") -> str:
+    """Rank duplicate trade facts so weaker later rows cannot hide a fill."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT ranked.*
+              FROM (
+                    SELECT scored.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY command_id, trade_id
+                               ORDER BY proof_rank DESC, local_sequence DESC
+                           ) AS canonical_rank
+                      FROM (
+                            SELECT fact.*,
+                                   CASE
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 500
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 450
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 400
+                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 300
+                                       ELSE 100
+                                   END AS proof_rank
+                              FROM venue_trade_facts fact
+                           ) scored
+                   ) ranked
+             WHERE ranked.canonical_rank = 1
+        )
+    """
+
+
+def _exit_close_target_size(position: Position, command_size: object) -> Decimal | None:
+    candidates = [
+        _positive_decimal(command_size),
+        _positive_decimal(getattr(position, "chain_shares", None)),
+        _positive_decimal(getattr(position, "effective_shares", None)),
+        _positive_decimal(getattr(position, "shares", None)),
+    ]
+    candidates = [candidate for candidate in candidates if candidate is not None]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _exit_trade_fact_close_candidate(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    exit_order_id: str = "",
+) -> dict[str, object] | None:
+    """Return durable full-fill evidence for an EXIT command, if already ingested."""
+
+    if conn is None:
+        return None
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return None
+
+    trade_states = tuple(sorted(EXIT_TRADE_FACT_CLOSE_STATES))
+    command_states = tuple(sorted(EXIT_TRADE_FACT_CLOSE_COMMAND_STATES))
+    trade_placeholders = ", ".join("?" for _ in trade_states)
+    command_placeholders = ", ".join("?" for _ in command_states)
+    order_clause = ""
+    params: list[object] = [position_id, *trade_states, *command_states]
+    if exit_order_id:
+        order_clause = "AND cmd.venue_order_id = ?"
+        params.append(exit_order_id)
+
+    try:
+        row = conn.execute(
+            "WITH "
+            + _canonical_exit_trade_fact_cte()
+            + f"""
+            SELECT cmd.command_id,
+                   cmd.venue_order_id,
+                   cmd.size AS command_size,
+                   cmd.state AS command_state,
+                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
+                   SUM(
+                       CAST(COALESCE(fact.filled_size, '0') AS REAL)
+                       * CAST(COALESCE(fact.fill_price, '0') AS REAL)
+                   ) AS fill_notional,
+                   GROUP_CONCAT(DISTINCT UPPER(COALESCE(fact.state, ''))) AS fill_states,
+                   MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)) AS observed_at
+              FROM venue_commands cmd
+              JOIN canonical_exit_trade_fact fact
+                ON fact.command_id = cmd.command_id
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+               AND cmd.venue_order_id IS NOT NULL
+               AND cmd.venue_order_id != ''
+               AND UPPER(COALESCE(fact.state, '')) IN ({trade_placeholders})
+               AND UPPER(COALESCE(cmd.state, '')) IN ({command_placeholders})
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+               {order_clause}
+             GROUP BY cmd.command_id, cmd.venue_order_id, cmd.size, cmd.state
+             ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
+             LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+
+    filled_size = _positive_decimal(row["filled_size"])
+    fill_notional = _positive_decimal(row["fill_notional"])
+    target_size = _exit_close_target_size(position, row["command_size"])
+    if filled_size is None or fill_notional is None or target_size is None:
+        return None
+    if filled_size + EXIT_FULL_CLOSE_DUST_TOLERANCE < target_size:
+        return None
+    fill_price = fill_notional / filled_size
+    if fill_price <= 0 or fill_price > 1:
+        return None
+    return {
+        "command_id": str(row["command_id"] or ""),
+        "venue_order_id": str(row["venue_order_id"] or ""),
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "observed_at": str(row["observed_at"] or ""),
+        "fill_states": str(row["fill_states"] or ""),
+        "command_state": str(row["command_state"] or ""),
+    }
+
+
+def _exit_trade_fact_confirmation_pending_candidate(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    exit_order_id: str = "",
+) -> dict[str, object] | None:
+    """Return non-final positive exit trade evidence that must block retries."""
+
+    if conn is None:
+        return None
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return None
+
+    trade_states = tuple(sorted(NON_TERMINAL_TRADE_STATUSES))
+    command_states = tuple(sorted(EXIT_TRADE_FACT_CLOSE_COMMAND_STATES))
+    trade_placeholders = ", ".join("?" for _ in trade_states)
+    command_placeholders = ", ".join("?" for _ in command_states)
+    order_clause = ""
+    params: list[object] = [position_id, *trade_states, *command_states]
+    if exit_order_id:
+        order_clause = "AND cmd.venue_order_id = ?"
+        params.append(exit_order_id)
+
+    try:
+        row = conn.execute(
+            "WITH "
+            + _canonical_exit_trade_fact_cte()
+            + f"""
+            SELECT cmd.command_id,
+                   cmd.venue_order_id,
+                   cmd.size AS command_size,
+                   cmd.state AS command_state,
+                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
+                   SUM(
+                       CAST(COALESCE(fact.filled_size, '0') AS REAL)
+                       * CAST(COALESCE(fact.fill_price, '0') AS REAL)
+                   ) AS fill_notional,
+                   GROUP_CONCAT(DISTINCT UPPER(COALESCE(fact.state, ''))) AS fill_states,
+                   MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)) AS observed_at
+              FROM venue_commands cmd
+              JOIN canonical_exit_trade_fact fact
+                ON fact.command_id = cmd.command_id
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+               AND cmd.venue_order_id IS NOT NULL
+               AND cmd.venue_order_id != ''
+               AND UPPER(COALESCE(fact.state, '')) IN ({trade_placeholders})
+               AND UPPER(COALESCE(cmd.state, '')) IN ({command_placeholders})
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+               {order_clause}
+             GROUP BY cmd.command_id, cmd.venue_order_id, cmd.size, cmd.state
+             ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
+             LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+
+    filled_size = _positive_decimal(row["filled_size"])
+    fill_notional = _positive_decimal(row["fill_notional"])
+    if filled_size is None or fill_notional is None:
+        return None
+    fill_price = fill_notional / filled_size
+    if fill_price <= 0 or fill_price > 1:
+        return None
+    return {
+        "command_id": str(row["command_id"] or ""),
+        "venue_order_id": str(row["venue_order_id"] or ""),
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "observed_at": str(row["observed_at"] or ""),
+        "fill_states": str(row["fill_states"] or ""),
+        "command_state": str(row["command_state"] or ""),
+    }
+
+
+def _close_pending_exit_from_trade_fact(
+    portfolio: PortfolioState,
+    position: Position,
+    fill: dict[str, object],
+    *,
+    conn: sqlite3.Connection | None,
+) -> Position | None:
+    fill_price = _positive_decimal(fill.get("fill_price"))
+    if fill_price is None:
+        return None
+    order_id = str(fill.get("venue_order_id") or "")
+    command_id = str(fill.get("command_id") or "")
+    exit_reason = str(getattr(position, "exit_reason", "") or "DEFERRED_SELL_FILL")
+    phase_before = _canonical_phase_before_for_economic_close(position)
+    closed = compute_economic_close(
+        portfolio,
+        position.trade_id,
+        float(fill_price),
+        exit_reason,
+    )
+    if closed is None:
+        return None
+
+    closed.exit_state = "sell_filled"
+    closed.order_status = "sell_filled"
+    closed.last_exit_order_id = order_id
+    closed.chain_shares = 0.0
+    closed.chain_avg_price = 0.0
+    closed.chain_cost_basis_usd = 0.0
+    _dual_write_canonical_economic_close_if_available(
+        conn,
+        closed,
+        phase_before=phase_before,
+        command_id=command_id,
+    )
+    if conn is not None:
+        conn.execute(
+            """
+            UPDATE position_current
+               SET order_status = 'sell_filled',
+                   exit_price = COALESCE(exit_price, ?),
+                   chain_shares = 0.0,
+                   chain_avg_price = 0.0,
+                   chain_cost_basis_usd = 0.0
+             WHERE position_id = ?
+               AND phase = 'economically_closed'
+            """,
+            (float(fill_price), closed.trade_id),
+        )
+    return closed
+
+
 def check_pending_exits(
     portfolio: PortfolioState,
     clob,
@@ -3820,6 +4560,47 @@ def check_pending_exits(
         processed_scan_positions += 1
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
+        fill = _exit_trade_fact_close_candidate(conn, pos)
+        if fill is not None:
+            closed = _close_pending_exit_from_trade_fact(portfolio, pos, fill, conn=conn)
+            if closed is not None:
+                stats["filled_positions"].append(closed)
+                if conn is not None:
+                    fill_price = float(fill["fill_price"])
+                    filled_shares = float(fill["filled_size"])
+                    order_id = str(fill["venue_order_id"])
+                    log_exit_fill_event(
+                        conn,
+                        closed,
+                        order_id=order_id,
+                        fill_price=fill_price,
+                        current_market_price=pos.last_monitor_market_price or pos.entry_price,
+                        best_bid=getattr(pos, "last_monitor_best_bid", None),
+                        timestamp=getattr(closed, "last_exit_at", None),
+                    )
+                    _log_partial_exit_execution_fact(
+                        conn,
+                        closed,
+                        status=str(fill.get("fill_states") or "MATCHED"),
+                        fill_price=fill_price,
+                        filled_shares=filled_shares,
+                        order_id=order_id,
+                    )
+                    _emit_typed_realized_fill(
+                        actual_price=fill_price,
+                        expected_price=pos.last_monitor_market_price or pos.entry_price,
+                        side="sell",
+                        shares=getattr(closed, "shares", 0.0),
+                        trade_id=getattr(closed, "trade_id", ""),
+                    )
+                stats["filled"] += 1
+                stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
+                continue
+        confirmation_pending = _exit_trade_fact_confirmation_pending_candidate(conn, pos)
+        if confirmation_pending is not None:
+            stats["unchanged"] += 1
+            stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
+            continue
         if exit_state == "retry_pending":
             if (
                 str(getattr(pos, "next_exit_retry_at", "") or "").strip()
@@ -3878,6 +4659,42 @@ def check_pending_exits(
             continue
         if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
             pos.last_exit_order_id = exit_order_id
+
+        fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
+        if fill is not None:
+            closed = _close_pending_exit_from_trade_fact(portfolio, pos, fill, conn=conn)
+            if closed is not None:
+                stats["filled_positions"].append(closed)
+                if conn is not None:
+                    fill_price = float(fill["fill_price"])
+                    filled_shares = float(fill["filled_size"])
+                    log_exit_fill_event(
+                        conn,
+                        closed,
+                        order_id=exit_order_id,
+                        fill_price=fill_price,
+                        current_market_price=pos.last_monitor_market_price or pos.entry_price,
+                        best_bid=getattr(pos, "last_monitor_best_bid", None),
+                        timestamp=getattr(closed, "last_exit_at", None),
+                    )
+                    _log_partial_exit_execution_fact(
+                        conn,
+                        closed,
+                        status=str(fill.get("fill_states") or "MATCHED"),
+                        fill_price=fill_price,
+                        filled_shares=filled_shares,
+                        order_id=exit_order_id,
+                    )
+                    _emit_typed_realized_fill(
+                        actual_price=fill_price,
+                        expected_price=pos.last_monitor_market_price or pos.entry_price,
+                        side="sell",
+                        shares=getattr(closed, "shares", 0.0),
+                        trade_id=getattr(closed, "trade_id", ""),
+                    )
+                stats["filled"] += 1
+                stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
+                continue
 
         _commit_before_exit_venue_io(conn, stage="pending_exit_status_poll")
         status, status_payload = _check_order_fill(clob, exit_order_id)
@@ -4072,6 +4889,22 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if position.exit_state != "retry_pending":
         return False
 
+    dust_error = _latest_snapshot_min_order_dust_error(position, conn=conn)
+    if dust_error:
+        current_reason = str(getattr(position, "exit_reason", "") or "EXIT_RETRY_PENDING")
+        dust_reason = (
+            current_reason
+            if _dust_evidence_marks_non_executable(current_reason)
+            else f"{current_reason} [DUST: {dust_error}]"
+        )
+        _mark_exit_dust_hold(
+            position,
+            reason=dust_reason,
+            error=dust_error,
+            conn=conn,
+        )
+        return False
+
     if is_exit_cooldown_active(position):
         return False  # Still cooling down
 
@@ -4104,6 +4937,9 @@ def _dual_write_exit_retry_released_if_available(
     previous_next_retry_at: str,
     previous_retry_count: int,
     previous_error: str,
+    event_type: str = "EXIT_RETRY_RELEASED",
+    release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
+    caused_by: str = "exit_retry_cooldown_expired",
 ) -> bool:
     """Persist retry cooldown release and projection in one canonical write.
 
@@ -4125,6 +4961,18 @@ def _dual_write_exit_retry_released_if_available(
 
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
+        if not any(
+            getattr(position, field, "")
+            for field in (
+                "last_monitor_at",
+                "last_exit_at",
+                "chain_verified_at",
+                "day0_entered_at",
+                "entered_at",
+                "order_posted_at",
+            )
+        ):
+            position.order_posted_at = occurred_at
         phase_after = phase_for_runtime_position(
             state=getattr(position, "state", ""),
             exit_state=getattr(position, "exit_state", ""),
@@ -4143,20 +4991,20 @@ def _dual_write_exit_retry_released_if_available(
             env = "live"
         payload = {
             "status": "ready",
-            "exit_reason": getattr(position, "exit_reason", "") or "EXIT_RETRY_RELEASED",
+            "exit_reason": getattr(position, "exit_reason", "") or release_reason,
             "error": previous_error,
             "previous_retry_count": previous_retry_count,
             "retry_count": 0,
             "previous_next_retry_at": previous_next_retry_at,
             "next_retry_at": "",
-            "release_reason": "EXIT_RETRY_COOLDOWN_EXPIRED",
+            "release_reason": release_reason,
         }
         event = {
-            "event_id": f"{trade_id}:exit_retry_released:{sequence_no}",
+            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
             "position_id": trade_id,
             "event_version": 1,
             "sequence_no": sequence_no,
-            "event_type": "EXIT_RETRY_RELEASED",
+            "event_type": event_type,
             "occurred_at": occurred_at,
             "phase_before": LifecyclePhase.PENDING_EXIT.value,
             "phase_after": fold_lifecycle_phase(
@@ -4172,8 +5020,8 @@ def _dual_write_exit_retry_released_if_available(
             "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
             "order_id": None,
             "command_id": None,
-            "caused_by": "exit_retry_cooldown_expired",
-            "idempotency_key": f"{trade_id}:exit_retry_released:{sequence_no}",
+            "caused_by": caused_by,
+            "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
             "venue_status": "ready",
             "source_module": "src.execution.exit_lifecycle",
             "env": env,
@@ -4209,21 +5057,25 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
         return False
+    previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
+    previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
+    previous_error = str(getattr(position, "last_exit_error", "") or "")
     position.exit_state = ""
     position.next_exit_retry_at = ""
+    position.exit_retry_count = 0
     order_status = str(getattr(position, "order_status", "") or "")
     if order_status.startswith("sell_") or order_status in {"retry_pending", "exit_intent"}:
         position.order_status = "filled"
     _release_pending_exit(position)
     if conn is not None:
-        from src.state.db import log_pending_exit_recovery_event
-
-        log_pending_exit_recovery_event(
+        _dual_write_exit_retry_released_if_available(
             conn,
             position,
-            event_type="EXIT_INTENT_RECOVERED",
-            reason="PENDING_EXIT_NO_ORDER_RELEASED",
-            error="no_exit_order",
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+            release_reason="PENDING_EXIT_NO_ORDER_RELEASED",
+            caused_by="pending_exit_no_order_released",
         )
     return True
 

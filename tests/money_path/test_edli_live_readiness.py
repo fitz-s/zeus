@@ -662,6 +662,207 @@ def _lock_reason(
     )
 
 
+def test_terminal_no_fill_reprice_suppresses_before_live_order_append():
+    """A same-price terminal zero-fill retry should not emit a new EDLI proof/cap."""
+
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            intent_kind TEXT,
+            side TEXT,
+            token_id TEXT,
+            state TEXT,
+            price REAL,
+            size REAL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            command_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            local_sequence INTEGER,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands
+        VALUES (
+            'cmd-zero-fill', 'old-pos', 'ENTRY', 'BUY', 'tok-no',
+            'CANCELLED', 0.61, 18.52,
+            '2026-07-08T12:29:35+00:00',
+            '2026-07-08T12:35:57+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts
+        VALUES (
+            'cmd-zero-fill', 'CANCEL_CONFIRMED', '0', 1,
+            '2026-07-08T12:35:57+00:00'
+        )
+        """
+    )
+
+    reason = adapter._same_token_terminal_no_fill_reprice_suppression_reason(
+        conn,
+        token_id="tok-no",
+        candidate_position_id="fresh-intent",
+        limit_price=0.61,
+    )
+
+    assert reason is not None
+    assert reason.startswith("ENTRY_COOLDOWN_TERMINAL_NO_FILL_REPRICE_REQUIRED")
+    assert "existing_command_id=cmd-zero-fill" in reason
+
+
+def test_terminal_no_fill_reprice_guard_allows_real_reprice_and_positive_fill():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            intent_kind TEXT,
+            side TEXT,
+            token_id TEXT,
+            state TEXT,
+            price REAL,
+            size REAL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            command_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            local_sequence INTEGER,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            filled_size REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands
+        VALUES (
+            'cmd-zero-fill', 'old-pos', 'ENTRY', 'BUY', 'tok-no',
+            'CANCELLED', 0.61, 18.52,
+            '2026-07-08T12:29:35+00:00',
+            '2026-07-08T12:35:57+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts
+        VALUES (
+            'cmd-zero-fill', 'CANCEL_CONFIRMED', '0', 1,
+            '2026-07-08T12:35:57+00:00'
+        )
+        """
+    )
+
+    repriced = adapter._same_token_terminal_no_fill_reprice_suppression_reason(
+        conn,
+        token_id="tok-no",
+        candidate_position_id="fresh-intent",
+        limit_price=0.611,
+    )
+    assert repriced is None
+
+    conn.execute(
+        "INSERT INTO venue_trade_facts VALUES ('cmd-zero-fill', 1.25)"
+    )
+    same_price_after_fill = adapter._same_token_terminal_no_fill_reprice_suppression_reason(
+        conn,
+        token_id="tok-no",
+        candidate_position_id="fresh-intent",
+        limit_price=0.61,
+    )
+    assert same_price_after_fill is None
+
+
+def test_entry_global_submit_guard_suppresses_configured_reduce_only(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.risk_allocator import AllocationDecision, AllocationDenied
+
+    monkeypatch.setattr(
+        "src.risk_allocator.summary",
+        lambda: {
+            "configured": True,
+            "reduce_only": True,
+            "kill_switch_reason": None,
+            "entry": {"allow_submit": False, "reason": "reduce_only_mode_active"},
+        },
+    )
+
+    def _deny_submit(*, reduce_only=False):
+        raise AllocationDenied(
+            AllocationDecision(
+                False,
+                "reduce_only_mode_active",
+                0,
+                reduce_only=reduce_only,
+            )
+        )
+
+    monkeypatch.setattr("src.risk_allocator.assert_global_submit_allows", _deny_submit)
+
+    reason = adapter._entry_global_submit_suppression_reason()
+
+    assert reason is not None
+    assert reason.startswith("RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:")
+    assert "reason=reduce_only_mode_active" in reason
+    assert "reduce_only=True" in reason
+
+
+def test_entry_global_submit_guard_does_not_early_block_unconfigured(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    monkeypatch.setattr(
+        "src.risk_allocator.summary",
+        lambda: {
+            "configured": False,
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        },
+    )
+
+    def _unexpected_submit_check(*, reduce_only=False):
+        raise AssertionError("unconfigured runtimes must fall through")
+
+    monkeypatch.setattr("src.risk_allocator.assert_global_submit_allows", _unexpected_submit_check)
+
+    assert adapter._entry_global_submit_suppression_reason() is None
+
+
 def test_fixA_active_live_order_suppresses_new_submit():
     """FIX A (#125): a genuinely ACTIVE (OPEN/in-flight) order for the family blocks
     a duplicate submit — regardless of any price improvement (the retired 0.02 gate
@@ -1499,6 +1700,7 @@ def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkey
         ),
         operator_arm=_operator_arm(),
         pre_submit_authority_provider=_pre_submit_authority_provider,
+        entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
     )
 
     receipt = submit(event, decision_time)
@@ -1989,6 +2191,54 @@ def test_live_execution_command_requires_qkernel_book_certificate_match():
     )
 
     with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_MISMATCH"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
+def test_live_execution_command_rejects_qkernel_selected_book_rejection():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    qkernel_cert = _qkernel_execution_cert(
+        payoff_q_point=0.8144224142386236,
+        payoff_q_lcb=0.7042980463451396,
+        cost=0.62,
+        side="YES",
+    )
+    book = _opportunity_book_with_qkernel_cert(qkernel_cert)
+    book["candidates"][0].update(
+        {
+            "missing_reason": (
+                "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+                "policy=MAKER_TAKER_FORBIDDEN"
+            ),
+            "passed_prefilter": False,
+            "trade_score": 0.0,
+        }
+    )
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        q_live=0.8144224142386236,
+        q_lcb_5pct=0.7042980463451396,
+        c_fee_adjusted=0.62,
+        trade_score=0.0842980463451396,
+        qkernel_execution_economics=qkernel_cert,
+        opportunity_book=book,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED",
+    ):
         adapter._build_live_execution_command_certificates(
             event=event,
             receipt=accepted,
@@ -2493,6 +2743,89 @@ def test_live_adapter_no_canary_gate_proceeds_past_deleted_canary_block(monkeypa
     assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
 
 
+def test_live_adapter_blocks_entry_when_live_health_surface_missing(monkeypatch, tmp_path):
+    """Live-health entry authority must fail closed before command build.
+
+    A missing q/provenance/lifecycle/monitor surface is not an operator pause
+    and not a no-edge decision; it is degraded entry authority. ENTRY must stop
+    before the no-submit receipt builder can reserve live cap or reach executor.
+    """
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    build_called = {"count": 0}
+    executor_called = {"count": 0}
+
+    def _build_should_not_run(*_args, **_kwargs):
+        build_called["count"] += 1
+        raise AssertionError("no-submit receipt builder must not run when live health blocks entry")
+
+    def _executor_should_not_run(_final_intent, _command):
+        executor_called["count"] += 1
+        raise AssertionError("executor_submit must not run when live health blocks entry")
+
+    def _missing_q_version_surface():
+        payload = _healthy_entry_live_health_provider(decision_time)()
+        payload["surfaces"].pop("entry_q_version")
+        return payload
+
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", _build_should_not_run)
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        operator_arm=_operator_arm(),
+        executor_submit=_executor_should_not_run,
+        entry_live_health_authority_provider=_missing_q_version_surface,
+    )
+
+    receipt = submit(event, decision_time)
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "live_health_entry_authority:missing_surfaces=entry_q_version"
+    assert build_called["count"] == 0
+    assert executor_called["count"] == 0
+
+
+def test_entry_live_health_authority_blocks_legacy_composite_without_computed_at():
+    from src.engine import event_reactor_adapter as adapter
+
+    payload = _healthy_entry_live_health_provider(
+        datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    )()
+    payload.pop("computed_at")
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=datetime(2026, 5, 24, 18, 11, tzinfo=timezone.utc),
+    )
+
+    assert reason == "computed_at_missing_or_invalid"
+
+
+def test_entry_live_health_authority_ignores_business_plane_only_degraded():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        _healthy_entry_live_health_provider(decision_time),
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason is None
+
+
 def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
@@ -2548,6 +2881,9 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             operator_arm=_operator_arm(),
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(
+                datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+            ),
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -2608,6 +2944,7 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch, tmp_
                 venue_ack_received=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
         )
 
         receipt = submit(event, decision_time)
@@ -2738,6 +3075,9 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch, tmp_path):
                 venue_call_started=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(
+                datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+            ),
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -2813,6 +3153,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
             operator_arm=_operator_arm(),
             executor_submit=_boundary_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
         )
 
         receipt = submit(event, decision_time)
@@ -2894,6 +3235,7 @@ def test_post_command_executor_exception_terminalizes_aggregate(monkeypatch, tmp
             operator_arm=_operator_arm(),
             executor_submit=_raising_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
         )
 
         receipt = submit(event, decision_time)
@@ -2966,6 +3308,9 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch, tmp_
                 side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(
+                datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+            ),
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -3032,6 +3377,9 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
                 side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            entry_live_health_authority_provider=_healthy_entry_live_health_provider(
+                datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+            ),
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -4042,6 +4390,31 @@ def _operator_arm():
     from src.main import require_operator_arm
 
     return require_operator_arm({"edli_live_operator_authorized": True})
+
+
+def _healthy_entry_live_health_provider(decision_time: datetime):
+    def _provider():
+        from src.engine import event_reactor_adapter as adapter
+
+        surfaces = {
+            surface: {"ok": True, "issue": None}
+            for surface in adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES
+        }
+        # Business-plane health is observability only and must not self-lock
+        # entry authority when every provenance/runtime/monitor surface is OK.
+        surfaces["business_plane"] = {
+            "ok": False,
+            "issue": "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW",
+        }
+        return {
+            "computed_at": decision_time.astimezone(timezone.utc).isoformat(),
+            "failing_surfaces": ["business_plane"],
+            "healthy": False,
+            "status": "DEGRADED",
+            "surfaces": surfaces,
+        }
+
+    return _provider
 
 
 def _forecast_event():

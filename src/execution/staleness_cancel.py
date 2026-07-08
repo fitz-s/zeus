@@ -28,11 +28,13 @@ behavior-continuous.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
 from src.state.order_state_predicates import (
     bootstrap_rest_deadline_minutes,
@@ -53,6 +55,7 @@ OPEN_REST_FACT_STATES = tuple(sorted(OPEN_ORDER_FACT_STATES))
 # phase-1 posterior lookup event_reactor_adapter._forecast_authority_payload_from_posterior
 # uses (src/engine/event_reactor_adapter.py:11309).
 _REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
+_Q_AUTHORITY_BLOCKED_PREFIX = "__Q_AUTHORITY_BLOCKED__:"
 
 FamilyKey = tuple[str, str, str]
 
@@ -65,6 +68,82 @@ def _venue_commands_q_version_select_expr(conn: sqlite3.Connection) -> str:
     return "vc.q_version" if "q_version" in columns else "NULL"
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})")}
+    except sqlite3.DatabaseError:
+        return set()
+
+
+def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone() is not None
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _decision_source_details_from_submit_payload(payload_json: object) -> dict[str, object] | None:
+    try:
+        payload = json.loads(str(payload_json or "{}"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    capability = payload.get("execution_capability")
+    if not isinstance(capability, dict):
+        return None
+    components = capability.get("components")
+    if not isinstance(components, list):
+        return None
+    details: dict[str, object] | None = None
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component.get("component") != "decision_source_integrity":
+            continue
+        raw_details = component.get("details")
+        if isinstance(raw_details, dict):
+            details = raw_details
+        break
+    if not isinstance(details, dict):
+        return None
+    return details
+
+
+def _decision_q_authority_from_details(details: dict[str, object] | None) -> str | None:
+    if not isinstance(details, dict):
+        return None
+    authority_tier = str(details.get("authority_tier") or "").strip().upper()
+    source_role = str(details.get("forecast_source_role") or "").strip()
+    if authority_tier == "FORECAST" and source_role == "entry_primary":
+        return "forecast_entry_primary"
+    if authority_tier in {"OBSERVATION", "DAY0_OBSERVATION"} or source_role in {
+        "day0_live_observation",
+        "day0_observed_probability",
+    }:
+        return "day0_observation"
+    return None
+
+
+def _decision_q_version_from_details(details: dict[str, object] | None) -> str | None:
+    if not isinstance(details, dict):
+        return None
+    if str(details.get("authority_tier") or "") != "FORECAST":
+        return None
+    if str(details.get("forecast_source_role") or "") != "entry_primary":
+        return None
+    if str(details.get("source_id") or "") != "openmeteo_ecmwf_ifs9_bayes_fusion":
+        return None
+    for key in ("posterior_identity_hash", "raw_payload_hash"):
+        value = str(details.get(key) or "").strip()
+        if len(value) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+            return value
+    return None
+
+
 def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every open ENTRY rest, with its stamped ``q_version``. No deadline filter —
     unlike the retired ``find_expired_resting_entries``, classification (stale vs.
@@ -72,6 +151,37 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """
     placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
     q_version_expr = _venue_commands_q_version_select_expr(conn)
+    venue_command_columns = _table_columns(conn, "venue_commands")
+    snapshot_id_select = (
+        "vc.snapshot_id AS snapshot_id" if "snapshot_id" in venue_command_columns else "NULL AS snapshot_id"
+    )
+    snapshot_join = ""
+    snapshot_min_order_select = "NULL AS min_order_size"
+    if "snapshot_id" in venue_command_columns and _has_table(conn, "executable_market_snapshots"):
+        snapshot_join = """
+        LEFT JOIN executable_market_snapshots snap
+          ON snap.snapshot_id = vc.snapshot_id
+        """
+        snapshot_min_order_select = "snap.min_order_size AS min_order_size"
+    submit_payload_join = ""
+    submit_payload_select = "NULL AS submit_payload_json"
+    if _has_table(conn, "venue_command_events"):
+        submit_payload_join = """
+        LEFT JOIN (
+            SELECT command_id, payload_json
+            FROM (
+                SELECT command_id, payload_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY command_id ORDER BY sequence_no DESC
+                       ) AS rn
+                FROM venue_command_events
+                WHERE event_type = 'SUBMIT_REQUESTED'
+            )
+            WHERE rn = 1
+        ) submit_payload
+          ON submit_payload.command_id = vc.command_id
+        """
+        submit_payload_select = "submit_payload.payload_json AS submit_payload_json"
     rows = conn.execute(
         f"""
         WITH latest_facts AS (
@@ -82,10 +192,13 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             FROM venue_order_facts
         )
         SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
-               vc.created_at, {q_version_expr} AS q_version, lf.state AS fact_state, lf.matched_size
+               vc.created_at, {q_version_expr} AS q_version, lf.state AS fact_state, lf.matched_size,
+               {snapshot_id_select}, {snapshot_min_order_select}, {submit_payload_select}
         FROM venue_commands vc
         JOIN latest_facts lf
           ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
+        {snapshot_join}
+        {submit_payload_join}
         WHERE vc.intent_kind = 'ENTRY'
           AND vc.venue_order_id IS NOT NULL
           AND vc.venue_order_id != ''
@@ -97,21 +210,47 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         if isinstance(row, sqlite3.Row):
-            out.append(dict(row))
+            item = dict(row)
         else:
-            out.append(
-                {
-                    "command_id": row[0],
-                    "venue_order_id": row[1],
-                    "token_id": row[2],
-                    "market_id": row[3],
-                    "created_at": row[4],
-                    "q_version": row[5],
-                    "fact_state": row[6],
-                    "matched_size": row[7],
-                }
-            )
+            item = {
+                "command_id": row[0],
+                "venue_order_id": row[1],
+                "token_id": row[2],
+                "market_id": row[3],
+                "created_at": row[4],
+                "q_version": row[5],
+                "fact_state": row[6],
+                "matched_size": row[7],
+                "snapshot_id": row[8],
+                "min_order_size": row[9],
+                "submit_payload_json": row[10],
+            }
+        source_details = _decision_source_details_from_submit_payload(item.get("submit_payload_json"))
+        q_authority = _decision_q_authority_from_details(source_details)
+        if q_authority:
+            item["q_version_authority"] = q_authority
+        if not item.get("q_version"):
+            recovered = _decision_q_version_from_details(source_details)
+            if recovered:
+                item["q_version"] = recovered
+                item["q_version_source"] = "submit_requested_decision_source"
+                item["q_version_authority"] = "forecast_entry_primary"
+        item.pop("submit_payload_json", None)
+        out.append(item)
     return out
+
+
+def _has_sub_min_partial_fill(entry: dict[str, Any]) -> bool:
+    try:
+        matched_size = float(entry.get("matched_size") or 0.0)
+        min_order_size = float(entry.get("min_order_size") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        matched_size > 0.0
+        and min_order_size > 0.0
+        and matched_size < min_order_size
+    )
 
 
 def resolve_order_families(
@@ -198,6 +337,8 @@ def resolve_order_families(
 def read_current_family_q_versions(
     forecasts_conn: sqlite3.Connection,
     families: Iterable[FamilyKey],
+    *,
+    now: datetime | None = None,
 ) -> dict[FamilyKey, str | None]:
     """Freshest live ``posterior_identity_hash`` per distinct family.
 
@@ -210,12 +351,13 @@ def read_current_family_q_versions(
     ``None`` (INDETERMINATE for every one of its orders' q-staleness comparison).
     """
     out: dict[FamilyKey, str | None] = {}
+    decision_time = (now or datetime.now(UTC)).astimezone(UTC)
     for family in {f for f in families if f}:
         city, target_date, metric = family
         try:
             row = forecasts_conn.execute(
                 """
-                SELECT posterior_identity_hash
+                SELECT posterior_identity_hash, source_cycle_time, computed_at
                   FROM forecast_posteriors
                  WHERE product_id = ?
                    AND city = ? AND target_date = ? AND temperature_metric = ?
@@ -226,7 +368,26 @@ def read_current_family_q_versions(
             ).fetchone()
         except Exception:  # noqa: BLE001 — fail-closed to INDETERMINATE, never raise
             row = None
-        out[family] = str(row[0]) if row and row[0] else None
+        if not row or not row[0]:
+            out[family] = None
+            continue
+        q_version = str(row[0])
+        try:
+            lag_reason = _replacement_input_hwm.replacement_live_input_lag_reason(
+                forecasts_conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+                posterior_source_cycle_time=row[1],
+                posterior_computed_at=row[2],
+            )
+        except Exception:  # noqa: BLE001 — classification must stay conservative
+            lag_reason = None
+        if lag_reason:
+            out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:{lag_reason}"
+        else:
+            out[family] = q_version
     return out
 
 
@@ -253,9 +414,11 @@ def classify_cancel_set(
         command_id = str(entry.get("command_id") or "")
         family = families_by_command.get(command_id)
         current_q = q_by_family.get(family) if family else None
-        stale = is_stale_pending_cancel(
-            entry.get("q_version"), current_q, True
-        )
+        stale = None
+        if entry.get("q_version_authority") != "day0_observation":
+            stale = is_stale_pending_cancel(
+                entry.get("q_version"), current_q, True
+            )
         ttl = rest_deadline_exceeded(
             order_open=True,
             resting_since=entry.get("created_at"),
@@ -263,6 +426,8 @@ def classify_cancel_set(
             deadline_minutes=deadline_minutes,
         )
         if not (stale is True or ttl):
+            continue
+        if _has_sub_min_partial_fill(entry):
             continue
         reasons = []
         if stale is True:
@@ -376,6 +541,7 @@ def run_c3_staleness_cancel_cycle(
                 for f in families_by_command.values()
                 if f and f[0] in affected_cities
             ),
+            now=now,
         )
         q_cancel_set = classify_cancel_set(
             scoped_entries, families_by_command, q_by_family, now=now, deadline_minutes=deadline_minutes

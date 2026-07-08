@@ -94,6 +94,7 @@ class ReplacementBelief:
     posterior_method: str | None = None
     latest_raw_cycle_time: str | None = None
     raw_cycle_lag_hours: float | None = None
+    raw_input_lag_reason: str | None = None
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
@@ -108,6 +109,8 @@ class ReplacementBelief:
             raw_lag = f";latest_raw_cycle_time={self.latest_raw_cycle_time}"
             if self.raw_cycle_lag_hours is not None:
                 raw_lag += f";raw_cycle_lag_h={self.raw_cycle_lag_hours:.2f}"
+        if self.raw_input_lag_reason:
+            raw_lag += f";raw_input_lag_reason={self.raw_input_lag_reason}"
         if self.source_cycle_age_hours is not None:
             return (
                 f"belief_source={self.source_table};age_h={self.age_hours:.2f};"
@@ -132,6 +135,13 @@ def _parse_computed_at(raw: object) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _raw_input_lag_basis(reason: str | None) -> str | None:
+    text = str(reason or "").strip()
+    if not text.startswith("basis="):
+        return None
+    return text.split(":", 1)[0].removeprefix("basis=") or None
 
 
 def _latest_raw_single_runs_cycle(
@@ -600,6 +610,7 @@ def load_replacement_belief(
     now_dt = now or datetime.now(timezone.utc)
     latest_raw_cycle_time: datetime | None = None
     latest_raw_cycle_basis: str | None = None
+    raw_input_lag_reason: str | None = None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as exc:
@@ -653,6 +664,26 @@ def load_replacement_belief(
                 temperature_metric=temperature_metric,
                 now=now_dt,
             )
+            try:
+                from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+
+                raw_input_lag_reason = replacement_live_input_lag_reason(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=temperature_metric,
+                    decision_time=now_dt,
+                    posterior_source_cycle_time=row["source_cycle_time"],
+                    posterior_computed_at=row["computed_at"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "position_belief: raw-input HWM check failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    temperature_metric,
+                    exc,
+                )
     except sqlite3.Error as exc:
         logger.warning("position_belief: posterior read failed: %s", exc)
         return None
@@ -737,6 +768,9 @@ def load_replacement_belief(
         ).total_seconds() / 3600.0
         fresh = False
         freshness_basis = latest_raw_cycle_basis or "source_cycle_time_live_input_lag"
+    if raw_input_lag_reason:
+        fresh = False
+        freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
     return ReplacementBelief(
         held_side_prob=held,
@@ -761,6 +795,7 @@ def load_replacement_belief(
             latest_raw_cycle_time.isoformat() if latest_raw_cycle_time is not None else None
         ),
         raw_cycle_lag_hours=raw_cycle_lag_hours,
+        raw_input_lag_reason=raw_input_lag_reason,
     )
 
 

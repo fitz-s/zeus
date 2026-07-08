@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-08
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -213,6 +213,68 @@ def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_can
 
     assert get_open_positions(portfolio) == []
     assert cycle_runtime._monitoring_phase_positions(portfolio, conn=conn) == [pos]
+
+
+def test_monitor_selection_syncs_pending_exit_projection_over_stale_runtime_state():
+    """Canonical pending_exit truth must not re-enter the held EXIT_INTENT lane as stale day0."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            order_status TEXT,
+            shares REAL,
+            chain_shares REAL,
+            exit_retry_count INTEGER,
+            next_exit_retry_at TEXT,
+            exit_reason TEXT,
+            updated_at TEXT,
+            last_monitor_market_price_is_fresh INTEGER
+        )
+        """
+    )
+    pos = _make_position(
+        trade_id="dust-exit-stale-runtime-day0",
+        state="day0_window",
+        order_status="filled",
+        exit_state="",
+        shares=1.0,
+        chain_shares=1.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, order_status, shares, chain_shares,
+            exit_retry_count, next_exit_retry_at, exit_reason, updated_at,
+            last_monitor_market_price_is_fresh
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "dust-exit-stale-runtime-day0",
+            "pending_exit",
+            "retry_pending",
+            1.0,
+            1.0,
+            0,
+            "2026-07-08T16:12:57+00:00",
+            "DAY0_HARD_FACT_BIN_DEAD [DUST: size 1 below min_order_size 5]",
+            "2026-07-08T16:10:57+00:00",
+            1,
+        ),
+    )
+
+    selected = cycle_runtime._monitoring_phase_positions(_make_portfolio(pos), conn=conn)
+
+    assert selected == [pos]
+    assert pos.state == "pending_exit"
+    assert pos.order_status == "retry_pending"
+    assert pos.exit_state == "retry_pending"
+    assert pos.next_exit_retry_at == "2026-07-08T16:12:57+00:00"
+    assert "DUST" in pos.exit_reason
 
 
 def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monkeypatch):
@@ -3102,6 +3164,88 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     assert monitor_results[0].exit_reason == "CI_OVERLAP_HOLD"
 
 
+def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monkeypatch):
+    """Non-executable dust holds must not re-enter monitor and spam EXIT_INTENT."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="backoff-exhausted-dust-hold",
+        direction="buy_no",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        shares=1.0,
+        chain_shares=1.0,
+        city="Kuala Lumpur",
+        target_date="2026-07-08",
+        token_id="yes-kl",
+        no_token_id="no-kl",
+        condition_id="condition-kl",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_retry_count=MAX_EXIT_RETRIES,
+        exit_reason=(
+            "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES (entry=0.8679, current=0.0000) "
+            "[DUST: executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5]"
+        ),
+        last_exit_error="executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            raise AssertionError("dust hold must not request fresh exit quote")
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("dust hold must not record an exit")
+
+    def refresh_must_not_run(conn, clob, position):
+        raise AssertionError("dust hold must not refresh into evaluate_exit")
+
+    def evaluate_must_not_run(self, exit_context):
+        raise AssertionError("dust hold must not evaluate or emit exit intent")
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh_must_not_run)
+    monkeypatch.setattr(Position, "evaluate_exit", evaluate_must_not_run)
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_backoff_exhausted_dust_hold"),
+            "cities_by_name": {"Kuala Lumpur": type("City", (), {"timezone": "Asia/Kuala_Lumpur"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 8, 9, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "backoff_exhausted"
+    assert pos.order_status == "backoff_exhausted"
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_pending_exit_phase"] == 1
+    assert summary["monitors"] == 0
+    assert summary["exits"] == 0
+    assert monitor_results == []
+
+
 # ---- Test 7: Collateral check blocks underfunded sell ----
 
 def test_collateral_check_blocks_underfunded_sell():
@@ -3877,6 +4021,63 @@ def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
     conn.close()
 
 
+def test_monitor_refresh_with_exit_backoff_preserves_pending_exit_phase(tmp_path):
+    """Monitor receipts must not re-project a pending dust/backoff exit as day0."""
+    from src.engine import cycle_runtime
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "pending-exit-monitor-phase.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="pending-exit-monitor-phase",
+        direction="buy_no",
+        state="day0_window",
+        chain_state="synced",
+        shares=1.0,
+        chain_shares=1.0,
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+        condition_id="condition-pending-exit-monitor-phase",
+        strategy_key="forecast_qkernel_entry",
+        entered_at="2026-07-02T19:00:00+00:00",
+        exit_reason="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES [DUST]",
+    )
+    deps = type(
+        "Deps",
+        (),
+        {
+            "logger": logging.getLogger("test_monitor_refresh_pending_exit_phase"),
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 2, 20, 20, tzinfo=timezone.utc)),
+        },
+    )
+
+    assert cycle_runtime._emit_monitor_refreshed_canonical_if_available(conn, pos, deps=deps) is True
+
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    current = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+
+    assert event is not None
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "pending_exit"
+    payload = json.loads(event["payload_json"])
+    assert payload["phase_after"] == "pending_exit"
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "backoff_exhausted"
+    conn.close()
+
+
 def test_pending_exit_chain_absent_zero_balance_uses_chain_truth_resolution(monkeypatch):
     """Pending-exit chain-absent review rows must resolve via balanceOf instead of sell retry."""
     from src.execution.exit_lifecycle import handle_exit_pending_missing
@@ -4419,6 +4620,178 @@ def test_entry_replacement_ignores_partial_non_anchor_raw_cycle_newer_than_poste
     )
 
     assert reason is None
+
+
+def test_entry_replacement_blocks_when_used_model_raw_cycle_newer_than_posterior():
+    """A posterior is stale when one of its own used models has a newer raw cycle."""
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "Kuala Lumpur",
+            "2026-07-10",
+            "high",
+            "2026-07-08T00:00:00+00:00",
+            "2026-07-08T08:16:19+00:00",
+            json.dumps(
+                {
+                    "bayes_precision_fusion": {
+                        "used_models": ["icon_global", "ukmo_global_deterministic_10km", "ecmwf_ifs"]
+                    }
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "icon_global",
+            "Kuala Lumpur",
+            "2026-07-10",
+            "high",
+            "2026-07-08T06:00:00+00:00",
+            "single_runs",
+            "COVERED",
+            "2026-07-08T09:39:37+00:00",
+            "2026-07-08T09:27:52+00:00",
+        ),
+    )
+
+    reason = adapter._replacement_live_input_lag_reason(
+        conn,
+        family=SimpleNamespace(
+            city="Kuala Lumpur",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        decision_time=datetime(2026, 7, 8, 10, 39, tzinfo=timezone.utc),
+        posterior_source_cycle_time="2026-07-08T00:00:00+00:00",
+    )
+
+    assert reason is not None
+    assert "source_cycle_time_used_raw_model_forecasts_lag" in reason
+    assert "latest_raw_cycle=2026-07-08T06:00:00+00:00" in reason
+    assert "posterior_cycle=2026-07-08T00:00:00+00:00" in reason
+
+
+def test_entry_replacement_blocks_when_used_model_same_cycle_arrives_after_posterior():
+    """A same-cycle used-model row captured after computed_at invalidates the posterior."""
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "Kuala Lumpur",
+            "2026-07-10",
+            "high",
+            "2026-07-08T06:00:00+00:00",
+            "2026-07-08T08:00:00+00:00",
+            json.dumps({"bayes_precision_fusion": {"used_models": ["icon_global"]}}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "icon_global",
+            "Kuala Lumpur",
+            "2026-07-10",
+            "high",
+            "2026-07-08T06:00:00+00:00",
+            "single_runs",
+            "COVERED",
+            "2026-07-08T09:30:00+00:00",
+            "2026-07-08T09:20:00+00:00",
+        ),
+    )
+
+    reason = adapter._replacement_live_input_lag_reason(
+        conn,
+        family=SimpleNamespace(
+            city="Kuala Lumpur",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        decision_time=datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc),
+        posterior_source_cycle_time="2026-07-08T06:00:00+00:00",
+        posterior_computed_at="2026-07-08T08:00:00+00:00",
+    )
+
+    assert reason is not None
+    assert "used_raw_model_forecasts_same_cycle_late_input" in reason
+    assert "latest_raw_cycle=2026-07-08T06:00:00+00:00" in reason
+    assert "latest_raw_input_at=2026-07-08T09:30:00+00:00" in reason
+    assert "posterior_computed_at=2026-07-08T08:00:00+00:00" in reason
 
 
 def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monkeypatch):

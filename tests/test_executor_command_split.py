@@ -851,6 +851,197 @@ class TestLiveOrderCommandSplit:
         assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
         assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"
 
+    def test_entry_q_version_stamped_from_decision_source_posterior_identity(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Event-bound entry commands carry the posterior identity that authorized q."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        q_version = "posterior-live-q-version-001"
+        context = _decision_source_context(posterior_identity_hash=q_version)
+        certificate_hash = "d" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            decision_source_context=context,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-entry-q-version")
+            )
+
+            result = _live_order(
+                trade_id="trd-entry-q-version",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-q-version",
+            )
+
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
+        row = mem_conn.execute(
+            "SELECT command_id, q_version FROM venue_commands WHERE position_id = ?",
+            ("trd-entry-q-version",),
+        ).fetchone()
+        assert row["q_version"] == q_version
+
+        from src.state.venue_command_repo import list_events
+
+        requested = [
+            event for event in list_events(mem_conn, row["command_id"])
+            if event["event_type"] == "SUBMIT_REQUESTED"
+        ]
+        payload = json.loads(requested[0]["payload_json"])
+        components_by_name = {
+            component["component"]: component
+            for component in payload["execution_capability"]["components"]
+        }
+        assert (
+            components_by_name["decision_source_integrity"]["details"]["posterior_identity_hash"]
+            == q_version
+        )
+
+    def test_entry_q_version_falls_back_to_forecast_raw_hash_for_legacy_context(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Older forecast contexts still stamp q identity from their source hash."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        raw_hash = "e" * 64
+        context = _decision_source_context(
+            posterior_identity_hash="",
+            raw_payload_hash=raw_hash,
+            forecast_source_role="entry_primary",
+            authority_tier="FORECAST",
+            degradation_level="OK",
+        )
+        certificate_hash = "f" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            decision_source_context=context,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-entry-q-version-legacy")
+            )
+
+            result = _live_order(
+                trade_id="trd-entry-q-version-legacy",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-q-version-legacy",
+            )
+
+        assert result.status == "pending", f"reason={getattr(result, 'reason', None)}"
+        row = mem_conn.execute(
+            "SELECT q_version FROM venue_commands WHERE position_id = ?",
+            ("trd-entry-q-version-legacy",),
+        ).fetchone()
+        assert row["q_version"] == raw_hash
+
+    def test_entry_missing_q_version_rejects_before_venue_submit(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Live ENTRY without a q identity is not allowed to reach the venue."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        context = _decision_source_context()
+        certificate_hash = "9" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            decision_source_context=context,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_q_version_from_authority",
+            lambda *args, **kwargs: None,
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-entry-no-q-version",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-no-q-version",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "entry_q_version:missing_decision_q_identity"
+        assert mock_inst.place_limit_order.called is False
+        assert (
+            mem_conn.execute(
+                "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+                ("trd-entry-no-q-version",),
+            ).fetchone()[0]
+            == 0
+        )
+
     def test_entry_pre_submit_integrity_does_not_require_post_submit_audit_fields(
         self,
         mem_conn,
@@ -1467,6 +1658,200 @@ class TestLiveOrderCommandSplit:
             == 1
         )
 
+    def test_live_order_uses_recent_terminal_no_fill_cooldown_after_older_closed_fill(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Live gate must not let an older closed fill hide a newer zero-fill terminal attempt."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        token_id = "tok-terminal-nofill-after-closed-fill"
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+        envelope_id = _ensure_envelope(
+            mem_conn,
+            token_id=token_id,
+            price=Decimal("0.40"),
+            size=Decimal("10.0"),
+        )
+        now = datetime.now(timezone.utc)
+        older_iso = (now - timedelta(hours=24)).isoformat()
+        recent_iso = now.isoformat()
+        mem_conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, target_date,
+                bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+                entry_price, p_posterior, strategy_key, edge_source,
+                discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at,
+                temperature_metric
+            ) VALUES (
+                'pos-older-closed-fill', 'economically_closed',
+                'trade-older-closed-fill', 'mkt-test-001',
+                'Shenzhen', '2026-06-19', '34C+', 'buy_yes', 'C',
+                4.0, 10.0, 4.0, 0.40, 0.60, 'center_buy',
+                'replacement', 'live', 'synced', ?, ?,
+                'condition-test', 'order-older-closed-fill', 'filled',
+                ?, 'high'
+            )
+            """,
+            (token_id, f"{token_id}-no", older_iso),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-older-closed-fill', ?, ?, 'pos-older-closed-fill',
+                'dec-older-closed-fill', 'idem-older-closed-fill', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-older-closed-fill',
+                'FILLED', NULL, ?, ?, NULL
+            )
+            """,
+            (snapshot_id, envelope_id, token_id, older_iso, older_iso),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-recent-terminal-nofill-after-closed-fill', ?, ?,
+                'pos-recent-terminal-nofill-after-closed-fill',
+                'dec-recent-terminal-nofill-after-closed-fill',
+                'idem-recent-terminal-nofill-after-closed-fill', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.41, NULL,
+                'REJECTED', NULL, ?, ?, NULL
+            )
+            """,
+            (snapshot_id, envelope_id, token_id, recent_iso, recent_iso),
+        )
+        mem_conn.commit()
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        certificate_hash = "b" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            token_id=token_id,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+
+        with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
+            result = _live_order(
+                trade_id="trd-terminal-nofill-after-closed-fill",
+                intent=intent,
+                shares=11.0,
+                conn=mem_conn,
+                decision_id="dec-terminal-nofill-after-closed-fill",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "entry_cooldown:same_token_terminal_no_fill_cooling_down"
+        assert result.command_state == "REJECTED"
+        insert_command.assert_not_called()
+        MockClient.assert_not_called()
+
+    def test_entry_same_token_cooldown_uses_latest_terminal_no_fill_before_older_fill(
+        self,
+        mem_conn,
+    ):
+        """A recent zero-fill terminal command must not be skipped in favor of an older fill."""
+        from src.execution.executor import _entry_same_token_cooldown_component
+
+        token_id = "tok-terminal-nofill-before-older-fill"
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+        envelope_id = _ensure_envelope(
+            mem_conn,
+            token_id=token_id,
+            price=Decimal("0.40"),
+            size=Decimal("10.0"),
+        )
+        now = datetime.now(timezone.utc)
+        recent_iso = now.isoformat()
+        older_iso = (now - timedelta(hours=24)).isoformat()
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-older-filled', ?, ?, 'pos-older-filled',
+                'dec-older-filled', 'idem-older-filled', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-older-filled',
+                'FILLED', NULL, ?, ?, NULL
+            )
+            """,
+            (snapshot_id, envelope_id, token_id, older_iso, older_iso),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'fill-older-filled', 'order-older-filled',
+                'cmd-older-filled', 'MATCHED', '1.0', '0.40',
+                0, NULL, NULL, 0, 'FAKE_VENUE', ?, ?, 1, ?, '{}'
+            )
+            """,
+            (older_iso, older_iso, "e" * 64),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-recent-rejected-nofill', ?, ?, 'pos-recent-rejected-nofill',
+                'dec-recent-rejected-nofill', 'idem-recent-rejected-nofill',
+                'ENTRY', 'mkt-test-001', ?, 'BUY', 10.0, 0.41, NULL,
+                'REJECTED', NULL, ?, ?, NULL
+            )
+            """,
+            (snapshot_id, envelope_id, token_id, recent_iso, recent_iso),
+        )
+        mem_conn.commit()
+
+        component = _entry_same_token_cooldown_component(
+            mem_conn,
+            token_id=token_id,
+            candidate_position_id="pos-candidate",
+            limit_price=0.44,
+            shares=9.75,
+            now=now,
+        )
+
+        assert component["allowed"] is False
+        assert component["reason"] == "same_token_terminal_no_fill_cooling_down"
+        assert component["existing_command_id"] == "cmd-recent-rejected-nofill"
+        assert component["existing_command_state"] == "REJECTED"
+
     def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):
         """FinalExecutionIntent handoff must use the same pre-submit integrity split."""
         from src.contracts.execution_intent import FinalExecutionIntent
@@ -1597,6 +1982,115 @@ class TestLiveOrderCommandSplit:
         assert result.reason is not None
         assert result.reason.startswith("decision_source_integrity:")
         assert expected_reason in result.reason
+        assert command_count == 0
+        mock_inst.place_limit_order.assert_not_called()
+
+    def test_entry_rejects_replacement_hwm_lag_before_command_persistence(
+        self,
+        mem_conn,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Replacement q freshness must match the cancel lane before submit."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        forecasts_path = tmp_path / "forecasts.db"
+        forecasts_conn = sqlite3.connect(forecasts_path)
+        forecasts_conn.execute(
+            """
+            CREATE TABLE market_events (
+                condition_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        forecasts_conn.execute(
+            """
+            INSERT INTO market_events (
+                condition_id, city, target_date, temperature_metric, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Taipei",
+                "2026-07-09",
+                "high",
+                "2026-07-08T12:00:00+00:00",
+            ),
+        )
+        forecasts_conn.commit()
+        forecasts_conn.close()
+
+        monkeypatch.setattr(
+            "src.state.db.get_forecasts_connection_read_only",
+            lambda: sqlite3.connect(forecasts_path),
+        )
+        monkeypatch.setattr(
+            "src.data.replacement_input_hwm.replacement_live_input_lag_reason",
+            lambda *_args, **_kwargs: (
+                "basis=source_cycle_time_used_raw_model_forecasts_lag:"
+                "latest_raw_cycle=2026-07-08T09:11:26+00:00:"
+                "posterior_cycle=2026-07-08T00:00:00+00:00:lag_h=9.19"
+            ),
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_risk_allocator_allows_submit",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_select_risk_allocator_order_type",
+            lambda *args, **kwargs: "GTC",
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {
+                "component": "ws_gap_guard",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+
+        context = _decision_source_context(
+            source_id="openmeteo_ecmwf_ifs9_bayes_fusion",
+            model_family="raw_model_forecasts.multimodel",
+            forecast_issue_time="2026-07-08T00:00:00+00:00",
+            forecast_valid_time="2026-07-09T00:00:00+00:00",
+            forecast_fetch_time="2026-07-08T08:17:34+00:00",
+            forecast_available_at="2026-07-08T08:16:57+00:00",
+            decision_time="2026-07-08T12:29:35+00:00",
+            observation_time="2026-07-08T08:16:00+00:00",
+            observation_available_at="2026-07-08T08:16:57+00:00",
+            polymarket_end_anchor_source="gamma_explicit",
+            first_member_observed_time="2026-07-08T08:10:00+00:00",
+            run_complete_time="2026-07-08T08:17:00+00:00",
+        )
+        intent = _make_entry_intent(mem_conn, decision_source_context=context)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-entry-hwm-lag",
+                intent=intent,
+                shares=18.52,
+                conn=mem_conn,
+                decision_id="dec-entry-hwm-lag",
+            )
+
+        command_count = mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        assert result.status == "rejected"
+        assert result.reason is not None
+        assert result.reason.startswith("replacement_input_hwm:live_input_lag:")
+        assert "lag_h=9.19" in result.reason
         assert command_count == 0
         mock_inst.place_limit_order.assert_not_called()
 

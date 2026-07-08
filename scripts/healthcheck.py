@@ -83,18 +83,34 @@ PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
 PROCESS_CODE_SURFACES = {
     "live_trading": (
         "src/main.py",
+        "src/control/cutover_guard.py",
+        "src/control/heartbeat_supervisor.py",
+        "src/control/live_health.py",
+        "src/control/runtime_code_plane.py",
         "src/engine/cycle_runner.py",
+        "src/engine/cycle_runtime.py",
         "src/engine/evaluator.py",
+        "src/engine/event_reactor_adapter.py",
+        "src/engine/monitor_refresh.py",
+        "src/engine/position_belief.py",
         "src/contracts/no_trade_reason.py",
         "src/contracts/executable_market_snapshot.py",
         "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
         "src/data/market_scanner.py",
         "src/data/polymarket_client.py",
+        "src/events/event_store.py",
+        "src/events/reactor.py",
         "src/execution/command_recovery.py",
         "src/execution/exchange_reconcile.py",
         "src/execution/executor.py",
+        "src/execution/exit_lifecycle.py",
+        "src/execution/exit_safety.py",
         "src/execution/harvester_pnl_resolver.py",
+        "src/execution/staleness_cancel.py",
+        "src/observability/status_summary.py",
+        "src/state/chain_mirror_reconciler.py",
+        "src/state/db.py",
         "src/strategy/selection_family.py",
         "src/strategy/family_exclusive_dedup.py",
     ),
@@ -143,6 +159,10 @@ def _scheduler_health_path() -> Path:
 
 def _live_health_composite_path() -> Path:
     return state_path("live_health_composite.json")
+
+
+def _live_trading_heartbeat_path() -> Path:
+    return state_path("daemon-heartbeat.json")
 
 
 def _venue_heartbeat_keeper_path() -> Path:
@@ -710,6 +730,50 @@ def _position_current_schema_status() -> dict:
             pass
 
 
+def _monitor_probability_freshness_status() -> dict:
+    """Evaluate active held-position monitor probability freshness read-only."""
+
+    try:
+        from src.control.live_health import _monitor_probability_freshness_surface
+
+        return _monitor_probability_freshness_surface(
+            _trade_db_path().parent,
+            datetime.now(timezone.utc),
+            main_daemon_surface=_main_daemon_attestation_surface(),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "issue": f"MONITOR_PROBABILITY_FRESHNESS_UNAVAILABLE:{type(exc).__name__}",
+            "evaluated": False,
+        }
+
+
+def _json_object_or_none(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if isinstance(payload, dict) else None
+
+
+def _main_daemon_attestation_surface() -> dict:
+    """Use the shared live-health attestation before evaluating monitor freshness."""
+
+    try:
+        from src.control.live_health import _main_daemon_surface
+
+        return _main_daemon_surface(
+            _json_object_or_none(_status_path()),
+            _json_object_or_none(_live_trading_heartbeat_path()),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "issue": f"MAIN_DAEMON_ATTESTATION_UNAVAILABLE:{type(exc).__name__}",
+            "attested": False,
+        }
+
+
 def _venue_commands_schema_status() -> dict:
     """Ensure live submit journaling can persist the current command contract."""
 
@@ -740,11 +804,91 @@ def _venue_commands_schema_status() -> dict:
             for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
         }
         missing = sorted(VENUE_COMMANDS_SUBMIT_REQUIRED_COLUMNS - columns)
+        active_missing_q_version_count = 0
+        active_missing_q_version_sample: list[dict] = []
+        row_check_skipped_reason = None
+        if not missing and {"position_id", "intent_kind", "q_version"} <= columns:
+            position_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='position_current'"
+            ).fetchone()
+            if position_table is None:
+                row_check_skipped_reason = "POSITION_CURRENT_TABLE_MISSING"
+            else:
+                position_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+                }
+                required_position_columns = {
+                    "position_id",
+                    "phase",
+                    "shares",
+                    "chain_shares",
+                }
+                missing_position_columns = sorted(required_position_columns - position_columns)
+                if missing_position_columns:
+                    row_check_skipped_reason = (
+                        "POSITION_CURRENT_COLUMN_MISSING:"
+                        + ",".join(missing_position_columns)
+                    )
+                else:
+                    active_missing_q_version_count = int(
+                        conn.execute(
+                            """
+                            SELECT COUNT(DISTINCT pc.position_id)
+                              FROM position_current pc
+                              JOIN venue_commands vc
+                                ON vc.position_id = pc.position_id
+                             WHERE vc.intent_kind = 'ENTRY'
+                               AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                               AND (
+                                   COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                                   OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                               )
+                               AND (
+                                   vc.q_version IS NULL
+                                   OR TRIM(CAST(vc.q_version AS TEXT)) = ''
+                               )
+                            """
+                        ).fetchone()[0]
+                        or 0
+                    )
+                    active_missing_q_version_sample = [
+                        dict(row)
+                        for row in conn.execute(
+                            """
+                            SELECT pc.position_id, pc.phase, pc.shares, pc.chain_shares,
+                                   vc.command_id, vc.state, vc.created_at
+                              FROM position_current pc
+                              JOIN venue_commands vc
+                                ON vc.position_id = pc.position_id
+                             WHERE vc.intent_kind = 'ENTRY'
+                               AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                               AND (
+                                   COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                                   OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                               )
+                               AND (
+                                   vc.q_version IS NULL
+                                   OR TRIM(CAST(vc.q_version AS TEXT)) = ''
+                               )
+                             ORDER BY datetime(vc.created_at) DESC, vc.command_id DESC
+                             LIMIT 8
+                            """
+                        ).fetchall()
+                    ]
+        elif not missing:
+            row_check_skipped_reason = "VENUE_COMMANDS_ROW_CHECK_COLUMNS_MISSING"
+        issue = "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT" if missing else None
+        if active_missing_q_version_count > 0:
+            issue = "VENUE_COMMANDS_ENTRY_Q_VERSION_MISSING_ACTIVE_EXPOSURE"
         return {
-            "ok": not missing,
+            "ok": not missing and active_missing_q_version_count == 0,
             "path": str(db_path),
-            "issue": "VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT" if missing else None,
+            "issue": issue,
             "missing_columns": missing,
+            "active_missing_q_version_count": active_missing_q_version_count,
+            "active_missing_q_version_sample": active_missing_q_version_sample,
+            "row_check_skipped_reason": row_check_skipped_reason,
         }
     except Exception as exc:
         return {
@@ -1982,6 +2126,15 @@ def check() -> dict:
             result["position_current_schema"].get("issue")
             or "POSITION_CURRENT_SCHEMA_DRIFT"
         )
+    result["monitor_probability_freshness"] = _monitor_probability_freshness_status()
+    result["monitor_probability_freshness_ok"] = bool(
+        result["monitor_probability_freshness"].get("ok", True)
+    )
+    if not result["monitor_probability_freshness_ok"]:
+        result["monitor_probability_freshness_issue"] = (
+            result["monitor_probability_freshness"].get("issue")
+            or "MONITOR_PROBABILITY_FRESHNESS_UNHEALTHY"
+        )
     result["venue_commands_schema"] = _venue_commands_schema_status()
     result["venue_commands_schema_ok"] = bool(
         result["venue_commands_schema"].get("ok", True)
@@ -2309,6 +2462,7 @@ def check() -> dict:
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
         and bool(result.get("position_current_schema_ok", True))
+        and bool(result.get("monitor_probability_freshness_ok", True))
         and bool(result.get("venue_commands_schema_ok", True))
         and bool(result.get("venue_order_truth_conflicts_ok", True))
         and bool(result.get("monitor_cadence_ok", True))

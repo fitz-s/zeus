@@ -448,6 +448,8 @@ def _reason_from(value: Any, fallback: str) -> str:
 def _reason_is_already_canceled(value: Any) -> bool:
     reason = _reason_from(value, "").lower()
     normalized = reason.replace("_", " ").replace("-", " ")
+    if "matched" in normalized:
+        return False
     return (
         "already canceled" in normalized
         or "already cancelled" in normalized

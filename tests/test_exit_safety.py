@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-08
 # Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -24,11 +24,13 @@ _CTF_SCALE = 1_000_000
 @pytest.fixture
 def conn():
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_collateral_schema(c)
     yield c
     c.close()
 
@@ -146,6 +148,7 @@ def _ensure_snapshot(
     captured_at: datetime = _NOW,
     freshness_deadline: datetime | None = None,
     min_tick_size: Decimal | str = Decimal("0.01"),
+    min_order_size: Decimal | str = Decimal("0.01"),
     active: bool = True,
     closed: bool = False,
     accepting_orders: bool | None = True,
@@ -184,7 +187,7 @@ def _ensure_snapshot(
             market_close_at=None,
             sports_start_at=None,
             min_tick_size=Decimal(str(min_tick_size)),
-            min_order_size=Decimal("0.01"),
+            min_order_size=Decimal(str(min_order_size)),
             fee_details={
                 "source": "test",
                 "token_id": selected_token,
@@ -421,12 +424,14 @@ def test_cancel_requested_persists_execution_capability_before_cancel_callable(c
 
 def test_cancel_caller_connection_commits_requested_before_cancel_callable(tmp_path, monkeypatch):
     from src.execution.exit_safety import request_cancel_for_command
+    from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import get_connection, init_schema
 
     monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
     db_path = tmp_path / "cancel-caller-conn-durable.db"
     setup_conn = get_connection(db_path)
     init_schema(setup_conn)
+    init_collateral_schema(setup_conn)
     _insert_exit_command(setup_conn, venue_order_id="ord-1")
     _ack_exit(setup_conn)
     setup_conn.commit()
@@ -534,6 +539,29 @@ def test_cancel_already_canceled_not_canceled_dict_is_terminal_cancel(conn):
     events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
     assert "CANCEL_ACKED" in events
     assert "CANCEL_FAILED" not in events
+
+
+def test_cancel_already_canceled_or_matched_dict_stays_review_required(conn):
+    from src.execution.exit_safety import parse_cancel_response, request_cancel_for_command
+    from src.state.venue_command_repo import get_command, list_events
+
+    raw = {
+        "canceled": [],
+        "not_canceled": {"ord-1": "order can't be found - already canceled or matched"},
+    }
+    parsed = parse_cancel_response(raw)
+    assert parsed.status == "NOT_CANCELED"
+    assert "matched" in (parsed.reason or "")
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+    outcome = request_cancel_for_command(conn, "cmd-exit-1", lambda order_id: raw)
+
+    assert outcome.status == "NOT_CANCELED"
+    assert get_command(conn, "cmd-exit-1")["state"] == "REVIEW_REQUIRED"
+    events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
+    assert "CANCEL_FAILED" in events
+    assert "CANCEL_ACKED" not in events
 
 
 def test_cancel_network_timeout_creates_CANCEL_UNKNOWN(conn):
@@ -924,7 +952,9 @@ def test_pending_exit_fill_poller_releases_expired_retry_without_order_id(conn):
 
 def test_pending_exit_without_order_releases_for_redecision(conn):
     from src.execution.exit_lifecycle import release_pending_exit_without_order_if_retryable
+    from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
 
     position = Position(
         trade_id="pos-pending-no-order-release",
@@ -941,6 +971,7 @@ def test_pending_exit_without_order_releases_for_redecision(conn):
         cost_basis_usd=0.15,
         state="pending_exit",
         pre_exit_state="entered",
+        entered_at="2026-07-01T00:10:00+00:00",
         exit_state="",
         order_status="filled",
         last_exit_order_id="",
@@ -948,12 +979,43 @@ def test_pending_exit_without_order_releases_for_redecision(conn):
         no_token_id=NO_TOKEN,
         condition_id="condition-pending-no-order-release",
     )
+    upsert_position_current(conn, build_position_current_projection(position))
 
     assert release_pending_exit_without_order_if_retryable(position, conn=conn) is True
     assert position.state == "entered"
     assert position.pre_exit_state == ""
     assert position.exit_state == ""
     assert position.order_status == "filled"
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "active",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "active"
+    assert event["venue_status"] == "ready"
+    assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
 
 
 def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(conn):
@@ -1350,14 +1412,21 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
     assert position.order_status == "filled"
     events = conn.execute(
         """
-        SELECT event_type, payload_json
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
           FROM position_events
          WHERE position_id = ?
          ORDER BY sequence_no
         """,
         (position.trade_id,),
     ).fetchall()
-    assert events == []
+    assert len(events) == 1
+    event = events[0]
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "active"
+    assert event["venue_status"] == "ready"
+    assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
 
 
 def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
@@ -1416,6 +1485,263 @@ def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
     assert facts[0]["fill_price"] == pytest.approx(0.44)
     assert facts[0]["shares"] == pytest.approx(20.0)
     assert facts[0]["command_id"] == "cmd-full-exit"
+
+
+def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cancel(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_event, append_trade_fact, get_command
+
+    position = Position(
+        trade_id="pos-filled-exit-fact",
+        market_id="condition-test",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-07-08",
+        bin_label="Will the highest temperature in Paris be 34C on July 8?",
+        direction="buy_yes",
+        unit="C",
+        size_usd=13.0415,
+        entry_price=0.52,
+        p_posterior=0.857866666666667,
+        shares=25.0799,
+        cost_basis_usd=13.0415,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        exit_retry_count=1,
+        next_exit_retry_at="2026-07-08T14:44:50+00:00",
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        chain_state="synced",
+        chain_shares=25.0799,
+        chain_avg_price=0.52,
+        chain_cost_basis_usd=13.0415,
+        strategy_key="settlement_capture",
+        strategy="settlement_capture",
+        edge_source="settlement_capture",
+        env="live",
+        entered_at="2026-07-08T09:40:58+00:00",
+        order_id="ord-entry",
+        order_status="retry_pending",
+        last_exit_order_id="ord-exit-filled",
+        last_monitor_market_price=0.61,
+        last_monitor_best_bid=0.61,
+    )
+    portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-exit-filled",
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=25.07,
+        price=0.60,
+        venue_order_id="ord-exit-filled",
+    )
+    _ack_exit(conn, command_id="cmd-exit-filled", venue_order_id="ord-exit-filled")
+    append_event(
+        conn,
+        command_id="cmd-exit-filled",
+        event_type="FILL_CONFIRMED",
+        occurred_at="2026-07-08T14:42:59+00:00",
+        payload={
+            "reason": "place_exit_order_matched_submit",
+            "venue_order_id": "ord-exit-filled",
+            "trade_id": "trade-exit-filled",
+            "filled_size": "25.07",
+            "fill_price": "0.61",
+            "tx_hash": "0xexitfilled",
+        },
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-exit-filled",
+        venue_order_id="ord-exit-filled",
+        command_id="cmd-exit-filled",
+        state="CONFIRMED",
+        filled_size="25.07",
+        fill_price="0.61",
+        source="REST",
+        observed_at="2026-07-08T14:42:59+00:00",
+        raw_payload_hash="f" * 64,
+        raw_payload_json={
+            "source": "place_exit_order_matched_submit",
+            "filled_size": "25.07",
+            "fill_price": "0.61",
+        },
+        tx_hash="0xexitfilled",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"must not poll filled order: {order_id}")
+
+        def cancel_order(self, order_id):
+            raise AssertionError(f"must not cancel filled order: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 1
+    assert stats["filled_from_trade_fact"] == 1
+    assert stats["retried"] == 0
+    assert get_command(conn, "cmd-exit-filled")["state"] == "FILLED"
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_price, chain_shares,
+               exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+        "exit_price": 0.61,
+        "chain_shares": 0.0,
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+
+    fill_event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(fill_event) == {
+        "event_type": "EXIT_ORDER_FILLED",
+        "phase_before": "pending_exit",
+        "phase_after": "economically_closed",
+        "order_id": "ord-exit-filled",
+        "command_id": "cmd-exit-filled",
+        "venue_status": "sell_filled",
+    }
+
+
+@pytest.mark.parametrize("state", ["MATCHED", "MINED"])
+def test_pending_exit_nonfinal_trade_fact_waits_for_confirmation(conn, state):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact, get_command
+
+    position = Position(
+        trade_id="pos-nonfinal-exit-fact",
+        market_id="condition-test",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-07-08",
+        bin_label="Will the highest temperature in Paris be 34C on July 8?",
+        direction="buy_yes",
+        unit="C",
+        size_usd=13.0415,
+        entry_price=0.52,
+        p_posterior=0.857866666666667,
+        shares=25.0799,
+        cost_basis_usd=13.0415,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        exit_retry_count=1,
+        next_exit_retry_at="2026-07-08T14:44:50+00:00",
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        chain_state="synced",
+        chain_shares=25.0799,
+        chain_avg_price=0.52,
+        chain_cost_basis_usd=13.0415,
+        strategy_key="settlement_capture",
+        strategy="settlement_capture",
+        edge_source="settlement_capture",
+        env="live",
+        entered_at="2026-07-08T09:40:58+00:00",
+        order_id="ord-entry",
+        order_status="retry_pending",
+        last_exit_order_id="ord-exit-nonfinal",
+        last_monitor_market_price=0.61,
+        last_monitor_best_bid=0.61,
+    )
+    portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-exit-nonfinal",
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=25.07,
+        price=0.60,
+        venue_order_id="ord-exit-nonfinal",
+    )
+    _ack_exit(conn, command_id="cmd-exit-nonfinal", venue_order_id="ord-exit-nonfinal")
+    append_trade_fact(
+        conn,
+        trade_id=f"trade-exit-nonfinal-{state.lower()}",
+        venue_order_id="ord-exit-nonfinal",
+        command_id="cmd-exit-nonfinal",
+        state=state,
+        filled_size="25.07",
+        fill_price="0.61",
+        source="REST",
+        observed_at="2026-07-08T14:42:59+00:00",
+        raw_payload_hash="e" * 64,
+        raw_payload_json={
+            "source": "place_exit_order_matched_submit",
+            "filled_size": "25.07",
+            "fill_price": "0.61",
+        },
+        tx_hash="0xexitnonfinal",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"nonfinal trade fact must not close or poll: {order_id}")
+
+        def cancel_order(self, order_id):
+            raise AssertionError(f"nonfinal trade fact must not cancel: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats.get("filled_from_trade_fact", 0) == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert stats.get("exit_confirmation_pending", 0) == 1
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert get_command(conn, "cmd-exit-nonfinal")["state"] == "ACKED"
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """,
+            (position.trade_id,),
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_RETRY_RELEASED'
+            """,
+            (position.trade_id,),
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_exit_lifecycle_confirmed_without_explicit_fill_price_stays_pending(conn):
@@ -3219,6 +3545,25 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     assert position.next_exit_retry_at in ("", None)
     assert position.last_exit_error == error
     assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert (
+        exit_lifecycle.release_backoff_exhausted_pending_exit_for_redecision(
+            position,
+            conn=conn,
+        )
+        is False
+    )
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    released = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_RETRY_RELEASED'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    assert released == 0
     current = conn.execute(
         "SELECT phase FROM position_current WHERE position_id = ?",
         (position.trade_id,),
@@ -3244,6 +3589,576 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     facts = _execution_facts(conn, position.trade_id)
     assert facts[-1]["venue_status"] == "backoff_exhausted"
     assert facts[-1]["terminal_exec_status"] == "backoff_exhausted"
+
+
+def test_existing_canonical_dust_hold_suppresses_duplicate_exit_intent(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    reason = f"DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES [DUST: {error}]"
+    canonical = Position(
+        trade_id="pos-dust-existing-canonical",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        canonical,
+        reason=reason,
+        error=error,
+        conn=conn,
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-dust-existing-canonical-fresh",
+    )
+    before_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (canonical.trade_id,),
+    ).fetchone()[0]
+    before_intents = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+        """,
+        (canonical.trade_id,),
+    ).fetchone()[0]
+
+    stale_runtime = Position(
+        trade_id=canonical.trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_context = ExitContext(
+        exit_reason="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+        current_market_price=0.001,
+        current_market_price_is_fresh=True,
+        best_bid=0.001,
+        best_ask=0.002,
+        hours_to_settlement=5.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical dust hold must preempt snapshot capture")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical dust hold must not submit a sell")
+        ),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[stale_runtime]),
+        stale_runtime,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == f"sell_blocked_dust: existing_canonical_dust_hold: {error}"
+    assert stale_runtime.state == "pending_exit"
+    assert stale_runtime.exit_state == "backoff_exhausted"
+    assert stale_runtime.order_status == "backoff_exhausted"
+    assert stale_runtime.exit_reason == reason
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (canonical.trade_id,),
+    ).fetchone()[0] == before_events
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+        """,
+        (canonical.trade_id,),
+    ).fetchone()[0] == before_intents
+
+
+def test_existing_dust_hold_without_chain_evidence_does_not_emit_chain_correction(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    reason = f"DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES [DUST: {error}]"
+    canonical = Position(
+        trade_id="pos-dust-existing-no-chain-correction",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        canonical,
+        reason=reason,
+        error=error,
+        conn=conn,
+    )
+    before_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (canonical.trade_id,),
+    ).fetchone()[0]
+
+    stale_runtime = Position(
+        trade_id=canonical.trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        stale_runtime,
+        reason=reason,
+        error=error,
+        conn=conn,
+    )
+
+    assert stale_runtime.state == "pending_exit"
+    assert stale_runtime.exit_state == "backoff_exhausted"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (canonical.trade_id,),
+    ).fetchone()[0] == before_events
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'CHAIN_SIZE_CORRECTED'
+        """,
+        (canonical.trade_id,),
+    ).fetchone()[0] == 0
+
+
+def test_existing_dust_hold_chain_correction_is_idempotent(conn):
+    from decimal import Decimal
+
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    reason = "EXIT_CHAIN_DUST_STILL_HELD"
+    error = "chain_balance_units=0;chain_balance_shares=0;asset_id=no-token"
+    canonical = Position(
+        trade_id="pos-dust-chain-correction-idempotent",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        canonical,
+        reason=reason,
+        error=error,
+        conn=conn,
+    )
+
+    for index in range(2):
+        stale_runtime = Position(
+            trade_id=canonical.trade_id,
+            market_id="condition-test",
+            condition_id="condition-test",
+            city="Kuala Lumpur",
+            cluster="asia",
+            target_date="2026-07-08",
+            bin_label="33C",
+            direction="buy_no",
+            token_id=YES_TOKEN,
+            no_token_id=NO_TOKEN,
+            entry_price=0.64,
+            size_usd=0.64,
+            shares=1.0,
+            chain_shares=1.0,
+            cost_basis_usd=0.64,
+            state="day0_window",
+            strategy_key="forecast_qkernel_entry",
+            env="live",
+        )
+        exit_lifecycle._mark_exit_dust_hold(
+            stale_runtime,
+            reason=reason,
+            error=error,
+            conn=conn,
+            chain_balance_units=0,
+            chain_balance_shares=Decimal("0"),
+            asset_id=NO_TOKEN,
+        )
+        assert stale_runtime.state == "pending_exit", index
+        assert stale_runtime.exit_state == "backoff_exhausted", index
+
+    start_sequence = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (canonical.trade_id,),
+    ).fetchone()[0]
+    for offset in range(1, 56):
+        sequence_no = int(start_sequence) + offset
+        payload = {
+            "source": "exit_lifecycle",
+            "reason": "chain_dust_projection_corrected",
+            "chain_balance_units": offset,
+            "chain_balance_shares": str(offset),
+            "asset_id": f"other-asset-{offset}",
+        }
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id,
+                position_id,
+                sequence_no,
+                event_type,
+                occurred_at,
+                phase_before,
+                phase_after,
+                strategy_key,
+                caused_by,
+                idempotency_key,
+                venue_status,
+                source_module,
+                env,
+                payload_json
+            ) VALUES (?, ?, ?, 'CHAIN_SIZE_CORRECTED', ?, 'pending_exit', 'pending_exit',
+                      'forecast_qkernel_entry', 'chain_dust_projection_corrected', ?,
+                      NULL, 'tests.test_exit_safety', 'live', ?)
+            """,
+            (
+                f"{canonical.trade_id}:other-chain-dust:{offset}",
+                canonical.trade_id,
+                sequence_no,
+                f"2026-07-08T12:{offset % 60:02d}:00+00:00",
+                f"{canonical.trade_id}:other-chain-dust:{offset}",
+                json.dumps(payload, sort_keys=True),
+            ),
+        )
+
+    stale_runtime = Position(
+        trade_id=canonical.trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        stale_runtime,
+        reason=reason,
+        error=error,
+        conn=conn,
+        chain_balance_units=0,
+        chain_balance_shares=Decimal("0"),
+        asset_id=NO_TOKEN,
+    )
+
+    rows = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'CHAIN_SIZE_CORRECTED'
+        """,
+        (canonical.trade_id,),
+    ).fetchall()
+    matching_rows = [
+        row
+        for row in rows
+        if (
+            (payload := json.loads(row["payload_json"]))
+            and payload.get("reason") == "chain_dust_projection_corrected"
+            and payload.get("chain_balance_units") == 0
+            and payload.get("chain_balance_shares") == "0"
+            and payload.get("asset_id") == NO_TOKEN
+        )
+    ]
+    assert len(matching_rows) == 1
+    payload = json.loads(matching_rows[0]["payload_json"])
+    assert payload["reason"] == "chain_dust_projection_corrected"
+    assert payload["chain_balance_units"] == 0
+    assert payload["chain_balance_shares"] == "0"
+    assert payload["asset_id"] == NO_TOKEN
+
+
+def test_existing_canonical_dust_hold_requires_fresh_snapshot_evidence(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    reason = f"DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES [DUST: {error}]"
+    position = Position(
+        trade_id="pos-dust-existing-stale-snapshot",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        position,
+        reason=reason,
+        error=error,
+        conn=conn,
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-dust-existing-canonical-stale",
+        captured_at=_NOW,
+        freshness_deadline=datetime(2026, 7, 7, tzinfo=timezone.utc),
+    )
+
+    assert (
+        exit_lifecycle._canonical_non_executable_dust_hold(
+            position,
+            conn=conn,
+            now=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        )
+        is None
+    )
+
+
+def test_backoff_release_blocks_snapshot_min_order_dust_without_reason_marker(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-no-dust-min-order",
+    )
+    position = Position(
+        trade_id="pos-dust-structural-min-order",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+        last_exit_error="venue_rejected_sub_minimum_size",
+        env="live",
+    )
+
+    assert (
+        exit_lifecycle.release_backoff_exhausted_pending_exit_for_redecision(
+            position,
+            conn=conn,
+        )
+        is False
+    )
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+    released = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_RETRY_RELEASED'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    assert released == 0
+
+
+def test_retry_pending_snapshot_min_order_dust_becomes_hold_not_release(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        orderbook_top_bid=None,
+        orderbook_top_ask="0.001",
+        snapshot_id="snap-retry-pending-dust-min-order",
+        captured_at=_NOW,
+        freshness_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    position = Position(
+        trade_id="pos-retry-pending-dust-hold",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        exit_reason="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+        last_exit_error="exit_executable_snapshot_unavailable",
+        next_exit_retry_at="2026-07-08T00:00:00+00:00",
+        env="live",
+    )
+
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+    assert position.last_exit_error == (
+        "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    )
+    released = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_RETRY_RELEASED'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    assert released == 0
+    rejected = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert rejected["event_type"] == "EXIT_ORDER_REJECTED"
+    assert rejected["phase_after"] == "pending_exit"
+    payload = json.loads(rejected["payload_json"])
+    assert payload["status"] == "backoff_exhausted"
+    assert payload["error"] == position.last_exit_error
 
 
 def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, monkeypatch):
@@ -3320,8 +4235,92 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     assert loaded["exit_state"] == "backoff_exhausted"
 
 
+def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        orderbook_top_bid=None,
+        orderbook_top_ask="0.001",
+        snapshot_id="snap-no-bid-dust-min-order",
+        captured_at=_NOW,
+        freshness_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    position = Position(
+        trade_id="pos-no-bid-dust",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_context = ExitContext(
+        exit_reason="SETTLEMENT_IMMINENT",
+        current_market_price=0.0,
+        current_market_price_is_fresh=True,
+        best_bid=0.0,
+        best_ask=0.001,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dust must not submit")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        exit_context,
+        clob=None,
+        conn=conn,
+    )
+
+    error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    assert outcome == f"sell_blocked_dust: {error}"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+    assert position.last_exit_error == error
+    rejected = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert rejected["event_type"] == "EXIT_ORDER_REJECTED"
+    assert rejected["phase_after"] == "pending_exit"
+    assert json.loads(rejected["payload_json"])["status"] == "backoff_exhausted"
+
+
 def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
-    from src.execution.exit_lifecycle import release_market_closed_pending_exit_hold
+    from src.execution.exit_lifecycle import (
+        mark_market_closed_hold_to_settlement,
+        release_market_closed_pending_exit_hold,
+    )
     from src.contracts.semantic_types import ExitState
     from src.state.portfolio import Position
 
@@ -3391,6 +4390,227 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
     assert payload["exit_order_submitted"] is False
     assert payload["exit_failure"] is False
+
+    for sequence_no in range(2, 34):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id,
+                position_id,
+                sequence_no,
+                event_type,
+                occurred_at,
+                phase_before,
+                phase_after,
+                strategy_key,
+                caused_by,
+                idempotency_key,
+                venue_status,
+                source_module,
+                env,
+                payload_json
+            ) VALUES (?, ?, ?, 'MONITOR_REFRESHED', ?, 'day0_window', 'day0_window',
+                      'center_buy', 'test_normal_monitor', ?, 'filled',
+                      'tests.test_exit_safety', 'live', '{}')
+            """,
+            (
+                f"{position.trade_id}:normal-monitor:{sequence_no}",
+                position.trade_id,
+                sequence_no,
+                f"2026-06-24T11:{sequence_no:02d}:00+00:00",
+                f"{position.trade_id}:normal-monitor:{sequence_no}",
+            ),
+        )
+
+    mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="legacy_pending_exit_projection_repaired",
+        conn=conn,
+    )
+
+    hold_payloads = [
+        json.loads(row["payload_json"])
+        for row in conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+             ORDER BY sequence_no
+            """,
+            (position.trade_id,),
+        ).fetchall()
+    ]
+    semantic_hold_count = sum(
+        1
+        for item in hold_payloads
+        if item.get("semantic_event") == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    )
+    assert semantic_hold_count == 1
+
+
+def test_after_settlement_stale_market_price_marks_closed_hold_not_retry(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-after-settlement-stale-price",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        chain_state="synced",
+        order_status="partial",
+        strategy_key="forecast_qkernel_entry",
+        entry_method="qkernel_spine",
+        selected_method="qkernel_spine",
+        last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+        env="live",
+    )
+    exit_context = ExitContext(
+        exit_reason="DAY0_HARD_FACT_BIN_DEAD (final high extreme 33.0 resolved inside bin [33.0,33.0])",
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.0,
+        current_market_price_is_fresh=False,
+        best_bid=0.0,
+        hours_to_settlement=-0.5,
+        position_state="day0_window",
+        day0_active=True,
+    )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("closed-market hold must not submit an exit order")
+        ),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: market_closed_hold_to_settlement"
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.exit_retry_count == 0
+    assert position.next_exit_retry_at in ("", None)
+    assert position.exit_reason == "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+            """,
+            (position.trade_id,),
+        ).fetchone()[0]
+        == 0
+    )
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "MONITOR_REFRESHED"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] is None
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    assert payload["hold_reason"] == "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+    assert payload["market_closed_error"] == "stale_current_market_price_after_settlement"
+    assert payload["exit_order_submitted"] is False
+    assert payload["exit_failure"] is False
+
+
+def test_pre_settlement_stale_market_price_still_enters_retry(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-pre-settlement-stale-price",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        chain_state="synced",
+        order_status="partial",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_context = ExitContext(
+        exit_reason="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.0,
+        current_market_price_is_fresh=False,
+        best_bid=0.0,
+        hours_to_settlement=0.5,
+        position_state="day0_window",
+        day0_active=True,
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: stale_market_price"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert event["phase_after"] == "pending_exit"
+    assert payload["error"] == "stale_current_market_price"
+    assert payload["status"] == "retry_pending"
 
 
 def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):

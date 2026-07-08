@@ -2658,6 +2658,19 @@ def _refresh_day0_observation(
                 *coverage_validations,
                 "day0_live_forecast_unavailable",
             ]
+        raw_forecast_role = str(raw_extrema.get("forecast_source_role") or "")
+        if raw_forecast_role != "day0_remaining_window_live":
+            _set_monitor_probability_fresh(position, False)
+            _set_day0_zero_probability_exit_authority(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                *coverage_validations,
+                "day0_remaining_window_hourly_bundle_unavailable",
+                (
+                    "day0_daily_extrema_not_remaining_window:"
+                    f"{raw_forecast_role or 'missing_role'}"
+                ),
+            ]
         from src.signal.day0_extrema import RemainingMemberExtrema
 
         extrema = RemainingMemberExtrema.for_metric(
@@ -2672,7 +2685,7 @@ def _refresh_day0_observation(
         live_forecast_source = "day0_raw_model_extrema"
         forecast_source_validations = [
             f"forecast_source_id:{raw_extrema['source_id']}",
-            f"forecast_source_role:{raw_extrema['forecast_source_role']}",
+            f"forecast_source_role:{raw_forecast_role}",
             f"forecast_source_cycle_time:{raw_extrema['source_cycle_time']}",
         ]
 
@@ -2806,16 +2819,23 @@ def _refresh_day0_observation(
         position.direction,
     )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
-    zero_probability_exit_authority = (
+    zero_probability_exit_authority_candidate = (
         maturity_rejection is None
         and "day0_observation_stale_monitor_bound" not in coverage_validations
     )
-    zero_probability_exit_authority_reason = (
-        "mature_day0_extreme"
-        if zero_probability_exit_authority
-        else "stale_or_immature_day0_remaining_window"
-    )
     held_probability_collapsed = current_p_posterior <= 1e-9
+    if held_probability_collapsed and zero_probability_exit_authority_candidate:
+        zero_probability_exit_authority = False
+        zero_probability_exit_authority_reason = (
+            "probabilistic_remaining_window_degenerate_not_hard_fact"
+        )
+    else:
+        zero_probability_exit_authority = zero_probability_exit_authority_candidate
+        zero_probability_exit_authority_reason = (
+            "mature_day0_extreme"
+            if zero_probability_exit_authority
+            else "stale_or_immature_day0_remaining_window"
+        )
     if held_probability_collapsed and not zero_probability_exit_authority:
         applied.append("day0_zero_probability_exit_authority_blocked")
     setattr(
@@ -2838,6 +2858,15 @@ def _refresh_day0_observation(
             "p_cal_vector": _monitor_receipt_vector(p_cal_full),
             "observation": {
                 "source": str(_day0_observation_field(obs, "source", "") or ""),
+                "source_role": str(_day0_observation_field(obs, "source_role", "") or ""),
+                "source_authority": str(
+                    _day0_observation_field(obs, "source_authority", "") or ""
+                ),
+                "data_version": str(_day0_observation_field(obs, "data_version", "") or ""),
+                "training_allowed": _day0_observation_field(obs, "training_allowed"),
+                "causality_status": str(
+                    _day0_observation_field(obs, "causality_status", "") or ""
+                ),
                 "observation_time": _day0_observation_field(obs, "observation_time"),
                 "observation_available_at": _day0_observation_field(
                     obs, "observation_available_at"

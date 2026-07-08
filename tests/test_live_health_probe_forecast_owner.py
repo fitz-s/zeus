@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-05-15; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-07-08
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -61,13 +61,23 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
 
     assert "src/engine/evaluator.py" in daemon_paths
+    assert "src/control/live_health.py" in daemon_paths
+    assert "src/control/runtime_code_plane.py" in daemon_paths
+    assert "src/engine/cycle_runtime.py" in daemon_paths
+    assert "src/engine/event_reactor_adapter.py" in daemon_paths
+    assert "src/engine/monitor_refresh.py" in daemon_paths
     assert "src/contracts/executable_market_snapshot.py" in daemon_paths
     assert "src/contracts/execution_intent.py" in daemon_paths
     assert "src/data/market_scanner.py" in daemon_paths
     assert "src/control/ws_gap_guard.py" in daemon_paths
+    assert "src/events/reactor.py" in daemon_paths
     assert "src/execution/command_recovery.py" in daemon_paths
     assert "src/execution/exchange_reconcile.py" in daemon_paths
+    assert "src/execution/exit_lifecycle.py" in daemon_paths
+    assert "src/execution/staleness_cancel.py" in daemon_paths
     assert "src/data/polymarket_client.py" in daemon_paths
+    assert "src/state/chain_reconciliation.py" in daemon_paths
+    assert "src/state/chain_mirror_reconciler.py" in daemon_paths
 
 
 def test_ops_health_probe_ignores_stuck_job_before_latest_daemon_start(tmp_path, monkeypatch):
@@ -225,6 +235,58 @@ def _configure(
     )
 
 
+def _write_trade_db_with_missing_active_q_version(root: Path) -> None:
+    db_path = root / "state" / "zeus_trades.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                intent_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                q_version TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, position_id, intent_kind, state, created_at, q_version
+            ) VALUES (
+                'cmd-missing-q', 'pos-active-missing-q', 'ENTRY', 'FILLED',
+                datetime('now'), NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, shares, chain_shares
+            ) VALUES (
+                'pos-active-missing-q', 'active', 'filled', 12.0, 12.0
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive(
     tmp_path, monkeypatch, capsys
 ):
@@ -253,6 +315,33 @@ def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive
     assert "legacy_ingest=0" in out
     assert "data_ingest_dead" in out
     assert "forecast_live_dead" not in out
+
+
+def test_live_probe_alerts_on_active_entry_missing_q_version(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _write_trade_db_with_missing_active_q_version(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "ENTRY_Q_VERSION_MISSING_ACTIVE_EXPOSURE:n=1" in out
 
 
 def test_live_probe_alerts_on_degraded_business_plane_composite(
@@ -294,6 +383,48 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
     assert out.startswith("ALERT")
     assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_IN_PROGRESS_NO_COMPLETED_AT" in out
     assert "flags=all_healthy" not in out
+
+
+def test_live_probe_alerts_when_composite_schema_is_missing_required_surfaces(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": True,
+            "status": "HEALTHY",
+            "failing_surfaces": [],
+            "surfaces": {
+                "heartbeat": {"ok": True, "issue": None},
+                "runtime_code": {"ok": True, "issue": None},
+                "main_daemon": {"ok": True, "issue": None},
+            },
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_HEALTH_COMPOSITE_SURFACES_MISSING=" in out
+    assert "process_code" in out
+    assert "entry_q_version" in out
+    assert "pending_exit_release_loop" in out
 
 
 def test_live_probe_alerts_when_status_summary_process_pid_is_stale(

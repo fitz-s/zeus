@@ -407,6 +407,62 @@ class TestLoadReplacementBelief:
         assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
         assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
 
+    def test_same_cycle_used_model_raw_row_after_computed_at_marks_belief_stale(self, forecasts_db):
+        """Held monitor must share entry/C3 HWM semantics for same-cycle late inputs."""
+        posterior_cycle = NOW - timedelta(hours=12)
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=posterior_cycle.isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT")
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = 'p1'",
+            (
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "used_models": ["icon_global"],
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                city, target_date, metric, source_cycle_time, endpoint,
+                coverage_status, captured_at, source_available_at, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Karachi",
+                "2026-06-12",
+                "high",
+                posterior_cycle.isoformat(),
+                "single_runs",
+                "COVERED",
+                (NOW - timedelta(minutes=30)).isoformat(),
+                (NOW - timedelta(minutes=40)).isoformat(),
+                "icon_global",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "used_raw_model_forecasts_same_cycle_late_input"
+        assert belief.raw_cycle_lag_hours is None
+        assert belief.raw_input_lag_reason is not None
+        assert "latest_raw_input_at=" in belief.raw_input_lag_reason
+
     def test_partial_non_anchor_raw_model_cycle_does_not_stale_posterior(self, forecasts_db):
         """Partial non-anchor cycle rows cannot make held-position belief stale."""
         _insert(
