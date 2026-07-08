@@ -2703,3 +2703,14 @@ scripts:
     required_tests:
       - tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py
       - tests/test_bayes_precision_fusion_no_leak_history_join.py
+
+  # NOTE (R0-f/R0-g prepare packet, 2026-07-08): scripts/ops/migrate_plist_secrets.sh,
+  # scripts/ops/rotate_zeus_logs.sh, and scripts/ops/db_hygiene.sh were added under
+  # scripts/ops/. topology_doctor's top_level_scripts() (scripts/topology_doctor_script_checks.py)
+  # only iterates direct children of scripts/ and its run_scripts() check flags any
+  # manifest key without a matching top-level file as script_manifest_stale — there is
+  # currently no supported manifest key form for a scripts/<subdir>/ script. Rows were
+  # deliberately NOT added here to avoid introducing doctor errors; documented instead
+  # in docs/rebuild/r0f_plist_migration.md §7 for the operator/registry-law owner to
+  # decide whether to extend the manifest schema for subdirectories or relocate these
+  # scripts to top-level scripts/.
