@@ -5411,10 +5411,25 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
     return [_dict_row(row) for row in rows]
 
 
-def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], list[object]]:
+# R2-core hole closure (a) (R0 verifier finding; docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+# §E R2 brief item 4a): the phases this repair ever writes a `settled`/
+# `economically_closed` terminal_phase into -- the two phases
+# src.state.projection._REALIZED_PNL_REQUIRED_PHASES actually gates. voided/
+# admin_closed are deliberately excluded (that guard's own comment: "not
+# economic close-and-realize-P&L events").
+_HARD_TERMINAL_REPAIR_REALIZED_PNL_PHASES = frozenset({"settled", "economically_closed"})
+
+
+def _terminal_projection_repair_field_updates(candidate: dict) -> tuple[dict, Optional[float]]:
+    """Field overlay for a hard-terminal projection repair. Pure.
+
+    Returns ``(fields, coalesce_exit_price)``: ``fields`` are unconditional
+    overwrites; ``coalesce_exit_price`` (when not None) is only applied by the
+    caller if the position's CURRENT exit_price is still NULL -- mirrors the
+    original raw-SQL ``exit_price = COALESCE(exit_price, ?)`` semantics.
+    """
     terminal_phase = str(candidate.get("phase_after") or "").strip().lower()
-    updates: list[str] = ["phase = ?", "updated_at = ?"]
-    params: list[object] = [terminal_phase, _now_iso()]
+    fields: dict[str, object] = {}
     payload = _json_dict(candidate.get("payload_json"))
     chain_zero_admin_void = (
         terminal_phase == "voided"
@@ -5426,47 +5441,34 @@ def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], lis
         )
     )
     if chain_zero_admin_void:
-        updates.extend(
-            [
-                "chain_state = ?",
-                "chain_shares = ?",
-                "order_status = ?",
-                "exit_retry_count = ?",
-                "next_exit_retry_at = ?",
-                "exit_reason = ?",
-            ]
-        )
-        params.extend(
-            [
-                "chain_confirmed_zero",
-                0.0,
-                "voided",
-                0,
-                None,
-                "CHAIN_CONFIRMED_ZERO",
-            ]
+        fields.update(
+            {
+                "chain_state": "chain_confirmed_zero",
+                "chain_shares": 0.0,
+                "order_status": "voided",
+                "exit_retry_count": 0,
+                "next_exit_retry_at": None,
+                "exit_reason": "CHAIN_CONFIRMED_ZERO",
+            }
         )
     economic_close_exit_fill = (
         terminal_phase == "economically_closed"
         and str(candidate.get("event_type") or "") == "EXIT_ORDER_FILLED"
     )
+    coalesce_exit_price = None
     if economic_close_exit_fill:
-        updates.extend(
-            [
-                "order_status = ?",
-                "exit_retry_count = ?",
-                "next_exit_retry_at = ?",
-                "chain_shares = ?",
-                "chain_avg_price = ?",
-                "chain_cost_basis_usd = ?",
-            ]
+        fields.update(
+            {
+                "order_status": "sell_filled",
+                "exit_retry_count": 0,
+                "next_exit_retry_at": None,
+                "chain_shares": 0.0,
+                "chain_avg_price": 0.0,
+                "chain_cost_basis_usd": 0.0,
+            }
         )
-        params.extend(["sell_filled", 0, None, 0.0, 0.0, 0.0])
-        exit_price = _float_or_none(payload.get("fill_price") or payload.get("exit_price"))
-        if exit_price is not None:
-            updates.append("exit_price = COALESCE(exit_price, ?)")
-            params.append(exit_price)
-    return updates, params
+        coalesce_exit_price = _float_or_none(payload.get("fill_price") or payload.get("exit_price"))
+    return fields, coalesce_exit_price
 
 
 def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection) -> dict:
@@ -5475,7 +5477,24 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
     This repairs projection drift only. It does not invent a terminal event and
     it does not touch venue/chain state; the latest position_events terminal row
     is the authority.
+
+    R2-core hole closure (a) (R0 verifier finding, EXECUTION_MASTER §E R2 item
+    4a): this used to write ``phase`` via a raw ``UPDATE position_current``,
+    bypassing src.state.projection.upsert_position_current entirely -- which
+    let a position land in ``settled``/``economically_closed`` with
+    realized_pnl_usd left NULL forever. It now builds a full projection dict
+    and routes through upsert_position_current, so R0-a's
+    MissingRealizedPnlOnCloseError backstop applies here too. realized_pnl_usd
+    is sourced from the terminal event's own payload (the canonical writer
+    that appended it already computed it -- position_settled.v1's "pnl" key)
+    when present; otherwise it is recomputed via the shared close-economics
+    formula from an available exit_price. If neither is available the guard
+    raises, which this function's existing per-candidate try/except already
+    catches (rollback + log + count as an error) -- fail-closed instead of a
+    silent NULL, exactly the R0-a backstop's purpose.
     """
+    from src.state.close_economics import compute_realized_pnl_usd
+    from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, upsert_position_current
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for candidate in _hard_terminal_projection_repair_candidates(conn):
@@ -5490,21 +5509,51 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
         )[:80]
         conn.execute("SAVEPOINT " + sp_name)
         try:
-            updates, params = _terminal_projection_repair_updates(candidate)
-            params.append(position_id)
-            cursor = conn.execute(
-                f"""
-                UPDATE position_current
-                   SET {", ".join(updates)}
-                 WHERE position_id = ?
-                """,
-                tuple(params),
-            )
-            conn.execute("RELEASE SAVEPOINT " + sp_name)
-            if cursor.rowcount > 0:
-                summary["advanced"] += 1
-            else:
+            current = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?", (position_id,)
+            ).fetchone()
+            if current is None:
+                conn.execute("RELEASE SAVEPOINT " + sp_name)
                 summary["stayed"] += 1
+                continue
+            projection = {
+                col: current[col] for col in CANONICAL_POSITION_CURRENT_COLUMNS if col in current.keys()
+            }
+            for col in CANONICAL_POSITION_CURRENT_COLUMNS:
+                projection.setdefault(col, None)
+
+            fields, coalesce_exit_price = _terminal_projection_repair_field_updates(candidate)
+            projection.update(fields)
+            if coalesce_exit_price is not None and projection.get("exit_price") is None:
+                projection["exit_price"] = coalesce_exit_price
+            projection["phase"] = terminal_phase
+            projection["updated_at"] = _now_iso()
+
+            if (
+                terminal_phase in _HARD_TERMINAL_REPAIR_REALIZED_PNL_PHASES
+                and projection.get("realized_pnl_usd") is None
+            ):
+                payload = _json_dict(candidate.get("payload_json"))
+                payload_pnl = _float_or_none(payload.get("pnl"))
+                if payload_pnl is not None:
+                    projection["realized_pnl_usd"] = round(payload_pnl, 2)
+                else:
+                    exit_price = _float_or_none(
+                        projection.get("exit_price") or payload.get("exit_price") or payload.get("fill_price")
+                    )
+                    if exit_price is not None:
+                        shares = _float_or_none(projection.get("chain_shares")) or _float_or_none(
+                            projection.get("shares")
+                        ) or 0.0
+                        cost_basis = _float_or_none(projection.get("cost_basis_usd")) or 0.0
+                        projection["realized_pnl_usd"] = compute_realized_pnl_usd(
+                            shares=shares, exit_price=exit_price, cost_basis_usd=cost_basis,
+                        )
+                        projection.setdefault("exit_price", exit_price)
+
+            upsert_position_current(conn, projection)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            summary["advanced"] += 1
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
             conn.execute("RELEASE SAVEPOINT " + sp_name)

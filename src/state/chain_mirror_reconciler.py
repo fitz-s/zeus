@@ -40,10 +40,13 @@ mutation) — see _has_prior_review_open_absent_marker.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Market-rule classification labels (registered in
 # architecture/money_path_objects.yaml::chain_mirror_reconciliation_classification).
@@ -180,6 +183,10 @@ class ReconcileReport:
     dry_run: bool
     findings: list[MirrorFinding] = field(default_factory=list)
     applied: int = 0
+    # R2-core hole closure (b) (R0 verifier finding, docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+    # §E R2 item 4b): per-row isolation errors from reconcile()'s main loop --
+    # a raising position no longer aborts the whole pass (see reconcile()).
+    errors: list[dict] = field(default_factory=list)
 
     def by_classification(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -193,6 +200,7 @@ class ReconcileReport:
             "dry_run": self.dry_run,
             "applied": self.applied,
             "counts": self.by_classification(),
+            "errors": self.errors,
             "findings": [
                 {
                     "classification": f.classification,
@@ -1001,55 +1009,80 @@ def reconcile(
         held = row.held_token_id()
         if held:
             matched_assets.add(held)
-        # P0b: only compute the (DB-touching) force-resolve signals when they
-        # could actually matter — held token absent from THIS snapshot and
-        # the row is in an _OPEN_LIKE_PHASES-eligible phase. Cheap in-memory
-        # checks first; avoids a wasted query on the common matched/closed path.
-        prior_review_open_absent = False
-        has_open_orders = False
-        if row.phase in _OPEN_LIKE_PHASES and (not held or held not in chain_by_asset):
-            prior_review_open_absent = _has_prior_review_open_absent_marker(
-                conn_trades, row.position_id
+        # R2-core hole closure (b) (R0 verifier finding, docs/rebuild/
+        # EXECUTION_MASTER_2026-07-07.md §E R2 item 4b): this loop previously
+        # had no per-row isolation -- one raising position aborted the WHOLE
+        # pass, silently skipping classification/repair for every row after
+        # it. Each row is now independently try/excepted: a raising
+        # classify/apply call is logged and skipped, never aborts the pass
+        # (the diff engine's reconcile() in src/reconcile/diff_engine.py has
+        # this from birth for the same reason).
+        try:
+            # P0b: only compute the (DB-touching) force-resolve signals when
+            # they could actually matter — held token absent from THIS
+            # snapshot and the row is in an _OPEN_LIKE_PHASES-eligible phase.
+            # Cheap in-memory checks first; avoids a wasted query on the
+            # common matched/closed path.
+            prior_review_open_absent = False
+            has_open_orders = False
+            if row.phase in _OPEN_LIKE_PHASES and (not held or held not in chain_by_asset):
+                prior_review_open_absent = _has_prior_review_open_absent_marker(
+                    conn_trades, row.position_id
+                )
+                if prior_review_open_absent:
+                    has_open_orders = has_open_orders_for_position(conn_trades, row.position_id)
+            finding = classify_local_position(
+                row,
+                chain_by_asset,
+                settlement_by_key,
+                prior_review_open_absent=prior_review_open_absent,
+                has_open_orders=has_open_orders,
             )
-            if prior_review_open_absent:
-                has_open_orders = has_open_orders_for_position(conn_trades, row.position_id)
-        finding = classify_local_position(
-            row,
-            chain_by_asset,
-            settlement_by_key,
-            prior_review_open_absent=prior_review_open_absent,
-            has_open_orders=has_open_orders,
-        )
-        report.findings.append(finding)
-        if apply:
-            if finding.classification == REVIEW_OPEN_ABSENT:
-                # Bookkeeping marker, dispatched independent of `writes`
-                # (REVIEW_OPEN_ABSENT itself never mutates phase/chain_state —
-                # see classify_local_position's comment on this classification).
-                # One marker suffices for the two-run threshold: when the
-                # latest event already IS the marker (token still absent but
-                # CLOSED_EXITED blocked, e.g. in-flight order), re-appending
-                # would only bloat position_events.
-                if not prior_review_open_absent:
-                    _apply_review_marker_finding(conn_trades, finding, now=now)
-                    report.applied += 1
-            elif finding.writes:
-                if finding.classification in (CLOSED_REDEEMED, CLOSED_WORTHLESS, REDEEMABLE):
-                    _apply_settlement_finding(conn_trades, finding, now=now)
-                    report.applied += 1
-                elif finding.classification == SIZE_CORRECTED:
-                    if apply_size_correction_finding(conn_trades, finding, now=now):
+            report.findings.append(finding)
+            if apply:
+                if finding.classification == REVIEW_OPEN_ABSENT:
+                    # Bookkeeping marker, dispatched independent of `writes`
+                    # (REVIEW_OPEN_ABSENT itself never mutates phase/chain_state —
+                    # see classify_local_position's comment on this classification).
+                    # One marker suffices for the two-run threshold: when the
+                    # latest event already IS the marker (token still absent but
+                    # CLOSED_EXITED blocked, e.g. in-flight order), re-appending
+                    # would only bloat position_events.
+                    if not prior_review_open_absent:
+                        _apply_review_marker_finding(conn_trades, finding, now=now)
                         report.applied += 1
-                elif finding.classification == CLOSED_EXITED:
-                    _apply_closed_exited_finding(conn_trades, finding, now=now)
-                    report.applied += 1
+                elif finding.writes:
+                    if finding.classification in (CLOSED_REDEEMED, CLOSED_WORTHLESS, REDEEMABLE):
+                        _apply_settlement_finding(conn_trades, finding, now=now)
+                        report.applied += 1
+                    elif finding.classification == SIZE_CORRECTED:
+                        if apply_size_correction_finding(conn_trades, finding, now=now):
+                            report.applied += 1
+                    elif finding.classification == CLOSED_EXITED:
+                        _apply_closed_exited_finding(conn_trades, finding, now=now)
+                        report.applied += 1
+        except Exception as exc:  # per-row isolation -- never abort the pass
+            logger.error(
+                "chain_mirror_reconciler: reconcile failed for position %s: %s",
+                row.position_id,
+                exc,
+            )
+            report.errors.append({"position_id": row.position_id, "error": str(exc)})
 
     for asset, chain_fact in chain_by_asset.items():
         if asset in matched_assets:
             continue
-        zeus_origin = is_zeus_origin_asset(conn_trades, asset)
-        finding = classify_chain_only_asset(asset, chain_fact, matched_assets, zeus_origin)
-        if finding is not None:
-            report.findings.append(finding)
+        try:
+            zeus_origin = is_zeus_origin_asset(conn_trades, asset)
+            finding = classify_chain_only_asset(asset, chain_fact, matched_assets, zeus_origin)
+            if finding is not None:
+                report.findings.append(finding)
+        except Exception as exc:  # per-row isolation -- never abort the pass
+            logger.error(
+                "chain_mirror_reconciler: chain-only asset classification failed for %s: %s",
+                asset,
+                exc,
+            )
+            report.errors.append({"asset": asset, "error": str(exc)})
 
     return report

@@ -8133,6 +8133,123 @@ class TestRecoveryResolutionTable:
             "exit_reason": "CHAIN_CONFIRMED_ZERO",
         }
 
+    # R2-core hole closure (a) (R0 verifier finding, docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+    # §E R2 item 4a): reconcile_hard_terminal_position_projection_repairs now
+    # routes through upsert_position_current, so a first transition into
+    # settled/economically_closed picks up realized_pnl_usd instead of
+    # silently leaving it NULL.
+    def test_hard_terminal_settled_repair_books_pnl_from_event_payload(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-settled-drift', 'pending_exit', 'condition-test', 'Manila', 'Manila',
+                '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+                'buy_yes', 'C', 10.0, 10.0, 10.0, 1.0,
+                0.6, 'forecast-snap-old', 'center_buy', 'edli',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-settled-drift', 'filled',
+                '2026-07-01T00:00:00Z', 'high', 10.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-settled-drift', 'pos-settled-drift', 9, 'SETTLED',
+                '2026-07-02T11:45:30+00:00', 'pending_exit', 'settled',
+                'edli', 'dec-1', 'snap-1', NULL, 'cmd-1',
+                'harvester', 'idem-settled-drift', NULL,
+                'src.execution.harvester', '{"pnl": 3.5, "exit_price": 1.0}', 'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            "SELECT phase, realized_pnl_usd FROM position_current WHERE position_id = 'pos-settled-drift'"
+        ).fetchone()
+        assert row["phase"] == "settled"
+        assert row["realized_pnl_usd"] == 3.5
+
+    def test_hard_terminal_settled_repair_fails_closed_without_pnl_evidence(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-settled-no-pnl', 'pending_exit', 'condition-test', 'Manila', 'Manila',
+                '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+                'buy_yes', 'C', 10.0, 10.0, 10.0, 1.0,
+                0.6, 'forecast-snap-old', 'center_buy', 'edli',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-settled-no-pnl', 'filled',
+                '2026-07-01T00:00:00Z', 'high', 10.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-settled-no-pnl', 'pos-settled-no-pnl', 9, 'SETTLED',
+                '2026-07-02T11:45:30+00:00', 'pending_exit', 'settled',
+                'edli', 'dec-1', 'snap-1', NULL, 'cmd-1',
+                'harvester', 'idem-settled-no-pnl', NULL,
+                'src.execution.harvester', '{}', 'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        # Fail-closed: no pnl/exit_price evidence in the terminal event's own
+        # payload means upsert_position_current's MissingRealizedPnlOnCloseError
+        # backstop fires -- caught by this function's own try/except, counted
+        # as an error, and the phase is NOT silently advanced with a NULL pnl.
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        row = conn.execute(
+            "SELECT phase, realized_pnl_usd FROM position_current WHERE position_id = 'pos-settled-no-pnl'"
+        ).fetchone()
+        assert row["phase"] == "pending_exit"
+        assert row["realized_pnl_usd"] is None
+
     def test_live_entry_repair_prefers_forecasts_market_events_over_trade_ghost(
         self,
         conn,
