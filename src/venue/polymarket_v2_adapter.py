@@ -36,13 +36,18 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
-from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.venue.response_contracts import (
+    extract_order_id as _extract_order_id,
+    extract_response_error as _response_error,
+    parse_cancel_outcome,
+    parse_order_status,
+)
 from src.observability.counters import increment as _cnt_inc
 from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
 from src.venue.batch_submit import (
@@ -788,7 +793,7 @@ class PolymarketV2Adapter:
             raw = cancel_order(_order_payload(order_id))
         else:
             raw = cancel(order_id)
-        return _cancel_result_from_response(order_id, raw)
+        return _cancel_result_from_response(order_id, raw, check_envelope=True)
 
     def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]:
         """Submit up to MAX_ORDERS_PER_BATCH orders in ONE SDK post_orders call.
@@ -1000,7 +1005,8 @@ class PolymarketV2Adapter:
         _assert_no_world_mutex_held_for_io("venue.get_order")
         raw = self._sdk_client().get_order(order_id)
         raw_dict = dict(raw or {})
-        return OrderState(order_id=_extract_order_id(raw_dict) or order_id, status=str(raw_dict.get("status") or raw_dict.get("state") or "UNKNOWN"), raw=raw_dict)
+        outcome = parse_order_status(raw_dict, fallback_order_id=order_id, endpoint="get_order")
+        return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
         _assert_no_world_mutex_held_for_io("venue.get_open_orders")
@@ -1019,7 +1025,12 @@ class PolymarketV2Adapter:
             raw = get_orders()
         if isinstance(raw, dict):
             raw = raw.get("data", []) or []
-        return [OrderState(order_id=_extract_order_id(item) or "", status=str(item.get("status") or item.get("state") or "UNKNOWN"), raw=dict(item)) for item in raw]
+        states: list[OrderState] = []
+        for item in raw:
+            item_dict = dict(item)
+            outcome = parse_order_status(item_dict, fallback_order_id="", endpoint="get_open_orders")
+            states.append(OrderState(order_id=outcome.order_id, status=outcome.status, raw=item_dict))
+        return states
 
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]:
         _assert_no_world_mutex_held_for_io("venue.get_trades")
@@ -1646,653 +1657,15 @@ class PolymarketV2Adapter:
             "ctf_index_set": ctf_index_set,
         }
 
-    def _redeem_via_safe(
-        self,
-        condition_id: str,
-        index_sets: list[int],
-        signer_eoa: str,
-    ) -> dict[str, Any]:
-        """Safe v1.3.0 execTransaction wrapper for autonomous redeem.
-
-        Called when signature_type==2 AND signer_eoa != funder_address.
-        The funder_address is the Safe proxy; signer_eoa is the Safe owner EOA.
-
-        Pre-flight: VERSION, getOwners, nonce, EOA MATIC balance.
-        Builds inner CTF calldata, wraps in execTransaction, signs, broadcasts
-        (or dry-runs if ZEUS_AUTONOMOUS_REDEEM_DRY_RUN is truthy).
-        """
-        import logging
-        import os
-
-        from src.venue.safe_exec import (
-            SAFE_V1_3_VERSION,
-            build_exec_transaction_calldata,
-            build_safe_tx_hash,
-            sign_safe_tx,
-        )
-
-        logger = logging.getLogger(__name__)
-        safe_address = self.funder_address
-        dry_run = os.environ.get(AUTONOMOUS_REDEEM_DRY_RUN_ENV, "").lower() in (
-            "1", "true", "yes", "on",
-        )
-
-        # ── Pre-flight 1: Safe VERSION ────────────────────────────────────────
-        try:
-            # Safe.VERSION() selector: keccak256('VERSION()')[:4] = 0xffa1ad74
-            version_calldata = "0xffa1ad74"
-            raw_version = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": version_calldata}, "latest"],
-            )
-            import eth_abi
-            version_str = eth_abi.decode(
-                ["string"], bytes.fromhex(str(raw_version).removeprefix("0x"))
-            )[0]
-        except Exception as exc:
-            # RPC/network failure or ABI-decode error — NOT a semantic version
-            # mismatch.  Use REDEEM_RPC_PRECHECK_FAILED so a network blip does
-            # not quarantine a healthy Safe as "unsupported version".
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"VERSION() eth_call failed: {exc}",
-                "condition_id": condition_id,
-            }
-        if version_str != SAFE_V1_3_VERSION:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SAFE_VERSION_UNSUPPORTED",
-                "errorMessage": (
-                    f"Safe at {safe_address} reports VERSION={version_str!r}; "
-                    f"expected {SAFE_V1_3_VERSION!r}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 2: getOwners ───────────────────────────────────────────
-        try:
-            # Safe.getOwners() selector: keccak256('getOwners()')[:4] = 0xa0e67e2b
-            owners_calldata = "0xa0e67e2b"
-            raw_owners = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": owners_calldata}, "latest"],
-            )
-            owners_list = eth_abi.decode(
-                ["address[]"], bytes.fromhex(str(raw_owners).removeprefix("0x"))
-            )[0]
-        except Exception as exc:
-            # RPC failure — not a semantic ownership mismatch.
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"getOwners() eth_call failed: {exc}",
-                "condition_id": condition_id,
-            }
-        owners_lower = [o.lower() for o in owners_list]
-        if signer_eoa.lower() not in owners_lower:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SAFE_OWNER_MISMATCH",
-                "errorMessage": (
-                    f"signer EOA {signer_eoa} not in Safe.getOwners() {owners_list}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 3: Safe nonce ──────────────────────────────────────────
-        try:
-            # Safe.nonce() selector: keccak256('nonce()')[:4] = 0xaffed0e0
-            nonce_calldata = "0xaffed0e0"
-            raw_nonce = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": nonce_calldata}, "latest"],
-            )
-            safe_nonce = int(str(raw_nonce), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"Safe nonce() eth_call failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 4: EOA MATIC balance ──────────────────────────────────
-        _MATIC_FLOOR_WEI = 50_000_000_000_000_000  # 0.05 MATIC
-        try:
-            raw_balance = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_getBalance",
-                [signer_eoa, "latest"],
-            )
-            eoa_balance_wei = int(str(raw_balance), 16)
-        except Exception as exc:
-            # RPC failure — not a semantic balance-too-low result.
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"eth_getBalance failed for signer EOA: {exc}",
-                "condition_id": condition_id,
-            }
-        if eoa_balance_wei < _MATIC_FLOOR_WEI:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_EOA_MATIC_INSUFFICIENT",
-                "errorMessage": (
-                    f"signer EOA {signer_eoa} has {eoa_balance_wei} wei MATIC; "
-                    f"need >= {_MATIC_FLOOR_WEI} wei (0.05 MATIC)"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Build inner CTF calldata ──────────────────────────────────────────
-        try:
-            inner_calldata_hex = _build_redeem_calldata(condition_id, index_sets)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
-                "errorMessage": f"inner CTF calldata build failed: {exc}",
-                "condition_id": condition_id,
-            }
-        inner_data = bytes.fromhex(inner_calldata_hex.removeprefix("0x"))
-
-        # ── Build Safe tx hash + sign ─────────────────────────────────────────
-        try:
-            safe_tx_hash_bytes = build_safe_tx_hash(
-                safe_address=safe_address,
-                chain_id=int(self.chain_id),
-                to=POLYGON_CTF_ADDRESS,
-                value=0,
-                data=inner_data,
-                operation=0,  # CALL
-                nonce=safe_nonce,
-            )
-            signature = sign_safe_tx(safe_tx_hash_bytes, self.signer_key)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGN_FAILED",
-                "errorMessage": f"Safe sign failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Build outer execTransaction calldata ─────────────────────────────
-        try:
-            exec_calldata = build_exec_transaction_calldata(
-                to=POLYGON_CTF_ADDRESS,
-                value=0,
-                data=inner_data,
-                operation=0,
-                signatures=signature,
-            )
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
-                "errorMessage": f"execTransaction calldata build failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── EOA nonce + gas ───────────────────────────────────────────────────
-        try:
-            eoa_nonce_hex = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_getTransactionCount",
-                [signer_eoa, "pending"],
-            )
-            eoa_nonce = int(str(eoa_nonce_hex), 16)
-            gas_price_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_gasPrice", []
-            )
-            gas_price = int(str(gas_price_hex), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"EOA nonce/gasPrice fetch failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        estimate_params = {
-            "from": signer_eoa,
-            "to": safe_address,
-            "data": exec_calldata,
-        }
-        try:
-            gas_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_estimateGas", [estimate_params]
-            )
-            gas_limit = (int(str(gas_hex), 16) * 12) // 10
-        except V2AdapterError as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_GAS_ESTIMATE_REVERTED",
-                "errorMessage": f"eth_estimateGas reverted (Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"eth_estimateGas failed (Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-
-        outer_tx = {
-            "to": safe_address,
-            "data": exec_calldata,
-            "value": 0,
-            "chainId": int(self.chain_id),
-            "nonce": eoa_nonce,
-            "gas": gas_limit,
-            "gasPrice": gas_price,
-        }
-
-        try:
-            from eth_account import Account
-
-            signed = Account.sign_transaction(outer_tx, self.signer_key)
-            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGN_FAILED",
-                "errorMessage": f"sign_transaction (outer EOA tx) failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Dry-run gate ──────────────────────────────────────────────────────
-        if dry_run:
-            # SECURITY (codereview-may19 P0-2): never log or return the signed
-            # raw_tx_hex. A signed raw transaction is a broadcastable payload;
-            # any observer (logs, DB events, alerting collectors, backups) can
-            # broadcast it and bypass the no-side-effect gate. Log only
-            # non-sensitive metadata (tx_type label + length + short SHA-256
-            # fingerprint) — matching the EOA dry-run path's secure pattern.
-            import hashlib as _hashlib
-            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
-            logger.warning(
-                "REDEEM_DRY_RUN_LOGGED safe_address=%s safe_nonce=%d "
-                "condition_id=%s raw_tx_hex_len=%d "
-                "dry_run_fingerprint=%s tx_type=SAFE",
-                safe_address, safe_nonce, condition_id,
-                len(raw_hex), _dry_run_fingerprint,
-            )
-            return {
-                "success": False,
-                "errorCode": "REDEEM_DRY_RUN_LOGGED",
-                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast",
-                "condition_id": condition_id,
-                "dry_run_fingerprint": _dry_run_fingerprint,
-                "safe_nonce": safe_nonce,
-            }
-
-        # ── Broadcast ─────────────────────────────────────────────────────────
-        try:
-            tx_hash = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_sendRawTransaction",
-                [raw_hex],
-            )
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_BROADCAST_FAILED",
-                "errorMessage": f"eth_sendRawTransaction failed (Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-
-        import re as _re
-        tx_hash_str = str(tx_hash) if tx_hash is not None else None
-        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
-            return {
-                "success": False,
-                "errorCode": "REDEEM_INVALID_TX_HASH",
-                "errorMessage": (
-                    f"eth_sendRawTransaction returned non-hash result: {tx_hash!r}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        return {
-            "success": True,
-            "tx_hash": tx_hash_str,
-            "condition_id": condition_id,
-            "index_sets": list(index_sets),
-            "safe_nonce": safe_nonce,
-            "eoa_nonce": eoa_nonce,
-            "gas_price": gas_price,
-            "gas_limit": gas_limit,
-        }
-
-    def _redeem_via_negrisk_safe(
-        self,
-        condition_id: str,
-        index_sets: list[int],
-        signer_eoa: str,
-        amount: int,
-    ) -> dict[str, Any]:
-        """Safe v1.3.0 execTransaction wrapper for negRisk autonomous redeem.
-
-        Mirrors _redeem_via_safe but targets POLYGON_NEGRISK_ADAPTER_ADDRESS
-        with NEGRISK_REDEEM_POSITIONS_SELECTOR calldata instead of the
-        standard CTF.
-
-        Called when neg_risk=True AND signature_type==2 AND signer_eoa !=
-        funder_address. The funder_address is the Safe proxy; signer_eoa is
-        the Safe owner EOA.
-
-        amount: token balance in micro-units (e.g. 1587297 for 1.587297 tokens).
-        Derived from settlement_commands.token_amounts_json by submit_redeem().
-
-        negRisk ABI: redeemPositions(bytes32 conditionId, uint256[] amounts)
-        indexSet→slot mapping (verified on-chain 2026-05-19):
-          indexSet=2 (YES) → amounts=[amount, 0]   (slot 0)
-          indexSet=1 (NO)  → amounts=[0, amount]   (slot 1)
-        Reference tx: 0x4ce58f2683bd81f7f49b7dd19e35cc2db4fc137c2f841712876ace23afe39448
-        """
-        import logging
-        import os
-
-        from src.venue.safe_exec import (
-            SAFE_V1_3_VERSION,
-            build_exec_transaction_calldata,
-            build_safe_tx_hash,
-            sign_safe_tx,
-        )
-
-        logger = logging.getLogger(__name__)
-        safe_address = self.funder_address
-        dry_run = os.environ.get(AUTONOMOUS_REDEEM_DRY_RUN_ENV, "").lower() in (
-            "1", "true", "yes", "on",
-        )
-
-        # ── Pre-flight 1: Safe VERSION ────────────────────────────────────────
-        try:
-            version_calldata = "0xffa1ad74"
-            raw_version = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": version_calldata}, "latest"],
-            )
-            import eth_abi
-            version_str = eth_abi.decode(
-                ["string"], bytes.fromhex(str(raw_version).removeprefix("0x"))
-            )[0]
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"VERSION() eth_call failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-        if version_str != SAFE_V1_3_VERSION:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SAFE_VERSION_UNSUPPORTED",
-                "errorMessage": (
-                    f"Safe at {safe_address} reports VERSION={version_str!r}; "
-                    f"expected {SAFE_V1_3_VERSION!r}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 2: getOwners ───────────────────────────────────────────
-        try:
-            owners_calldata = "0xa0e67e2b"
-            raw_owners = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": owners_calldata}, "latest"],
-            )
-            owners_list = eth_abi.decode(
-                ["address[]"], bytes.fromhex(str(raw_owners).removeprefix("0x"))
-            )[0]
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"getOwners() eth_call failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-        owners_lower = [o.lower() for o in owners_list]
-        if signer_eoa.lower() not in owners_lower:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SAFE_OWNER_MISMATCH",
-                "errorMessage": (
-                    f"signer EOA {signer_eoa} not in Safe.getOwners() {owners_list}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 3: Safe nonce ──────────────────────────────────────────
-        try:
-            nonce_calldata = "0xaffed0e0"
-            raw_nonce = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_call",
-                [{"to": safe_address, "data": nonce_calldata}, "latest"],
-            )
-            safe_nonce = int(str(raw_nonce), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"Safe nonce() eth_call failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Pre-flight 4: EOA MATIC balance ──────────────────────────────────
-        _MATIC_FLOOR_WEI = 50_000_000_000_000_000  # 0.05 MATIC
-        try:
-            raw_balance = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_getBalance",
-                [signer_eoa, "latest"],
-            )
-            eoa_balance_wei = int(str(raw_balance), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"eth_getBalance failed for signer EOA (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-        if eoa_balance_wei < _MATIC_FLOOR_WEI:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_EOA_MATIC_INSUFFICIENT",
-                "errorMessage": (
-                    f"signer EOA {signer_eoa} has {eoa_balance_wei} wei MATIC; "
-                    f"need >= {_MATIC_FLOOR_WEI} wei (0.05 MATIC)"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # ── Build inner negRisk calldata ──────────────────────────────────────
-        try:
-            inner_calldata_hex = _build_negrisk_redeem_calldata(condition_id, index_sets, amount)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
-                "errorMessage": f"inner negRisk calldata build failed: {exc}",
-                "condition_id": condition_id,
-            }
-        inner_data = bytes.fromhex(inner_calldata_hex.removeprefix("0x"))
-
-        # ── Build Safe tx hash + sign ─────────────────────────────────────────
-        try:
-            safe_tx_hash_bytes = build_safe_tx_hash(
-                safe_address=safe_address,
-                chain_id=int(self.chain_id),
-                to=POLYGON_NEGRISK_ADAPTER_ADDRESS,
-                value=0,
-                data=inner_data,
-                operation=0,  # CALL
-                nonce=safe_nonce,
-            )
-            signature = sign_safe_tx(safe_tx_hash_bytes, self.signer_key)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGN_FAILED",
-                "errorMessage": f"Safe sign failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Build outer execTransaction calldata ─────────────────────────────
-        try:
-            exec_calldata = build_exec_transaction_calldata(
-                to=POLYGON_NEGRISK_ADAPTER_ADDRESS,
-                value=0,
-                data=inner_data,
-                operation=0,
-                signatures=signature,
-            )
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
-                "errorMessage": f"execTransaction calldata build failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── EOA nonce + gas ───────────────────────────────────────────────────
-        try:
-            eoa_nonce_hex = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_getTransactionCount",
-                [signer_eoa, "pending"],
-            )
-            eoa_nonce = int(str(eoa_nonce_hex), 16)
-            gas_price_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_gasPrice", []
-            )
-            gas_price = int(str(gas_price_hex), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"EOA nonce/gasPrice fetch failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-
-        estimate_params = {
-            "from": signer_eoa,
-            "to": safe_address,
-            "data": exec_calldata,
-        }
-        try:
-            gas_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_estimateGas", [estimate_params]
-            )
-            gas_limit = (int(str(gas_hex), 16) * 12) // 10
-        except V2AdapterError as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_GAS_ESTIMATE_REVERTED",
-                "errorMessage": f"eth_estimateGas reverted (negRisk Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"eth_estimateGas failed (negRisk Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-
-        outer_tx = {
-            "to": safe_address,
-            "data": exec_calldata,
-            "value": 0,
-            "chainId": int(self.chain_id),
-            "nonce": eoa_nonce,
-            "gas": gas_limit,
-            "gasPrice": gas_price,
-        }
-
-        try:
-            from eth_account import Account
-
-            signed = Account.sign_transaction(outer_tx, self.signer_key)
-            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGN_FAILED",
-                "errorMessage": f"sign_transaction (outer EOA tx) failed (negRisk path): {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Dry-run gate ──────────────────────────────────────────────────────
-        if dry_run:
-            # SECURITY (codereview-may19 P0-2): never log or return the signed
-            # raw_tx_hex (broadcastable payload). Log only metadata and a short
-            # SHA-256 fingerprint, matching the EOA + Safe dry-run patterns.
-            import hashlib as _hashlib
-            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
-            logger.warning(
-                "REDEEM_DRY_RUN_LOGGED safe_address=%s safe_nonce=%d "
-                "condition_id=%s neg_risk=True raw_tx_hex_len=%d "
-                "dry_run_fingerprint=%s tx_type=NEGRISK_SAFE",
-                safe_address, safe_nonce, condition_id,
-                len(raw_hex), _dry_run_fingerprint,
-            )
-            return {
-                "success": False,
-                "errorCode": "REDEEM_DRY_RUN_LOGGED",
-                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast (negRisk path)",
-                "condition_id": condition_id,
-                "dry_run_fingerprint": _dry_run_fingerprint,
-                "safe_nonce": safe_nonce,
-                "neg_risk": True,
-            }
-
-        # ── Broadcast ─────────────────────────────────────────────────────────
-        try:
-            tx_hash = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_sendRawTransaction",
-                [raw_hex],
-            )
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_BROADCAST_FAILED",
-                "errorMessage": f"eth_sendRawTransaction failed (negRisk Safe wrap): {exc}",
-                "condition_id": condition_id,
-            }
-
-        import re as _re
-        tx_hash_str = str(tx_hash) if tx_hash is not None else None
-        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
-            return {
-                "success": False,
-                "errorCode": "REDEEM_INVALID_TX_HASH",
-                "errorMessage": (
-                    f"eth_sendRawTransaction returned non-hash result: {tx_hash!r}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        return {
-            "success": True,
-            "tx_hash": tx_hash_str,
-            "condition_id": condition_id,
-            "index_sets": list(index_sets),
-            "neg_risk": True,
-            "safe_nonce": safe_nonce,
-            "eoa_nonce": eoa_nonce,
-            "gas_price": gas_price,
-            "gas_limit": gas_limit,
-        }
+    # _redeem_via_safe / _redeem_via_negrisk_safe DELETED 2026-07-08 (R6-a):
+    # dead redeem-submission broadcast machinery (zero production callers --
+    # redeem() above raises RedeemSubmissionAbandonedError before either could
+    # ever be reached). Both still built real eth_sendRawTransaction calldata
+    # for a live CTF/negRisk redeemPositions broadcast, which the operator law
+    # of 2026-06-10 (Zeus never submits redeem tx) forbids -- keeping
+    # constructable-but-unreachable code was the actual residual risk this
+    # packet closes. See src/execution/settlement_commands.py's
+    # assert_redeem_submission_allowed for the permanent enforcement point.
 
     def _wrap_via_safe(
         self,
@@ -3950,38 +3323,40 @@ def _order_payload(order_id: str) -> Any:
         return SimpleNamespace(orderID=order_id)
 
 
-def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
+def _cancel_result_from_response(
+    order_id: str, raw: Any, *, check_envelope: bool = False
+) -> CancelResult:
+    """Thin call site into the response-contract layer (src.venue.response_contracts).
+
+    Shared by the single-order ``cancel()`` path (``check_envelope=True``)
+    and cancel_batch's per-order index/echo_id fallback (default False --
+    those raw_items are already-mapped legacy per-item dicts, not a
+    top-level envelope; see response_contracts._looks_like_cancel_envelope
+    for why the two must not be conflated). ``check_envelope=True`` closes
+    the #429 false-positive this closes (single-cancel used to report
+    CANCELED for an order id the envelope never actually mentioned) --
+    see response_contracts.py module docstring for the live incident.
+    VenueResponseShapeError intentionally propagates uncaught: every
+    current caller of cancel()/cancel_order() already wraps the call in
+    ``except Exception`` and records an unknown/ambiguous side effect
+    (venue_cancel_journal.py:242, fill_tracker.py:1562,
+    day0_hard_fact_exit.py:937) -- the same fail-closed handling a raised
+    SDK/network exception already gets, never a silently-guessed CANCELED.
+    """
+    outcome = parse_cancel_outcome(
+        order_id, raw, endpoint="cancel", check_envelope=check_envelope
+    )
     if isinstance(raw, str) and raw.strip():
-        normalized_order_id = raw.strip()
-        return CancelResult(
-            status="CANCELED",
-            order_id=normalized_order_id,
-            raw_response_json=_canonical_json({"orderID": normalized_order_id, "status": "CANCELED"}),
-        )
-    raw_dict = dict(raw or {}) if isinstance(raw, dict) else {"raw": _to_jsonish(raw)}
-    error_code, error_message = _response_error(raw_dict)
-    not_canceled = raw_dict.get("not_canceled", raw_dict.get("not_cancelled"))
-    if error_code or error_message or _nonempty(not_canceled) or raw_dict.get("success") is False:
-        return CancelResult(
-            status="NOT_CANCELED",
-            order_id=order_id,
-            raw_response_json=_canonical_json(raw_dict),
-            error_code=error_code,
-            error_message=error_message or _reason_from(not_canceled, "cancel_not_canceled"),
-        )
-    canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
-    status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
-    if _nonempty(canceled) or is_cancel_confirmed_status(status) or raw_dict.get("success") is True:
-        return CancelResult(
-            status="CANCELED",
-            order_id=_extract_order_id(raw_dict) or order_id,
-            raw_response_json=_canonical_json(raw_dict),
-        )
+        raw_json = _canonical_json({"orderID": outcome.order_id, "status": "CANCELED"})
+    else:
+        raw_dict = dict(raw) if isinstance(raw, dict) else {"raw": _to_jsonish(raw)}
+        raw_json = _canonical_json(raw_dict)
     return CancelResult(
-        status="UNKNOWN",
-        order_id=order_id,
-        raw_response_json=_canonical_json(raw_dict),
-        error_message="unrecognized_cancel_response",
+        status=outcome.status,
+        order_id=outcome.order_id,
+        raw_response_json=raw_json,
+        error_code=outcome.error_code,
+        error_message=outcome.error_message,
     )
 
 
@@ -4001,42 +3376,9 @@ def _to_jsonish(value: Any) -> Any:
     return repr(value)
 
 
-def _nonempty(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, (str, bytes)):
-        return bool(value)
-    if isinstance(value, dict):
-        return bool(value)
-    try:
-        return bool(list(value))
-    except TypeError:
-        return bool(value)
-
-
-def _reason_from(value: Any, fallback: str) -> str:
-    if value is None:
-        return fallback
-    if isinstance(value, dict):
-        parts = [f"{key}: {item}" for key, item in value.items()]
-        return "; ".join(parts) if parts else fallback
-    if isinstance(value, (list, tuple, set)):
-        return ", ".join(str(item) for item in value) or fallback
-    return str(value) or fallback
-
-
-def _extract_order_id(raw: Any) -> Optional[str]:
-    if not isinstance(raw, dict):
-        return None
-    return raw.get("orderID") or raw.get("orderId") or raw.get("order_id") or raw.get("id")
-
-
-def _response_error(raw: Any) -> tuple[Optional[str], Optional[str]]:
-    if not isinstance(raw, dict):
-        return None, None
-    code = raw.get("errorCode") or raw.get("error_code") or raw.get("code")
-    message = raw.get("errorMessage") or raw.get("error_message") or raw.get("message")
-    return (str(code) if code else None, str(message) if message else None)
+# _nonempty/_reason_from/_extract_order_id/_response_error moved to
+# src.venue.response_contracts (R6-a response-contract layer); imported at
+# module top as _extract_order_id/_response_error aliases.
 
 
 def _string_sequence_from_value(value: Any) -> tuple[str, ...]:

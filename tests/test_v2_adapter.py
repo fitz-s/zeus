@@ -1909,6 +1909,92 @@ def test_v2_cancel_order_method_uses_order_payload(tmp_path):
     assert '"canceled":["ord-cancel"]' in (result.raw_response_json or "")
 
 
+class TestCancelSingleResponseContract:
+    """R6-a response-contract layer: single-order cancel() must apply the
+    same live-verified (2026-07-05) envelope exact-membership check that
+    cancel_batch already applies, closing the #429 false-positive where a
+    batch-envelope-shaped response mentioning some OTHER order id was
+    silently reported as CANCELED for THIS order."""
+
+    def test_envelope_mentioning_other_order_stays_unknown_fail_closed(self, tmp_path):
+        """2026-07-05 live incident class, single-cancel variant: before
+        this packet, `_nonempty(raw_dict.get("canceled"))` was truthy
+        whenever ANY order id appeared in "canceled", regardless of
+        whether it was the order this call asked to cancel."""
+        fake = FakeCancelOrderClient(response={"canceled": ["other-ord"], "not_canceled": {}})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        result = adapter.cancel("ord-cancel")
+
+        assert result.status == "UNKNOWN"
+        assert result.order_id == "ord-cancel"
+
+    def test_envelope_not_canceled_dict_maps_with_reason(self, tmp_path):
+        fake = FakeCancelOrderClient(
+            response={"canceled": [], "not_canceled": {"ord-cancel": "order not found"}}
+        )
+        adapter, _ = _adapter(tmp_path, fake)
+
+        result = adapter.cancel("ord-cancel")
+
+        assert result.status == "NOT_CANCELED"
+        assert "order not found" in (result.error_message or "")
+
+    def test_legacy_status_shape_still_confirms_cancel(self, tmp_path):
+        """Non-envelope legacy per-order shape (status key, no
+        canceled/not_canceled) must keep working exactly as before."""
+        fake = FakeCancelOrderClient(response={"orderID": "ord-cancel", "status": "CANCELED"})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        result = adapter.cancel("ord-cancel")
+
+        assert result.status == "CANCELED"
+        assert result.order_id == "ord-cancel"
+
+    def test_unrecognized_shape_raises_venue_response_shape_error(self, tmp_path):
+        from src.venue.response_contracts import VenueResponseShapeError
+
+        fake = FakeCancelOrderClient(response={"foo": "bar"})
+        adapter, _ = _adapter(tmp_path, fake)
+
+        with pytest.raises(VenueResponseShapeError, match="cancel"):
+            adapter.cancel("ord-cancel")
+
+
+class TestOrderStatusResponseContract:
+    """R6-a: get_order/get_open_orders must fail closed (raise) on a
+    response item that carries neither 'status' nor 'state', rather than
+    silently defaulting to the placeholder status string "UNKNOWN"."""
+
+    def test_get_order_missing_status_key_raises(self, tmp_path):
+        from src.venue.response_contracts import VenueResponseShapeError
+
+        class FakeNoStatusOrderClient:
+            def get_order(self, order_id):
+                return {"orderID": order_id}
+
+        adapter, _ = _adapter(tmp_path, FakeNoStatusOrderClient())
+
+        with pytest.raises(VenueResponseShapeError, match="get_order"):
+            adapter.get_order("ord-1")
+
+    def test_get_open_orders_item_missing_status_key_raises(self, tmp_path):
+        from src.venue.response_contracts import VenueResponseShapeError
+
+        class FakeNoStatusOpenOrdersClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_open_orders(self, **kwargs):
+                self.calls.append(("get_open_orders", kwargs))
+                return [{"orderID": "ord-open"}]
+
+        adapter, _ = _adapter(tmp_path, FakeNoStatusOpenOrdersClient())
+
+        with pytest.raises(VenueResponseShapeError, match="get_open_orders"):
+            adapter.get_open_orders()
+
+
 def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
     from src.control.cutover_guard import CutoverDecision, CutoverState
     from src.data.polymarket_client import PolymarketClient

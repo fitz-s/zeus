@@ -54,6 +54,12 @@ contract.
 - `src/venue/polymarket_v2_adapter.py::PolymarketV2Adapter`
 - `src/venue/polymarket_v2_adapter.py::PolymarketV2AdapterProtocol`
 - `src/contracts/venue_submission_envelope.py::VenueSubmissionEnvelope`
+- `src/venue/response_contracts.py` (R6-a, 2026-07-08): response-contract layer
+  for the venue client boundary. `parse_cancel_outcome`/`parse_order_status`
+  are the single source of truth for cancel/order-status response parsing
+  (shared by the single-order and batch-fallback paths); `VenueResponseShapeError`
+  is raised on a genuinely unrecognized response shape instead of silently
+  defaulting. See the module docstring for the #429 false-positive this closes.
 
 ## 7. Invariants
 
@@ -69,9 +75,20 @@ contract.
   unknown-side-effect inputs for executor recovery rather than safe replay.
 - V2 cancel and redeem capabilities are surfaced conservatively: unsupported or
   unverified SDK methods return typed failures instead of falling back to V1.
+- Cancel response parsing (single and batch-fallback) goes through
+  `src/venue/response_contracts.py`, never a fresh ad hoc `.get()` guess at the
+  raw payload shape (R6-a).
 - Fake-venue safety tests use `tests/fakes/polymarket_v2.py` to implement the
   same protocol and compare envelope / event schemas against a mock live
   adapter. This does not authorize live submit/cancel/redeem or cutover.
+- Zeus never submits a redeem transaction (operator law 2026-06-10, ABSOLUTE).
+  `redeem()` raises `RedeemSubmissionAbandonedError` unconditionally via
+  `assert_redeem_submission_allowed`; the autonomous broadcast bodies
+  (`_redeem_via_safe`, `_redeem_via_negrisk_safe`) were DELETED (R6-a,
+  2026-07-08), not merely gated -- they had zero production callers and still
+  built real `eth_sendRawTransaction` redeem calldata. Winning-balance READS
+  (`get_negrisk_winning_position_balance`) are KEPT -- external/manual
+  redemptions still need accounting.
 
 ## 8. Negative constraints
 

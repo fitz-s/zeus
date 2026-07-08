@@ -285,8 +285,12 @@ capabilities:
         - deployment_freshness_mismatch
     hard_kernel_paths:
       - src/execution/executor.py
-      - src/execution/venue_adapter.py  # Phase 4 deliverable — created when LiveAuthToken phantom + ABC split lands; entry pre-registers the path so the route function can recognize the future hard kernel from day 1
-      - src/execution/live_executor.py  # Phase 4 deliverable — created when LiveAuthToken phantom + ABC split lands; entry pre-registers the path so the route function can recognize the future hard kernel from day 1
+      - src/execution/live_executor.py
+      # src/execution/venue_adapter.py deleted 2026-07-08 (R6-a): zero
+      # production callers (VenueAdapterExecutor was never instantiated --
+      # live submission runs through executor.py -> PolymarketV2Adapter
+      # directly). Both remaining paths already carry
+      # @capability("live_venue_submit", ...) independently.
     original_intent:
       intent_test: "diff touches live executor or venue adapter submit path"
       does_not_fit: refuse_with_advice
