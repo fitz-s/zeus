@@ -1728,7 +1728,7 @@ entries:
   doc_class: artifact
   default_read: false
   direct_reference_allowed: true
-  current_role: per-city source overlay consumed by src/forecast/per_city_source_registry.py (live code input)
+  current_role: per-city source overlay; R1-b (2026-07-08) deleted src/forecast/per_city_source_registry.py (zero live callers, only its own test); the CSV's remaining consumer is the offline scripts/per_city_model_mae.py (direct CSV parse, no dependency on the deleted module)
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: active

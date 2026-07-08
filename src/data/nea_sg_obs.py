@@ -36,9 +36,11 @@ Provenance law (source + station + distance on EVERY datum; the v4/Zeus rule):
   reproducible and the area-vs-settlement gap (distance_km) is explicit on the
   reading rather than hidden.
 
-Integration point (NOT wired in this pass — documented hook only):
-  src/forecast/observation_precision_fusion.fuse_day0_observations consumes
-  ObsSourceReading records. nea_obs_to_fusion_reading() below adapts a
+Integration point (NEVER wired; R1-b 2026-07-08 deleted src/forecast/observation_precision_fusion.py
+  — zero live callers, module never reached the seam it was written for. This adapter is now a
+  dangling shape-conversion helper kept for its ObsSourceReading-compatible kwargs shape; a future
+  day0 multi-source observation fusion module would be the real target, not the deleted one):
+  nea_obs_to_fusion_reading() below adapts a
   NeaObsReading into that shape with is_settlement_faithful=False, so when the
   multi-source day0 observation fusion is wired for Singapore, NEA enters as a
   correlated-but-distinct source (its station_id differs from WSSS, so it is
@@ -312,10 +314,13 @@ def fetch_nea_reading(
 
 
 def nea_obs_to_fusion_reading(reading: NeaObsReading) -> dict[str, Any]:
-    """Adapt a NeaObsReading → kwargs for forecast.observation_precision_fusion
-    .ObsSourceReading (the documented fusion integration point).
+    """Adapt a NeaObsReading into an ObsSourceReading-shaped kwargs dict.
 
-    Returns a kwargs dict (not the dataclass — kept import-free here) with
+    The fusion module this was written for (src/forecast/observation_precision_fusion.py)
+    was deleted R1-b (2026-07-08, zero live callers). This adapter is retained as a
+    dangling shape-conversion helper for a future day0 multi-source fusion module.
+
+    Returns a kwargs dict (not a dataclass — kept import-free here) with
     is_settlement_faithful=False so the fusion treats NEA as distinct from the
     settlement instrument. ``value`` is the NEA Celsius reading; callers
     that fuse against an F-settled city must convert first (Singapore settles in
