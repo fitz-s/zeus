@@ -474,6 +474,8 @@ modules:
       - src/ingest/polymarket_user_channel.py
       - src/control/ws_gap_guard.py
       - src/state/venue_command_repo.py
+      - src/ingest/contract.py
+      - src/ingest/scheduler.py
     public_entry_files:
       - src/ingest/forecast_live_daemon.py
       - src/ingest/polymarket_user_channel.py
@@ -487,6 +489,7 @@ modules:
       - tests/test_forecast_live_daemon.py
       - tests/test_user_channel_ingest.py
       - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
+      - tests/test_ingest_source_contract_scheduler.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   signal:
