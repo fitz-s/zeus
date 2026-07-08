@@ -638,7 +638,6 @@ cards:
       family, including hypotheses that fail positive-edge prefilter.
     antibodies:
       code:
-        - src/strategy/fdr_filter.py
         - src/strategy/selection_family.py
       tests:
         - tests/test_fdr.py
@@ -654,7 +653,6 @@ cards:
     routing:
       task_terms: [FDR, BH, selection family, hypothesis, candidate family]
       file_patterns:
-        - src/strategy/fdr_filter.py
         - src/strategy/selection_family.py
         - src/engine/evaluator.py
     downstream_blast_radius:

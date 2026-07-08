@@ -2440,12 +2440,14 @@ def test_live_command_reuses_single_pre_submit_authority_witness():
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     from pathlib import Path
 
+    # src/strategy/live_inference/promotion_ledger.py removed 2026-07-08 (R0-c zero-caller
+    # corpse purge); dropped from this scan — the assertion is vacuously strengthened by
+    # its absence (a deleted file cannot reference the legacy cap columns).
     source = "\n".join(
         Path(path).read_text()
         for path in (
             "src/events/reactor.py",
             "src/engine/event_reactor_adapter.py",
-            "src/strategy/live_inference/promotion_ledger.py",
         )
     )
 

@@ -122,7 +122,6 @@ from src.state.portfolio import (
     has_inflight_exit_for_token,
     portfolio_heat_for_bankroll,
 )
-from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
@@ -140,6 +139,7 @@ from src.engine.ddd_wiring import DDDFailClosed, evaluate_ddd_for_decision
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import (
+    DEFAULT_FDR_ALPHA,
     apply_familywise_fdr,
     make_hypothesis_family_id,
     make_edge_family_id,
@@ -6458,7 +6458,7 @@ def evaluate_candidate(
         # this file. `sample_size` sources from the shared bootstrap-count
         # helper (src.config.edge_n_bootstrap) so the evidence reflects the
         # exact count used for the family FDR scan. `confidence_level` sources
-        # from DEFAULT_FDR_ALPHA (src.strategy.fdr_filter:19, backed by
+        # from DEFAULT_FDR_ALPHA (src.strategy.selection_family, backed by
         # settings["edge"]["fdr_alpha"]) so any α tuning in config propagates
         # here without code edits. `consecutive_confirmations=1` = 1 robust
         # confirmation (CI_lower > 0 across n_bootstrap draws) per the D4

@@ -62,7 +62,6 @@ class CapPolicy:
     max_per_market_micro: int = 250_000_000
     max_per_event_micro: int = 500_000_000
     max_per_resolution_window_micro: dict[str, int] = field(default_factory=lambda: {"default": 750_000_000})
-    max_drawdown_pct: float = 10.0
     max_correlated_exposure_micro: int = 1_000_000_000
     unknown_side_effect_limit: int = 0
     reconcile_finding_limit: int = 0
@@ -90,8 +89,6 @@ class CapPolicy:
                 raise ValueError(f"{name} must be positive")
         if not 0.0 <= float(self.optimistic_exposure_weight) <= 1.0:
             raise ValueError("optimistic_exposure_weight must be in [0, 1]")
-        if float(self.max_drawdown_pct) < 0:
-            raise ValueError("max_drawdown_pct must be non-negative")
         if int(self.unknown_side_effect_limit) < 0 or int(self.reconcile_finding_limit) < 0 or int(self.ws_gap_seconds_limit) < 0:
             raise ValueError("kill-switch thresholds must be non-negative")
         if int(self.systemic_market_count_limit) < 1:
@@ -275,8 +272,6 @@ class RiskAllocator:
             return "heartbeat_lost"
         if governor_state.ws_gap_active and governor_state.ws_gap_seconds > policy.ws_gap_seconds_limit:
             return "ws_gap_threshold"
-        if governor_state.current_drawdown_pct >= policy.max_drawdown_pct:
-            return "drawdown_threshold"
         return None
 
     def _market_exposure(self, market_id: str) -> tuple[int, int, int]:
@@ -334,7 +329,6 @@ class PortfolioGovernor:
         risk_level = _coerce_risk_level(getattr(ledger, "risk_level", _mapping_get(ledger, "risk_level", RiskLevel.GREEN)))
         automatic_reason = _automatic_kill_switch_reason(
             self.cap_policy,
-            current_drawdown_pct=drawdown,
             heartbeat_health=health,
             ws_gap_active=ws_gap_active,
             ws_gap_seconds=ws_gap_seconds,
@@ -530,7 +524,6 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
         max_per_market_micro=int(data.get("max_per_market_micro", CapPolicy().max_per_market_micro)),
         max_per_event_micro=int(data.get("max_per_event_micro", CapPolicy().max_per_event_micro)),
         max_per_resolution_window_micro=dict(data.get("max_per_resolution_window_micro", CapPolicy().max_per_resolution_window_micro)),
-        max_drawdown_pct=float(data.get("max_drawdown_pct", CapPolicy().max_drawdown_pct)),
         max_correlated_exposure_micro=int(data.get("max_correlated_exposure_micro", CapPolicy().max_correlated_exposure_micro)),
         unknown_side_effect_limit=int(data.get("unknown_side_effect_limit", CapPolicy().unknown_side_effect_limit)),
         reconcile_finding_limit=int(data.get("reconcile_finding_limit", CapPolicy().reconcile_finding_limit)),
@@ -1003,7 +996,6 @@ class _EmptySnapshot:
 def _automatic_kill_switch_reason(
     policy: CapPolicy,
     *,
-    current_drawdown_pct: float,
     heartbeat_health: HeartbeatHealth,
     ws_gap_active: bool,
     ws_gap_seconds: int,
@@ -1014,8 +1006,6 @@ def _automatic_kill_switch_reason(
         return "heartbeat_lost"
     if ws_gap_active and ws_gap_seconds > policy.ws_gap_seconds_limit:
         return "ws_gap_threshold"
-    if current_drawdown_pct >= policy.max_drawdown_pct:
-        return "drawdown_threshold"
     return None
 
 

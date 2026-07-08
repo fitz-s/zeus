@@ -209,9 +209,51 @@ class NullConditionIdOnOpenPhaseError(ValueError):
         self.phase = phase
 
 
+class MissingRealizedPnlOnCloseError(ValueError):
+    """Raised when upsert_position_current detects a position transitioning
+    into an economically_closed/settled phase for the first time without a
+    realized_pnl_usd value.
+
+    R0-a (close-economics unification, 2026-07-08): this is the structural
+    backstop for the bug class where a close path builds its own
+    Position/SimpleNamespace stand-in and forgets to attach "pnl" before
+    projecting (Bug A/B, 2026-07-07 — ~91% of settled positions were left
+    with NULL/0.0 realized_pnl_usd). Every close path must compute
+    realized_pnl_usd via src.state.close_economics.compute_realized_pnl_usd
+    before reaching this write; this makes forgetting it a loud write-time
+    failure instead of a silent NULL discovered only by later audit.
+
+    Only the write that performs the FIRST transition into a close phase is
+    checked — a position already sitting in an absorbing phase (e.g. a
+    chain-mirror size correction re-touching an already-settled row, see
+    apply_size_correction_finding) is not re-checked here, so historical
+    legacy rows with a pre-existing NULL do not start raising on unrelated
+    re-writes. Use the R0-a backfill script to repair those.
+    """
+
+    def __init__(self, *, position_id: str, phase: str):
+        super().__init__(
+            f"MissingRealizedPnl: position_id={position_id!r} phase={phase!r} — "
+            f"realized_pnl_usd must be non-NULL when a position first transitions "
+            f"into phase={phase!r}. Compute it via "
+            f"src.state.close_economics.compute_realized_pnl_usd before building the projection."
+        )
+        self.position_id = position_id
+        self.phase = phase
+
+
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+# R0-a: the two phases build_position_current_projection / chain_mirror_reconciler
+# treat as "this position has a durable close economics record" (Bug #128 /
+# Bug A/B). VOIDED and ADMIN_CLOSED are deliberately excluded: those closes
+# are not economic close-and-realize-P&L events (a voided market or an admin
+# manual close may have no meaningful realized economics), so they are out of
+# this guard's scope.
+_REALIZED_PNL_REQUIRED_PHASES = frozenset(
+    {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.SETTLED.value}
+)
 # P0c: QUARANTINED is retained explicitly — it dropped out of the canonical
 # TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
 # (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but the
@@ -430,6 +472,31 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
         candidate_condition_id = projection.get("condition_id")
         if not candidate_condition_id:
             raise NullConditionIdOnOpenPhaseError(
+                position_id=candidate_position_id,
+                phase=candidate_phase,
+            )
+
+    # R0-a (close-economics unification, 2026-07-08): fail-closed guard for a
+    # position transitioning into a close phase (economically_closed/settled)
+    # for the first time without realized_pnl_usd. See
+    # MissingRealizedPnlOnCloseError. Only checked when realized_pnl_usd is
+    # actually missing (cheap on the happy path) and only for the write that
+    # performs the FIRST transition into an absorbing phase — a re-write of an
+    # already-absorbing row (e.g. a chain-mirror size correction touching an
+    # already-settled position) is not re-checked, so legacy NULL rows do not
+    # start raising on unrelated writes.
+    if (
+        candidate_phase in _REALIZED_PNL_REQUIRED_PHASES
+        and projection.get("realized_pnl_usd") is None
+        and candidate_position_id
+    ):
+        prior_phase_row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (candidate_position_id,),
+        ).fetchone()
+        prior_phase = str(prior_phase_row[0] if prior_phase_row else "")
+        if prior_phase not in _ABSORBING_POSITION_PHASES:
+            raise MissingRealizedPnlOnCloseError(
                 position_id=candidate_position_id,
                 phase=candidate_phase,
             )
