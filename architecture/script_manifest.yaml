@@ -1089,6 +1089,7 @@ scripts:
   topology_doctor_registry_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for registry/root/docs-strict checker family}
   topology_doctor_reference_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for reference/core-claim checker family}
   topology_doctor_receipt_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for change-receipt checker family}
+  topology_doctor_repr_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: "imported by topology_doctor.py for the representation-contract checker family (--repr); advisory-only, always exits 0 (docs/rebuild/representation_contract_2026-07-08.md)"}
   topology_doctor_script_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for script-manifest checker family}
   topology_doctor_source_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for source-rationale/scoped-AGENTS checker family}
   topology_doctor_test_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for test-topology checker family}

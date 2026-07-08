@@ -870,7 +870,8 @@ class SolveEngineShim:
     net of reservations — the seam-swap threads the real read; tests inject) and, optionally,
     ``ledger_snapshot_id_provider``. The endowment wealth VECTOR is the legacy ``portfolio`` A_y
     (like-for-like with the picker). ``engine`` may be injected for tests in place of a real
-    FamilyDecisionEngine. NOTHING wires this shim yet — the seam swap + G3 harness are the next packet.
+    FamilyDecisionEngine. Wired behind the w3_solve_enabled feature flag: qkernel_spine_bridge.py
+    wraps the engine with this shim at its construction seam (:1412) when w3_solve_enabled() is True.
     """
 
     def __init__(

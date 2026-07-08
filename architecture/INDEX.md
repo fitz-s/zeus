@@ -1,6 +1,6 @@
 # Architecture Index
 
-Navigation entry point for the 54 YAML manifests and 12 design docs in this directory.
+Navigation entry point for the 55 YAML manifests and 12 design docs in this directory.
 See [AGENTS.md](AGENTS.md) for routing rules and authority order. This file is a file map, not an authority source.
 
 ---
@@ -114,6 +114,7 @@ The five manifests that govern almost every code change:
 | `artifact_lifecycle.yaml` | Lifecycle classification for agent-created files |
 | `change_receipt_schema.yaml` | Route/change receipts: typed route-artifact evidence for high-risk closeout |
 | `naming_conventions.yaml` | Canonical naming map for files, functions, and freshness metadata |
+| `canonical_vocabulary.yaml` | One-concept-one-name registry (checked_policy_input, advisory-scope): canonical terms + forbidden aliases + migration wave, checked by `topology_doctor --repr` on new code only |
 | `code_idioms.yaml` | Registry for intentional non-obvious code shapes |
 | `maturity_model.yaml` | Current (`hardened_transition`) → target (`governed_runtime`) state |
 | `reference_replacement.yaml` | Tracks which bulky reference docs have been replaced by machine manifests |
