@@ -1,1 +1,0 @@
-"""Decision certificate report namespace."""

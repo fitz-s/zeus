@@ -299,7 +299,6 @@ def test_replay_pnl_uses_fee_adjusted_execution_cost_for_share_count(tmp_path, m
     conn.close()
 
     import src.state.db as db_module
-    import src.strategy.fdr_filter as fdr_module
     import src.strategy.kelly as kelly_module
     import src.strategy.market_analysis as market_analysis_module
 
@@ -322,7 +321,6 @@ def test_replay_pnl_uses_fee_adjusted_execution_cost_for_share_count(tmp_path, m
 
     monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
     monkeypatch.setattr(market_analysis_module, "MarketAnalysis", FakeMarketAnalysis)
-    monkeypatch.setattr(fdr_module, "fdr_filter", lambda edges: edges)
     monkeypatch.setattr(kelly_module, "dynamic_kelly_mult", lambda **kwargs: 1.0)
 
     summary = replay_module.run_replay(

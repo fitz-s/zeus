@@ -693,9 +693,22 @@ def _apply_settlement_finding(
     # the GREEN-only reactor gate. 2026-07-05 incident: 37 mirror-closed rows
     # did exactly that. The mirror KNOWS every truth field at close time;
     # stamp the full contract.
+    # R0-a (close-economics unification, 2026-07-08): the chain reconciler is
+    # a settlement-discovery *trigger* (chain truth as backstop for Gamma
+    # capture), not a second bookkeeper -- it now feeds the same shared
+    # close-economics formula every other close path uses instead of
+    # re-deriving its own pnl math. A settlement is graded binary: exit_price
+    # is 1.0 (won, redeemed at par) or 0.0 (lost, worthless); no entry_price
+    # guard is applied here (matches this path's pre-existing behavior of
+    # always booking a chain-verified settlement regardless of entry_price).
+    from src.state.close_economics import compute_realized_pnl_usd
+
     _shares = float(current["chain_shares"] or current["shares"] or 0.0)
     _cost = float(current["cost_basis_usd"] or 0.0)
-    _pnl = (_shares - _cost) if won else -_cost
+    _exit_price = 1.0 if won else 0.0
+    _pnl = compute_realized_pnl_usd(
+        shares=_shares, exit_price=_exit_price, cost_basis_usd=_cost
+    )
     # Bug B (truth-path PnL booking, 2026-07-07): _pnl above was already
     # computed correctly for the audit payload below, but `projection` (built
     # by copying pre-transition columns forward) never carried it into the
@@ -704,7 +717,7 @@ def _apply_settlement_finding(
     # "exit_price" fields were right. settlement_price (below) is a distinct
     # column holding a raw temperature value; do not touch it.
     projection["realized_pnl_usd"] = round(_pnl, 2)
-    projection["exit_price"] = 1.0 if won else 0.0
+    projection["exit_price"] = _exit_price
     payload = json.dumps(
         {
             "reconciler": "chain_mirror",

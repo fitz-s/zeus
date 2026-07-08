@@ -4863,3 +4863,41 @@ def test_city_truth_contract_rejects_unbacked_current_assertion(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "city_truth_contract_current_claim_unbacked" for issue in result.issues)
+
+
+def test_repr_audit_is_always_advisory_and_flags_banned_patterns(monkeypatch, tmp_path):
+    root = tmp_path
+    script = root / "src" / "decision" / "legacy_authority.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "# Last reused or audited: 2026-06-08\n"
+        "# The marginal-utility ranker is the unconditional single selection path.\n"
+        "def resolve_settlement_grade_market():\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"src/decision/legacy_authority.py": "modified"},
+    )
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+    monkeypatch.setattr(
+        topology_doctor,
+        "load_canonical_vocabulary",
+        lambda: {
+            "terms": [
+                {"concept_id": "governance.family_key", "canonical": "family_key", "forbidden_aliases": ["market"]},
+            ]
+        },
+    )
+
+    payload = topology_doctor.run_repr_audit(["src/decision/legacy_authority.py"])
+
+    assert payload["ok"] is True
+    assert payload["advisory"] is True
+    codes = {finding["code"] for finding in payload["findings"]}
+    assert "repr_banned_lifecycle_header_comment" in codes
+    assert "repr_authority_claim_comment" in codes
+    assert "repr_forbidden_alias_in_new_def" in codes

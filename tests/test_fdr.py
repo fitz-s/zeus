@@ -1,17 +1,16 @@
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-22; last_reused=2026-05-22
-# Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
-#          substrate boundary-gate + Day0 causal-day edge case coverage.
-# Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
-#        CANONICAL_DATA_VERSIONS → CANONICAL_ENSEMBLE_DATA_VERSIONS comment
-#        rename (no assertion change).
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Purpose: T4.3 selection-family substrate boundary-gate + Day0 causal-day
+#          edge case coverage over the active FDR (Benjamini-Hochberg) path.
+# Reuse: Referenced by regression suite; R0-d 2026-07-08 removed TestFDRFilter
+#        (direct unit tests of the deleted legacy src/strategy/fdr_filter.py
+#        helper) — the active BH path is covered via
+#        src.strategy.selection_family.benjamini_hochberg_mask /
+#        apply_familywise_fdr, exercised below.
 # Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29
-"""Tests for FDR (Benjamini-Hochberg) filter.
+"""Tests for the active FDR (Benjamini-Hochberg) selection path.
 
-Covers:
-1. Happy path: 10 edges with known p-values → correct filtering
-2. Edge case: all p-values below threshold → all pass
-3. Edge case: all p-values above threshold → none pass
-4. Empty input → empty output
+Covers T4.3 selection-family substrate boundary-gate and Day0 causal-day
+edge case coverage.
 """
 
 import json
@@ -31,7 +30,6 @@ from src.config import cities_by_name
 from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
-from src.strategy.fdr_filter import fdr_filter
 # STALE_LAW re-pin 2026-06-09: the BUY_NO_NATIVE_QUOTE_EVIDENCE_* flag-key constants and the
 # *_enabled() readers were relocated from src.engine.evaluator to
 # src.strategy.family_exclusive_dedup (commit 22dba73349 + slim bce3091a0d). Import them
@@ -152,68 +150,6 @@ def _set_buy_no_native_quote_evidence_flags(monkeypatch, *, evidence: bool, subm
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = evidence
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = submit
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
-
-
-class TestFDRFilter:
-    def test_known_p_values(self):
-        """Standard BH test with 10 edges at known p-values.
-
-        fdr_alpha=0.10, m=10.
-        BH thresholds: k/10 * 0.10 = [0.01, 0.02, 0.03, ..., 0.10]
-        """
-        p_values = [0.005, 0.01, 0.025, 0.05, 0.08, 0.12, 0.15, 0.30, 0.50, 0.90]
-        edges = [_make_edge(p) for p in p_values]
-
-        # S6 (2026-06-01): these 10 edges ARE the complete tested family for
-        # this fixture. Q4 structural contract (2026-06-01) requires BOTH the
-        # family_complete=True provenance assertion AND full_family_size equal
-        # to len(edges); the assert len(edges) == full_family_size proves the
-        # attestation is not over a subset. Assertions below are unchanged.
-        result = fdr_filter(
-            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
-        )
-
-        # k=1: p=0.005 <= 0.01 ✓
-        # k=2: p=0.01  <= 0.02 ✓
-        # k=3: p=0.025 <= 0.03 ✓
-        # k=4: p=0.05  <= 0.04 ✗
-        # So threshold_k = 3
-        assert len(result) == 3
-        # Results should be sorted by p-value
-        assert result[0].p_value <= result[1].p_value <= result[2].p_value
-
-    def test_all_significant(self):
-        """All p-values very low → all pass."""
-        edges = [_make_edge(0.001) for _ in range(5)]
-        result = fdr_filter(
-            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
-        )
-        assert len(result) == 5
-
-    def test_none_significant(self):
-        """All p-values high → none pass."""
-        edges = [_make_edge(0.50) for _ in range(5)]
-        result = fdr_filter(
-            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
-        )
-        assert len(result) == 0
-
-    def test_empty_input(self):
-        assert fdr_filter([], fdr_alpha=0.10, family_complete=True, full_family_size=0) == []
-
-    def test_single_edge_passes(self):
-        """Single edge with p=0.05, fdr=0.10 → passes (0.05 <= 0.10 * 1/1)."""
-        result = fdr_filter(
-            [_make_edge(0.05)], fdr_alpha=0.10, family_complete=True, full_family_size=1
-        )
-        assert len(result) == 1
-
-    def test_single_edge_fails(self):
-        """Single edge with p=0.15, fdr=0.10 → fails (0.15 > 0.10)."""
-        result = fdr_filter(
-            [_make_edge(0.15)], fdr_alpha=0.10, family_complete=True, full_family_size=1
-        )
-        assert len(result) == 0
 
 
 class TestDT7ScemaPathActuallyRuns:
