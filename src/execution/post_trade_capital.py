@@ -17,8 +17,10 @@ daemon (src.main) and are now hosted by the dedicated P4 process
                                        per-position HTTP the order daemon used to run
                                        afterwards (the DATA_DEGRADED-flap root cause, §4.3).
   - ``_harvester_cycle``             — settlement P&L resolver (REDEEM_INTENT_CREATED producer)
-  - ``_redeem_submitter_cycle``      — REDEEM_INTENT_CREATED/RETRYING -> submit_redeem
   - ``_redeem_reconciler_cycle``     — REDEEM_TX_HASHED -> reconcile_pending_redeems
+    (``_redeem_submitter_cycle`` DELETED 2026-07-08, R6-a: dead redeem-submission
+    machinery -- Zeus never submits redeem tx, operator law 2026-06-10. Redemption
+    accounting stays live via ``request_redeem``/``reconcile_pending_redeems``.)
   - ``_wrap_intent_creator_cycle``   — enqueue WRAP_REQUESTED on balance threshold
   - ``_wrap_submitter_cycle``        — WRAP_REQUESTED/WRAP_APPROVED -> submit APPROVE/WRAP tx
   - ``_wrap_reconciler_cycle``       — WRAP_*_TX_HASHED -> advance on receipt
@@ -314,157 +316,14 @@ def _harvester_cycle():
 # cascade-liveness boot guard travels with them (post_trade_capital_daemon.py).
 # ---------------------------------------------------------------------------
 
-def _redeem_submitter_cycle() -> None:
-    """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
-
-    PR #126 review-fix (Codex P1 + Copilot 3254021478): poll the full
-    _SUBMITTABLE_STATES set (INTENT_CREATED + RETRYING), not just INTENT_CREATED.
-    Without RETRYING in the query, rows that hit an adapter exception once
-    and were durably moved to RETRYING by submit_redeem would never be
-    re-attempted.
-
-    PR #126 review-fix (Codex P1 + Copilot 3254021447/49): commit AFTER each
-    submit_redeem call. submit_redeem only commits when own_conn=True; the
-    poller passes conn=conn so own_conn=False; without an explicit commit
-    the state transitions roll back when conn closes -> INTENT_CREATED rows
-    are re-processed every tick AND any real adapter tx_hash is not durably
-    anchored. Per-row commit gives partial-failure tolerance.
-    """
-    from src.execution.settlement_commands import redeem_submission_allowed
-
-    if not redeem_submission_allowed():
-        logger.info(
-            "redeem_submitter: SKIPPED — redeem submission FORBIDDEN "
-            "(operator law 2026-06-10). Zeus books external redemption and "
-            "never submits a redeem tx."
-        )
-        return
-
-    from src.data.dual_run_lock import acquire_lock
-    from src.data.polymarket_client import (
-        resolve_polymarket_credentials,
-        _resolve_clob_v2_signature_type,
-        _resolve_q1_egress_evidence_path,
-    )
-    from src.execution.settlement_commands import (
-        _SUBMITTABLE_STATES,
-        submit_redeem,
-    )
-    from src.state.db import get_trade_connection
-    from src.venue.polymarket_v2_adapter import (
-        DEFAULT_Q1_EGRESS_EVIDENCE,
-        DEFAULT_POLYGON_RPC_URL,
-        DEFAULT_V2_HOST,
-        PolymarketV2Adapter,
-        Q1_EGRESS_EVIDENCE_ENV,
-    )
-
-    # PR-I.5.b — Karachi unblock prep (2026-05-18):
-    # Paper/dry-run skips cleanly; live mode requires keychain credentials
-    # before any adapter is constructed. The redeem adapter MUST share the
-    # same credential source as the entry adapter (polymarket_client._ensure_v2_adapter)
-    # to avoid the "structural decision incompletely executed" pattern:
-    # different credential paths for entry vs redeem = silent drift hazard.
-    #
-    # Codex P2 fix (PR #145): credential lookup is deferred until AFTER the
-    # empty-row check so that an idle daemon with no REDEEM_INTENT_CREATED /
-    # REDEEM_RETRYING rows does NOT mark _scheduler_job FAILED every 5 min
-    # merely because Keychain is unavailable at that moment.
-    # Fail-closed still applies: if work exists and creds are missing, raise.
-    if get_mode() != "live":
-        logger.info("redeem_submitter skipped_non_live mode=%s", get_mode())
-        return
-
-    with acquire_lock("redeem_submitter") as acquired:
-        if not acquired:
-            logger.info("redeem_submitter skipped_lock_held")
-            return
-        conn = get_trade_connection(write_class="live")
-        try:
-            from src.execution.settlement_commands import reseat_stub_deferred_rows_for_autonomous_retry
-            promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
-            if promoted > 0:
-                conn.commit()
-                logger.info(
-                    "redeem_submitter: promoted %d stub-deferred rows to RETRYING",
-                    promoted,
-                )
-            # Poll ALL submittable states (INTENT_CREATED + RETRYING).
-            placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
-            state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
-            rows = conn.execute(
-                f"""
-                SELECT command_id FROM settlement_commands
-                 WHERE state IN ({placeholders})
-                 ORDER BY requested_at, command_id
-                 LIMIT 32
-                """,
-                state_values,
-            ).fetchall()
-            if not rows:
-                return
-            # Credentials resolved only when actual work exists — fail-closed:
-            # if Keychain is unavailable here, raise so the scheduler records
-            # FAILED and the operator sees a clear provisioning gap.
-            try:
-                creds = resolve_polymarket_credentials()
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
-                ) from exc
-            q1_egress_evidence = _resolve_q1_egress_evidence_path(
-                default=DEFAULT_Q1_EGRESS_EVIDENCE,
-                env_name=Q1_EGRESS_EVIDENCE_ENV,
-            )
-            adapter = PolymarketV2Adapter(
-                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
-                funder_address=creds["funder_address"],
-                signer_key=creds["private_key"],
-                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                signature_type=_resolve_clob_v2_signature_type(),
-                polygon_rpc_url=os.environ.get(
-                    "POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL
-                ),
-                api_creds=creds.get("api_creds"),
-                q1_egress_evidence_path=q1_egress_evidence,
-            )
-            submitted = 0
-            failed = 0
-            for row in rows:  # already capped at 32 via SQL LIMIT
-                try:
-                    result = submit_redeem(
-                        row["command_id"], adapter, object(), conn=conn,
-                    )
-                    conn.commit()  # durable per-row commit; transitions stick
-                    submitted += 1
-                    logger.info(
-                        "redeem_submitter: command_id=%s state=%s",
-                        row["command_id"], result.state.value,
-                    )
-                except Exception as exc:  # noqa: BLE001 — fail-open per scheduler contract
-                    # On exception submit_redeem may have committed an intermediate
-                    # REDEEM_RETRYING via its own savepoint+commit (own_conn path
-                    # closed it); for own_conn=False we still rollback in-flight
-                    # uncommitted savepoints by closing the conn cleanly. Per-row
-                    # rollback isolates failures from successful prior rows.
-                    try:
-                        conn.rollback()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    failed += 1
-                    logger.error(
-                        "redeem_submitter: command_id=%s error=%s",
-                        row["command_id"], exc,
-                    )
-            logger.info(
-                "redeem_submitter: submitted=%d failed=%d", submitted, failed,
-            )
-            if failed:
-                raise RuntimeError(
-                    f"redeem_submitter: submitted={submitted} failed={failed}"
-                )
-        finally:
-            conn.close()
+# _redeem_submitter_cycle DELETED 2026-07-08 (R6-a): dead redeem-submission
+# scheduler machinery. It already unconditionally calm-skipped every cycle
+# (redeem_submission_allowed() is always False per operator law 2026-06-10)
+# -- the ~150 lines below the skip-and-return, including the submit_redeem
+# call and the autoretry reseat call, were unreachable. See
+# src.execution.settlement_commands.assert_redeem_submission_allowed for
+# the permanent enforcement point. Scheduler registration removed from
+# src/ingest/post_trade_capital_daemon.py in the same commit.
 
 
 def _redeem_reconciler_cycle() -> None:

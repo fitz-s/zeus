@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +24,7 @@ from src.contracts.execution_intent import DecisionSourceContext
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.execution.order_truth_reducer import PARTIAL_WITH_REMAINDER, TERMINAL_FILLED, VenueOrderTruthReducer
-from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+from src.execution.settlement_commands import SettlementState, _atomic_transition, reconcile_pending_redeems, request_redeem
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.db import _install_connection_functions, init_schema
 from src.state.decision_events import write_decision_event
@@ -41,16 +40,6 @@ from src.state.venue_command_repo import (
 )
 
 PAYOUT_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
-
-
-class FakeRedeemAdapter:
-    def __init__(self, tx_hash: str = "0x" + "ab" * 32) -> None:
-        self.tx_hash = tx_hash
-        self.calls: list[tuple[str, list[int] | None]] = []
-
-    def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
-        self.calls.append((condition_id, list(index_sets) if index_sets else None))
-        return {"success": True, "tx_hash": self.tx_hash}
 
 
 class FakeEth:
@@ -373,10 +362,6 @@ def _receipt(tx_hash: str) -> dict[str, object]:
 
 def test_money_path_lifecycle_replay_converges_across_crash_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", "fx_line_item")
-    monkeypatch.setattr(
-        "src.execution.settlement_commands.redemption_decision",
-        lambda: SimpleNamespace(allow_redemption=True, block_reason=None, state="LIVE_ENABLED"),
-    )
     replay = ReplayHarness.create(tmp_path)
     try:
         natural_key = make_decision_natural_key("weather-live", "high", "2026-05-22", "2026-05-21T12:00:00Z", 0)
@@ -565,19 +550,28 @@ def test_money_path_lifecycle_replay_converges_across_crash_boundaries(tmp_path:
         replay.crash_restart()
         assert replay.conn.execute("SELECT state FROM settlement_commands WHERE command_id=?", (command_id,)).fetchone()[0] == SettlementState.REDEEM_INTENT_CREATED.value
 
-        adapter = FakeRedeemAdapter()
-        result = submit_redeem(
+        # R6-a (2026-07-08): submit_redeem was DELETED (Zeus never submits redeem
+        # tx, operator law 2026-06-10). REDEEM_TX_HASHED is now reached only via
+        # an operator manually recording an externally-observed redemption
+        # (scripts/operator_record_redeem.py, same _atomic_transition building
+        # block) -- this replays that transition directly so the rest of the
+        # crash-recovery harness (reconcile_pending_redeems onward) still gets
+        # exercised against a real REDEEM_TX_HASHED row.
+        expected_tx_hash = "0x" + "ab" * 32
+        transitioned = _atomic_transition(
+            replay.conn,
             command_id,
-            adapter,
-            object(),
-            conn=replay.conn,
+            from_state=SettlementState.REDEEM_INTENT_CREATED,
+            to_state=SettlementState.REDEEM_TX_HASHED,
+            tx_hash=expected_tx_hash,
             submitted_at="2026-05-21T12:11:00Z",
+            payload={"actor": "operator", "actor_override": False, "notes": "replay-fixture"},
+            recorded_at="2026-05-21T12:11:00Z",
         )
-        assert result.state is SettlementState.REDEEM_TX_HASHED
+        assert transitioned
         replay.crash_restart()
         tx_hash = replay.conn.execute("SELECT tx_hash FROM settlement_commands WHERE command_id=?", (command_id,)).fetchone()[0]
-        assert tx_hash == adapter.tx_hash
-        assert adapter.calls == [("cond-live", [2])]
+        assert tx_hash == expected_tx_hash
 
         [confirmed] = reconcile_pending_redeems(FakeWeb3(_receipt(tx_hash)), replay.conn)
         replay.crash_restart()
@@ -592,7 +586,10 @@ def test_money_path_lifecycle_replay_converges_across_crash_boundaries(tmp_path:
         assert row["terminal_at"] is not None
 
         assert replay.conn.execute("SELECT COUNT(*) FROM venue_command_events WHERE command_id='cmd-entry'").fetchone()[0] == 7
-        assert replay.conn.execute("SELECT COUNT(*) FROM settlement_command_events WHERE command_id=?", (command_id,)).fetchone()[0] == 4
+        # 3 events, not the pre-R6-a 4: REDEEM_INTENT_CREATED (request_redeem),
+        # REDEEM_TX_HASHED (operator record, replacing the deleted submit_redeem's
+        # two-step INTENT->SUBMITTED->TX_HASHED), REDEEM_CONFIRMED (reconcile).
+        assert replay.conn.execute("SELECT COUNT(*) FROM settlement_command_events WHERE command_id=?", (command_id,)).fetchone()[0] == 3
         assert replay.conn.execute("SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id='trade-live'").fetchone()[0] == 1
         assert replay.conn.execute("SELECT COUNT(*) FROM position_lots WHERE source_command_id='cmd-entry'").fetchone()[0] == 1
     finally:

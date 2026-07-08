@@ -10,9 +10,12 @@ Phase 2 rollout: all capabilities that have .py hard_kernel_paths are now
 decorated. Capabilities whose only paths are non-py (docs/AGENTS.md,
 architecture/*.yaml, *.db) are skipped — AST coverage is not applicable.
 
-Phase 4 pre-registered paths (src/execution/venue_adapter.py,
-src/execution/live_executor.py) that do not yet exist are explicitly
-skipped via pytest.skip — not vacuous-pass, not error.
+Phase 4 pre-registered paths that do not yet exist are explicitly skipped
+via pytest.skip — not vacuous-pass, not error. (src/execution/venue_adapter.py
+was the original Phase 4 placeholder for live_venue_submit; it was built,
+found to have zero production callers, and deleted 2026-07-08 (R6-a) --
+live_venue_submit is already covered independently by executor.py and
+live_executor.py, both decorated.)
 
 Per ULTIMATE_DESIGN §3 lines 266-269 + IMPLEMENTATION_PLAN Phase 2 D-2.
 """
@@ -33,7 +36,6 @@ CAPABILITIES_YAML = REPO_ROOT / "architecture" / "capabilities.yaml"
 # created (LiveAuthToken phantom + ABC split lands in Phase 4). C-6 handling.
 # ---------------------------------------------------------------------------
 PHASE_4_DEFERRED_PATHS: set[str] = {
-    "src/execution/venue_adapter.py",
     "src/execution/live_executor.py",
     # Phase 4.C: venue adapter for live_venue_submit capability; file not yet created
     # (capabilities.yaml pre-registers this path; actual kernel is venue_adapter.py)

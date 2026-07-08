@@ -58,10 +58,12 @@ _P4_PLIST = _REPO_ROOT / "deploy" / "launchd" / "com.zeus.post-trade-capital.pli
 _CONTRACT = _REPO_ROOT / "architecture" / "cascade_liveness_contract.yaml"
 _CASCADE_TEST = _REPO_ROOT / "tests" / "test_cascade_liveness_contract.py"
 
-# The 6 post-trade pollers lifted to P4 (harvester resolver + redeem x2 + wrap x3).
+# The post-trade pollers lifted to P4 (harvester resolver + redeem reconciler + wrap x3).
+# redeem_submitter DELETED 2026-07-08 (R6-a): dead redeem-submission machinery
+# (Zeus never submits redeem tx, operator law 2026-06-10) -- it already
+# unconditionally calm-skipped every cycle. 6 -> 5.
 _LIFTED_POLLER_IDS = (
     "harvester",
-    "redeem_submitter",
     "redeem_reconciler",
     "wrap_intent_creator",
     "wrap_submitter",
@@ -71,7 +73,6 @@ _LIFTED_POLLER_IDS = (
 # The cycle-body function names that own those pollers + the lifted chain-sync READ phase.
 _LIFTED_CYCLE_FUNCS = (
     "_harvester_cycle",
-    "_redeem_submitter_cycle",
     "_redeem_reconciler_cycle",
     "_wrap_intent_creator_cycle",
     "_wrap_submitter_cycle",

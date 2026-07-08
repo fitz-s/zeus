@@ -56,11 +56,14 @@ state_machines:
         owner: src/execution/post_trade_capital.py:_harvester_cycle
         owner_daemon: post_trade_capital
         mode: producer
-      - id: redeem_submitter
-        watched_states: [REDEEM_INTENT_CREATED]
-        owner: src/execution/post_trade_capital.py:_redeem_submitter_cycle
-        owner_daemon: post_trade_capital
-        mode: submitter
+      # redeem_submitter DELETED 2026-07-08 (R6-a): dead redeem-submission
+      # machinery (Zeus never submits redeem tx, operator law 2026-06-10) --
+      # it already unconditionally calm-skipped every cycle
+      # (redeem_submission_allowed() is always False). REDEEM_INTENT_CREATED
+      # rows now intentionally sit unconsumed by any autonomous poller; the
+      # existing REDEEM_OPERATOR_REQUIRED terminal_states_with_operator_action
+      # entry above (operator_runbook + cli_invocation) is the accounting
+      # path for external/manual redemption.
       - id: redeem_reconciler
         watched_states: [REDEEM_TX_HASHED]
         owner: src/execution/post_trade_capital.py:_redeem_reconciler_cycle
