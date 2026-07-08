@@ -58,7 +58,7 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 | `risk_level.py` | Level taxonomy and ordering. |
 | `metrics.py` | Source metrics and decision-support calculations. |
 | `discord_alerts.py` | Human-visible symptom layer; must stay downstream. |
-| `../risk_allocator/governor.py` | R3 A2 blocking capital allocator/governor: reads current `position_lots`, unresolved submit-unknown side effects, open exchange reconcile findings, heartbeat/WS health, and drawdown evidence to deny new risk or force reduce-only/no-trade modes before executor submission. |
+| `../risk_allocator/governor.py` | R3 A2 blocking capital allocator/governor: reads current `position_lots`, unresolved submit-unknown side effects, open exchange reconcile findings, and heartbeat/WS health to deny new risk or force reduce-only/no-trade modes before executor submission. |
 
 ### R3 A2 risk allocator / portfolio governor
 
@@ -74,8 +74,10 @@ blocking and read-only:
 - Per-market, per-event, per-resolution-window, and correlated-exposure caps
   deny allocation with structured reasons.
 - Kill switch reasons include manual operator halt, heartbeat lost, WS-gap
-  threshold breach, unresolved submit-unknown count, unresolved exchange
-  reconciliation finding count, and drawdown threshold.
+  threshold breach, unresolved submit-unknown count, and unresolved exchange
+  reconciliation finding count. Drawdown/realized-loss circuit breaking is
+  owned solely by `src/riskguard/riskguard.py`'s realized-settled-loss breaker
+  (governor.py's parallel drawdown breaker was retired R0-e 2026-07-08).
 - Maker/taker selection is behavior-changing: shallow books, near-resolution
   windows, or heartbeat states that only allow non-resting orders select `FOK`
   for executor submission; healthy/deep/far-from-close paths may rest as `GTC`.

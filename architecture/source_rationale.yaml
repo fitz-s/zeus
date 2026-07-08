@@ -872,7 +872,7 @@ files:
   src/risk_allocator/governor.py:
     zone: K1_governance
     authority_role: capital_allocation_governor
-    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, drawdown, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission.
+    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission (drawdown breaker retired R0-e 2026-07-08; riskguard owns realized-settled-loss circuit breaking).
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:
