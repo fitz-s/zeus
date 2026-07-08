@@ -4487,7 +4487,7 @@ def _qkernel_selected_route_fdr_proof(
     if false_edge_rate is None:
         return None
     from src.events.money_path_adapters import FdrProof
-    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+    from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
     passed = bool(selected_proof.passed_prefilter) and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
     return FdrProof(
@@ -4529,7 +4529,7 @@ def _day0_selected_route_fdr_proof(
     if str(event_type or "") not in _DAY0_LANE_EVENT_TYPES:
         return None
     from src.events.money_path_adapters import FdrProof
-    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+    from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
     def _proof(passed: bool) -> FdrProof:
         return FdrProof(
@@ -4598,7 +4598,7 @@ def _fdr_rejection_reason(
     """
 
     try:
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
         alpha = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001
@@ -13066,7 +13066,7 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
 
 def _qkernel_max_false_edge_rate() -> float:
     try:
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
         alpha = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001

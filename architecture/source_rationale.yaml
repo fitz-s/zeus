@@ -422,10 +422,10 @@ files:
     - src/state/strategy_tracker.py
     - src/state/truth_files.py
     - src/strategy/correlation.py
-    - src/strategy/fdr_filter.py
     - src/strategy/market_analysis.py
     - src/strategy/market_fusion.py
     - src/strategy/risk_limits.py
+    - src/strategy/selection_family.py
   src/analysis/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -2182,13 +2182,6 @@ files:
     zone: K3_extension
     authority_role: correlation_model
     why: Cross-city/bin correlation helper for risk-aware strategy.
-  src/strategy/fdr_filter.py:
-    zone: K3_extension
-    authority_role: fdr_law
-    why: Benjamini-Hochberg control over active tested hypothesis family.
-    downstream:
-    - src/engine/evaluator.py
-    - src/engine/replay.py
   src/strategy/horse_race_kelly.py:
     zone: K3_extension
     authority_role: portfolio_sizing_law
@@ -2309,7 +2302,7 @@ files:
   src/strategy/selection_family.py:
     zone: K3_extension
     authority_role: hypothesis_family_model
-    why: Represents selection family for statistical testing.
+    why: Represents selection family for statistical testing. Hosts DEFAULT_FDR_ALPHA (R0-d 2026-07-08, migrated from the retired src/strategy/fdr_filter.py corpse).
     downstream:
     - src/engine/evaluator.py
   src/strategy/exit_observation_constraint.py:

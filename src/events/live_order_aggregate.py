@@ -990,7 +990,7 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
             "PreSubmitRevalidated qkernel false_edge_rate requires probability"
         )
     try:
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
         max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001

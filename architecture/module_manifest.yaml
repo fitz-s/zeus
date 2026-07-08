@@ -565,7 +565,6 @@ modules:
     authority_role: strategy_identity
     high_risk_files:
       - src/strategy/market_analysis.py
-      - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
@@ -574,7 +573,6 @@ modules:
       - src/strategy/live_inference/source_clock_city_weights.py
     public_entry_files:
       - src/strategy/market_analysis.py
-      - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/benchmark_suite.py
       - src/strategy/data_lake.py
