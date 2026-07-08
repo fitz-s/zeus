@@ -19,22 +19,32 @@
 # loop/prompts/**) even though those paths sit under loop/** — they are
 # GUARD_IMMUTABLE in scripts/ops/loop_guard.py::cmd_enforce, checked
 # unconditionally before the allowlist itself. Any tick-made change to any
-# of them is always a VIOLATION and gets hard-restored, full stop. This is
-# also why enforce reads a FROZEN pre-tick copy of this file
-# (loop/.pre_tick_allowlist.{l1,l2}, written by tick.sh/daily.sh before
-# claude runs), never the live file — without a frozen copy, a tick could
-# append a wider pattern here and then exploit it in the same run before
-# the immutability check alone would catch it on the NEXT tick.
+# of them is always a VIOLATION and gets hard-restored, full stop.
 #
-# WHO READS IT: scripts/ops/loop_guard.py enforce, via the frozen snapshot,
-# every tick. If the live file goes missing or fails to parse at snapshot
-# time, `cp` in tick.sh/daily.sh fails under `set -e` and the tick aborts
-# BEFORE claude ever runs (fail closed). If the frozen snapshot somehow
-# still fails to load inside enforce, load_allowlist's OSError is caught
-# and treated as zero patterns — allows nothing, so every new-this-tick
-# change becomes a violation (fail closed there too). Do not let this file
-# go stale regardless; a permanently-empty-patterns enforce quarantines
-# every legitimate AUTO change too, which is safe but makes the loop useless.
+# THE LOAD-BEARING PROTECTION IS ELSEWHERE: enforce never reads this live
+# file, and never reads any frozen copy kept inside the repo (an earlier
+# version did — loop/.pre_tick_allowlist.{l1,l2} — and it was a real escape:
+# that path sits under loop/**, gitignored but still repo-relative, so a
+# tick's Bash tool could `echo 'src/**' >> loop/.pre_tick_allowlist.l1`
+# mid-run and enforce would trust the tampered copy). tick.sh/daily.sh now
+# `cp` this file into a per-invocation `mktemp -d` directory OUTSIDE the
+# repo tree entirely, BEFORE claude runs, and pass THAT path to
+# `enforce --allowlist-snapshot`. The GUARD_IMMUTABLE check above is
+# belt-and-suspenders; the out-of-repo snapshot is what actually defeats a
+# tick guessing a plausible REPO-RELATIVE path for the trusted artifact.
+# It does NOT defeat active $TMPDIR enumeration by the tick's own Bash tool
+# (same OS user, no process isolation) — see loop/tick.sh's SAFETY section
+# KNOWN LIMITATION note for that accepted residual.
+#
+# WHO READS IT: scripts/ops/loop_guard.py enforce, via the out-of-repo
+# snapshot, every tick. If the live file goes missing at snapshot time, the
+# `cp` in tick.sh/daily.sh fails under `set -e` and the tick aborts BEFORE
+# claude ever runs (fail closed). If the snapshot somehow still fails to
+# load inside enforce, load_allowlist's OSError is caught and treated as
+# zero patterns — allows nothing, so every new-this-tick change becomes a
+# violation (fail closed there too). Do not let this file go stale
+# regardless; a permanently-empty-patterns enforce quarantines every
+# legitimate AUTO change too, which is safe but makes the loop useless.
 
 loop/**
 docs/**

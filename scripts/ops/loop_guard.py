@@ -47,14 +47,23 @@
 #       a tick can never widen its own scope by editing these) or (b) has
 #       any side (both old and new path, for a rename/copy — checking only
 #       the new path would let a tick launder a file out of scope by
-#       renaming it into an allowed dir) that fails the FROZEN
-#       --allowlist-snapshot. Appends one VIOLATION line naming them, exit 1
-#       if any were restored else exit 0. --allowlist-snapshot MUST be a
-#       copy taken before claude ran — see that flag's --help text.
+#       renaming it into an allowed dir) that fails the --allowlist-snapshot.
+#       Appends one VIOLATION line naming them, exit 1 if any were restored
+#       else exit 0. --allowlist-snapshot MUST be a copy taken before claude
+#       ran, AND that copy MUST live OUTSIDE the repo tree (tick.sh/daily.sh
+#       mktemp -d a per-invocation dir under $TMPDIR, never under loop/) —
+#       see that flag's --help text for why an earlier in-repo frozen copy
+#       (loop/.pre_tick_allowlist.*) was itself a real escape: gitignored
+#       does not mean unreachable, the tick's own Bash tool could still
+#       tamper it mid-run since it was a predictable repo-relative path.
 #   db-sentinel-snapshot --repo-root DIR --out PATH
 #       records (mtime, size) for every state/**/*.db* file (recursive) plus
 #       repo-root *.db* decoys, via lstat (symlink-safe). Call BEFORE
-#       invoking claude, alongside `snapshot`.
+#       invoking claude, alongside `snapshot`, into the same out-of-repo
+#       $TMPDIR directory as the allowlist snapshot (same reachability
+#       argument applies, though a DB write is not something enforce could
+#       "widen scope" through the way a tampered allowlist could — this is
+#       about keeping the pre-tick baseline itself honest).
 #   db-sentinel-check --repo-root DIR --pre-snapshot PATH --journal PATH
 #            --loop-dir DIR --tier {l1,l2}
 #       re-scans and compares against the pre-snapshot. *.db/*.db-wal/
@@ -64,7 +73,12 @@
 #       delta (added/removed/changed) appends one ESCALATION line AND
 #       writes loop/HALT (self-halt — a DB write cannot be hard-restored
 #       byte-for-byte the way a tracked file can, so the safe response is
-#       to stop, not repair). Never opens or diffs DB content.
+#       to stop, not repair). Never opens or diffs DB content. KNOWN LIMIT:
+#       mtime+size only — a deliberate same-length overwrite with a forged
+#       mtime (`touch -t` to the original timestamp) evades this sentinel;
+#       an honest SQLite writer always changes at least one of the two, so
+#       this is a real gap only against a tick going out of its way to hide
+#       the write, not against ordinary or even careless DB writes.
 #   fallback-entry --journal PATH --tier {l1,l2} --reason TEXT
 #       appends a mechanical FALLBACK journal line — used when the invoked
 #       claude run exited non-zero, so the journal never silently stops
@@ -346,7 +360,11 @@ def _now_iso() -> str:
 # docs/tests file a DB write cannot be hard-restored byte-for-byte the way
 # git restore can undo a tracked file; the safe response is to stop and let
 # the operator look, not attempt a repair. Deliberately mtime/size only —
-# never opens or diffs DB content.
+# never opens or diffs DB content. KNOWN LIMITATION (accepted, not fixed): a
+# deliberate same-length overwrite with a forged mtime (`touch -t` back to
+# the original timestamp) evades this sentinel; an honest SQLite write
+# always changes at least one of the two, so this only misses a tick going
+# out of its way to hide the write, not ordinary or careless DB writes.
 DB_SENTINEL_GLOBS = ("*.db", "*.db-wal", "*.db-shm", "*.db-journal")
 
 
@@ -410,12 +428,25 @@ def cmd_enforce(argv: list[str]) -> int:
         "--allowlist-snapshot",
         required=True,
         help=(
-            "Path to a FROZEN copy of loop/allowlist_auto.txt taken BEFORE "
-            "claude was invoked (tick.sh: `cp` before the run). Never pass "
-            "the live loop/allowlist_auto.txt here — a tick could append "
-            "'src/**' to the live file (loop/** is otherwise AUTO-allowed) "
-            "and then edit src/ in the same tick; reading the live file at "
-            "enforce time would see both as allowed with zero trace."
+            "Path to a copy of loop/allowlist_auto.txt taken BEFORE claude "
+            "was invoked, AND stored OUTSIDE the repo tree (tick.sh/daily.sh: "
+            "`mktemp -d` a dir under $TMPDIR, `cp` into it, before the run). "
+            "Never pass the live loop/allowlist_auto.txt — a tick could "
+            "append 'src/**' to it (loop/** is otherwise AUTO-allowed) and "
+            "then edit src/ in the same tick with zero trace. Never pass an "
+            "in-repo path either, even a gitignored one — an earlier design "
+            "used loop/.pre_tick_allowlist.* and that was itself a real "
+            "escape: the tick's own Bash tool can reach and tamper any "
+            "repo-relative path mid-run (e.g. `echo 'src/**' >> "
+            "loop/.pre_tick_allowlist.l1`), regardless of gitignore status. "
+            "A path outside the repo, whose exact location is never "
+            "disclosed to the tick (not in the prompt, not in argv/env "
+            "passed to the claude subprocess), defeats that repo-relative-"
+            "guess class of attack. It does NOT defeat active $TMPDIR "
+            "enumeration by the tick's own Bash tool (same OS user, no "
+            "process isolation) — that residual requires real sandboxing to "
+            "close and is accepted, not fixed here; see tick.sh's SAFETY "
+            "section KNOWN LIMITATION note."
         ),
     )
     ap.add_argument("--pre-snapshot", required=True)

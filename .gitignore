@@ -194,12 +194,14 @@ raw/**/*.h5
 #   self-written by scripts/ops/loop_guard.py db-sentinel-check on a DB
 #   mtime/size delta.
 # loop/.lock: scripts/ops/loop_guard.py flock-run single-flight lock file.
-# loop/.pre_tick_snapshot.*: tick.sh/daily.sh pre-run dirty-path snapshot.
-# loop/.pre_tick_allowlist.*: tick.sh/daily.sh FROZEN copy of
-#   allowlist_auto.txt taken before claude runs (never the live file — see
-#   scripts/ops/loop_guard.py cmd_enforce --allowlist-snapshot).
-# loop/.pre_tick_db_sentinel.*: tick.sh/daily.sh pre-run state/**.db*
-#   mtime/size snapshot (git-independent — *.db is gitignored, see below).
+# Pre-tick snapshots (dirty-path list, allowlist copy, DB sentinel) are
+# deliberately NOT written anywhere under loop/ — tick.sh/daily.sh mktemp -d
+# a per-invocation directory OUTSIDE the repo tree entirely ($TMPDIR, not
+# loop/), so there is nothing repo-relative to gitignore here for them. This
+# is load-bearing, not incidental: a frozen "trusted" snapshot living inside
+# the repo (even gitignored) is still a path the tick's own Bash tool can
+# reach and tamper mid-run — see scripts/ops/loop_guard.py cmd_enforce
+# --allowlist-snapshot help and loop/tick.sh's header for the full history.
 # loop/logs/*.log|*.err: per-tick output, rotated by nothing (bounded by
 #   ZEUS_LOOP_MAX_LOG_BYTES truncation in tick.sh/daily.sh, not deleted).
 # NOTE: the blanket `logs/` rule above (repo-root logs/) matches ANY
@@ -210,9 +212,6 @@ raw/**/*.h5
 !loop/logs/
 loop/HALT
 loop/.lock
-loop/.pre_tick_snapshot.*
-loop/.pre_tick_allowlist.*
-loop/.pre_tick_db_sentinel.*
 loop/logs/*.log
 loop/logs/*.err
 !loop/logs/.gitkeep

@@ -3,15 +3,21 @@
 #   loop/tick.sh and loop/daily.sh (24/7 improvement loop v2). Covers HALT
 #   semantics, the pre/post-tick allowlist diff enforcement (quarantine
 #   restore of out-of-scope changes, operator-dirty files never touched),
-#   the diff circuit breaker, the flock-run single-flight lock, and four
-#   adversarially-found guard escapes: allowlist self-widening (must judge
-#   against a FROZEN pre-tick snapshot, not the live file), rename
-#   laundering (git mv into an allowed dir must check BOTH sides), symlink-
-#   following delete (must lstat/unlink the link, never its resolved
-#   target), and DB writes being invisible to git status (*.db is globally
-#   gitignored — needs a separate mtime/size sentinel that self-halts).
-# Reuse: every test builds its own throwaway git repo under tmp_path; no
-#   live repo state or DBs are touched.
+#   the diff circuit breaker, the flock-run single-flight lock, and five
+#   adversarially-found guard escapes: allowlist self-widening (enforce must
+#   judge against a snapshot taken before the tick ran AND stored OUTSIDE
+#   the repo tree — an in-repo frozen copy, even gitignored, is still
+#   reachable and tamperable by the tick's own Bash tool; see
+#   test_enforce_recursive_tamper_of_in_repo_snapshot_guess_has_no_effect
+#   for the reproduction of that exact escape), rename laundering (git mv
+#   into an allowed dir must check BOTH sides), symlink-following delete
+#   (must lstat/unlink the link, never its resolved target), and DB writes
+#   being invisible to git status (*.db is globally gitignored — needs a
+#   separate mtime/size sentinel that self-halts).
+# Reuse: every test builds its own throwaway git repo under tmp_path (with
+#   snapshot artifacts placed OUTSIDE that repo, as a sibling directory,
+#   mirroring tick.sh's real mktemp-outside-the-tree behavior); no live
+#   repo state or DBs are touched.
 # Authority basis: docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md
 #   §3 (wrapper mechanism, adopted consult BLOCKER-1/HIGH items).
 """Tests for scripts/ops/loop_guard.py."""
@@ -52,15 +58,25 @@ def _init_repo(repo: Path) -> None:
 
 
 def _allowlist_snapshot(repo: Path, content: str = DEFAULT_ALLOWLIST, name: str = "allowlist_snap") -> Path:
-    """Simulate tick.sh's `cp allowlist_auto.txt .pre_tick_allowlist.*` step —
-    a frozen copy taken BEFORE the tick runs, independent of the live file."""
-    p = repo / "loop" / f".{name}"
+    """Simulate tick.sh's real mktemp-based snapshot: a frozen copy taken
+    BEFORE the tick runs, stored OUTSIDE the repo tree entirely — a SIBLING
+    directory of `repo`, never nested inside it, mirroring tick.sh's
+    `mktemp -d "$TMPDIR/zeus-loop-XXXXXX"` + `cp` into it. An earlier design
+    put this under repo/loop/ (gitignored but still repo-relative and
+    therefore tick-reachable) and that was itself the escape being fixed —
+    tests must not silently regress back to that shape."""
+    outside = repo.parent / f"outside_snapdir_{name}"
+    outside.mkdir(parents=True, exist_ok=True)
+    p = outside / name
     p.write_text(content)
     return p
 
 
 def _snapshot(repo: Path) -> Path:
-    out = repo / "loop" / ".pre_tick_snapshot"
+    """Simulate tick.sh's dirty-path pre-snapshot — also OUTSIDE the repo."""
+    outside = repo.parent / "outside_snapdir_dirty_paths"
+    outside.mkdir(parents=True, exist_ok=True)
+    out = outside / "dirty_paths"
     loop_guard.main(["snapshot", "--repo-root", str(repo), "--out", str(out)])
     return out
 
@@ -233,8 +249,8 @@ def test_enforce_circuit_breaker_trips_on_line_count(tmp_path):
 def test_enforce_allowlist_tamper_defeated_by_frozen_snapshot(tmp_path):
     """A tick that appends 'src/**' to the live allowlist_auto.txt and then
     edits src/ in the same run must NOT get away with it — enforce judges
-    against the FROZEN pre-tick snapshot, which does not have the widened
-    pattern, so the src/ edit is still a violation."""
+    against the out-of-repo snapshot taken before the tick ran, which does
+    not have the widened pattern, so the src/ edit is still a violation."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     allowlist_snap = _allowlist_snapshot(repo)  # frozen BEFORE the "tick"
@@ -282,6 +298,51 @@ def test_enforce_guard_immutable_files_always_violate_even_if_allowlisted(tmp_pa
     text = journal.read_text()
     assert "VIOLATION" in text
     assert "guard-immutable" in text
+
+
+def test_enforce_recursive_tamper_of_in_repo_snapshot_guess_has_no_effect(tmp_path):
+    """The actual escape a live verifier reproduced through real tick.sh:
+    an earlier design froze the trusted allowlist snapshot INSIDE the repo
+    at a predictable, documented path (loop/.pre_tick_allowlist.l1). Even
+    gitignored, that path was fully reachable by the tick's own Bash tool —
+    `echo 'src/**' >> loop/.pre_tick_allowlist.l1` mid-run silently widened
+    the very artifact enforce trusted, with zero journal trace.
+
+    This test proves the fix: the REAL trusted snapshot enforce is told to
+    read now lives OUTSIDE the repo (see _allowlist_snapshot/_snapshot —
+    they mirror tick.sh's real mktemp behavior). A tick that tampers the
+    old, now-abandoned repo-relative path — the most natural guess, since
+    it is documented in loop/allowlist_auto.txt's own comments, which the
+    tick reads as part of ORIENT — has ZERO effect, because enforce was
+    never told to read anything under loop/ for this purpose in the first
+    place. The escape fails not because the tamper was detected, but
+    because the tampered file is disconnected from what enforce trusts."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    # The REAL trusted snapshot — outside the repo, exactly as tick.sh
+    # produces it, untouched by anything below.
+    real_allowlist_snap = _allowlist_snapshot(repo)
+    snapshot = _snapshot(repo)
+    journal = repo / "loop" / "journal_out.md"
+
+    # The "tick" tampers the OLD, abandoned in-repo guess path, hoping it
+    # is still what enforce reads. It is not.
+    old_guess_path = repo / "loop" / ".pre_tick_allowlist.l1"
+    old_guess_path.write_text(DEFAULT_ALLOWLIST + "src/**\n")
+    (repo / "src" / "sneaky.py").write_text("evil = True\n")
+
+    rc = _enforce(repo, snapshot, real_allowlist_snap, journal)
+    assert rc == 1
+    # The exploit attempt is still quarantined — the tampered decoy file
+    # never influenced enforce's actual decision.
+    assert not (repo / "src" / "sneaky.py").exists()
+    text = journal.read_text()
+    assert "VIOLATION" in text
+    assert "src/sneaky.py" in text
+    # The REAL out-of-repo snapshot is provably untouched by the tamper
+    # attempt (they are different files entirely).
+    assert real_allowlist_snap.read_text() == DEFAULT_ALLOWLIST
 
 
 # --------------------------------------------------------------------------

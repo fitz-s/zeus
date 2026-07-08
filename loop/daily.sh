@@ -7,14 +7,15 @@
 #
 # WHAT: L2 daily wrapper for the Zeus 24/7 improvement loop v2. Same
 #   skeleton as loop/tick.sh (see that file's header for the full mechanism
-#   walkthrough — HALT check, pre-tick snapshots incl. frozen allowlist copy
-#   and DB sentinel, single-flight lock via scripts/ops/loop_guard.py
-#   flock-run, post-run allowlist enforcement + DB sentinel self-halt,
-#   FALLBACK-on-crash) with three differences: opus model (settlement-join
-#   evidence analysis, not a quick AUTO-packet pick), a longer turn/time
-#   budget, and loop/prompts/l2.md as the prompt (settlement-window
-#   six-category attribution, ledger update, PREPARE diff prep, morning
-#   report — see that file).
+#   walkthrough — HALT check, out-of-repo mktemp $SNAPDIR + trap cleanup,
+#   pre-tick snapshots incl. allowlist copy and DB sentinel written into
+#   $SNAPDIR, single-flight lock via scripts/ops/loop_guard.py flock-run,
+#   post-run allowlist enforcement + DB sentinel self-halt, FALLBACK-on-
+#   crash) with three differences: opus model (settlement-join evidence
+#   analysis, not a quick AUTO-packet pick), a longer turn/time budget, and
+#   loop/prompts/l2.md as the prompt (settlement-window six-category
+#   attribution, ledger update, PREPARE diff prep, morning report — see
+#   that file).
 #
 # WHO WRITES: launchd (com.zeus.loop-daily.plist) or the operator running
 #   this manually, once daily after the settlement window. WHO READS:
@@ -55,9 +56,6 @@ JOURNAL="$LOOP_DIR/JOURNAL.md"
 ALLOWLIST="$LOOP_DIR/allowlist_auto.txt"
 PROMPT="$LOOP_DIR/prompts/l2.md"
 LOCKFILE="$LOOP_DIR/.lock"
-SNAPSHOT="$LOOP_DIR/.pre_tick_snapshot.l2"
-ALLOWLIST_SNAPSHOT="$LOOP_DIR/.pre_tick_allowlist.l2"
-DB_SENTINEL_SNAPSHOT="$LOOP_DIR/.pre_tick_db_sentinel.l2"
 
 MODEL="${ZEUS_LOOP_L2_MODEL:-opus}"
 MAX_TURNS="${ZEUS_LOOP_L2_MAX_TURNS:-120}"
@@ -71,16 +69,23 @@ CLAUDE_CMD="${ZEUS_LOOP_CLAUDE_CMD:-claude}"
 
 mkdir -p "$LOOP_DIR/logs"
 
-# 2. Pre-tick snapshots — fail-closed setup, no `|| true` (see loop/tick.sh
-#    header for the full rationale; identical here).
-"$PY" "$GUARD_PY" snapshot --repo-root "$REPO_ROOT" --out "$SNAPSHOT"
-cp "$ALLOWLIST" "$ALLOWLIST_SNAPSHOT"
-"$PY" "$GUARD_PY" db-sentinel-snapshot --repo-root "$REPO_ROOT" --out "$DB_SENTINEL_SNAPSHOT"
+# 2. Per-invocation snapshot dir OUTSIDE the repo tree (see loop/tick.sh
+#    header for the full rationale). Trap fires on every exit path.
+SNAPDIR="$(mktemp -d "${TMPDIR:-/tmp}/zeus-loop-XXXXXX")"
+trap 'rm -rf "$SNAPDIR"' EXIT
+
+# 3. Pre-tick snapshots into $SNAPDIR — fail-closed setup, no `|| true`
+#    (see loop/tick.sh header for the full rationale; identical here).
+"$PY" "$GUARD_PY" snapshot --repo-root "$REPO_ROOT" --out "$SNAPDIR/dirty_paths"
+cp "$ALLOWLIST" "$SNAPDIR/allowlist"
+"$PY" "$GUARD_PY" db-sentinel-snapshot --repo-root "$REPO_ROOT" --out "$SNAPDIR/db_sentinel"
 
 LOG_FILE="$LOOP_DIR/logs/tick-l2-$(date -u +%Y%m%dT%H%M%SZ).log"
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 
-# 3. Single-flight lock + invocation.
+# 4. Single-flight lock + invocation. $SNAPDIR is never passed as an
+#    argument or environment variable to the claude subprocess below, and
+#    is never mentioned in the prompt file.
 set +e
 if [ -n "$TIMEOUT_BIN" ]; then
   "$TIMEOUT_BIN" "$TIMEOUT_SECONDS" \
@@ -98,8 +103,8 @@ RC=$?
 set -e
 
 # rc=75 = LOCK_BUSY (an L1 or L2 tick already running): quiet no-op.
+# $SNAPDIR cleanup happens via the trap regardless of exit point.
 if [ "$RC" -eq 75 ]; then
-  rm -f "$SNAPSHOT" "$ALLOWLIST_SNAPSHOT" "$DB_SENTINEL_SNAPSHOT"
   exit 0
 fi
 
@@ -110,22 +115,23 @@ if [ -f "$LOG_FILE" ]; then
   fi
 fi
 
-# 4a. Post-run allowlist diff check + hard restore of anything out of scope.
-#    Uses the FROZEN allowlist snapshot from step 2, never the live file.
-"$PY" "$GUARD_PY" enforce --repo-root "$REPO_ROOT" --allowlist-snapshot "$ALLOWLIST_SNAPSHOT" \
-  --pre-snapshot "$SNAPSHOT" --journal "$JOURNAL" --tier l2 || true
+# 5a. Post-run allowlist diff check + hard restore of anything out of scope.
+#    Uses the $SNAPDIR allowlist snapshot from step 3 — outside the repo,
+#    never reachable by the tick, never the live file.
+"$PY" "$GUARD_PY" enforce --repo-root "$REPO_ROOT" --allowlist-snapshot "$SNAPDIR/allowlist" \
+  --pre-snapshot "$SNAPDIR/dirty_paths" --journal "$JOURNAL" --tier l2 || true
 
-# 4b. DB sentinel check — git-independent backstop for state/**.db* writes.
-#    Self-halts (writes loop/HALT) on any delta; best-effort like 4a.
+# 5b. DB sentinel check — git-independent backstop for state/**.db* writes.
+#    Self-halts (writes loop/HALT) on any delta; best-effort like 5a.
 "$PY" "$GUARD_PY" db-sentinel-check --repo-root "$REPO_ROOT" \
-  --pre-snapshot "$DB_SENTINEL_SNAPSHOT" --journal "$JOURNAL" \
+  --pre-snapshot "$SNAPDIR/db_sentinel" --journal "$JOURNAL" \
   --loop-dir "$LOOP_DIR" --tier l2 || true
 
-# 5. If claude itself failed/crashed, leave a mechanical trace.
+# 6. If claude itself failed/crashed, leave a mechanical trace.
 if [ "$RC" -ne 0 ]; then
   "$PY" "$GUARD_PY" fallback-entry --journal "$JOURNAL" --tier l2 \
     --reason "claude exit=$RC (see $LOG_FILE)"
 fi
 
-rm -f "$SNAPSHOT" "$ALLOWLIST_SNAPSHOT" "$DB_SENTINEL_SNAPSHOT"
+# 7. $SNAPDIR removed by the EXIT trap set in step 2.
 exit 0
