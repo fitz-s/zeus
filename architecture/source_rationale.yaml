@@ -1045,16 +1045,20 @@ files:
     zone: K2_runtime
     authority_role: registry_to_scheduler_planner
     why: >
-      PR6 of data_temporal_kernel program. PURE planner: resolves source_job_registry jobs into
-      per-job executor classes (live_db/backfill_db/derived_db/io/heartbeat) so DB writers never
-      share the file-only executor that starves heartbeats. Structural home of the UMA-off-fast
-      fix (writes_db ⇒ *_db class by construction; UMA historical ⇒ backfill_db).
-      Daemon wiring is operator-gated behind ZEUS_SCHEDULER_REGISTRY_ENABLED (default off) —
-      this module changes NO runtime behavior on its own. NOT_DAEMON_WIRED.
-    hazards:
-    - NOT_DAEMON_WIRED
+      PR6 of data_temporal_kernel program. Resolves source_job_registry jobs into per-job
+      executor classes (live_db/backfill_db/derived_db/io/heartbeat) so DB writers never share
+      the file-only executor that starves heartbeats. Structural home of the UMA-off-fast fix
+      (writes_db ⇒ *_db class by construction; UMA historical ⇒ backfill_db).
+      R3 (2026-07-08, ingest contractualization): the legacy hand-coded add_job() scheduler mode
+      and its ZEUS_DATA_COLLECTION_MODE/ZEUS_USE_LEGACY_DATA_COLLECTION/
+      ZEUS_SCHEDULER_REGISTRY_ENABLED mode-selection flags were DELETED (zero-caller-verified —
+      no deploy/launchd plist ever set them). build_registry_scheduler() is now the sole,
+      unconditional daemon-wiring path for src.ingest_main and src.ingest.forecast_live_daemon —
+      DAEMON_WIRED, not a dormant planner.
+    hazards: []
     downstream:
-    - future operator-gated ingest_main scheduler activation
+    - src/ingest_main.py
+    - src/ingest/forecast_live_daemon.py
   src/data/temporal_provenance.py:
     zone: K2_runtime
     authority_role: row_provenance_contract_and_live_gate
