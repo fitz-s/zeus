@@ -1736,11 +1736,11 @@ class PortfolioState:
     # PR C2 (Finding 3, 2026-05-27): typed review-queue entries for chain-only
     # venue inventory (tokens visible on chain with NO matching local intent).
     # Replaces the synthetic `Position(direction="unknown", ...)` construction
-    # in chain_reconciliation. Consumers that gate on chain-only inventory
-    # (e.g. cycle_runner._has_quarantined_positions) MUST check both
-    # `positions` (legacy synthetic placeholders, still emitted by loader) AND
-    # `chain_only_facts` (new typed signal from reconcile). Loader synthesis
-    # is removed in PR E once all consumers migrate.
+    # formerly in chain_reconciliation (that constructor is deleted; see the
+    # PR E2 note below load_portfolio). Consumers that gate on chain-only
+    # inventory (e.g. cycle_runner._has_quarantined_positions) consult both
+    # `positions` (loader no longer emits synthetic placeholders here) AND
+    # `chain_only_facts` (typed signal from reconcile).
     chain_only_facts: list = field(default_factory=list)
     # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
     # Cycle runner must suppress new entries when this flag is set.
@@ -3029,9 +3029,17 @@ def _runtime_open_exposure_usd(pos: Position) -> float:
 
 
 def _compute_realized_pnl(position: Position, exit_price: float) -> float:
-    if position.entry_price <= 0:
-        return 0.0
-    return round(position.effective_shares * exit_price - position.effective_cost_basis_usd, 2)
+    # R0-a (close-economics unification, 2026-07-08): thin wrapper over the
+    # single shared formula in src.state.close_economics. See that module's
+    # docstring for the full close-path inventory this consolidates.
+    from src.state.close_economics import compute_realized_pnl_usd
+
+    return compute_realized_pnl_usd(
+        shares=position.effective_shares,
+        exit_price=exit_price,
+        cost_basis_usd=position.effective_cost_basis_usd,
+        entry_price=position.entry_price,
+    )
 
 
 def compute_economic_close(

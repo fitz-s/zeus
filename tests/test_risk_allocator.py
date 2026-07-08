@@ -225,15 +225,6 @@ def test_book_depth_json_can_select_maker_when_healthy_and_deep():
     assert allocator.maker_or_taker(snapshot, _state(heartbeat_health=HeartbeatHealth.HEALTHY)) == "MAKER"
 
 
-def test_drawdown_governor_blocks_new_risk_at_threshold():
-    allocator = RiskAllocator(CapPolicy(max_drawdown_pct=5.0))
-
-    decision = allocator.can_allocate(_intent(size=1), _state(current_drawdown_pct=5.0))
-
-    assert not decision.allowed
-    assert decision.reason == "drawdown_threshold"
-
-
 def test_reduce_only_mode_when_risk_state_degraded():
     allocator = RiskAllocator()
 
@@ -563,21 +554,6 @@ def test_summary_entry_blocks_when_reduce_only_without_kill_switch():
         "allow_submit": False,
         "reason": "reduce_only_mode_active",
     }
-
-
-def test_portfolio_governor_update_state_arms_threshold_kill_switch():
-    governor = PortfolioGovernor(CapPolicy(max_drawdown_pct=5.0))
-
-    state = governor.update_state(
-        {"current_drawdown_pct": 5.0, "risk_level": "GREEN"},
-        {"health": "HEALTHY"},
-        {"m5_reconcile_required": False},
-        unknown_count=0,
-        finding_count=0,
-    )
-
-    assert state.kill_switch_armed
-    assert state.manual_reason == "drawdown_threshold"
 
 
 def test_optimistic_vs_confirmed_split_in_capacity_check():

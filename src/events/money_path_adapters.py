@@ -69,8 +69,7 @@ def evaluate_fdr_full_family(
 ) -> FdrProof:
     """Apply Zeus' canonical family-wise BH FDR over the full event family."""
 
-    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
-    from src.strategy.selection_family import apply_familywise_fdr
+    from src.strategy.selection_family import DEFAULT_FDR_ALPHA, apply_familywise_fdr
 
     if duplicate_event:
         return FdrProof(family_id, len(all_hypothesis_ids), tuple(), tuple(), False)

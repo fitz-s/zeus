@@ -347,7 +347,15 @@ class TestT1Dispatch:
 # ---------------------------------------------------------------------------
 
 class TestT2FDRPathAntibody:
-    """T2: scan_full_hypothesis_family + apply_familywise_fdr called; find_edges + fdr_filter NOT called."""
+    """T2: scan_full_hypothesis_family + apply_familywise_fdr called; find_edges NOT called.
+
+    R0-d 2026-07-08: the legacy src/strategy/fdr_filter.py module (and its
+    ``fdr_filter`` function) was deleted — DEFAULT_FDR_ALPHA moved to
+    src.strategy.selection_family. The "fdr_filter NOT called" leg of this
+    antibody is now structurally guaranteed (the function no longer exists to
+    call) rather than something a mock can observe, so only the find_edges
+    non-call is still asserted here.
+    """
 
     def test_live_fdr_path_called_not_legacy(self, tmp_path):
         """Antibody: selection_coverage must use the live FDR path, not replay.py:1628 legacy path."""
@@ -369,7 +377,6 @@ class TestT2FDRPathAntibody:
         scan_calls = []
         apply_calls = []
         find_edges_calls = []
-        fdr_filter_calls = []
 
         def mock_scan(analysis, *, n_bootstrap):
             scan_calls.append(1)
@@ -401,17 +408,12 @@ class TestT2FDRPathAntibody:
             find_edges_calls.append(1)
             return []
 
-        def mock_fdr_filter(*args, **kwargs):
-            fdr_filter_calls.append(1)
-            return []
-
         with patch("src.engine.replay_selection_coverage.get_trade_connection_with_world", return_value=conn), \
              patch("src.engine.replay_selection_coverage.get_backtest_connection") as mock_bc, \
              patch("src.engine.replay_selection_coverage.init_backtest_schema"), \
              patch("src.engine.replay_selection_coverage.scan_full_hypothesis_family", side_effect=mock_scan), \
              patch("src.engine.replay_selection_coverage.apply_familywise_fdr", side_effect=mock_apply), \
-             patch("src.strategy.market_analysis.MarketAnalysis.find_edges", side_effect=mock_find_edges), \
-             patch("src.strategy.fdr_filter.fdr_filter", side_effect=mock_fdr_filter):
+             patch("src.strategy.market_analysis.MarketAnalysis.find_edges", side_effect=mock_find_edges):
             mock_bc.return_value = MagicMock()
 
             run_selection_coverage(
@@ -426,7 +428,6 @@ class TestT2FDRPathAntibody:
         assert len(scan_calls) >= 1, "scan_full_hypothesis_family must be called at least once"
         assert len(apply_calls) >= 1, "apply_familywise_fdr must be called at least once"
         assert len(find_edges_calls) == 0, f"find_edges must NOT be called; was called {len(find_edges_calls)} times"
-        assert len(fdr_filter_calls) == 0, f"fdr_filter must NOT be called; was called {len(fdr_filter_calls)} times"
 
 
 # ---------------------------------------------------------------------------
