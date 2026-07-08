@@ -380,7 +380,7 @@ def main():
 
     if args.mode == "selection_coverage":
         from src.engine.replay_selection_coverage import run_selection_coverage
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
         fdr_alpha = args.override_fdr_alpha if args.override_fdr_alpha is not None else DEFAULT_FDR_ALPHA
         summary = run_selection_coverage(
             start_date=args.start,

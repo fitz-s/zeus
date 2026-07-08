@@ -1444,8 +1444,7 @@ def _selected_keys_from_full_family_for_replay(
     The BH denominator ``m`` is ``len(hypotheses)`` (the complete family), so
     the significance threshold is NOT inflated by a shrunken survivor count.
     """
-    from src.strategy.selection_family import apply_familywise_fdr, make_hypothesis_family_id
-    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+    from src.strategy.selection_family import DEFAULT_FDR_ALPHA, apply_familywise_fdr, make_hypothesis_family_id
 
     if not hypotheses:
         return set()

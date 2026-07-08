@@ -900,7 +900,7 @@ def _entry_economics_component(
         qkernel_execution_economics=economics,
     )
     try:
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
         max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001

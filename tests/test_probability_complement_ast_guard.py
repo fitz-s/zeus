@@ -36,7 +36,7 @@ LIVE_PROBABILITY_PATHS = (
     "src/state/db.py",
     # src/strategy/candidates/* removed 2026-06-14 (shadow-candidate framework
     # deletion — gate-mass-collapse wave); their entries dropped from this scan list.
-    "src/strategy/exit_family_optimizer.py",
+    # src/strategy/exit_family_optimizer.py removed 2026-07-08 (R0-c zero-caller corpse purge).
     "src/strategy/live_inference/live_admission.py",
     "src/strategy/market_analysis.py",
     "src/strategy/market_analysis_family_scan.py",
