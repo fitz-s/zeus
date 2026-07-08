@@ -27,16 +27,39 @@
 #   A real regression here would silently stop enforcing the AUTO allowlist,
 #   which is why tests/test_loop_guard.py exists.
 #
+# CONTROL-STATE PRINCIPLE (2026-07-08, second hardening round): every value
+#   `enforce`/`db-sentinel-check` trust about "how things stood before the
+#   tick ran" now lives somewhere a tick's Bash tool cannot reach OR alter,
+#   full stop — not somewhere merely undisclosed:
+#     - the allowlist comes from an IMMUTABLE GIT OBJECT (`git show
+#       <base-sha>:loop/allowlist_auto.txt`). A tick can create new commits,
+#       but it cannot rewrite the tree an EXISTING sha points at — content-
+#       addressed storage makes this a property of git, not a policy.
+#     - the dirty-at-start baseline and the DB sentinel baseline are held in
+#       loop/tick.sh's/daily.sh's OWN shell variables (process memory),
+#       never written to any file, never exported, never passed as a claude
+#       CLI argument. They cross the tick.sh -> loop_guard.py boundary via
+#       an anonymous stdin pipe (`--pre-snapshot -`), which never touches
+#       disk and never appears in `ps` output.
+#   An earlier design (2026-07-08, first hardening round) froze these into
+#   files under a `mktemp -d` directory OUTSIDE the repo tree — that closed
+#   the easy repo-relative-guess escape, but a tick whose Bash tool actively
+#   enumerated $TMPDIR could still find and tamper that directory (same OS
+#   user as the wrapper, no process isolation — see the KNOWN LIMITATION
+#   note near the bottom of this file for what remains genuinely open).
+#
 # SUBCOMMANDS:
 #   halt-check --loop-dir DIR
 #       exit 0 if loop/HALT does not exist (ok to proceed), exit 3 if it does.
-#   snapshot --repo-root DIR --out PATH
-#       writes the current set of dirty/untracked paths (git status
-#       --porcelain) to PATH, one per line. Call BEFORE invoking claude so
-#       the post-run enforce only ever evaluates paths that changed DURING
-#       this tick — operator-dirty files present before the tick started
-#       are never touched, restored, or reported.
-#   enforce --repo-root DIR --allowlist-snapshot PATH --pre-snapshot PATH
+#   snapshot --repo-root DIR [--out PATH]
+#       prints the current set of dirty/untracked paths (git status
+#       --porcelain), one per line, to PATH if given, else stdout (the
+#       production path: tick.sh captures stdout into a shell variable).
+#       Call BEFORE invoking claude so the post-run enforce only ever
+#       evaluates paths that changed DURING this tick — operator-dirty
+#       files present before the tick started are never touched, restored,
+#       or reported.
+#   enforce --repo-root DIR --allowlist-git-ref REF --pre-snapshot {PATH|-}
 #            --journal PATH --tier {l1,l2}
 #       computes new = current_dirty - pre_snapshot. If new is empty:
 #       no-op, exit 0. If len(new) > 20 files or > 600 changed lines: hard-
@@ -47,31 +70,29 @@
 #       a tick can never widen its own scope by editing these) or (b) has
 #       any side (both old and new path, for a rename/copy — checking only
 #       the new path would let a tick launder a file out of scope by
-#       renaming it into an allowed dir) that fails the --allowlist-snapshot.
-#       Appends one VIOLATION line naming them, exit 1 if any were restored
-#       else exit 0. --allowlist-snapshot MUST be a copy taken before claude
-#       ran, AND that copy MUST live OUTSIDE the repo tree (tick.sh/daily.sh
-#       mktemp -d a per-invocation dir under $TMPDIR, never under loop/) —
-#       see that flag's --help text for why an earlier in-repo frozen copy
-#       (loop/.pre_tick_allowlist.*) was itself a real escape: gitignored
-#       does not mean unreachable, the tick's own Bash tool could still
-#       tamper it mid-run since it was a predictable repo-relative path.
-#   db-sentinel-snapshot --repo-root DIR --out PATH
+#       renaming it into an allowed dir) that fails the allowlist loaded
+#       from --allowlist-git-ref. Appends one VIOLATION line naming them,
+#       exit 1 if any were restored else exit 0. --allowlist-git-ref is a
+#       `git show`-compatible object spec, e.g. "$BASE_SHA:loop/allowlist_auto.txt"
+#       where BASE_SHA = `git rev-parse HEAD` captured BEFORE claude ran —
+#       see that flag's --help text for the full history of why a file
+#       (even one outside the repo) was never fully sufficient here.
+#       --pre-snapshot "-" reads the dirty-at-start baseline from stdin
+#       instead of a file (tick.sh pipes its shell variable in).
+#   db-sentinel-snapshot --repo-root DIR [--out PATH]
 #       records (mtime, size) for every state/**/*.db* file (recursive) plus
-#       repo-root *.db* decoys, via lstat (symlink-safe). Call BEFORE
-#       invoking claude, alongside `snapshot`, into the same out-of-repo
-#       $TMPDIR directory as the allowlist snapshot (same reachability
-#       argument applies, though a DB write is not something enforce could
-#       "widen scope" through the way a tampered allowlist could — this is
-#       about keeping the pre-tick baseline itself honest).
-#   db-sentinel-check --repo-root DIR --pre-snapshot PATH --journal PATH
+#       repo-root *.db* decoys, via lstat (symlink-safe), to PATH if given
+#       else stdout. Call BEFORE invoking claude, alongside `snapshot`;
+#       tick.sh captures stdout into a shell variable, same as `snapshot`.
+#   db-sentinel-check --repo-root DIR --pre-snapshot {PATH|-} --journal PATH
 #            --loop-dir DIR --tier {l1,l2}
-#       re-scans and compares against the pre-snapshot. *.db/*.db-wal/
-#       *.db-shm/*.db-journal are globally gitignored, so `enforce` above
-#       (which is entirely git-status-driven) is structurally blind to any
-#       DB write — this is the separate mechanical backstop for that. Any
-#       delta (added/removed/changed) appends one ESCALATION line AND
-#       writes loop/HALT (self-halt — a DB write cannot be hard-restored
+#       re-scans and compares against the pre-snapshot (stdin via "-", same
+#       convention as `enforce`). *.db/*.db-wal/*.db-shm/*.db-journal are
+#       globally gitignored, so `enforce` above (which is entirely
+#       git-status-driven) is structurally blind to any DB write — this is
+#       the separate mechanical backstop for that. Any delta
+#       (added/removed/changed) appends one ESCALATION line AND writes
+#       loop/HALT (self-halt — a DB write cannot be hard-restored
 #       byte-for-byte the way a tracked file can, so the safe response is
 #       to stop, not repair). Never opens or diffs DB content. KNOWN LIMIT:
 #       mtime+size only — a deliberate same-length overwrite with a forged
@@ -89,6 +110,21 @@
 #       <command...> for its duration. If the lock is already held, prints
 #       LOCK_BUSY to stderr and exits 75 (EX_TEMPFAIL) WITHOUT running the
 #       command — this is the single-flight overlap guard.
+#
+# KNOWN LIMITATION (accepted, not fixed — operator's accept-or-scope call):
+#   this guard is repo-scoped. It detects and reverts stray changes to
+#   TRACKED files (via git) and detects (but cannot revert) DB touches under
+#   state/. It is NOT an OS sandbox: the claude subprocess runs under the
+#   full user UID with no process isolation, so a deliberately rogue or
+#   prompt-injected tick can write ANYWHERE else on the filesystem —
+#   ~/.ssh, /etc, another repo, an absolute-path DB write outside state/ —
+#   and nothing in this file or the wrapper scripts would see it, let alone
+#   revert it. Closing that requires real OS-level sandboxing (a
+#   sandbox-exec/Seatbelt profile jailing the claude subprocess to the
+#   worktree, or running it under a restricted UID), which is a materially
+#   heavier fix than anything in this file and is NOT attempted here. For
+#   unattended enablement on a live-money host, wrap the claude subprocess
+#   in sandbox-exec first (follow-up, not this packet).
 """Testable core for loop/tick.sh and loop/daily.sh (24/7 improvement loop v2)."""
 from __future__ import annotations
 
@@ -262,6 +298,38 @@ def load_allowlist(path: str | Path) -> list[str]:
     return load_allowlist_from_lines(Path(path).read_text(encoding="utf-8").splitlines())
 
 
+def load_allowlist_from_git(repo_root: Path, git_ref: str) -> list[str]:
+    """Load the allowlist from an immutable git object (`git show <ref>`),
+    e.g. ref = "<base_sha>:loop/allowlist_auto.txt". A tick can create new
+    commits but cannot rewrite the tree an EXISTING sha already points at —
+    this is a property of content-addressed storage, not a policy a tick
+    could talk its way around by editing a file. Fails CLOSED: any git
+    error (bad ref, path missing at that ref, git not on PATH) returns an
+    empty pattern list, so every new-this-tick change becomes a violation
+    rather than silently allowing everything."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "show", git_ref],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return load_allowlist_from_lines(result.stdout.splitlines())
+
+
+def _read_pre_snapshot_text(value: str) -> str:
+    """Read pre-snapshot content: '-' means stdin (the production path —
+    tick.sh pipes its own shell-variable baseline in, never touching disk
+    or argv/env), anything else is treated as a file path (test/CLI
+    convenience). Missing file -> empty string, matching the old
+    "file absent = no baseline" behavior."""
+    if value == "-":
+        return sys.stdin.read()
+    p = Path(value)
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
 def _glob_to_regex(pattern: str) -> re.Pattern:
     """Translate a path glob into a regex.
 
@@ -411,13 +479,23 @@ def cmd_halt_check(argv: list[str]) -> int:
 def cmd_snapshot(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="loop_guard.py snapshot")
     ap.add_argument("--repo-root", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="Write to PATH instead of stdout (test/CLI convenience). "
+        "Production usage omits this: tick.sh captures stdout into its own "
+        "shell variable, never a file.",
+    )
     args = ap.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
     paths = sorted(dirty_paths(repo_root))
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(paths) + ("\n" if paths else ""), encoding="utf-8")
+    text = "\n".join(paths) + ("\n" if paths else "")
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    else:
+        sys.stdout.write(text)
     return 0
 
 
@@ -425,40 +503,40 @@ def cmd_enforce(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="loop_guard.py enforce")
     ap.add_argument("--repo-root", required=True)
     ap.add_argument(
-        "--allowlist-snapshot",
+        "--allowlist-git-ref",
         required=True,
         help=(
-            "Path to a copy of loop/allowlist_auto.txt taken BEFORE claude "
-            "was invoked, AND stored OUTSIDE the repo tree (tick.sh/daily.sh: "
-            "`mktemp -d` a dir under $TMPDIR, `cp` into it, before the run). "
-            "Never pass the live loop/allowlist_auto.txt — a tick could "
-            "append 'src/**' to it (loop/** is otherwise AUTO-allowed) and "
-            "then edit src/ in the same tick with zero trace. Never pass an "
-            "in-repo path either, even a gitignored one — an earlier design "
-            "used loop/.pre_tick_allowlist.* and that was itself a real "
-            "escape: the tick's own Bash tool can reach and tamper any "
-            "repo-relative path mid-run (e.g. `echo 'src/**' >> "
-            "loop/.pre_tick_allowlist.l1`), regardless of gitignore status. "
-            "A path outside the repo, whose exact location is never "
-            "disclosed to the tick (not in the prompt, not in argv/env "
-            "passed to the claude subprocess), defeats that repo-relative-"
-            "guess class of attack. It does NOT defeat active $TMPDIR "
-            "enumeration by the tick's own Bash tool (same OS user, no "
-            "process isolation) — that residual requires real sandboxing to "
-            "close and is accepted, not fixed here; see tick.sh's SAFETY "
-            "section KNOWN LIMITATION note."
+            "A `git show`-compatible object spec pointing at "
+            "loop/allowlist_auto.txt as it stood BEFORE claude ran, e.g. "
+            "\"$BASE_SHA:loop/allowlist_auto.txt\" where BASE_SHA = "
+            "`git rev-parse HEAD` captured before the run. Never pass the "
+            "live working-tree loop/allowlist_auto.txt (a tick could append "
+            "'src/**' to it and exploit it in the same run). This replaced "
+            "an earlier file-based frozen-snapshot design (first an in-repo "
+            "copy, then an out-of-repo mktemp copy) that was never fully "
+            "sufficient: any file a tick's Bash tool can locate — inside "
+            "the repo via a documented naming convention, or outside it via "
+            "$TMPDIR enumeration (same OS user, no process isolation) — is "
+            "a file it can tamper. A git object at a fixed sha is "
+            "content-addressed and immutable: the tick can make NEW "
+            "commits, but nothing it does can rewrite what BASE_SHA's tree "
+            "already contains. This closes the tracked-file tamper vector "
+            "completely, not just make it harder to find."
         ),
     )
-    ap.add_argument("--pre-snapshot", required=True)
+    ap.add_argument(
+        "--pre-snapshot",
+        required=True,
+        help="Path to the dirty-at-start baseline, or '-' for stdin "
+        "(production: tick.sh pipes its own shell-variable baseline in).",
+    )
     ap.add_argument("--journal", required=True)
     ap.add_argument("--tier", required=True, choices=["l1", "l2"])
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
-    pre_path = Path(args.pre_snapshot)
-    pre = set()
-    if pre_path.exists():
-        pre = {line for line in pre_path.read_text(encoding="utf-8").splitlines() if line}
+    pre_text = _read_pre_snapshot_text(args.pre_snapshot)
+    pre = {line for line in pre_text.splitlines() if line}
 
     entries = parse_status(repo_root)
     new_entries = [e for e in entries if e.path not in pre]
@@ -493,15 +571,12 @@ def cmd_enforce(argv: list[str]) -> int:
         )
         return 2
 
-    # Load the FROZEN pre-tick allowlist snapshot — never the live file (see
-    # --allowlist-snapshot help above; this is the fix for the self-widening
-    # escape). A missing/unparseable snapshot fails CLOSED here: an empty
+    # Load the allowlist from the IMMUTABLE git object at --allowlist-git-ref
+    # — never the live working-tree file (see that flag's --help above).
+    # load_allowlist_from_git fails CLOSED on any git error: an empty
     # pattern list allows nothing, so every new entry becomes a violation
     # and gets restored — safer than silently allowing everything.
-    try:
-        patterns = load_allowlist(args.allowlist_snapshot)
-    except OSError:
-        patterns = []
+    patterns = load_allowlist_from_git(repo_root, args.allowlist_git_ref)
 
     violations = []
     for e in new_entries:
@@ -543,32 +618,47 @@ def cmd_enforce(argv: list[str]) -> int:
 def cmd_db_sentinel_snapshot(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="loop_guard.py db-sentinel-snapshot")
     ap.add_argument("--repo-root", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="Write to PATH instead of stdout (test/CLI convenience). "
+        "Production usage omits this: tick.sh captures stdout into its own "
+        "shell variable, never a file.",
+    )
     args = ap.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
     state = _db_sentinel_state(repo_root)
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    text = json.dumps(state, sort_keys=True)
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    else:
+        sys.stdout.write(text)
     return 0
 
 
 def cmd_db_sentinel_check(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="loop_guard.py db-sentinel-check")
     ap.add_argument("--repo-root", required=True)
-    ap.add_argument("--pre-snapshot", required=True)
+    ap.add_argument(
+        "--pre-snapshot",
+        required=True,
+        help="Path to the DB-sentinel baseline JSON, or '-' for stdin "
+        "(production: tick.sh pipes its own shell-variable baseline in).",
+    )
     ap.add_argument("--journal", required=True)
     ap.add_argument("--loop-dir", required=True)
     ap.add_argument("--tier", required=True, choices=["l1", "l2"])
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
-    pre_path = Path(args.pre_snapshot)
+    pre_text = _read_pre_snapshot_text(args.pre_snapshot)
     pre: dict[str, list[int]] = {}
-    if pre_path.exists():
+    if pre_text.strip():
         try:
-            pre = json.loads(pre_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            pre = json.loads(pre_text)
+        except ValueError:
             pre = {}
 
     cur = _db_sentinel_state(repo_root)
