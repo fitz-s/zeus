@@ -13,11 +13,13 @@
 #        BEFORE invoking claude — never a file, never exported, never
 #        passed as a claude CLI argument:
 #          - BASE_SHA = `git rev-parse HEAD`. enforce reads the allowlist
-#            from the IMMUTABLE git object at
-#            "$BASE_SHA:loop/allowlist_auto.txt" after claude exits — a tick
-#            can create new commits, but cannot rewrite what an EXISTING
-#            sha's tree already contains, so this cannot be tampered with,
-#            full stop (content-addressed storage, not a policy).
+#            from the git object at "$BASE_SHA:loop/allowlist_auto.txt"
+#            after claude exits. This removes the enumerable on-disk path a
+#            file snapshot exposed, but is NOT same-UID-proof: git does not
+#            verify object hashes on read and .git/objects is owner-writable,
+#            so a deliberate tick could overwrite the loose object. Treat as
+#            a tripwire for an honest straying tick; the real boundary is OS
+#            sandboxing (posture A — Claude Code auto-mode sandbox-exec).
 #          - DIRTY_AT_START = `loop_guard.py snapshot` output (current
 #            git-dirty/untracked paths) — the post-run check only ever
 #            evaluates paths that changed DURING this tick; operator-dirty
