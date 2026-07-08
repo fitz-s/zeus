@@ -3029,9 +3029,17 @@ def _runtime_open_exposure_usd(pos: Position) -> float:
 
 
 def _compute_realized_pnl(position: Position, exit_price: float) -> float:
-    if position.entry_price <= 0:
-        return 0.0
-    return round(position.effective_shares * exit_price - position.effective_cost_basis_usd, 2)
+    # R0-a (close-economics unification, 2026-07-08): thin wrapper over the
+    # single shared formula in src.state.close_economics. See that module's
+    # docstring for the full close-path inventory this consolidates.
+    from src.state.close_economics import compute_realized_pnl_usd
+
+    return compute_realized_pnl_usd(
+        shares=position.effective_shares,
+        exit_price=exit_price,
+        cost_basis_usd=position.effective_cost_basis_usd,
+        entry_price=position.entry_price,
+    )
 
 
 def compute_economic_close(
