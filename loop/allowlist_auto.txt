@@ -14,13 +14,27 @@
 #   docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md §3
 #   (AUTO row) + docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C2.
 #
-# WHO WRITES THIS FILE: only a human/operator commit (or an AUTO-tier tick
-# editing loop/**, since this file itself is loop/**). WHO READS IT:
-# scripts/ops/loop_guard.py enforce, every tick. If this file goes missing
-# or fails to parse, loop_guard.py's load_allowlist raises and the wrapper's
-# `enforce` call fails — tick.sh treats that as best-effort (`|| true`), so
-# a broken allowlist fails OPEN on enforcement, not closed. Do not let this
-# file go stale; a broken allowlist means NOTHING gets quarantined.
+# WHO WRITES THIS FILE: only a human/operator commit. A tick can NEVER
+# widen its own scope by editing this file (or loop/tick.sh, loop/daily.sh,
+# loop/prompts/**) even though those paths sit under loop/** — they are
+# GUARD_IMMUTABLE in scripts/ops/loop_guard.py::cmd_enforce, checked
+# unconditionally before the allowlist itself. Any tick-made change to any
+# of them is always a VIOLATION and gets hard-restored, full stop. This is
+# also why enforce reads a FROZEN pre-tick copy of this file
+# (loop/.pre_tick_allowlist.{l1,l2}, written by tick.sh/daily.sh before
+# claude runs), never the live file — without a frozen copy, a tick could
+# append a wider pattern here and then exploit it in the same run before
+# the immutability check alone would catch it on the NEXT tick.
+#
+# WHO READS IT: scripts/ops/loop_guard.py enforce, via the frozen snapshot,
+# every tick. If the live file goes missing or fails to parse at snapshot
+# time, `cp` in tick.sh/daily.sh fails under `set -e` and the tick aborts
+# BEFORE claude ever runs (fail closed). If the frozen snapshot somehow
+# still fails to load inside enforce, load_allowlist's OSError is caught
+# and treated as zero patterns — allows nothing, so every new-this-tick
+# change becomes a violation (fail closed there too). Do not let this file
+# go stale regardless; a permanently-empty-patterns enforce quarantines
+# every legitimate AUTO change too, which is safe but makes the loop useless.
 
 loop/**
 docs/**

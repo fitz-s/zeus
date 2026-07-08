@@ -7,8 +7,9 @@
 #
 # WHAT: L2 daily wrapper for the Zeus 24/7 improvement loop v2. Same
 #   skeleton as loop/tick.sh (see that file's header for the full mechanism
-#   walkthrough — HALT check, pre-tick snapshot, single-flight lock via
-#   scripts/ops/loop_guard.py flock-run, post-run allowlist enforcement,
+#   walkthrough — HALT check, pre-tick snapshots incl. frozen allowlist copy
+#   and DB sentinel, single-flight lock via scripts/ops/loop_guard.py
+#   flock-run, post-run allowlist enforcement + DB sentinel self-halt,
 #   FALLBACK-on-crash) with three differences: opus model (settlement-join
 #   evidence analysis, not a quick AUTO-packet pick), a longer turn/time
 #   budget, and loop/prompts/l2.md as the prompt (settlement-window
@@ -55,6 +56,8 @@ ALLOWLIST="$LOOP_DIR/allowlist_auto.txt"
 PROMPT="$LOOP_DIR/prompts/l2.md"
 LOCKFILE="$LOOP_DIR/.lock"
 SNAPSHOT="$LOOP_DIR/.pre_tick_snapshot.l2"
+ALLOWLIST_SNAPSHOT="$LOOP_DIR/.pre_tick_allowlist.l2"
+DB_SENTINEL_SNAPSHOT="$LOOP_DIR/.pre_tick_db_sentinel.l2"
 
 MODEL="${ZEUS_LOOP_L2_MODEL:-opus}"
 MAX_TURNS="${ZEUS_LOOP_L2_MAX_TURNS:-120}"
@@ -68,8 +71,11 @@ CLAUDE_CMD="${ZEUS_LOOP_CLAUDE_CMD:-claude}"
 
 mkdir -p "$LOOP_DIR/logs"
 
-# 2. Pre-tick snapshot (operator-dirty files are frozen out of scope here).
+# 2. Pre-tick snapshots — fail-closed setup, no `|| true` (see loop/tick.sh
+#    header for the full rationale; identical here).
 "$PY" "$GUARD_PY" snapshot --repo-root "$REPO_ROOT" --out "$SNAPSHOT"
+cp "$ALLOWLIST" "$ALLOWLIST_SNAPSHOT"
+"$PY" "$GUARD_PY" db-sentinel-snapshot --repo-root "$REPO_ROOT" --out "$DB_SENTINEL_SNAPSHOT"
 
 LOG_FILE="$LOOP_DIR/logs/tick-l2-$(date -u +%Y%m%dT%H%M%SZ).log"
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
@@ -93,7 +99,7 @@ set -e
 
 # rc=75 = LOCK_BUSY (an L1 or L2 tick already running): quiet no-op.
 if [ "$RC" -eq 75 ]; then
-  rm -f "$SNAPSHOT"
+  rm -f "$SNAPSHOT" "$ALLOWLIST_SNAPSHOT" "$DB_SENTINEL_SNAPSHOT"
   exit 0
 fi
 
@@ -104,9 +110,16 @@ if [ -f "$LOG_FILE" ]; then
   fi
 fi
 
-# 4. Post-run allowlist diff check + hard restore of anything out of scope.
-"$PY" "$GUARD_PY" enforce --repo-root "$REPO_ROOT" --allowlist "$ALLOWLIST" \
+# 4a. Post-run allowlist diff check + hard restore of anything out of scope.
+#    Uses the FROZEN allowlist snapshot from step 2, never the live file.
+"$PY" "$GUARD_PY" enforce --repo-root "$REPO_ROOT" --allowlist-snapshot "$ALLOWLIST_SNAPSHOT" \
   --pre-snapshot "$SNAPSHOT" --journal "$JOURNAL" --tier l2 || true
+
+# 4b. DB sentinel check — git-independent backstop for state/**.db* writes.
+#    Self-halts (writes loop/HALT) on any delta; best-effort like 4a.
+"$PY" "$GUARD_PY" db-sentinel-check --repo-root "$REPO_ROOT" \
+  --pre-snapshot "$DB_SENTINEL_SNAPSHOT" --journal "$JOURNAL" \
+  --loop-dir "$LOOP_DIR" --tier l2 || true
 
 # 5. If claude itself failed/crashed, leave a mechanical trace.
 if [ "$RC" -ne 0 ]; then
@@ -114,5 +127,5 @@ if [ "$RC" -ne 0 ]; then
     --reason "claude exit=$RC (see $LOG_FILE)"
 fi
 
-rm -f "$SNAPSHOT"
+rm -f "$SNAPSHOT" "$ALLOWLIST_SNAPSHOT" "$DB_SENTINEL_SNAPSHOT"
 exit 0

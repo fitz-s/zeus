@@ -36,14 +36,35 @@
 #       the post-run enforce only ever evaluates paths that changed DURING
 #       this tick — operator-dirty files present before the tick started
 #       are never touched, restored, or reported.
-#   enforce --repo-root DIR --allowlist PATH --pre-snapshot PATH
+#   enforce --repo-root DIR --allowlist-snapshot PATH --pre-snapshot PATH
 #            --journal PATH --tier {l1,l2}
 #       computes new = current_dirty - pre_snapshot. If new is empty:
 #       no-op, exit 0. If len(new) > 20 files or > 600 changed lines: hard-
 #       restores ALL of `new`, appends one ESCALATION line, exit 2. Else:
-#       hard-restores any path in `new` that does not match a glob in the
-#       allowlist file, appends one VIOLATION line naming them, exit 1 if
-#       any were restored else exit 0.
+#       hard-restores any entry that (a) touches a guard-immutable path
+#       (loop/allowlist_auto.txt, loop/tick.sh, loop/daily.sh,
+#       loop/prompts/** — checked unconditionally, before the allowlist, so
+#       a tick can never widen its own scope by editing these) or (b) has
+#       any side (both old and new path, for a rename/copy — checking only
+#       the new path would let a tick launder a file out of scope by
+#       renaming it into an allowed dir) that fails the FROZEN
+#       --allowlist-snapshot. Appends one VIOLATION line naming them, exit 1
+#       if any were restored else exit 0. --allowlist-snapshot MUST be a
+#       copy taken before claude ran — see that flag's --help text.
+#   db-sentinel-snapshot --repo-root DIR --out PATH
+#       records (mtime, size) for every state/**/*.db* file (recursive) plus
+#       repo-root *.db* decoys, via lstat (symlink-safe). Call BEFORE
+#       invoking claude, alongside `snapshot`.
+#   db-sentinel-check --repo-root DIR --pre-snapshot PATH --journal PATH
+#            --loop-dir DIR --tier {l1,l2}
+#       re-scans and compares against the pre-snapshot. *.db/*.db-wal/
+#       *.db-shm/*.db-journal are globally gitignored, so `enforce` above
+#       (which is entirely git-status-driven) is structurally blind to any
+#       DB write — this is the separate mechanical backstop for that. Any
+#       delta (added/removed/changed) appends one ESCALATION line AND
+#       writes loop/HALT (self-halt — a DB write cannot be hard-restored
+#       byte-for-byte the way a tracked file can, so the safe response is
+#       to stop, not repair). Never opens or diffs DB content.
 #   fallback-entry --journal PATH --tier {l1,l2} --reason TEXT
 #       appends a mechanical FALLBACK journal line — used when the invoked
 #       claude run exited non-zero, so the journal never silently stops
@@ -117,24 +138,44 @@ def dirty_paths(repo_root: Path) -> set[str]:
 
 
 def _safe_target(repo_root: Path, rel_path: str) -> Path | None:
-    """Resolve rel_path under repo_root; refuse anything that escapes it."""
-    full = (repo_root / rel_path).resolve()
+    """Resolve rel_path under repo_root WITHOUT following a symlink at the
+    final path component.
+
+    A violating path can itself be a symlink (e.g. planted by a tick
+    pointing at loop/JOURNAL.md). `Path.resolve()` on the FULL path follows
+    that symlink to its target — deleting the resolved path then destroys
+    the target's content while the symlink itself survives untouched
+    (audit-trail wipe). Only the parent directory chain is resolved here
+    (to catch '..' traversal); the leaf component is left exactly as named
+    so callers can lstat/unlink the link itself, never its target.
+    """
+    repo_real = repo_root.resolve()
+    full = repo_root / rel_path
     try:
-        full.relative_to(repo_root.resolve())
+        parent_real = full.parent.resolve()
+    except OSError:
+        return None
+    try:
+        parent_real.relative_to(repo_real)
     except ValueError:
         return None
-    return full
+    return parent_real / full.name
 
 
 def _delete(repo_root: Path, rel_path: str) -> None:
     full = _safe_target(repo_root, rel_path)
     if full is None:
         return
-    if full.is_dir():
+    # Check symlink-ness FIRST via os.path.islink (lstat-based, does not
+    # follow) — Path.is_dir()/.exists() both stat() (follow symlinks) and
+    # would misclassify a symlink pointing at a directory/file elsewhere.
+    if os.path.islink(full):
+        os.unlink(full)  # removes the link itself, never the target
+    elif full.is_dir():
         import shutil
 
         shutil.rmtree(full, ignore_errors=True)
-    elif full.exists() or full.is_symlink():
+    elif full.exists():
         full.unlink()
     # Defensive: drop any lingering index entry (no-op if nothing staged).
     _git(repo_root, "restore", "--staged", "--", rel_path)
@@ -238,6 +279,44 @@ def path_allowed(path: str, patterns: list[str]) -> bool:
     return any(_glob_to_regex(pat).match(posix) for pat in patterns)
 
 
+# Files that govern the guard mechanism itself. Even though these sit under
+# loop/** (which is otherwise AUTO-allowed), a tick must NEVER be able to
+# widen its own scope by editing them — self-widening the allowlist mid-tick,
+# or editing the wrapper scripts / prompts that decide what runs next tick,
+# is always a violation regardless of what the (possibly-tampered) allowlist
+# says. This is why `cmd_enforce` checks this list BEFORE consulting the
+# frozen allowlist snapshot at all.
+GUARD_IMMUTABLE_PATTERNS = [
+    "loop/allowlist_auto.txt",
+    "loop/tick.sh",
+    "loop/daily.sh",
+    "loop/prompts/**",
+]
+
+
+def _entry_paths(e: DirtyEntry) -> list[str]:
+    """All path(s) a dirty entry touches — both sides for a rename/copy.
+
+    Checking only the new path lets a tick launder an out-of-scope file by
+    renaming it into an allowed directory (e.g. `git mv src/riskguard.py
+    docs/stolen.py` — the new path matches docs/** while the money-path
+    original silently vanishes). Both sides must be considered together.
+    """
+    if e.orig_path and e.orig_path != e.path:
+        return [e.path, e.orig_path]
+    return [e.path]
+
+
+def is_guard_immutable(e: DirtyEntry) -> bool:
+    return any(path_allowed(p, GUARD_IMMUTABLE_PATTERNS) for p in _entry_paths(e))
+
+
+def entry_allowed(e: DirtyEntry, patterns: list[str]) -> bool:
+    """An entry is allowed only if EVERY path it touches is allowlisted —
+    both sides of a rename must independently pass (see _entry_paths)."""
+    return all(path_allowed(p, patterns) for p in _entry_paths(e))
+
+
 # ---------------------------------------------------------------------------
 # journal
 # ---------------------------------------------------------------------------
@@ -250,6 +329,50 @@ def append_journal(journal_path: str | Path, text: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# DB mtime/size sentinel
+# ---------------------------------------------------------------------------
+# *.db, *.db-wal, *.db-shm, *.db-journal are ALL globally gitignored
+# (.gitignore lines ~79-90) — git status never sees a write to any of them,
+# so the allowlist/quarantine mechanism above is structurally blind to the
+# one class of file the prompts most emphasize never touching. This sentinel
+# is a separate, git-independent check: record (mtime, size) for every DB
+# file under state/ (recursive) plus repo-root decoy *.db* files (the same
+# scope db_hygiene.sh treats as suspect) before invoking claude, and diff
+# after. Any delta — added, removed, or mtime/size changed — self-halts the
+# loop (touches loop/HALT) rather than merely logging, because unlike a
+# docs/tests file a DB write cannot be hard-restored byte-for-byte the way
+# git restore can undo a tracked file; the safe response is to stop and let
+# the operator look, not attempt a repair. Deliberately mtime/size only —
+# never opens or diffs DB content.
+DB_SENTINEL_GLOBS = ("*.db", "*.db-wal", "*.db-shm", "*.db-journal")
+
+
+def _db_sentinel_paths(repo_root: Path) -> list[Path]:
+    paths: set[Path] = set()
+    state_dir = repo_root / "state"
+    if state_dir.is_dir():
+        for pat in DB_SENTINEL_GLOBS:
+            paths.update(state_dir.rglob(pat))
+    # Repo-root decoys (db_hygiene.sh precedent: K1 canon puts every live DB
+    # under state/, so a *.db* file sitting at the repo root is suspect).
+    for pat in DB_SENTINEL_GLOBS:
+        paths.update(repo_root.glob(pat))
+    return sorted(paths)
+
+
+def _db_sentinel_state(repo_root: Path) -> dict[str, list[int]]:
+    state: dict[str, list[int]] = {}
+    for p in _db_sentinel_paths(repo_root):
+        try:
+            st = os.lstat(p)  # lstat: never follow a symlink to its target
+        except OSError:
+            continue
+        rel = str(p.relative_to(repo_root))
+        state[rel] = [int(st.st_mtime), int(st.st_size)]
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +406,18 @@ def cmd_snapshot(argv: list[str]) -> int:
 def cmd_enforce(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="loop_guard.py enforce")
     ap.add_argument("--repo-root", required=True)
-    ap.add_argument("--allowlist", required=True)
+    ap.add_argument(
+        "--allowlist-snapshot",
+        required=True,
+        help=(
+            "Path to a FROZEN copy of loop/allowlist_auto.txt taken BEFORE "
+            "claude was invoked (tick.sh: `cp` before the run). Never pass "
+            "the live loop/allowlist_auto.txt here — a tick could append "
+            "'src/**' to the live file (loop/** is otherwise AUTO-allowed) "
+            "and then edit src/ in the same tick; reading the live file at "
+            "enforce time would see both as allowed with zero trace."
+        ),
+    )
     ap.add_argument("--pre-snapshot", required=True)
     ap.add_argument("--journal", required=True)
     ap.add_argument("--tier", required=True, choices=["l1", "l2"])
@@ -328,17 +462,37 @@ def cmd_enforce(argv: list[str]) -> int:
         )
         return 2
 
-    patterns = load_allowlist(args.allowlist)
-    violations = [e for e in new_entries if not path_allowed(e.path, patterns)]
+    # Load the FROZEN pre-tick allowlist snapshot — never the live file (see
+    # --allowlist-snapshot help above; this is the fix for the self-widening
+    # escape). A missing/unparseable snapshot fails CLOSED here: an empty
+    # pattern list allows nothing, so every new entry becomes a violation
+    # and gets restored — safer than silently allowing everything.
+    try:
+        patterns = load_allowlist(args.allowlist_snapshot)
+    except OSError:
+        patterns = []
+
+    violations = []
+    for e in new_entries:
+        if is_guard_immutable(e) or not entry_allowed(e, patterns):
+            violations.append(e)
     for e in violations:
         restore_entry(repo_root, e)
 
     if violations:
-        detail = ", ".join(e.path for e in violations)
+        detail_parts = []
+        for e in violations:
+            tag = " [guard-immutable]" if is_guard_immutable(e) else ""
+            if e.orig_path and e.orig_path != e.path:
+                detail_parts.append(f"{e.orig_path} -> {e.path}{tag}")
+            else:
+                detail_parts.append(f"{e.path}{tag}")
+        detail = ", ".join(detail_parts)
         append_journal(
             args.journal,
             f"VIOLATION: {args.tier} tick touched path(s) outside "
-            f"loop/allowlist_auto.txt: {detail} — hard-restored to HEAD.",
+            f"loop/allowlist_auto.txt (or the guard's own immutable files): "
+            f"{detail} — hard-restored to HEAD.",
         )
 
     print(
@@ -353,6 +507,76 @@ def cmd_enforce(argv: list[str]) -> int:
         )
     )
     return 1 if violations else 0
+
+
+def cmd_db_sentinel_snapshot(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="loop_guard.py db-sentinel-snapshot")
+    ap.add_argument("--repo-root", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args(argv)
+    repo_root = Path(args.repo_root).resolve()
+    state = _db_sentinel_state(repo_root)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    return 0
+
+
+def cmd_db_sentinel_check(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="loop_guard.py db-sentinel-check")
+    ap.add_argument("--repo-root", required=True)
+    ap.add_argument("--pre-snapshot", required=True)
+    ap.add_argument("--journal", required=True)
+    ap.add_argument("--loop-dir", required=True)
+    ap.add_argument("--tier", required=True, choices=["l1", "l2"])
+    args = ap.parse_args(argv)
+
+    repo_root = Path(args.repo_root).resolve()
+    pre_path = Path(args.pre_snapshot)
+    pre: dict[str, list[int]] = {}
+    if pre_path.exists():
+        try:
+            pre = json.loads(pre_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pre = {}
+
+    cur = _db_sentinel_state(repo_root)
+
+    if cur == pre:
+        print(json.dumps({"delta": False}))
+        return 0
+
+    added = sorted(set(cur) - set(pre))
+    removed = sorted(set(pre) - set(cur))
+    changed = sorted(k for k in (set(cur) & set(pre)) if cur[k] != pre[k])
+
+    parts = []
+    if added:
+        parts.append(f"added={added}")
+    if removed:
+        parts.append(f"removed={removed}")
+    if changed:
+        parts.append(f"changed={changed}")
+    detail = "; ".join(parts)
+
+    append_journal(
+        args.journal,
+        f"ESCALATION: {args.tier} tick touched a state/**.db* file — DB "
+        f"writes are outside git's visibility (*.db/*.db-wal/*.db-shm/"
+        f"*.db-journal are globally gitignored), so this sentinel is the "
+        f"only mechanical backstop for it: {detail}. Loop self-halted "
+        f"(loop/HALT written) — operator must investigate before the next "
+        f"tick runs.",
+    )
+    halt_path = Path(args.loop_dir) / "HALT"
+    halt_path.parent.mkdir(parents=True, exist_ok=True)
+    halt_path.write_text(
+        f"AUTO-HALT ({_now_iso()}): {args.tier} tick DB-sentinel delta detected — {detail}\n",
+        encoding="utf-8",
+    )
+
+    print(json.dumps({"delta": True, "added": added, "removed": removed, "changed": changed}))
+    return 2
 
 
 def cmd_fallback_entry(argv: list[str]) -> int:
@@ -409,6 +633,8 @@ COMMANDS = {
     "halt-check": cmd_halt_check,
     "snapshot": cmd_snapshot,
     "enforce": cmd_enforce,
+    "db-sentinel-snapshot": cmd_db_sentinel_snapshot,
+    "db-sentinel-check": cmd_db_sentinel_check,
     "fallback-entry": cmd_fallback_entry,
     "flock-run": cmd_flock_run,
 }
