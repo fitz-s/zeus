@@ -1,0 +1,37 @@
+# AUTO-tier path allowlist for loop/tick.sh (L1) and loop/daily.sh (L2).
+#
+# One glob per line; '#' starts a comment; blank lines ignored. Matched by
+# scripts/ops/loop_guard.py::path_allowed against every path that changed
+# DURING a tick (relative to the pre-tick snapshot, never against files the
+# operator already had dirty). Any changed path that matches none of these
+# is hard-restored to HEAD and logged as VIOLATION in loop/JOURNAL.md.
+#
+# `**` matches any depth (including zero extra segments); a bare `*` or `?`
+# matches within one path segment only (does not cross '/') — this is a
+# glob translator local to loop_guard.py, not stdlib fnmatch.
+#
+# Source of truth for scope:
+#   docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md §3
+#   (AUTO row) + docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C2.
+#
+# WHO WRITES THIS FILE: only a human/operator commit (or an AUTO-tier tick
+# editing loop/**, since this file itself is loop/**). WHO READS IT:
+# scripts/ops/loop_guard.py enforce, every tick. If this file goes missing
+# or fails to parse, loop_guard.py's load_allowlist raises and the wrapper's
+# `enforce` call fails — tick.sh treats that as best-effort (`|| true`), so
+# a broken allowlist fails OPEN on enforcement, not closed. Do not let this
+# file go stale; a broken allowlist means NOTHING gets quarantined.
+
+loop/**
+docs/**
+tests/**
+architecture/*.yaml
+
+# scripts/** is intentionally NOT allowlisted here. The design's AUTO row
+# only admits scripts/** entries with no dangerous_if_run/write_targets in
+# architecture/script_manifest.yaml and no plist/manifest reference — that
+# is a manifest-aware judgment call, not something a path glob can express,
+# and the design's §5 "拒收" list explicitly rejects building a machine
+# classifier for this. Until such a check exists, ANY scripts/** change made
+# by a tick is out of AUTO scope and gets quarantined; script fixes route
+# through PREPARE (queued diff, operator merges).

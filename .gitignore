@@ -189,6 +189,25 @@ raw/**/*.h5
 !.code-review-graph/.gitignore
 !.code-review-graph/README.md
 
+# 24/7 improvement loop v2 (loop/) runtime state — never committed.
+# loop/HALT: operator kill-switch touch-file, existence = halt.
+# loop/.lock: scripts/ops/loop_guard.py flock-run single-flight lock file.
+# loop/.pre_tick_snapshot.*: tick.sh/daily.sh pre-run dirty-path snapshot.
+# loop/logs/*.log|*.err: per-tick output, rotated by nothing (bounded by
+#   ZEUS_LOOP_MAX_LOG_BYTES truncation in tick.sh/daily.sh, not deleted).
+# NOTE: the blanket `logs/` rule above (repo-root logs/) matches ANY
+# directory literally named "logs" anywhere in the tree, including
+# loop/logs/ — git cannot re-include a file whose PARENT directory is
+# already excluded, so loop/logs/ must be explicitly un-ignored first
+# before re-scoping to just *.log/*.err.
+!loop/logs/
+loop/HALT
+loop/.lock
+loop/.pre_tick_snapshot.*
+loop/logs/*.log
+loop/logs/*.err
+!loop/logs/.gitkeep
+
 # ----------------------------------------------------------------------
 # Local config overlays
 # ----------------------------------------------------------------------

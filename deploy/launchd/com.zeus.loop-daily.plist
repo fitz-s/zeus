@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-07-08 (loop-build packet: 24/7 improvement loop v2 machinery).
+  Authority basis: docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md
+  §1/§6 (L2 daily settlement-window analysis, ~UTC 12:10) + §C1 (deploy is
+  operator-only — this is a TEMPLATE, nothing installs it automatically).
+
+  TEMPLATE ONLY — not installed by any script in this repo. No secrets: the
+  loop needs none (see com.zeus.loop-tick.plist header for the mechanism;
+  loop/daily.sh is the same skeleton with opus model + longer budget).
+
+  TIMEZONE CAVEAT: launchd's StartCalendarInterval fires on LOCAL wall-clock
+  time, not UTC, and macOS does not offer a UTC option. The design target is
+  ~UTC 12:10 (after the settlement window); Hour/Minute below are set for
+  this machine's current local offset (CDT, UTC-5) at authoring time —
+  07:10 local. This WILL drift by an hour across DST transitions unless the
+  operator re-checks it twice a year; there is no launchd-native fix for
+  this short of a wrapper that self-adjusts, which the v2 minimal design
+  does not include (deliberately — "~" in the design doc already signals
+  this is an approximate window, not a hard settlement-adjacent deadline).
+
+  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes):
+    1. cp deploy/launchd/com.zeus.loop-daily.plist ~/Library/LaunchAgents/
+    2. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.loop-daily.plist
+
+  DISABLE: `touch <repo>/loop/HALT` (soft) or
+  `launchctl bootout gui/$(id -u)/com.zeus.loop-daily` (hard).
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/leofitz/zeus/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.loop-daily</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/loop/daily.sh</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/loop/logs/launchd-daily.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/loop/logs/launchd-daily.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>7</integer>
+		<key>Minute</key>
+		<integer>10</integer>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

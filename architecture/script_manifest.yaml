@@ -2705,13 +2705,19 @@ scripts:
       - tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py
       - tests/test_bayes_precision_fusion_no_leak_history_join.py
 
-  # NOTE (R0-f/R0-g prepare packet, 2026-07-08): scripts/ops/migrate_plist_secrets.sh,
-  # scripts/ops/rotate_zeus_logs.sh, and scripts/ops/db_hygiene.sh were added under
-  # scripts/ops/. topology_doctor's top_level_scripts() (scripts/topology_doctor_script_checks.py)
-  # only iterates direct children of scripts/ and its run_scripts() check flags any
-  # manifest key without a matching top-level file as script_manifest_stale — there is
-  # currently no supported manifest key form for a scripts/<subdir>/ script. Rows were
-  # deliberately NOT added here to avoid introducing doctor errors; documented instead
-  # in docs/rebuild/r0f_plist_migration.md §7 for the operator/registry-law owner to
-  # decide whether to extend the manifest schema for subdirectories or relocate these
-  # scripts to top-level scripts/.
+  # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
+  # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,
+  # scripts/ops/db_hygiene.sh, scripts/ops/loop_guard.py, scripts/ops/loop_enable.sh,
+  # and scripts/ops/loop_status.sh were added under scripts/ops/. topology_doctor's
+  # top_level_scripts() (scripts/topology_doctor_script_checks.py) only iterates direct
+  # children of scripts/ and its run_scripts() check flags any manifest key without a
+  # matching top-level file as script_manifest_stale — there is currently no supported
+  # manifest key form for a scripts/<subdir>/ script. Rows were deliberately NOT added
+  # here to avoid introducing doctor errors; documented instead in
+  # docs/rebuild/r0f_plist_migration.md §7 (for the pre-existing three) and this file
+  # (for the loop-build three) for the operator/registry-law owner to decide whether to
+  # extend the manifest schema for subdirectories or relocate these scripts to top-level
+  # scripts/. None of the loop-build additions are dangerous_if_run or write_targets a
+  # live DB: loop_guard.py only touches loop/** + whatever the post-run enforce call
+  # hard-restores (git restore/rm, never a raw write), loop_enable.sh is read-only
+  # (prints commands, never runs them), loop_status.sh is read-only.
