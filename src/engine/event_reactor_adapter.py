@@ -38,8 +38,9 @@
 # Last reused or audited: 2026-06-08 (S7: deleted the last opportunity-book
 #   selector on/off gate artifacts — the dead `selector_enabled`/`selector_probe`
 #   cache keys, the `_env_flag_enabled` helper + its `import os`, and every literal
-#   toggle-name string. The marginal-utility ranker is the unconditional single
-#   selection path — "bin selection.md" §14 item 8 + operator directive 2026-06-08.
+#   toggle-name string. The marginal-utility ranker is the selection path when
+#   w3_solve_enabled() is OFF (ON routes selection through SolveEngineShim,
+#   src/solve/solver.py) — "bin selection.md" §14 item 8 + operator directive 2026-06-08.
 #   S4: marginal-utility ranker is the SOLE size authority via
 #   RobustCandidateScore.optimal_stake_usd on robust q_lcb + exposure; removed
 #   scalar market-disagreement / pre-selection scalar-Kelly gates —
@@ -18955,9 +18956,12 @@ def _canonical_probability_and_fdr_proof(
     # OWN world write-transaction (process_pending's per-event SAVEPOINT) → SQLite
     # self-deadlock that HUNG every event in process_pending (faulthandler-pinned:
     # continuous_redecision.cache_belief:124). The surrounding try/except could not catch
-    # it because it HANGS, not raises. The belief cache is currently write-only — no live
-    # reader (enqueue_live_redecisions/screen_exit are unwired dead code per the 2026-05-31
-    # audit) — so skipping the write is safe and is the unlock for the first receipt.
+    # it because it HANGS, not raises. This write path into probability_trace_fact is
+    # disabled — enqueue_live_redecisions (wired live via continuous_redecision.
+    # screen_entry_redecisions, called from main.py's edli_continuous_redecision_screen_cycle
+    # and price_channel_ingest.py) reads whatever probability_trace_fact rows already exist
+    # rather than rows from this call site — so skipping the write here is safe and is the
+    # unlock for the first receipt.
     # Re-enable under plan A2 by writing the belief through the reactor's EXISTING
     # connection (same transaction), never a fresh get_world_connection().
 

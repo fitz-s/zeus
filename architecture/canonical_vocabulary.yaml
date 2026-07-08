@@ -1,0 +1,167 @@
+# Canonical vocabulary — Representation Contract §1.2 (NAMING LAW), checked_policy_input.
+#
+# Purpose: one concept, one canonical name. Seeded from the 6 synonym clusters measured
+# in docs/rebuild/representation_contract_2026-07-08.md §0 (real defcount evidence, not
+# speculation): family/market/opportunity, settle/resolve/grade, posterior/belief/q,
+# certificate/receipt, edge/ev, is_fresh/is_stale.
+#
+# Scope: ADVISORY. This file is a checked policy input (writer=hand, checker=
+# scripts/topology_doctor_repr_checks.py via `topology_doctor --repr`), but the checker
+# itself is advisory-only (always exits 0) and only lints NEW or changed code — existing
+# uses of forbidden_aliases are migration territory, absorbed wave-by-wave per contract §5
+# (R1-R7). No existing file is retroactively flagged; no CI gate blocks on this file today.
+schema_version: 1
+
+migration_note: >
+  This file governs NEW code only. Existing occurrences of a forbidden_alias are not
+  violations by themselves — they are migration debt tracked by the owning R-wave (see
+  each term's migration entry below). A term's forbidden_aliases become enforceable for a
+  legacy call site only when that call site is touched by its assigned wave, or by any
+  wave that promotes the linter from advisory to blocking (contract §5, R8).
+
+terms:
+  # --- Cluster (iii): posterior / belief / q ---
+  - concept_id: prob.q
+    canonical: q
+    allowed_forms: [q, q_lcb, q_ucb, served_q]
+    forbidden_aliases: [posterior, belief, probability, prob]
+    allowed_context:
+      - persisted served probability consumed by decision/execution (post-calibration,
+        post-serving-transform)
+      - the only belief object price/fills may ever update (operator axiom — q is the
+        sole belief)
+    migration: R7 (decision-plane vocabulary unification, EXECUTION_MASTER §E)
+
+  - concept_id: prob.belief
+    canonical: belief
+    allowed_forms: [belief]
+    forbidden_aliases: [posterior, q]
+    allowed_context:
+      - the pre-serving distribution object (predictive/joint_q stage), before the
+        calibration + serving transform produces q
+    migration: R7
+
+  - concept_id: prob.posterior
+    canonical: posterior
+    allowed_forms: [posterior]
+    forbidden_aliases: [belief, q]
+    allowed_context:
+      - a distribution actually derived via Bayes' rule from a stated prior and
+        likelihood — reserved for true Bayesian posteriors only, never a loose synonym
+        for belief or q
+    migration: R7
+
+  # --- Cluster (ii): family / market / opportunity ---
+  - concept_id: governance.family_key
+    canonical: family_key
+    allowed_forms: [family_key]
+    forbidden_aliases: [family, market, opportunity, cluster, group]
+    allowed_context:
+      - the sole governance key identifying a decision family/opportunity (INV-04);
+        edge_source, discovery_mode, and entry_method are metadata and must not compete
+        as governance centers
+    migration: R7 (decision-plane clean-out is the batch-execution point per contract §1.2.4)
+
+  # --- Cluster (iv): certificate vs decision_receipt vs order_receipt ---
+  - concept_id: proof.certificate
+    canonical: certificate
+    allowed_forms: [certificate]
+    forbidden_aliases: [receipt, decision_receipt, order_receipt]
+    allowed_context:
+      - solver/repair proof object produced by src/solve (e.g. SolveCertificate);
+        certificate concept survives R7, EDLI-shaped certificate forms do not
+    migration: R7 (EDLI certificate family re-derives to SOLVE certificates)
+
+  - concept_id: proof.decision_receipt
+    canonical: decision_receipt
+    allowed_forms: [decision_receipt]
+    forbidden_aliases: [certificate, receipt, order_receipt]
+    allowed_context:
+      - immutable proof of a decision (admission/gating outcome) — decision-plane atom
+    migration: R7
+
+  - concept_id: proof.order_receipt
+    canonical: order_receipt
+    allowed_forms: [order_receipt]
+    forbidden_aliases: [certificate, decision_receipt, receipt]
+    allowed_context:
+      - venue/execution proof object (order fact / fill confirmation) — only where it
+        exists as its own schema, distinct from decision_receipt
+    migration: R6 (venue contract layer)
+
+  # --- Cluster (v): settle (verb) vs settlement_grade (value) vs resolve (lookup) ---
+  - concept_id: settlement.settle
+    canonical: settle
+    allowed_forms: [settle, settling]
+    forbidden_aliases: [resolve, grade]
+    allowed_context:
+      - process verb only — the act of finalizing a market/position to its terminal value
+    migration: R5/R7 (settlement-plane consolidation)
+
+  - concept_id: settlement.settlement_grade
+    canonical: settlement_grade
+    allowed_forms: [settlement_grade]
+    forbidden_aliases: [settle_result, outcome_value, grade, resolve]
+    allowed_context:
+      - the final settled value; the only settlement-value authority is
+        SettlementSemantics — ground truth is settlement grade x decision certificate,
+        never a runtime-derived number
+    migration: R5/R7
+
+  - concept_id: settlement.resolve
+    canonical: resolve
+    allowed_forms: [resolve, resolution]
+    forbidden_aliases: [settle, settlement_grade]
+    allowed_context:
+      - reserved for LOOKUP only (e.g. resolving a condition_id to a market record),
+        never for finalizing a settlement value
+    migration: R6
+
+  # --- Cluster (i): edge / ev / expected_value ---
+  - concept_id: money.edge
+    canonical: edge
+    allowed_forms: [edge, edge_lcb, edge_ucb]
+    forbidden_aliases: [ev, expected_value]
+    allowed_context:
+      - the probability-weighted, cost-adjusted economic advantage used for
+        selection/sizing; edge_lcb is its robust lower-bound form
+    migration: R7
+
+  - concept_id: money.expected_value
+    canonical: expected_value
+    allowed_forms: [expected_value, ev, point_ev]
+    forbidden_aliases: [edge]
+    allowed_context:
+      - raw point expected value before robustness/lower-bound treatment (e.g.
+        CandidateEconomics.point_ev)
+    migration: R7
+
+  # --- Cluster (vi): is_fresh / is_stale / age ---
+  - concept_id: freshness.is_fresh
+    canonical: is_fresh
+    allowed_forms: [is_fresh]
+    forbidden_aliases: [is_stale, is_current]
+    allowed_context:
+      - the single freshness predicate for a given authority plane; a datum's freshness
+        is judged by exactly one is_fresh definition scoped to that plane, never
+        re-derived ad hoc elsewhere (contract §0 measured two unrelated is_fresh/is_stale
+        definitions in the codebase today — this is the seed for their unification)
+    migration: R1-R7 (unify per authority plane as each plane is touched)
+
+  - concept_id: freshness.is_stale
+    canonical: is_stale
+    allowed_forms: [is_stale]
+    forbidden_aliases: [is_fresh]
+    allowed_context:
+      - the negation of is_fresh for the SAME scoped definition; must not be an
+        independently-derived predicate
+    migration: R1-R7
+
+  - concept_id: freshness.age
+    canonical: age
+    allowed_forms: [age, age_seconds]
+    forbidden_aliases: []
+    allowed_context:
+      - the raw elapsed-time measurement an is_fresh predicate is built FROM; never
+        itself a freshness verdict
+    migration: R1-R7

@@ -119,6 +119,7 @@ file_naming:
         topology_doctor_registry_checks.py: registry/root/docs-strict checker-family module imported by topology_doctor.py
         topology_doctor_reference_checks.py: reference/core-claim checker-family module imported by topology_doctor.py
         topology_doctor_receipt_checks.py: change-receipt checker-family module imported by topology_doctor.py
+        topology_doctor_repr_checks.py: representation-contract checker-family module imported by topology_doctor.py (--repr; advisory-only, always exit 0)
         topology_doctor_script_checks.py: script-manifest checker-family module imported by topology_doctor.py
         topology_doctor_source_checks.py: source-rationale/scoped-AGENTS checker-family module imported by topology_doctor.py
         topology_doctor_test_checks.py: test-topology checker-family module imported by topology_doctor.py
