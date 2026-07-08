@@ -517,11 +517,17 @@ def cmd_enforce(argv: list[str]) -> int:
             "sufficient: any file a tick's Bash tool can locate — inside "
             "the repo via a documented naming convention, or outside it via "
             "$TMPDIR enumeration (same OS user, no process isolation) — is "
-            "a file it can tamper. A git object at a fixed sha is "
-            "content-addressed and immutable: the tick can make NEW "
-            "commits, but nothing it does can rewrite what BASE_SHA's tree "
-            "already contains. This closes the tracked-file tamper vector "
-            "completely, not just make it harder to find."
+            "a file it can tamper. A git-ref baseline removes the enumerable "
+            "on-disk path, but is NOT same-UID-proof: `git show` does not "
+            "verify object hashes on read and .git/objects loose files are "
+            "owner-writable, so a deliberate same-UID tick can overwrite the "
+            "loose object and make `git show` return tampered bytes. This "
+            "guard is a tripwire that detects and reverts an HONEST straying "
+            "tick, not a boundary against a deliberate or injected one — the "
+            "only real boundary is OS sandboxing (posture A: the tick runs "
+            "under Claude Code auto-mode's sandbox-exec, jailed to the "
+            "worktree). Prefer this ref form over any file snapshot anyway: "
+            "it raises the honest-mistake bar without the enumerable path."
         ),
     )
     ap.add_argument(
