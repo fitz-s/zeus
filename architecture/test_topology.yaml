@@ -210,9 +210,6 @@ test_trust_policy:
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_canary_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_forecast_authority_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_quote_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_market_channel_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -772,11 +769,9 @@ test_trust_policy:
     tests/test_wave3_entry_quote_evidence.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave4_family_portfolio_activation.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave6_unified_uncertainty_budget.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27).
-    tests/test_exit_observation_constraint.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_constrained_posterior.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_family_optimizer.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_strategy_relationship.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27) removed 2026-07-08
+    # (R0-c zero-caller corpse purge — exit_observation_constraint/exit_constrained_posterior/
+    # exit_family_optimizer were never wired into the live path).
     # stat-whole-refactor wave (PR #361): residual-ledger seam, pairing contracts, OOS gate, migration antibodies.
     tests/test_aggregation_window_product_derived.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_analytic_p_raw_equivalence.py: {created: "2026-05-29", last_used: "2026-05-29"}
@@ -1519,7 +1514,6 @@ law_gate:
       - tests/test_strategy_benchmark.py
     protects:
       - src/strategy/benchmark_suite.py
-      - src/strategy/data_lake.py
       - src/strategy/candidates/__init__.py
   RISK_ALLOCATOR_GOVERNOR:
     tests:
