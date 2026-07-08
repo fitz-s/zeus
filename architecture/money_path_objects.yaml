@@ -217,6 +217,29 @@ state_machines:
       - CONSISTENT
     invariant_tests:
       - tests/test_reconcile_chain_mirror.py
+  reconcile_diff_finding_classification:
+    owner: src/reconcile/diff_engine.py
+    description: >
+      R2-core diff-engine finding classification codes (docs/rebuild/
+      EXECUTION_MASTER_2026-07-07.md §E R2-a/R2-b). Not venue/lifecycle
+      states; this is the diff engine's own predicate-table outcome
+      vocabulary (classify(local, chain) -> findings), carried on
+      DiffFinding.classification. Report-only in R2-core except
+      RESERVATION_ORPHANED_FILL_AFTER_RELEASE, whose apply_corrective_event
+      appends an append-only REVIEW_REQUIRED position_events marker (never a
+      collateral_reservations balance mutation -- see diff_engine.py's
+      apply_corrective_event docstring for the scope rationale). The module
+      is SHADOW-FREE but INERT: nothing outside tests/the replay harness
+      calls reconcile(apply=True) yet; live wiring is R2-c.
+    states:
+      - LOCAL_STATE_IGNORES_CONCURRENT_FILL
+      - WS_STATE_STALE_NEEDS_REST_TRUTH
+      - PARTIAL_REMAINDER_TERMINAL_PROOF_AVAILABLE
+      - POSITION_SHARES_EXCEED_CANONICAL_FILL
+      - RESERVATION_ORPHANED_FILL_AFTER_RELEASE
+    invariant_tests:
+      - tests/reconcile/test_diff_engine.py
+      - tests/reconcile/test_replay_harness.py
   family_rebalance_lease:
     owner: src/state/schema/family_rebalance_intents_schema.py
     description: >

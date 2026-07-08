@@ -884,6 +884,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/generate_schema_cheatsheet.py",  # read_only_ro_uri: schema-cheatsheet generator; opens all 3 live DBs via file:...?mode=ro; reads sqlite_master + PRAGMA table_info only; writes docs/reference/schema_cheatsheet.md
         # --- fee reconciliation evidence (2026-06-12): READ-ONLY fills scan ---
         "scripts/reconcile_realized_fees.py",  # read_only_ro_uri: venue_order_facts trade-level fee fields + position_current cost-basis arithmetic via file:...?mode=ro; SELECT-only; writes state/fee_reconciliation.json
+        # --- R2-core (2026-07-08): certificate/event-native replay harness (docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R2-a/R2-b item 6) ---
+        "src/reconcile/replay.py",  # read_only_ro_uri: main() demo/ops entry point opens trades+forecasts DBs via file:...?mode=ro uri; SELECT-only replay_window() call (apply=False always); never writes any canonical DB
     }
 )
 
