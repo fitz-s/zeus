@@ -6073,21 +6073,25 @@ def _append_exit_filled_projection(
     if filled_size is None or fill_price is None:
         raise ValueError("exit fill projection requires positive fill size and price")
 
-    # Bug A (truth-path PnL booking, 2026-07-07): this SimpleNamespace stands in
-    # for a Position but is not one, so it never carries the .pnl that
-    # src.state.portfolio._compute_realized_pnl sets on a real in-memory close.
-    # Without an explicit "pnl" key, _settled_economics_value(position, "pnl")
-    # returns None and realized_pnl_usd is booked NULL forever. Mirror
-    # _compute_realized_pnl's formula (shares * exit_price - cost_basis_usd,
-    # guarded by entry_price > 0) using the same close-share count set as
-    # "shares" below.
+    # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
+    # 2026-07-08): this SimpleNamespace stands in for a Position but is not
+    # one, so it never carries the .pnl that src.state.portfolio's Position
+    # close mutators set on a real in-memory close. Without an explicit "pnl"
+    # key, _settled_economics_value(position, "pnl") returns None and
+    # realized_pnl_usd is booked NULL forever. Compute it via the single
+    # shared close-economics formula (src.state.close_economics) using the
+    # same close-share count set as "shares" below.
+    from src.state.close_economics import compute_realized_pnl_usd
+
     close_shares = _positive_decimal_or_none(current.get("shares")) or filled_size
     cost_basis = _decimal_or_none(current.get("cost_basis_usd")) or Decimal("0")
     entry_price_guard = _decimal_or_none(current.get("entry_price"))
-    if entry_price_guard is None or entry_price_guard <= 0:
-        realized_pnl = Decimal("0.00")
-    else:
-        realized_pnl = (close_shares * fill_price - cost_basis).quantize(Decimal("0.01"))
+    realized_pnl = compute_realized_pnl_usd(
+        shares=float(close_shares),
+        exit_price=float(fill_price),
+        cost_basis_usd=float(cost_basis),
+        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    )
 
     position = SimpleNamespace(
         **{
@@ -6103,7 +6107,7 @@ def _append_exit_filled_projection(
             "last_exit_order_id": venue_order_id,
             "last_exit_at": occurred_at,
             "exit_price": _decimal_text(fill_price),
-            "pnl": _decimal_text(realized_pnl),
+            "pnl": realized_pnl,
             "exit_reason": current.get("exit_reason") or "COMMAND_RECOVERY_EXIT_FILL",
             "shares": current.get("shares") or _decimal_text(filled_size),
             "chain_shares": 0.0,
