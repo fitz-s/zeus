@@ -577,7 +577,6 @@ modules:
       - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/benchmark_suite.py
-      - src/strategy/data_lake.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml

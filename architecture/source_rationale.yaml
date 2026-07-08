@@ -2312,23 +2312,6 @@ files:
     why: Represents selection family for statistical testing.
     downstream:
     - src/engine/evaluator.py
-  src/strategy/exit_observation_constraint.py:
-    zone: K3_extension
-    authority_role: observation_constraint_contract
-    why: D1 pure-math layer — SettlementProgressConstraint dataclass encodes per-bin feasibility from live observation authority for the family exit optimizer.
-    downstream:
-    - src/strategy/exit_constrained_posterior.py
-    - src/strategy/exit_family_optimizer.py
-  src/strategy/exit_constrained_posterior.py:
-    zone: K3_extension
-    authority_role: exit_constrained_posterior_contract
-    why: D2 pure-math layer — projects p_family through D1 feasibility mask; renormalizes on both deterministic and advisory paths so p_obs is always a probability vector.
-    downstream:
-    - src/strategy/exit_family_optimizer.py
-  src/strategy/exit_family_optimizer.py:
-    zone: K3_extension
-    authority_role: exit_family_optimizer
-    why: D3 pure-math layer — computes family-level exit decisions (SELL_FULL / HOLD / HOLD_NO_BID) over typed leg inputs using observation-constrained posterior; D3 part 2 (cycle_runtime wiring) deferred to integration PR.
   src/backtest/__init__.py:
     zone: package_marker
     authority_role: package_marker
@@ -2382,15 +2365,7 @@ files:
     authority_role: strategy_benchmark_gate
     why: R3 A1 diagnostic/simulated/read-only-live benchmark metrics and promotion gate; computes evidence-only StrategyMetrics and blocks live promotion unless promotion-grade economics plus supporting diagnostic, simulated-venue, and read-only-live evidence pass.
     downstream:
-    - src/strategy/data_lake.py
     - src/strategy/candidates/__init__.py
-    - tests/test_strategy_benchmark.py
-  src/strategy/data_lake.py:
-    zone: K3_extension
-    authority_role: replay_corpus_accessor
-    why: R3 A1 read-only replay corpus accessor for StrategyBenchmarkSuite; in-memory deterministic seam only, no external fetch authority.
-    downstream:
-    - src/strategy/benchmark_suite.py
     - tests/test_strategy_benchmark.py
   src/analysis/promotion_proof_router.py:
     zone: K3_extension
