@@ -2214,3 +2214,210 @@ def test_cas_concurrent_reserve_stress_zero_overreserve(tmp_path):
     assert total_reserved == ok_count * reserve_amount
     assert total_reserved <= 100_000_000
     assert live_count == ok_count
+
+
+def test_cas_concurrent_reserve_fill_cancel_settle_holds_a4_identity(tmp_path):
+    """R0-b acceptance (order-engine W1 / design doc A4 tripwire, §4 table):
+
+        free + reserved + holdings_basis + unsettled == bankroll
+        (never negative free under pending races)
+
+    LIVE topology (own sqlite3 connection per thread, per the 25-thread
+    reserve-only stress test above) but exercising the FULL lifecycle mix —
+    reserve / fill / partial-then-cancel / zero-fill-cancel — against ONE
+    shared bankroll, then checked at TWO quiescent points (round 1 join,
+    round 2 join) plus a post-settle third point, rather than a single final
+    snapshot.
+
+    holdings_basis == 0 throughout (PUSD_BUY side only, no CTF legs), so the
+    identity collapses to: bankroll == free + reserved_open + unsettled_outgoing.
+
+    NOTE (honest pre-change disclosure): this worktree's base HEAD already
+    contains commit c7e095ee1 ("CAS reservation ledger with convert-on-fill
+    and type-aware A4 identity", 2026-07-02), which closed the check-then-
+    insert TOCTOU this test targets. This test therefore PASSES on both the
+    worktree's pre-change and post-change HEAD — it cannot be made to FAIL
+    pre-change because the fix predates this packet's starting point. The
+    TOCTOU characterization (SELECT preflight then a separate INSERT with no
+    wrapping transaction, so concurrent connections could both pass preflight
+    and both insert) is preserved verbatim in that commit's message and in
+    the superseded parent revision (818a88e44) of reserve_pusd_for_buy.
+    """
+    import random
+    import threading
+
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import (
+        convert_reservation_on_fill,
+        release_reservation_for_command_state,
+    )
+
+    db_path = tmp_path / "cas_lifecycle_stress.db"
+    setup_conn = sqlite3.connect(db_path)
+    setup_conn.row_factory = sqlite3.Row
+    init_schema(setup_conn)
+    init_collateral_schema(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    BANKROLL_MICRO = 300_000_000  # 300 pUSD
+    RESERVE_MICRO = 5_000_000  # 5 pUSD/command -> up to 60 concurrent grants
+    ORDER_SIZE = 10.0
+    ORDER_PRICE = 0.5  # notional = 5_000_000 micro, matches RESERVE_MICRO exactly
+
+    ledger_seed = CollateralLedger(db_path=db_path)
+    ledger_seed.set_snapshot(_snapshot(pusd=BANKROLL_MICRO))
+    ledger_seed.close()
+
+    def _quiescent_identity(bankroll_micro: int) -> dict[str, int]:
+        vconn = sqlite3.connect(db_path)
+        reserved_open = vconn.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
+            "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL"
+        ).fetchone()[0]
+        unsettled_outgoing = vconn.execute(
+            "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
+            "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL"
+        ).fetchone()[0]
+        vconn.close()
+        free = bankroll_micro - reserved_open - unsettled_outgoing
+        return {
+            "reserved_open": int(reserved_open),
+            "unsettled_outgoing": int(unsettled_outgoing),
+            "free": int(free),
+        }
+
+    def _run_round(round_no: int, n_threads: int) -> None:
+        outcomes = ["fill", "partial_cancel", "zero_cancel"]
+        results: list[str] = []
+        errors: list[tuple[str, str]] = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            command_id = f"lifecycle-r{round_no}-{i}"
+            outcome = outcomes[i % len(outcomes)]
+            conn_t = sqlite3.connect(db_path, timeout=30)
+            conn_t.row_factory = sqlite3.Row
+            conn_t.execute("PRAGMA journal_mode=WAL")
+            conn_t.execute("PRAGMA busy_timeout=30000")
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                conn_t.execute(
+                    """
+                    INSERT INTO venue_commands (
+                        command_id, snapshot_id, envelope_id, position_id, decision_id,
+                        idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                        state, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'INTENT_CREATED',?,?)
+                    """,
+                    (
+                        command_id, f"snap-{command_id}", f"env-{command_id}", f"pos-{command_id}",
+                        f"dec-{command_id}", f"idem-{command_id}", "ENTRY", "z4-market",
+                        YES_TOKEN, "BUY", ORDER_SIZE, ORDER_PRICE, now, now,
+                    ),
+                )
+                try:
+                    CollateralLedger._cas_insert_pusd_reservation(conn_t, command_id, RESERVE_MICRO, now)
+                except CollateralInsufficient:
+                    conn_t.rollback()
+                    with lock:
+                        results.append("insufficient")
+                    return
+                conn_t.commit()
+
+                if outcome == "fill":
+                    conn_t.execute(
+                        """
+                        INSERT INTO venue_order_facts (
+                            venue_order_id, command_id, state, remaining_size, matched_size,
+                            source, observed_at, local_sequence, raw_payload_hash
+                        ) VALUES (?, ?, 'MATCHED', '0', ?, 'WS_USER', ?, 0, ?)
+                        """,
+                        (
+                            f"vo-{command_id}", command_id, str(ORDER_SIZE), now,
+                            hashlib.sha256(command_id.encode()).hexdigest(),
+                        ),
+                    )
+                    convert_reservation_on_fill(conn_t, command_id, "FILLED")
+                elif outcome == "partial_cancel":
+                    matched = ORDER_SIZE * 0.4
+                    conn_t.execute(
+                        """
+                        INSERT INTO venue_order_facts (
+                            venue_order_id, command_id, state, remaining_size, matched_size,
+                            source, observed_at, local_sequence, raw_payload_hash
+                        ) VALUES (?, ?, 'PARTIALLY_MATCHED', ?, ?, 'WS_USER', ?, 0, ?)
+                        """,
+                        (
+                            f"vo-{command_id}", command_id, str(ORDER_SIZE - matched), str(matched), now,
+                            hashlib.sha256((command_id + "p").encode()).hexdigest(),
+                        ),
+                    )
+                    convert_reservation_on_fill(conn_t, command_id, "CANCELLED")
+                else:
+                    release_reservation_for_command_state(conn_t, command_id, "REJECTED")
+                conn_t.commit()
+                with lock:
+                    results.append(outcome)
+            except Exception as exc:  # noqa: BLE001 — captured for the assertion below
+                with lock:
+                    errors.append((type(exc).__name__, str(exc)))
+            finally:
+                conn_t.close()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+        random.Random(round_no).shuffle(threads)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        assert not errors, f"round {round_no}: non-CollateralInsufficient errors under contention: {errors}"
+        assert len(results) == n_threads
+
+    # Round 1: 30 threads racing against the 300M bankroll (60 grants possible
+    # at 5M each) mixed with fill/partial-cancel/zero-cancel outcomes.
+    _run_round(1, 30)
+    q1 = _quiescent_identity(BANKROLL_MICRO)
+    assert q1["free"] >= 0, f"round 1 quiescent free went negative: {q1}"
+    assert q1["reserved_open"] == 0, (
+        "every round-1 command reached a terminal outcome (fill/cancel), so no "
+        f"open reservations should remain: {q1}"
+    )
+    # A4 identity (holdings_basis == 0, cash-only slice):
+    assert BANKROLL_MICRO == q1["free"] + q1["reserved_open"] + q1["unsettled_outgoing"]
+
+    # Round 2: reuse the SAME bankroll snapshot (still unsettled from round 1)
+    # — proves capital released/converted in round 1 is correctly reflected
+    # (not leaked, not double-counted) before any balance-refresh settle.
+    _run_round(2, 30)
+    q2 = _quiescent_identity(BANKROLL_MICRO)
+    assert q2["free"] >= 0, f"round 2 quiescent free went negative: {q2}"
+    assert q2["reserved_open"] == 0
+    assert BANKROLL_MICRO == q2["free"] + q2["reserved_open"] + q2["unsettled_outgoing"]
+    # Round 2's unsettled_outgoing must be >= round 1's — conversions only
+    # accumulate until a balance-refresh settle clears matured rows.
+    assert q2["unsettled_outgoing"] >= q1["unsettled_outgoing"]
+
+    # Settle: simulate the venue balance catching up to every converted fill
+    # (a balance-refresh snapshot captured after CLOCK_SKEW clears matured
+    # unsettled rows, per _clear_matured_unsettled_proceeds).
+    settle_conn = sqlite3.connect(db_path)
+    settle_conn.row_factory = sqlite3.Row
+    total_converted = settle_conn.execute(
+        "SELECT COALESCE(SUM(converted_amount),0) FROM collateral_reservations"
+    ).fetchone()[0]
+    settle_conn.close()
+    new_bankroll = BANKROLL_MICRO - int(total_converted)
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS + 300)
+    ledger_settle = CollateralLedger(db_path=db_path)
+    ledger_settle.set_snapshot(_snapshot(pusd=new_bankroll, captured_at=future))
+    ledger_settle.close()
+
+    q3 = _quiescent_identity(new_bankroll)
+    assert q3["unsettled_outgoing"] == 0, f"settle should clear all matured unsettled rows: {q3}"
+    assert q3["free"] >= 0
+    assert new_bankroll == q3["free"] + q3["reserved_open"] + q3["unsettled_outgoing"]
+    assert q3["free"] == new_bankroll  # nothing left in flight after settle
