@@ -1623,7 +1623,6 @@ law_gate:
       - tests/test_fdr.py
       - tests/test_architecture_contracts.py
     protects:
-      - src/strategy/fdr_filter.py
       - src/strategy/selection_family.py
   NO_DIAGNOSTIC_PROMOTION:
     tests:

@@ -54,9 +54,8 @@ from src.engine.replay import (
     _replay_calibration_lookup_keys,
 )
 from src.state.db import get_backtest_connection, get_trade_connection_with_world, init_backtest_schema
-from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
-from src.strategy.selection_family import apply_familywise_fdr, make_hypothesis_family_id
+from src.strategy.selection_family import DEFAULT_FDR_ALPHA, apply_familywise_fdr, make_hypothesis_family_id
 from src.types import Bin
 
 logger = logging.getLogger(__name__)
