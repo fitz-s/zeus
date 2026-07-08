@@ -51,12 +51,6 @@ Key scripts: `check_topology_structural_blockers.py`, `assert_invariant_coverage
 `check_db_table_delta.py`, `check_source_rationale_delta.py`, `semantic_diff_classifier.py`,
 `check_context_pack_integrity.py`, `pr_monitor.py`
 
-### `ingest/` — Data ingestion ticks (7 scripts)
-
-Standalone ticks decoupled from the main scheduler:
-`daily_obs_tick.py` (WU + HKO + Ogimet), `forecasts_daily_tick.py` (NWP 5 models × 7 leads),
-`hourly_instants_tick.py`, `hole_scanner_tick.py`, `solar_daily_tick.py`
-
 ### `migrations/` — Schema migrations (19 scripts)
 
 Named `202605_*` / `202606_*`. Applied via `__main__.py`. One-time schema operations with

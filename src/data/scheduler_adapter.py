@@ -18,82 +18,20 @@ DB-heavy jobs starve heartbeats:
 This module is the structural home of the "UMA must not write the DB on the file-only fast
 executor" fix: by construction a writes_db job is assigned a *_db class, never io/heartbeat.
 
-PR6 ships this planner + a dry-run preview ONLY. Flipping the live daemon to build its scheduler
-from these specs is gated behind ZEUS_SCHEDULER_REGISTRY_ENABLED (default off) and is an
-operator-go activation step — this module changes NO runtime behavior on its own.
+R3 (2026-07-08, ingest contractualization): the legacy hand-coded add_job() scheduler mode and
+its ZEUS_DATA_COLLECTION_MODE/ZEUS_USE_LEGACY_DATA_COLLECTION/ZEUS_SCHEDULER_REGISTRY_ENABLED
+mode-flag machinery were DELETED — zero-caller-verified (no deploy/launchd plist ever set any of
+those env vars; the registry-built path has been the sole live path since PR #329). The
+registry-built scheduler is now unconditional, not merely the default.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal["live_db", "backfill_db", "derived_db", "io", "heartbeat"]
-
-SCHEDULER_REGISTRY_FLAG = "ZEUS_SCHEDULER_REGISTRY_ENABLED"  # legacy flag (back-compat, see below)
-
-# PR #329 review A/F: ONE data-collection mode flag, two values. The replacement (registry-built
-# scheduler) is the DEFAULT; legacy (hand-coded add_job) is the rollback escape hatch (F). A
-# single flag makes the two modes structurally mutually exclusive — you cannot be both.
-DATA_COLLECTION_MODE_FLAG = "ZEUS_DATA_COLLECTION_MODE"     # "registry" (default) | "legacy"
-LEGACY_DATA_COLLECTION_FLAG = "ZEUS_USE_LEGACY_DATA_COLLECTION"  # "1" -> force legacy (F rollback)
-REGISTRY_MODE = "registry"
-LEGACY_MODE = "legacy"
-
-
-def _truthy(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes")
-
-
-def assert_single_collection_mode() -> None:
-    """F: registry and legacy modes are mutually exclusive — contradictory env fails fast at boot.
-
-    Forbidden combinations (the operator must pick exactly one mode, not half-set two switches):
-      * ZEUS_DATA_COLLECTION_MODE=registry  AND  ZEUS_USE_LEGACY_DATA_COLLECTION=1
-      * ZEUS_DATA_COLLECTION_MODE=legacy    AND  ZEUS_SCHEDULER_REGISTRY_ENABLED=1
-      * ZEUS_DATA_COLLECTION_MODE set to anything other than registry/legacy
-    """
-    raw_mode = os.environ.get(DATA_COLLECTION_MODE_FLAG)
-    legacy_force = _truthy(os.environ.get(LEGACY_DATA_COLLECTION_FLAG, "0"))
-    registry_legacy_flag = _truthy(os.environ.get(SCHEDULER_REGISTRY_FLAG, "0"))
-
-    explicit_mode = raw_mode.strip().lower() if raw_mode is not None else None
-    if explicit_mode is not None and explicit_mode not in (REGISTRY_MODE, LEGACY_MODE):
-        raise RuntimeError(
-            f"{DATA_COLLECTION_MODE_FLAG}={raw_mode!r} invalid; must be "
-            f"{REGISTRY_MODE!r} or {LEGACY_MODE!r}."
-        )
-    # Contradiction only when the mode is EXPLICITLY set against an opposing flag — the rollback
-    # flag ALONE (mode unset) is a valid way to select legacy, not a conflict.
-    if explicit_mode == REGISTRY_MODE and legacy_force:
-        raise RuntimeError(
-            f"{DATA_COLLECTION_MODE_FLAG}=registry contradicts {LEGACY_DATA_COLLECTION_FLAG}=1 — "
-            "registry and legacy schedulers are mutually exclusive; set exactly one."
-        )
-    if explicit_mode == LEGACY_MODE and registry_legacy_flag:
-        raise RuntimeError(
-            f"{DATA_COLLECTION_MODE_FLAG}=legacy contradicts {SCHEDULER_REGISTRY_FLAG}=1 — "
-            "registry and legacy schedulers are mutually exclusive; set exactly one."
-        )
-
-
-def data_collection_mode() -> str:
-    """The active data-collection mode: 'registry' (default) | 'legacy'.
-
-    Default REGISTRY (PR #329 review A: the replacement is real + active, not deferred). The
-    legacy hand-coded path is reachable only via an explicit opt-out (ZEUS_USE_LEGACY_DATA_
-    COLLECTION=1 or ZEUS_DATA_COLLECTION_MODE=legacy). Raises on a contradictory combination."""
-    assert_single_collection_mode()
-    if _truthy(os.environ.get(LEGACY_DATA_COLLECTION_FLAG, "0")):
-        return LEGACY_MODE
-    return (os.environ.get(DATA_COLLECTION_MODE_FLAG, REGISTRY_MODE)).strip().lower()
-
-
-def registry_scheduler_active() -> bool:
-    """True when the registry-built scheduler is the active path (the new default)."""
-    return data_collection_mode() == REGISTRY_MODE
 
 
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:

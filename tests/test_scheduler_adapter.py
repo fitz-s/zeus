@@ -9,50 +9,18 @@
 from __future__ import annotations
 
 
-def test_registry_scheduler_is_default_legacy_is_opt_out(monkeypatch) -> None:
-    """PR #329 review A: the registry-built scheduler is now the DEFAULT (replacement is real, not
-    deferred). Legacy is reachable only via an explicit opt-out."""
+def test_legacy_scheduler_mode_flags_deleted() -> None:
+    """R3 (2026-07-08): the legacy hand-coded add_job() scheduler mode and its mode-selection
+    flags were deleted (zero-caller-verified — no deploy/launchd plist ever set them). The
+    registry-built scheduler is unconditional now, not merely the default."""
     from src.data import scheduler_adapter as sa
 
-    for var in (sa.DATA_COLLECTION_MODE_FLAG, sa.LEGACY_DATA_COLLECTION_FLAG, sa.SCHEDULER_REGISTRY_FLAG):
-        monkeypatch.delenv(var, raising=False)
-    assert sa.data_collection_mode() == "registry"          # default
-    assert sa.registry_scheduler_active() is True
-
-    monkeypatch.setenv(sa.LEGACY_DATA_COLLECTION_FLAG, "1")  # explicit rollback
-    assert sa.data_collection_mode() == "legacy"
-    assert sa.registry_scheduler_active() is False
-
-    monkeypatch.delenv(sa.LEGACY_DATA_COLLECTION_FLAG, raising=False)
-    monkeypatch.setenv(sa.DATA_COLLECTION_MODE_FLAG, "legacy")
-    assert sa.data_collection_mode() == "legacy"
-
-
-def test_registry_scheduler_and_legacy_scheduler_are_mutually_exclusive(monkeypatch) -> None:
-    """PR #329 review F: registry and legacy modes cannot both be active. Contradictory env fails
-    fast at boot (you must pick exactly one), and an invalid mode value is rejected."""
-    import pytest
-
-    from src.data import scheduler_adapter as sa
-
-    # registry mode + legacy-force flag = contradiction
-    monkeypatch.setenv(sa.DATA_COLLECTION_MODE_FLAG, "registry")
-    monkeypatch.setenv(sa.LEGACY_DATA_COLLECTION_FLAG, "1")
-    with pytest.raises(RuntimeError, match="mutually exclusive"):
-        sa.assert_single_collection_mode()
-
-    # legacy mode + old registry-enable flag = contradiction
-    monkeypatch.setenv(sa.DATA_COLLECTION_MODE_FLAG, "legacy")
-    monkeypatch.delenv(sa.LEGACY_DATA_COLLECTION_FLAG, raising=False)
-    monkeypatch.setenv(sa.SCHEDULER_REGISTRY_FLAG, "1")
-    with pytest.raises(RuntimeError, match="mutually exclusive"):
-        sa.assert_single_collection_mode()
-
-    # invalid mode value rejected
-    monkeypatch.delenv(sa.SCHEDULER_REGISTRY_FLAG, raising=False)
-    monkeypatch.setenv(sa.DATA_COLLECTION_MODE_FLAG, "banana")
-    with pytest.raises(RuntimeError, match="invalid"):
-        sa.assert_single_collection_mode()
+    for removed in (
+        "DATA_COLLECTION_MODE_FLAG", "LEGACY_DATA_COLLECTION_FLAG", "SCHEDULER_REGISTRY_FLAG",
+        "REGISTRY_MODE", "LEGACY_MODE", "data_collection_mode", "registry_scheduler_active",
+        "assert_single_collection_mode",
+    ):
+        assert not hasattr(sa, removed), f"{removed} should have been deleted with legacy mode"
 
 
 def test_no_db_writer_on_file_only_executor() -> None:

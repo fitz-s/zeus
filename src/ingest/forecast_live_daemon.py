@@ -1197,16 +1197,15 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
 
     from src.data.scheduler_adapter import (
         build_registry_scheduler,
-        data_collection_mode,
         registry_executor_pools,
     )
 
     specs = forecast_live_job_specs(startup_run_date=startup_run_date)
 
     # Operator Point-1 directive 2026-06-08: a DEDICATED executor lane for the replacement-
-    # forecast production jobs, present in EVERY scheduler branch below, so the replacement
-    # anchor download never contends with the heartbeat or OpenData lanes. The
-    # replacement jobs are registered (after each branch builds its scheduler) on this lane.
+    # forecast production jobs, so the replacement anchor download never contends with the
+    # heartbeat or OpenData lanes. The replacement jobs are registered (after the scheduler is
+    # built) on this lane.
     def _replacement_production_executor() -> dict[str, object]:
         # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of
         # (and starve) the light materialize that refreshes readiness — see
@@ -1216,35 +1215,18 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
             REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
         }
 
-    # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane routing +
-    # a fail-fast boot assert. The hand-coded loop below is the LEGACY (rollback) path only.
-    if data_collection_mode() == "registry":
-        scheduler = BlockingScheduler(
-            timezone=timezone.utc,
-            executors={**registry_executor_pools(), **_replacement_production_executor()},
-        )
-        build_registry_scheduler(
-            scheduler, "forecast_live_daemon", _job_defs_from_specs(specs),
-            forecast_live_owner_env=os.environ.get("ZEUS_FORECAST_LIVE_OWNER", ""),
-            logger=logger,
-        )
-        _register_replacement_forecast_production_jobs(scheduler, startup_run_date=startup_run_date)
-        return scheduler
-
-    # LEGACY mode (ZEUS_USE_LEGACY_DATA_COLLECTION=1 / ZEUS_DATA_COLLECTION_MODE=legacy): the
-    # original hand-coded 2-pool scheduler, byte-identical to pre-#329 behavior.
+    # R3 (2026-07-08): registry-built scheduling with executor-lane routing + a fail-fast boot
+    # assert is now the ONLY path — the legacy hand-coded 2-pool add_job() loop was deleted
+    # (zero-caller-verified; no plist ever set the mode-selection env vars, see scheduler_adapter.py).
     scheduler = BlockingScheduler(
         timezone=timezone.utc,
-        executors={
-            "default": _APSchedulerThreadPoolExecutor(max_workers=1),
-            "fast": _APSchedulerThreadPoolExecutor(max_workers=1),
-            "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
-            "source_health": _APSchedulerThreadPoolExecutor(max_workers=1),
-            **_replacement_production_executor(),
-        },
+        executors={**registry_executor_pools(), **_replacement_production_executor()},
     )
-    for func, trigger, kwargs in specs:
-        scheduler.add_job(func, trigger, **kwargs)
+    build_registry_scheduler(
+        scheduler, "forecast_live_daemon", _job_defs_from_specs(specs),
+        forecast_live_owner_env=os.environ.get("ZEUS_FORECAST_LIVE_OWNER", ""),
+        logger=logger,
+    )
     _register_replacement_forecast_production_jobs(scheduler, startup_run_date=startup_run_date)
     return scheduler
 

@@ -2185,7 +2185,6 @@ def _ingest_main_job_specs() -> list[tuple]:
 
 def main() -> None:
     global _scheduler
-    from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     # F85: route INFO/DEBUG to stdout (.log) and WARNING+ to stderr (.err).
@@ -2308,34 +2307,19 @@ def main() -> None:
 
     from src.data.scheduler_adapter import (
         build_registry_scheduler,
-        data_collection_mode,
         job_defs_from_specs,
         registry_executor_pools,
     )
 
-    _mode = data_collection_mode()
-    if _mode == "registry":
-        # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane
-        # routing + a fail-fast boot assert (a registry/daemon job-set mismatch halts boot rather
-        # than booting a divergent schedule). The hand-coded loop below is the LEGACY rollback path.
-        _scheduler = BlockingScheduler(executors=registry_executor_pools())
-        build_registry_scheduler(
-            _scheduler, "ingest_main", job_defs_from_specs(specs),
-            forecast_live_owner_env=_forecast_live_owner(), logger=logger,
-        )
-    else:
-        # LEGACY mode (ZEUS_USE_LEGACY_DATA_COLLECTION=1 / ZEUS_DATA_COLLECTION_MODE=legacy): the
-        # original hand-coded 2-pool scheduler. Trigger params come from the SAME spec list, so the
-        # only difference from pre-#329 is the registry path's lane/concurrency normalization.
-        # See memory: feedback_sqlite_wal_multi_writer_starvation.md.
-        _scheduler = BlockingScheduler(
-            executors={
-                "default": _APSchedulerThreadPoolExecutor(max_workers=1),
-                "fast": _APSchedulerThreadPoolExecutor(max_workers=4),
-            },
-        )
-        for _fn, _trigger, _kwargs in specs:
-            _scheduler.add_job(_fn, _trigger, **_kwargs)
+    # R3 (2026-07-08): registry-built scheduling with executor-lane routing + a fail-fast boot
+    # assert (a registry/daemon job-set mismatch halts boot rather than booting a divergent
+    # schedule) is now the ONLY path — the legacy hand-coded 2-pool add_job() loop was deleted
+    # (zero-caller-verified; no plist ever set the mode-selection env vars, see scheduler_adapter.py).
+    _scheduler = BlockingScheduler(executors=registry_executor_pools())
+    build_registry_scheduler(
+        _scheduler, "ingest_main", job_defs_from_specs(specs),
+        forecast_live_owner_env=_forecast_live_owner(), logger=logger,
+    )
 
     jobs = [j.id for j in _scheduler.get_jobs()]
     logger.info("Ingest scheduler ready. %d jobs: %s", len(jobs), jobs)
