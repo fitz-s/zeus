@@ -1,7 +1,7 @@
 # Created: 2026-06-13
 # Last reused or audited: 2026-06-13
 # Authority basis: workflow A4 calibration diagnosis 2026-06-13 + docs/authority statistical_calibration_addendum.
-#   GATE-2 defect relationship tests (RED-on-revert). Two cross-module invariants:
+#   GATE-2 defect relationship test (RED-on-revert):
 #     RT-1 RING CALIBRATION: the near-center ring q must carry its realized mass — q(dist-1 ring) >=
 #       realized_freq(dist-1). Under the LIVE uniform-pedestal sigma-shape this is RED (the pedestal
 #       steals ring mass: dist-1 mean_q 0.1715 < realized 0.1912). It turns GREEN only under the refit
@@ -9,12 +9,9 @@
 #       pedestal and floors the core sigma at the realized ~1.8-step dispersion. The test pins the
 #       invariant on a SYNTHETIC settled population whose realized ring frequency is known by
 #       construction, so it is deterministic and city/unit-agnostic.
-#     RT-2 MARKET-ANCHOR CAP BLIND SPOT: the live market-anchor cap (src/strategy/live_inference/
-#       market_anchor.py) is one-sided — q_anchor_no = a*q_model_no + (1-a)*market_no; out = min(in,
-#       anchor). For a CONFIDENT NO where the market ALSO leans NO, the blend stays above the price, so
-#       the cap CANNOT veto the admit; it only trims size. This pins the algebraic blind spot so nobody
-#       re-claims "the cap fixes GATE-2" (it provably cannot — the fix must be upstream at q production).
-"""Relationship tests for the GATE-2 sigma-shape refit and the market-anchor cap blind spot."""
+#     RT-2 (MARKET-ANCHOR CAP BLIND SPOT) removed 2026-07-08: see removal note above RT-1's tests below —
+#       src/strategy/live_inference/market_anchor.py was deleted as a zero-caller corpse.
+"""Relationship test for the GATE-2 sigma-shape refit (market-anchor cap blind spot test removed)."""
 from __future__ import annotations
 
 import importlib.util
@@ -153,64 +150,9 @@ def test_rt1_floor_drives_dist2_ratio_to_one():
     assert abs(ratio_floor - 1.0) < 0.2, f"floored dist-2 ratio should be near 1.0, got {ratio_floor:.3f}"
 
 
-# ==================================================================================================
-# RT-2: MARKET-ANCHOR CAP BLIND SPOT — the cap cannot veto a confident NO.
-#       Pins the algebra so no one re-claims the cap fixes GATE-2.
-# ==================================================================================================
-def _load_market_anchor():
-    from src.strategy.live_inference.market_anchor import market_anchored_no_lcb  # noqa: PLC0415
-    return market_anchored_no_lcb
-
-
-def test_rt2_market_anchor_cap_cannot_veto_a_confident_no():
-    """A confident NO (q_model_no high) whose market ALSO leans NO is NOT vetoed by the one-sided cap.
-
-    GATE-2 loss class: the model is confidently NO on a near-center ring bin AND the market price is a
-    moderate NO. The anchor blend q_anchor_no = a*q_model_no + (1-a)*market_no stays ABOVE the NO price,
-    so the cap only trims the lower bound; the admit (q_lcb_no_out > price) SURVIVES. The cap is the
-    WRONG layer for GATE-2 — proven here algebraically.
-    """
-    cap = _load_market_anchor()
-    # Confident NO on a near-center bin; market also leans NO (price 0.62), but the calibrated truth is
-    # that this bin actually WINS (so the NO loses). The model over-weights NO because its q(bin) is too
-    # low (the GATE-2 over-flattening). alpha = model trust (legacy level-3 ~0.5).
-    price_no = 0.62
-    res = cap(
-        q_lcb_no=0.80,        # confident NO lower bound (overconfident — the disease)
-        q_model_no=0.85,      # confident NO point belief
-        market_no_price=price_no,
-        alpha=0.5,
-        bin_distance_steps=1.0,   # near-center ring bin (in scope for the cap)
-    )
-    # The cap trims toward the blend but the blend = 0.5*0.85 + 0.5*0.62 = 0.735 > price 0.62.
-    assert res.q_lcb_no_out > price_no, (
-        f"BLIND SPOT: the cap must NOT push a confident-NO lower bound below the price (it only trims). "
-        f"out={res.q_lcb_no_out} should stay > price={price_no} — the admit survives, the cap cannot veto."
-    )
-    # Explicitly: even capped, the trade is still ADMITTED (out > price), so the cap did not prevent the
-    # GATE-2 loss. This is the structural claim: the fix must be upstream at q production.
-    admitted = res.q_lcb_no_out > price_no
-    assert admitted, "the confident NO is still admitted after the cap — the cap cannot fix GATE-2"
-
-
-def test_rt2_cap_is_one_sided_only_lowers():
-    """Sanity pin: the cap is one-sided (out <= in always); it can only ever LOWER the bound."""
-    cap = _load_market_anchor()
-    for q_in, q_model, mkt, a in [(0.8, 0.85, 0.62, 0.5), (0.7, 0.7, 0.9, 0.5), (0.5, 0.5, 0.3, 0.7)]:
-        res = cap(q_lcb_no=q_in, q_model_no=q_model, market_no_price=mkt, alpha=a, bin_distance_steps=1.0)
-        assert res.q_lcb_no_out <= q_in + 1e-9, f"cap must never raise the bound: {res.q_lcb_no_out} > {q_in}"
-
-
-def test_rt2_cap_only_trims_when_blend_below_input():
-    """When the market is a STRONG NO the blend can drop below the input and the cap trims (still no veto
-    of a positive-edge admit unless the blend < price, which is the market's call, not the cap's)."""
-    cap = _load_market_anchor()
-    # Strong-NO market (0.95): blend = 0.5*0.85 + 0.5*0.95 = 0.90; input 0.80 -> NOT capped (blend>input).
-    res = cap(q_lcb_no=0.80, q_model_no=0.85, market_no_price=0.95, alpha=0.5, bin_distance_steps=1.0)
-    assert not res.capped, "blend above input must not cap"
-    # Weak-NO market (0.30): blend = 0.5*0.85 + 0.5*0.30 = 0.575; input 0.80 -> capped to 0.575.
-    res2 = cap(q_lcb_no=0.80, q_model_no=0.85, market_no_price=0.30, alpha=0.5, bin_distance_steps=1.0)
-    assert res2.capped and abs(res2.q_lcb_no_out - 0.575) < 1e-9, "weak-NO market must trim to the blend"
+# RT-2 (MARKET-ANCHOR CAP BLIND SPOT) removed 2026-07-08: src/strategy/live_inference/market_anchor.py
+# was deleted as a zero-caller corpse (R0-c purge; the cap was already retired from the live adapter,
+# see tests/engine/test_market_anchor_retired_from_live_adapter.py). RT-1 above is unaffected.
 
 
 if __name__ == "__main__":

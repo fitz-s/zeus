@@ -843,32 +843,6 @@ state_machines:
     invariant_tests:
       - tests/forecast/test_raw_center_and_provenance.py
 
-  exit_family_decision_reason:
-    owner: src/strategy/exit_family_optimizer.py
-    description: >
-      ExitFamilyDecision per-leg verdict reason vocabulary emitted by the
-      D3 family optimizer (PR #353, 2026-05-27). The optimizer is the pure-
-      math layer of the multi-bin family exit strategy; these reasons are
-      NOT trading commands or lifecycle states — they are typed strings
-      returned in ExitLegDecision.reason that the follow-up integration
-      PR (D5 short-circuit + D3 monitor wiring) routes into exit_reason on
-      the existing exit_lifecycle state machine. Registered here so the CI
-      semantic classifier recognises the new uppercase tokens (per mesh-
-      maintenance: new vocabulary must be registered).
-    states:
-      - OBSERVATION_IMPOSSIBLE_HIGH
-      - OBSERVATION_IMPOSSIBLE_LOW
-      - OBSERVATION_IMPOSSIBLE_UNKNOWN_METRIC
-      - OBSERVATION_IMPOSSIBLE_NO_BID
-      - OBSERVATION_CONTRADICTION_FAIL_CLOSED
-      - OBSERVATION_CONTRADICTION_NO_BID
-      - EV_CASH_OUT
-      - HOLD_DOMINANT
-      - NO_EXECUTABLE_BID
-    invariant_tests:
-      - tests/test_exit_family_optimizer.py
-      - tests/test_exit_strategy_relationship.py
-
   obs_coverage_status:
     description: >
       Observation coverage status emitted by ObservationClient and stamped on
@@ -956,7 +930,6 @@ state_machines:
       - SUBMIT_ABORTED_MODE_FLIPPED
       - PARTIAL_FILL
     invariant_tests:
-      - tests/test_exit_family_optimizer.py
       - tests/test_stake_min_order_not_edge_reversed.py
       - tests/test_day0_exposure_cap_kernel.py
       - tests/engine/test_final_submit_mode_authority.py
@@ -1206,7 +1179,6 @@ state_machines:
       - tests/test_command_recovery.py
       - tests/test_exit_safety.py
       - tests/test_unknown_side_effect.py
-      - tests/execution/test_liquidation_value_engine.py
 
   venue_submission_diagnostic_labels:
     owner: src/venue/polymarket_v2_adapter.py

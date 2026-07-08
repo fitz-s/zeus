@@ -48,6 +48,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from src.config import settings
+
+# HARDCODED(setting_key="edge.fdr_alpha", note_key="edge._fdr_alpha_note",
+#           tier=1, replace_after="500+ candidate evaluations",
+#           data_needed="observed false positive rate versus target FDR")
+DEFAULT_FDR_ALPHA = float(settings["edge"]["fdr_alpha"])
+
 
 @dataclass(frozen=True)
 class HypothesisRecord:

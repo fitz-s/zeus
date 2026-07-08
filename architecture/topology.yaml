@@ -677,8 +677,6 @@ core_map_profiles:
         route_claims: [VIG_BEFORE_BLEND, TEMPERATURE_DELTA_SCALE_ONLY]
       - id: market_analysis
         file: src/strategy/market_analysis.py
-      - id: fdr_filter
-        file: src/strategy/fdr_filter.py
       - id: kelly
         file: src/strategy/kelly.py
         route_claims: [EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY]
@@ -692,7 +690,6 @@ core_map_profiles:
       - {from: market_fusion, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_fusion, symbol: compute_alpha}}
       - {from: market_fusion, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.strategy.market_fusion, symbol: compute_posterior}}
       - {from: market_analysis, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_analysis, symbol: MarketAnalysis}}
-      - {from: fdr_filter, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.fdr_filter, symbol: fdr_filter}}
       - {from: kelly, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.kelly, symbol: dynamic_kelly_mult}}
       - {from: settlement_semantics, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.contracts, symbol: SettlementSemantics}}
       - {from: settlement_semantics, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.contracts.settlement_semantics, symbol: round_wmo_half_up_values}}
@@ -2491,7 +2488,6 @@ digest_profiles:
       - "architecture/digest_profiles.py"
       - "src/strategy/market_analysis.py"
       - "src/strategy/market_analysis_family_scan.py"
-      - "src/strategy/fdr_filter.py"
       - "src/strategy/kelly.py"
       - "src/strategy/risk_limits.py"
       - "src/engine/evaluator.py"
@@ -2513,7 +2509,6 @@ digest_profiles:
       - "architecture/digest_profiles.py"
       - "src/strategy/market_analysis.py"
       - "src/strategy/market_analysis_family_scan.py"
-      - "src/strategy/fdr_filter.py"
       - "src/strategy/kelly.py"
       - "src/strategy/risk_limits.py"
       - "src/engine/evaluator.py"
