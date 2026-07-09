@@ -1,4 +1,5 @@
 # Created: 2026-07-03
+# Last reused/audited: 2026-07-08
 # Authority basis: W4.2 relocation of the persisted-cancel journal engine out of the retired
 #   src/execution/maker_rest_escalation.py into src/execution/venue_cancel_journal.py (still used
 #   by main._edli_boot_invalid_pending_entry_authority_cancel_once,
@@ -224,6 +225,38 @@ class TestPersistedRestCancel:
         assert events[-1][1]["semantic_cancel_status"] == "CANCEL_UNKNOWN"
         assert events[-1][1]["requires_m5_reconcile"] is True
 
+    def test_ambiguous_already_canceled_or_matched_is_recoverable_unknown(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+
+        class AmbiguousClob:
+            def cancel_order(self, _order_id: str):
+                return {
+                    "orderID": "o1",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "order can't be found - already canceled or matched",
+                }
+
+        stats = run_persisted_cancels_for_expired_rests(
+            [_entry("c1", "o1")], AmbiguousClob(),
+            conn_factory=lambda: conn, close_connections=False,
+        )
+
+        events = [
+            (row["event_type"], json.loads(row["payload_json"] or "{}"))
+            for row in conn.execute(
+                "SELECT event_type, payload_json FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            )
+        ]
+        assert stats == {
+            "scanned": 1, "cancelled": 0, "cancel_failed": 1, "cancel_journal_failed": 0,
+        }
+        assert events[-1][0] == "CANCEL_REPLACE_BLOCKED"
+        assert "CANCEL_ACKED" not in [event_type for event_type, _ in events]
+        assert events[-1][1]["semantic_cancel_status"] == "CANCEL_UNKNOWN"
+        assert events[-1][1]["requires_m5_reconcile"] is True
+
     def test_terminal_command_race_does_not_append_cancel_replace_blocked(self):
         conn = _db()
         _add_order(conn, command_id="c1", venue_order_id="o1")
@@ -300,6 +333,7 @@ class TestPersistedRestCancel:
 
     def test_persisted_cancel_immediately_voids_zero_fill_pending_entry_projection(self):
         from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema
         from tests.test_command_recovery import (
             _advance_to_acked,
@@ -311,6 +345,7 @@ class TestPersistedRestCancel:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_collateral_schema(conn)
         _insert(conn, size=13.45, price=0.68)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(

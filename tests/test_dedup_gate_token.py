@@ -88,6 +88,17 @@ def mem_db():
         )
     """)
     conn.execute("""
+        CREATE TABLE venue_command_events (
+            event_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            state_after TEXT
+        )
+    """)
+    conn.execute("""
         CREATE TABLE venue_order_facts (
             fact_id INTEGER PRIMARY KEY,
             venue_order_id TEXT NOT NULL,
@@ -649,6 +660,110 @@ def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):
     assert result["existing_command_id"] == "cmd-cancelled"
     assert result["candidate_price"] == "0.73"
     assert result["candidate_shares"] == "12.7"
+
+
+def test_terminal_no_fill_rest_pull_reprice_bypasses_same_token_cooldown(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-cancel-acked', 'cmd-cancelled', 2, 'CANCEL_ACKED',
+                   '2026-06-18T09:59:00+00:00',
+                   '{"cancel_reason":"CONFIRMED_VALUE_REFRESH"}',
+                   'CANCELLED')"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.74,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
+    )
+
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_no_fill_rest_pull_reprice"
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["rest_pull_cancel_reason"] == "CONFIRMED_VALUE_REFRESH"
+    assert result["reprice_delta"] == "0.01"
+
+
+def test_terminal_no_fill_rest_pull_still_requires_actual_reprice(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-cancel-acked', 'cmd-cancelled', 2, 'CANCEL_ACKED',
+                   '2026-06-18T09:59:00+00:00',
+                   '{"cancel_reason":"CONFIRMED_VALUE_REFRESH"}',
+                   'CANCELLED')"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["rest_pull_cancel_reason"] == "CONFIRMED_VALUE_REFRESH"
+    assert result["reprice_delta"] == "0.00"
 
 
 def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
