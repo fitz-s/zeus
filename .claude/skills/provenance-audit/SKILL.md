@@ -32,4 +32,4 @@ Update `Last audited` when reusing or re-auditing. A file without date + authori
 
 ## Why this exists
 
-Agents systematically hallucinate that existing code is trustworthy because it runs; running is necessary but not sufficient. The audit is near-zero-cost now and expensive to skip later. When in doubt: audit.
+Running code proves only that it ran, not that its assumptions match current law — Zeus law changes faster than its code, so a passing test today can rest on an invariant that no longer holds. The audit is near-zero-cost now and expensive to skip later. When in doubt: audit.

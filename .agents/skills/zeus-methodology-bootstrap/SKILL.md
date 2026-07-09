@@ -64,7 +64,7 @@ When fired, this SKILL ensures the agent reads:
 - **`.Codex/skills/multi-agent-debate-and-execution/SKILL.md`** (NEW v1 2026-05-03) — generic reusable EXECUTION + CLOSURE phase skill. Covers per-packet boot template, GO/DONE/REVIEW cycle, 3-batch decomposition, PATH A precision-favored framing, K3-adjacent surface pre-flag, HONEST DISCLOSURE pattern, 10-ATTACK template, co-tenant safe staging, cross-module orchestration seam. Embeds 5-packet 32-cycle Zeus R3 §1 #2 case study. Mirror at `~/.Codex/skills/multi-agent-debate-and-execution/SKILL.md` for cross-project reuse. Methodology doc covers DEBATE phase; this new skill covers EXECUTION + CLOSURE.
 - `.agents/skills/zeus-phase-discipline/SKILL.md` (Mode C/D operating pattern):
 - `.Codex/skills/zeus-phase-discipline/SKILL.md` (Mode C per-batch; 14 anti-drift mechanisms compressed)
-- Root `AGENTS.md` (Reads for adversarial work; §3 "What to read by task" → Adversarial debate / multi-agent / contamination remediation bullet)
+- Root `AGENTS.md` (§3 "Routing And Gates" → "Task-specific supplemental reads" table → Adversarial debate / multi-agent / contamination remediation row)
 - `docs/operations/task_2026-04-27_harness_debate/` (4-cycle case studies: R1+R2+R3+Tier 2)
 - `docs/operations/task_2026-04-28_contamination_remediation/` (5th cycle + 5th outcome category instantiation)
 

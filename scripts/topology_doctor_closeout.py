@@ -442,7 +442,7 @@ def run_closeout(
         "claim_scope": {
             "graph": "code_review_graph lane blocks closeout only for changed graph paths or explicit graph-impact claims",
             "repo_health": "global_health is reported separately from changed-file closeout",
-            "receipts": "receipt/work-record/planning-lock remain blocking for governed changed files",
+            "receipts": "receipt/work-record remain blocking for governed changed files; planning-lock (run_planning_lock) is a compatibility no-op since ac1f5a182 (2026-06-20) and no longer blocks",
         },
         "migration_notes": {
             "runtime_path_first": "python scripts/topology_doctor.py runtime --task '<task>' --files <files> --intent '<intent>' --task-class <class> --write-intent <intent>",

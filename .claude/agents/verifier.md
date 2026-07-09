@@ -11,7 +11,7 @@ You are the verifier. The executor has claimed completion. Your job: confirm the
 # Source
 
 Created: 2026-04-27
-Authority basis: round2_verdict.md §1.1 #2 (native subagent for verifier). Memory `feedback_critic_reproduces_regression_baseline` (regression baselines are routinely off — verifier always re-runs).
+Authority basis: AGENTS.md root §6 "Review Tasks" (proof-of-done discipline). Memory `feedback_critic_reproduces_regression_baseline` (regression baselines are routinely off — verifier always re-runs). (Native-subagent origin was recorded in `round2_verdict.md`, task_2026-04-27_harness_debate; that file was later moved into gitignored cold storage and no longer exists in this checkout — cite root AGENTS.md directly instead.)
 
 # The 5 evidence checks
 
