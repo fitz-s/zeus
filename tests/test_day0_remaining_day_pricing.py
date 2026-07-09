@@ -990,9 +990,10 @@ class TestRequestHashProvenance:
 
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
         # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the
-        # day0-hourly-refresh cluster; the reactor-cluster interval helper (used
-        # only by the still-in-main.py _edli_reactor_day0_hourly_refresher) stays.
-        import src.main as main
+        # day0-hourly-refresh cluster. R4-b3 (2026-07-08): the reactor-cluster
+        # interval helper's sole caller (_edli_reactor_day0_hourly_refresher)
+        # also moved to src.events.reactor with the reactor+prune cluster, so it
+        # followed.
         from src.events import reactor
 
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", raising=False)
@@ -1003,14 +1004,16 @@ class TestRequestHashProvenance:
         assert reactor._day0_hourly_refresh_max_cities(priority_city_count=31) == 1
         assert reactor._day0_hourly_refresh_budget_seconds() == 3.0
         assert reactor._day0_hourly_fetch_timeout_seconds() == 1.5
-        assert main._reactor_day0_hourly_refresh_interval_seconds() == 300.0
+        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 300.0
 
     def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
         self, monkeypatch
     ):
+        # R4-b3 (2026-07-08): _edli_reactor_day0_hourly_refresher moved from
+        # src/main.py to src.events.reactor with the reactor+prune cluster.
         import src.config as config
         import src.data.day0_hourly_vectors as hv
-        import src.main as main
+        from src.events import reactor
 
         captured = {}
 
@@ -1027,7 +1030,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", fake_refresh)
         monkeypatch.delenv("ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS", raising=False)
 
-        refresh = main._edli_reactor_day0_hourly_refresher()
+        refresh = reactor._edli_reactor_day0_hourly_refresher()
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
         assert captured["interval_s"] == 300.0
@@ -1039,11 +1042,11 @@ class TestRequestHashProvenance:
     ):
         # R4-b2 (2026-07-08 main.py slimming): the priority-families builder
         # moved to src.events.reactor with the day0-hourly-refresh cluster.
-        # It still lazily reach-back-imports the main.py-owned generic
-        # family-refresh utilities (_pending_family_rows_for_refresh,
-        # _open_rest_family_rows_for_refresh — shared broadly outside this
-        # cluster, so they stayed in main.py), so those two are patched on
-        # `main` as before; the held-family read now lives in reactor.py.
+        # R4-b3 (2026-07-08): _open_rest_family_rows_for_refresh's only
+        # remaining caller (_edli_day0_live_family_admission, in the
+        # reactor+prune cluster) also moved to src.events.reactor, so it
+        # followed too; _pending_family_rows_for_refresh is still used
+        # broadly outside any EDLI cluster and stays in main.py.
         import src.main as main
         from src.events import reactor
 
@@ -1064,7 +1067,7 @@ class TestRequestHashProvenance:
         )
         monkeypatch.setattr(reactor, "get_trade_connection_read_only", lambda: _Conn())
         monkeypatch.setattr(
-            main,
+            reactor,
             "_open_rest_family_rows_for_refresh",
             lambda _conn: [("London", "2026-06-25", "high")],
         )

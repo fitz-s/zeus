@@ -175,13 +175,15 @@ def test_proof_limit_ceiling_covers_live_family_set():
     FORECAST_SNAPSHOT_READY set (~200 events across ~50 cities × 3 dates) so honest
     no-edge is only declared after a FULL evaluation. A 50-cap truncates the queue
     below the live family count — unevaluated markets, which the operator forbids."""
-    import src.main as M
+    # R4-b3 (2026-07-08): _edli_positive_int_or_unbounded moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster.
+    from src.events import reactor
 
     # The live set is ~50 cities × up to 3 active target dates ≈ 150-210 events.
     # The ceiling must comfortably exceed this so a single cycle is not capped below
     # the admissible queue.
     cfg = {"no_submit_proof_limit": 100000}
-    resolved = M._edli_positive_int_or_unbounded(
+    resolved = reactor._edli_positive_int_or_unbounded(
         cfg, "no_submit_proof_limit", default=10, maximum=400
     )
     assert resolved >= 200, (

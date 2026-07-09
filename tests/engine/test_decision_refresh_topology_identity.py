@@ -356,7 +356,10 @@ def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backo
     durable shared evidence.
     """
 
+    # R4-b3 (2026-07-08): _edli_reactor_family_market_absence_provider moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster.
     import src.main as main
+    from src.events import reactor
     from src.data import market_absence_evidence
 
     monkeypatch.setattr(
@@ -365,7 +368,7 @@ def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backo
         lambda **_kwargs: False,
     )
 
-    provider = main._edli_reactor_family_market_absence_provider()
+    provider = reactor._edli_reactor_family_market_absence_provider()
 
     assert not hasattr(main, "_GAMMA_EMPTY_BACKOFF_UNTIL")
     assert provider(city="Auckland", target_date="2026-06-20", metric="low") is False
@@ -378,7 +381,9 @@ def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch
     own process-local backoff map.
     """
 
-    import src.main as main
+    # R4-b3 (2026-07-08): _edli_reactor_family_market_absence_provider moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster.
+    from src.events import reactor
     from src.data import market_absence_evidence
 
     def _has_recent_market_unavailable_evidence(*, city, target_date, metric, now=None, path=None):
@@ -390,7 +395,7 @@ def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch
         _has_recent_market_unavailable_evidence,
     )
 
-    provider = main._edli_reactor_family_market_absence_provider()
+    provider = reactor._edli_reactor_family_market_absence_provider()
 
     assert provider(city="Auckland", target_date="2026-06-20", metric="low") is True
     assert provider(city="Auckland", target_date="2026-06-20", metric="high") is False

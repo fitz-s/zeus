@@ -30,11 +30,16 @@ def test_default_pre_submit_outer_guard_clears_live_clob_tail(monkeypatch):
     still lower the value explicitly via env, but the no-env production default must
     match the 6s guard assumed by the warm-connection design.
     """
+    # R4-b3 (2026-07-08): _edli_pre_submit_jit_outer_timeout_seconds moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster;
+    # _edli_pre_submit_clob_timeout_seconds is used broadly outside that
+    # cluster and stayed in main.py.
     import src.main as main
+    from src.events import reactor
 
     monkeypatch.delenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", raising=False)
     assert main._edli_pre_submit_clob_timeout_seconds() >= 6.0
-    assert main._edli_pre_submit_jit_outer_timeout_seconds() >= 4.5
+    assert reactor._edli_pre_submit_jit_outer_timeout_seconds() >= 4.5
 
 
 def test_jit_book_strict_timeout_fails_closed_before_outer_guard_with_double_applied_connect():
@@ -101,7 +106,13 @@ def test_jit_book_provider_reuses_warm_client_across_calls(monkeypatch):
     monkeypatch.setattr(pmc, "PolymarketClient", _StubClient)
     main._edli_reset_pre_submit_jit_clob_client()
     try:
-        fetch = main._edli_pre_submit_jit_book_quote_provider()
+        # R4-b3 (2026-07-08): _edli_pre_submit_jit_book_quote_provider moved
+        # from src/main.py to src.events.reactor with the reactor+prune
+        # cluster; the warm-client reset/construct primitives it wraps stay
+        # in main.py (shared with the boot pre-warm + keepalive pinger).
+        from src.events import reactor
+
+        fetch = reactor._edli_pre_submit_jit_book_quote_provider()
         for _ in range(3):
             book = fetch("token-xyz")
             assert book and book.get("hash") == "h1"
