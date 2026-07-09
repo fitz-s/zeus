@@ -170,7 +170,18 @@ _CURRENT_TEMP_SQL = """
 """
 
 _LATEST_CONTEXT_SQL = """
-    SELECT temp_current, running_max, running_min, station_id, temp_unit, imported_at, source_role
+    SELECT
+        temp_current,
+        running_max,
+        running_min,
+        station_id,
+        temp_unit,
+        imported_at,
+        source_role,
+        authority,
+        data_version,
+        training_allowed,
+        causality_status
     FROM observation_instants
     WHERE city = ?
       AND target_date = ?
@@ -403,7 +414,15 @@ def read_day0_observation_context_from_instants(
     except sqlite3.OperationalError:
         latest = conn.execute(
             """
-            SELECT temp_current, running_max, running_min, source_role
+            SELECT
+                temp_current,
+                running_max,
+                running_min,
+                source_role,
+                authority,
+                data_version,
+                training_allowed,
+                causality_status
             FROM observation_instants
             WHERE city = ?
               AND target_date = ?
@@ -431,21 +450,31 @@ def read_day0_observation_context_from_instants(
     observed_unit = unit
     available_at = result.decision_time_utc
     latest_source_role = ""
+    latest_source_authority = ""
+    latest_data_version = ""
+    latest_training_allowed = None
+    latest_causality_status = ""
     if latest is not None:
         latest_current = latest[0]
         latest_hi = latest[1]
         latest_low = latest[2]
-        if len(latest) > 3:
-            if len(latest) == 4:
-                latest_source_role = str(latest[3] or "").strip()
-            else:
-                station_id = str(latest[3] or "").strip().upper()
-        if len(latest) > 4:
+        if len(latest) >= 11:
+            station_id = str(latest[3] or "").strip().upper()
             observed_unit = str(latest[4] or unit or "C")
-        if len(latest) > 5:
             available_at = str(latest[5] or result.decision_time_utc)
-        if len(latest) > 6:
             latest_source_role = str(latest[6] or "").strip()
+            latest_source_authority = str(latest[7] or "").strip()
+            latest_data_version = str(latest[8] or "").strip()
+            latest_training_allowed = bool(latest[9]) if latest[9] is not None else None
+            latest_causality_status = str(latest[10] or "").strip()
+        elif len(latest) >= 8:
+            latest_source_role = str(latest[3] or "").strip()
+            latest_source_authority = str(latest[4] or "").strip()
+            latest_data_version = str(latest[5] or "").strip()
+            latest_training_allowed = bool(latest[6]) if latest[6] is not None else None
+            latest_causality_status = str(latest[7] or "").strip()
+        elif len(latest) >= 4:
+            latest_source_role = str(latest[3] or "").strip()
 
     if (
         latest_source_role == "runtime_monitoring"
@@ -473,6 +502,11 @@ def read_day0_observation_context_from_instants(
         coverage_status=str(result.coverage_status),
         observation_available_at=available_at,
         provider_reported_time="canonical_observation_instants",
+        source_role=latest_source_role,
+        source_authority=latest_source_authority,
+        data_version=latest_data_version,
+        training_allowed=latest_training_allowed,
+        causality_status=latest_causality_status or "OK",
     )
 
 

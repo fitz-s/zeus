@@ -1,4 +1,5 @@
 # Created: 2026-07-02
+# Last reused/audited: 2026-07-08
 # Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
 #   §1 "batch submit + safe prefixes" + architecture/invariants.yaml INV-28
 #   -- W2.1 packet (inert, no production call site).
@@ -26,11 +27,13 @@ _NOW = datetime(2026, 7, 2, tzinfo=timezone.utc)
 @pytest.fixture
 def mem_conn():
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_collateral_schema(c)
     yield c
     c.close()
 
@@ -222,6 +225,36 @@ class TestCancelCommandsBatchMapping:
         outcomes = cancel_commands_batch(mem_conn, client, ["cmd-0", "cmd-1"])
 
         assert [o.status for o in outcomes] == ["acked", "not_canceled"]
+
+    def test_ambiguous_already_canceled_or_matched_does_not_ack_cancel(self, mem_conn):
+        _seed_ackable_command(mem_conn, command_id="cmd-live-shape", venue_order_id="vord-live")
+        client = FakeGatewayClient(
+            cancel_responses=[
+                [
+                    _not_canceled(
+                        "vord-live",
+                        "order can't be found - already canceled or matched",
+                    )
+                ]
+            ]
+        )
+
+        outcomes = cancel_commands_batch(mem_conn, client, ["cmd-live-shape"])
+
+        assert outcomes[0].status == "not_canceled"
+        command = mem_conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-live-shape'"
+        ).fetchone()
+        event_types = [
+            row["event_type"]
+            for row in mem_conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'cmd-live-shape' ORDER BY sequence_no"
+            )
+        ]
+        assert command["state"] == "REVIEW_REQUIRED"
+        assert event_types[-2:] == ["CANCEL_REQUESTED", "CANCEL_FAILED"]
+        assert "CANCEL_ACKED" not in event_types
 
     def test_not_requestable_command_skipped_without_blocking_chunk(self, mem_conn):
         _seed_ackable_command(mem_conn, command_id="cmd-good", venue_order_id="vord-good")

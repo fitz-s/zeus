@@ -253,7 +253,7 @@ Merge order on completion: W1.1 first.
 ══ W0 WAVE CLOSED 2026-07-02 ══ — final merge 8e1fb748; wave branch carries all four packets
 (W0.1 tripwire, W0.2 dual latency + blind-window, W0.3 SOURCE_RUN_ARRIVED, W0.4 registry
 backfill). Closing sanity: 143 + 1 + 14 tests green, fingerprint pin unchanged, manifest audit 0.
-NOT yet deployed to live daemon — deploy decision is the operator's, and W0.3's CHECK migration
+NOT yet deployed to live daemon — deploy is decided by the phase's gates passing, not by approval; W0.3's CHECK migration
 triggers a full opportunity_events table rebuild on first boot (flagged above).
 - W1.2 DONE — b845bd6c. q_version sourced from the VALIDATED certificate payload
   (executor.py:5378→5699→insert_command :5715; hash originates event_reactor_adapter.py:11564,
@@ -717,7 +717,7 @@ E2. MERGE TO MAIN:
    - git checkout main (main worktree /Users/leofitz/zeus — FIRST resolve the parked dirty
      hotfix tree there: P0.1 attribution debt, commit or stash-record it) → merge wave branch
      (--no-ff, milestone message) → full sanity → push origin main.
-E3. DEPLOY (operator-gated, quiet window):
+E3. DEPLOY (gates decide, quiet window):
    - Deploy gates on record: (a) opportunity_events full-table rebuild fires on first boot
      (W0.3 CHECK migration) — pick a no-cycle-advance window; (b) NEGRISK_SPLIT selector dry-run
      required before any first live neg-risk split (phase-2 concern, recorded not blocking);

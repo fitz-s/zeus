@@ -10,6 +10,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 | [`order_engine_rebuild_execution_plan_2026-07-02.md`](order_engine_rebuild_execution_plan_2026-07-02.md) | OPEN | Order-engine v2 execution packets (authority chain in docs/rebuild/) |
 | [`../../../rebuild/EXECUTION_MASTER_2026-07-07.md`](../../../rebuild/EXECUTION_MASTER_2026-07-07.md) | READY | 重构执行总纲:compact 后重对齐入口(§A),R0-R8 packet 队列 + 拓扑 + 验收模板;待操作员三开关(§I)|
 | [`../../../rebuild/whole_system_first_principles_2026-07-07.md`](../../../rebuild/whole_system_first_principles_2026-07-07.md) | PROPOSED | 全系统第一性原理蓝图:8 子系统判决 + 疤痕根除审计(§7)+ consult 对撞(§8);执行细节看 EXECUTION_MASTER |
+| [`../../../rebuild/representation_contract_2026-07-08.md`](../../../rebuild/representation_contract_2026-07-08.md) | PROPOSED | 表示层契约(agent-first):注释/命名/元数据/锚点四法 + 实测底账 + 逐 surface 判决;R-wave 第四维,落地包 = R0-h |
 | [`percity_representativeness_debias.md`](percity_representativeness_debias.md) | OPEN | Per-city representativeness de-bias |
 | [`live_redecision_repair/PLAN.md`](live_redecision_repair/PLAN.md) | IMPLEMENTING | Held-position redecision + exit readiness repair |
 | [`data_temporal_kernel/PLAN.md`](data_temporal_kernel/PLAN.md) | DORMANT | Ingest temporal control plane (additive; no commits since 2026-06) |

@@ -1250,6 +1250,7 @@ def _scheduler_job(job_name: str):
         @functools.wraps(fn)
         def _wrapper(*args, **kwargs):
             try:
+                _write_scheduler_health(job_name, failed=False, started=True)
                 result = fn(*args, **kwargs)
                 _write_scheduler_health(job_name, failed=False)
                 return result
@@ -1260,6 +1261,21 @@ def _scheduler_job(job_name: str):
         return _wrapper
 
     return _decorator
+
+
+def _scheduler_max_instance_skip_listener(event: Any) -> None:
+    """Surface APScheduler max-instance skips as live scheduler health."""
+
+    job_name = str(getattr(event, "job_id", "") or "").strip()
+    if not job_name:
+        return
+    logger.warning("scheduler job skipped: job=%s reason=max_instances_reached", job_name)
+    _write_scheduler_health(
+        job_name,
+        failed=False,
+        skipped=True,
+        skip_reason="max_instances_reached",
+    )
 
 
 
@@ -1496,12 +1512,6 @@ def _write_heartbeat() -> None:
             write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
         except Exception:
             pass
-        # Relationship-F: surface composite live-health on every heartbeat cycle
-        try:
-            from src.control.live_health import compute_composite_live_health
-            compute_composite_live_health()
-        except Exception:
-            pass  # observability write must never mask heartbeat success
         _heartbeat_fails = 0
     except Exception as exc:
         _heartbeat_fails += 1
@@ -1518,6 +1528,15 @@ def _write_heartbeat() -> None:
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
             os._exit(1)
+
+
+@_scheduler_job("live_health_composite")
+def _live_health_composite_cycle() -> None:
+    """Refresh composite live-health without blocking the heartbeat pulse."""
+
+    from src.control.live_health import compute_composite_live_health
+
+    compute_composite_live_health()
 
 
 _venue_heartbeat_supervisor = None
@@ -3017,7 +3036,10 @@ def _check_deployment_freshness(
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
     df_path = state_path("deployment_freshness.json")
     try:
-        from src.control.runtime_code_plane import runtime_code_plane_diff
+        from src.control.runtime_code_plane import (
+            dirty_runtime_worktree_paths,
+            runtime_code_plane_diff,
+        )
 
         code_plane = runtime_code_plane_diff(
             _repo_root,
@@ -3025,8 +3047,10 @@ def _check_deployment_freshness(
             current_sha=current_sha,
             timeout=5,
         )
+        dirty_runtime_paths = dirty_runtime_worktree_paths(_repo_root, timeout=5)
     except Exception as exc:  # noqa: BLE001
         code_plane = None
+        dirty_runtime_paths = ()
         logger.warning(
             "deployment_freshness: runtime code-plane classification failed (%s); "
             "treating SHA drift as executable",
@@ -3042,7 +3066,7 @@ def _check_deployment_freshness(
         except Exception as _exc:
             logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
 
-    if current_sha == _boot_sha:
+    if current_sha == _boot_sha and not dirty_runtime_paths:
         if df_path.exists():
             _write_deployment_freshness_state(
                 {
@@ -3058,7 +3082,7 @@ def _check_deployment_freshness(
             )
         return  # No divergence.
 
-    if code_plane is not None and not code_plane.runtime_code_changed:
+    if code_plane is not None and not code_plane.runtime_code_changed and not dirty_runtime_paths:
         _write_deployment_freshness_state(
             {
                 "boot_sha": _boot_sha,
@@ -3081,12 +3105,22 @@ def _check_deployment_freshness(
         )
         return
 
+    stale_status = "dirty_runtime_worktree" if dirty_runtime_paths else "mismatch"
+    changed_paths_sample = (
+        list(code_plane.changed_paths[:20]) if code_plane is not None else []
+    )
+    dirty_paths_sample = list(dirty_runtime_paths[:20])
     if uptime_hours >= 24.0:
         import signal as _signal
         logger.critical(
-            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh. "
+            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh "
+            "(status=%s dirty_runtime_paths=%s). "
             "Signaling SIGTERM to escape APScheduler exception boundary.",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
+            _boot_sha[:8],
+            current_sha[:8],
+            uptime_hours,
+            stale_status,
+            dirty_paths_sample[:5],
         )
         # os.kill(SIGTERM) propagates to the process's signal handler OUTSIDE
         # APScheduler's BaseException catch in run_job(), ensuring the daemon
@@ -3095,14 +3129,20 @@ def _check_deployment_freshness(
         os.kill(os.getpid(), _signal.SIGTERM)
         raise SystemExit(
             f"DEPLOYMENT_STALE — daemon loaded SHA {_boot_sha[:8]} but filesystem "
-            f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
+            f"has {current_sha[:8]} for >{uptime_hours:.1f}h "
+            f"(status={stale_status}). "
             f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
         )
     else:
         logger.error(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — merged code not reloaded; pausing entries immediately",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
+            "uptime_hours=%.1f status=%s dirty_runtime_paths=%s — runtime code not cleanly "
+            "loaded; pausing entries immediately",
+            _boot_sha[:8],
+            current_sha[:8],
+            uptime_hours,
+            stale_status,
+            dirty_paths_sample[:5],
         )
         # Write advisory flag to dedicated state/deployment_freshness.json.
         # NOT control_plane.json — that file is overwritten on every cycle by
@@ -3115,14 +3155,14 @@ def _check_deployment_freshness(
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
                 "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
-                "status": "mismatch",
+                "status": stale_status,
                 "code_plane_status": (
                     code_plane.status if code_plane is not None else "classification_failed"
                 ),
                 "runtime_code_changed": True,
-                "changed_paths_sample": (
-                    list(code_plane.changed_paths[:20]) if code_plane is not None else []
-                ),
+                "changed_paths_sample": changed_paths_sample,
+                "worktree_runtime_dirty": bool(dirty_runtime_paths),
+                "dirty_runtime_paths_sample": dirty_paths_sample,
             }
         )
         # Pause new entries immediately. Exit submits are also protected at the
@@ -3208,7 +3248,10 @@ def _boot_deployment_freshness_auto_resume() -> None:
             )
             return
         try:
-            from src.control.runtime_code_plane import runtime_code_plane_diff
+            from src.control.runtime_code_plane import (
+                dirty_runtime_worktree_paths,
+                runtime_code_plane_diff,
+            )
 
             code_plane = runtime_code_plane_diff(
                 PROJECT_ROOT,
@@ -3216,12 +3259,55 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 current_sha=current_sha,
                 timeout=5,
             )
+            dirty_runtime_paths = dirty_runtime_worktree_paths(PROJECT_ROOT, timeout=5)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "deployment_freshness_auto_resume: runtime code-plane classification failed "
                 "(%s); cannot verify SHA match",
                 exc,
             )
+            return
+        if dirty_runtime_paths:
+            logger.warning(
+                "deployment_freshness_auto_resume: runtime worktree is dirty at boot "
+                "(boot=%s current=%s paths=%s) — NOT auto-resuming",
+                boot_sha[:8],
+                current_sha[:8],
+                list(dirty_runtime_paths[:5]),
+            )
+            try:
+                df_path = state_path("deployment_freshness.json")
+                detected_at = datetime.now(timezone.utc)
+                boot_ts = _BOOT_STATE.get("ts")
+                uptime_hours = 0.0
+                if isinstance(boot_ts, datetime):
+                    uptime_hours = max(
+                        0.0,
+                        (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                    )
+                payload = {
+                    "boot_sha": boot_sha,
+                    "current_sha": current_sha,
+                    "uptime_hours": round(uptime_hours, 2),
+                    "detected_at": detected_at.isoformat(),
+                    "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
+                    "status": "dirty_runtime_worktree",
+                    "code_plane_status": code_plane.status,
+                    "runtime_code_changed": True,
+                    "changed_paths_sample": list(code_plane.changed_paths[:20]),
+                    "worktree_runtime_dirty": True,
+                    "dirty_runtime_paths_sample": list(dirty_runtime_paths[:20]),
+                }
+                tmp_path = str(df_path) + ".tmp"
+                with open(tmp_path, "w") as f:
+                    json.dump(payload, f, indent=2)
+                os.replace(tmp_path, str(df_path))
+            except Exception as exc:
+                logger.warning(
+                    "deployment_freshness_auto_resume: failed to write dirty worktree "
+                    "deployment_freshness.json (%s)",
+                    exc,
+                )
             return
         if current_sha != boot_sha and code_plane.runtime_code_changed:
             logger.warning(
@@ -5837,13 +5923,23 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     token_ids = {str(r[2] or "") for r in rows if r[2]}
     cond_by_token: dict[str, str] = {}
     side_by_token: dict[str, str] = {}
+    min_order_by_token: dict[str, object] = {}
     if token_ids:
         try:
+            latest_cols = {
+                str(row[1])
+                for row in trade_conn.execute(
+                    "PRAGMA table_info(executable_market_snapshot_latest)"
+                ).fetchall()
+            }
+            latest_min_order_select = (
+                ", min_order_size" if "min_order_size" in latest_cols else ", NULL AS min_order_size"
+            )
             tph = ",".join("?" for _ in token_ids)
             for cr in trade_conn.execute(
                 f"""
                 SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
-                       captured_at
+                       captured_at{latest_min_order_select}
                 FROM executable_market_snapshot_latest
                 WHERE selected_outcome_token_id IN ({tph})
                    OR yes_token_id IN ({tph})
@@ -5856,6 +5952,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 cond = str(cr[1] or "")
                 yes_token = str(cr[2] or "")
                 no_token = str(cr[3] or "")
+                min_order_size = cr[5]
                 for token, side in (
                     (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
                     (yes_token, "buy_yes"),
@@ -5864,39 +5961,78 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                     if token and token in token_ids and token not in cond_by_token:
                         cond_by_token[token] = cond
                         side_by_token[token] = side
+                        min_order_by_token[token] = min_order_size
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
             side_by_token = {}
-        if not cond_by_token:
+            min_order_by_token = {}
+        tokens_with_partial_fill: set[str] = set()
+        for row in rows:
+            token = str(row[2] or "")
+            if not token:
+                continue
             try:
-                tph = ",".join("?" for _ in token_ids)
+                matched = float(row[9]) if row[9] is not None else 0.0
+            except (TypeError, ValueError):
+                matched = 0.0
+            if matched > 0.0:
+                tokens_with_partial_fill.add(token)
+        fallback_token_ids = {
+            token
+            for token in token_ids
+            if token not in cond_by_token
+            or (
+                token in tokens_with_partial_fill
+                and min_order_by_token.get(token) in (None, "")
+            )
+        }
+        if fallback_token_ids:
+            try:
+                snapshot_cols = {
+                    str(row[1])
+                    for row in trade_conn.execute(
+                        "PRAGMA table_info(executable_market_snapshots)"
+                    ).fetchall()
+                }
+                snapshot_min_order_select = (
+                    ", min_order_size"
+                    if "min_order_size" in snapshot_cols
+                    else ", NULL AS min_order_size"
+                )
+                tph = ",".join("?" for _ in fallback_token_ids)
                 for cr in trade_conn.execute(
                     f"""
                     SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
-                           captured_at
+                           captured_at{snapshot_min_order_select}
                     FROM executable_market_snapshots
                     WHERE selected_outcome_token_id IN ({tph})
                        OR yes_token_id IN ({tph})
                        OR no_token_id IN ({tph})
                     ORDER BY captured_at DESC
                     """,
-                    (*tuple(token_ids), *tuple(token_ids), *tuple(token_ids)),
+                    (
+                        *tuple(fallback_token_ids),
+                        *tuple(fallback_token_ids),
+                        *tuple(fallback_token_ids),
+                    ),
                 ).fetchall():
                     selected = str(cr[0] or "")
                     cond = str(cr[1] or "")
                     yes_token = str(cr[2] or "")
                     no_token = str(cr[3] or "")
+                    min_order_size = cr[5]
                     for token, side in (
                         (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
                         (yes_token, "buy_yes"),
                         (no_token, "buy_no"),
                     ):
-                        if token and token in token_ids and token not in cond_by_token:
-                            cond_by_token[token] = cond
-                            side_by_token[token] = side
+                        if token and token in fallback_token_ids:
+                            cond_by_token.setdefault(token, cond)
+                            side_by_token.setdefault(token, side)
+                            if min_order_by_token.get(token) in (None, ""):
+                                min_order_by_token[token] = min_order_size
             except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
-                cond_by_token = {}
-                side_by_token = {}
+                pass
     if beliefs is None:
         beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).
@@ -5933,6 +6069,10 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         resting_held_side_posterior = (
             1.0 - resting_posterior if screen_side == "buy_no" else resting_posterior
         )
+        try:
+            min_order_size = float(min_order_by_token[token_id])
+        except (KeyError, TypeError, ValueError):
+            min_order_size = None
         out.append(
             OpenRest(
                 command_id=command_id,
@@ -5948,6 +6088,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 created_at=created_at,
                 fact_state=fact_state,
                 matched_size=None if matched_size is None else float(matched_size),
+                min_order_size=min_order_size,
                 city=city,
                 target_date=target_date,
                 metric=metric,
@@ -7344,6 +7485,8 @@ def _edli_refresh_continuous_money_path_families(
         receipt = _edli_wait_for_substrate_priority_receipt(
             request_id=request_id,
             now_utc=now_utc,
+            families=clean_families,
+            condition_ids=priority_conditions,
         )
         if isinstance(receipt, dict):
             receipt_summary = dict(receipt.get("summary") or {})
@@ -7352,8 +7495,10 @@ def _edli_refresh_continuous_money_path_families(
                 "families_requested": len(clean_families),
                 "priority_condition_count": len(priority_conditions),
                 "priority_request_id": request_id,
+                "priority_receipt_request_id": str(receipt.get("request_id") or ""),
                 "priority_receipt_serviced_at": str(receipt.get("serviced_at") or ""),
                 "priority_receipt_matched": True,
+                "priority_receipt_match_mode": str(receipt.get("_match_mode") or "request_id"),
             }
         return {
             "status": "priority_marked",
@@ -7389,10 +7534,57 @@ def _edli_redecision_confirm_receipt_poll_seconds() -> float:
     return max(0.05, min(value, 2.0))
 
 
+def _edli_priority_receipt_family_set(raw_families: Iterable[object] | None):
+    out: set[tuple[str, str, str]] = set()
+    for raw in raw_families or ():
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            continue
+        family = tuple(str(part or "").strip() for part in raw)
+        if all(family) and family[2] in {"high", "low"}:
+            out.add(family)  # type: ignore[arg-type]
+    return out
+
+
+def _edli_priority_receipt_condition_set(raw_condition_ids: Iterable[object] | None):
+    return {
+        str(condition_id or "").strip()
+        for condition_id in (raw_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+
+
+def _edli_priority_receipt_covers_request_scope(
+    receipt: dict,
+    *,
+    families: Iterable[tuple[str, str, str]],
+    condition_ids: Iterable[str],
+    serviced_after: datetime,
+) -> bool:
+    try:
+        serviced_at = datetime.fromisoformat(str(receipt.get("serviced_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    if serviced_at.tzinfo is None:
+        serviced_at = serviced_at.replace(tzinfo=timezone.utc)
+    if serviced_at.astimezone(timezone.utc) < serviced_after.astimezone(timezone.utc):
+        return False
+    requested_families = _edli_priority_receipt_family_set(families)
+    requested_conditions = _edli_priority_receipt_condition_set(condition_ids)
+    receipt_families = _edli_priority_receipt_family_set(receipt.get("families") or [])
+    receipt_conditions = _edli_priority_receipt_condition_set(receipt.get("condition_ids") or [])
+    if requested_families and not requested_families.issubset(receipt_families):
+        return False
+    if requested_conditions and not requested_conditions.issubset(receipt_conditions):
+        return False
+    return bool(requested_families or requested_conditions)
+
+
 def _edli_wait_for_substrate_priority_receipt(
     *,
     request_id: str,
     now_utc: datetime,
+    families: Iterable[tuple[str, str, str]] | None = None,
+    condition_ids: Iterable[str] | None = None,
 ) -> dict | None:
     request_id = str(request_id or "").strip()
     wait_s = _edli_redecision_confirm_receipt_wait_seconds()
@@ -7411,7 +7603,23 @@ def _edli_wait_for_substrate_priority_receipt(
             max_age_seconds=max_age_s,
         )
         if isinstance(receipt, dict):
-            return receipt
+            out = dict(receipt)
+            out["_match_mode"] = "request_id"
+            return out
+        superseding_receipt = money_path_substrate_priority_receipt(
+            request_id=None,
+            now=current,
+            max_age_seconds=max_age_s,
+        )
+        if isinstance(superseding_receipt, dict) and _edli_priority_receipt_covers_request_scope(
+            superseding_receipt,
+            families=families or (),
+            condition_ids=condition_ids or (),
+            serviced_after=now_utc,
+        ):
+            out = dict(superseding_receipt)
+            out["_match_mode"] = "scope_superset"
+            return out
         remaining = deadline - time.monotonic()
         if remaining <= 0.0:
             logger.info(
@@ -8772,6 +8980,32 @@ def _edli_prune_pending_working_set(
         logger.warning(
             "EDLI reactor: replacement FSR spine-readiness sweep failed (non-fatal): %r",
             _spine_ready_sweep_exc,
+    )
+
+    try:
+        if _budget_exhausted("archive_terminal_last_error_events"):
+            return
+        _step_started = time.monotonic()
+        _terminal_last_error_archived = store.archive_terminal_last_error_events(
+            batch_limit=batch_limit,
+        )
+        _log_prune_step(
+            "archive_terminal_last_error_events",
+            _step_started,
+            _terminal_last_error_archived,
+        )
+        if _terminal_last_error_archived:
+            logger.warning(
+                "EDLI reactor: expired %d pending events with terminal durable "
+                "last_error verdicts; stale retry debt no longer suppresses fresh "
+                "forecast events (batch_limit=%d)",
+                _terminal_last_error_archived,
+                batch_limit,
+            )
+    except Exception as _terminal_last_error_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: terminal last_error sweep failed (non-fatal): %r",
+            _terminal_last_error_sweep_exc,
     )
 
     try:
@@ -10166,6 +10400,27 @@ def _edli_latest_pre_submit_book_row(
         side_filter = "AND best_bid_before IS NOT NULL"
     else:
         side_filter = "AND best_bid_before IS NOT NULL AND best_ask_before IS NOT NULL"
+    latest_sql = f"""
+        SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
+        FROM execution_feasibility_latest
+        WHERE token_id = ?
+          AND quote_seen_at <= ?
+          {side_filter}
+          AND COALESCE(book_hash_before, '') != ''
+        ORDER BY quote_seen_at DESC
+        LIMIT 1
+        """
+    try:
+        latest_row = book_evidence_conn.execute(
+            latest_sql,
+            (token_id, decision_time.isoformat()),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "execution_feasibility_latest" not in str(exc):
+            raise
+        latest_row = None
+    if latest_row is not None:
+        return latest_row
     return book_evidence_conn.execute(
         f"""
         SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
@@ -11122,12 +11377,20 @@ def main():
         scheduler_kwargs["executors"] = {
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
+            "observability": _APThreadPoolExecutor(1),
         }
     except ModuleNotFoundError:
         if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
             raise
 
     scheduler = BlockingScheduler(**scheduler_kwargs)
+    try:
+        from apscheduler.events import EVENT_JOB_MAX_INSTANCES
+
+        scheduler.add_listener(_scheduler_max_instance_skip_listener, EVENT_JOB_MAX_INSTANCES)
+    except ModuleNotFoundError:
+        if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
+            raise
 
     # max_instances=1: prevent concurrent execution if previous cycle still running
     edli_cfg = _settings_section("edli", {})
@@ -11307,6 +11570,15 @@ def main():
     )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
+    scheduler.add_job(
+        _live_health_composite_cycle,
+        "interval",
+        seconds=60,
+        id="live_health_composite",
+        max_instances=1,
+        coalesce=True,
+        executor="observability",
+    )
     # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
     # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db so the -wal file cannot
     # grow unboundedly when a reader transiently pins the floor between part-1

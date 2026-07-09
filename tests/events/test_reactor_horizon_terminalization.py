@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-07-08
 # Authority basis: operator law 2026-06-12 ("no caps of any kind"; "重试次数不是市场
 #   事实" — a retry count is not a market fact) + Wave 1 items 1 and 13 of
 #   docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md + external
@@ -523,6 +523,14 @@ def test_known_terminal_reason_stays_terminal_no_log(caplog):
             is False
         )
         assert _is_transient_money_path_reason("FILL_UP_NO_SUBMIT:BELIEF_NOT_STRENGTHENED") is False
+        assert (
+            _is_transient_money_path_reason(
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                "actual_profit_below_strategy_floor:strategy=forecast_qkernel_entry:"
+                "profit_lcb_usd=0.467748:floor=1.000000:stake_usd=11.703848:cost=0.640000"
+            )
+            is False
+        )
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
 
 

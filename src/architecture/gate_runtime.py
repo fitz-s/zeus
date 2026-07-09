@@ -90,19 +90,28 @@ def _deployment_freshness_mismatch() -> tuple[bool, str]:
     if not boot_sha:
         return False, "ZEUS_PROCESS_BOOT_SHA='' (not a managed live daemon process)"
     try:
-        from src.control.runtime_code_plane import runtime_code_plane_diff
+        from src.control.runtime_code_plane import (
+            dirty_runtime_worktree_paths,
+            runtime_code_plane_diff,
+        )
 
         code_plane = runtime_code_plane_diff(
             REPO_ROOT,
             boot_sha=boot_sha,
             timeout=2,
         )
+        dirty_paths = dirty_runtime_worktree_paths(REPO_ROOT, timeout=2)
     except Exception as exc:  # noqa: BLE001
         return True, f"runtime_code_plane_unreadable:{type(exc).__name__}"
     if code_plane.error:
         return True, (
             f"runtime_code_plane_{code_plane.status}:{code_plane.error}:"
             f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"
+        )
+    if dirty_paths:
+        return True, (
+            f"runtime_worktree_dirty:boot_sha={boot_sha[:8]} "
+            f"current_sha={code_plane.current_sha[:8]} paths={list(dirty_paths[:5])}"
         )
     if not code_plane.sha_changed:
         return False, f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"

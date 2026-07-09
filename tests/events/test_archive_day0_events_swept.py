@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-06-15
+# Last reused or audited: 2026-07-08
 # Authority basis: GOAL #83 / task #118 — DAY0_EXTREME_UPDATED events were in NEITHER
 #   drain sweep (archive_expired_candidates filtered FORECAST_SNAPSHOT_READY only;
 #   _CHANNEL_EVENT_TYPES is token-keyed and excludes day0). Live 2026-06-15: 1972 pending
@@ -529,6 +529,9 @@ def test_day0_supersession_candidate_query_uses_processing_status_index():
     )
     assert "SCAN P" not in plan, (
         f"day0 candidate query must not full-scan opportunity_event_processing, got: {plan!r}"
+    )
+    assert "USE TEMP B-TREE" not in plan, (
+        f"day0 candidate query must not materialize a temp ORDER BY tree, got: {plan!r}"
     )
 
 

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-08
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -1860,6 +1860,32 @@ def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_s
     assert "missing_authority_tier" not in errors
     assert "missing_first_member_observed_time" not in errors
     assert "missing_run_complete_time" not in errors
+
+
+def test_decision_source_context_preserves_posterior_identity_hash_for_capability_details():
+    ctx = DecisionSourceContext.from_forecast_context(
+        {
+            "source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+            "model_family": "bayes_precision_fusion",
+            "forecast_issue_time": "2026-07-08T06:00:00+00:00",
+            "forecast_valid_time": "2026-07-10T00:00:00+00:00",
+            "forecast_fetch_time": "2026-07-08T12:31:30+00:00",
+            "forecast_available_at": "2026-07-08T12:31:30+00:00",
+            "raw_payload_hash": "a" * 64,
+            "posterior_identity_hash": "posterior-q-version-001",
+            "degradation_level": "OK",
+            "forecast_source_role": "entry_primary",
+            "authority_tier": "FORECAST",
+            "first_member_observed_time": "2026-07-08T06:00:00+00:00",
+            "run_complete_time": "2026-07-08T12:31:00+00:00",
+            "decision_time": "2026-07-08T17:07:14+00:00",
+            "decision_time_status": "OK",
+        }
+    )
+
+    assert ctx is not None
+    assert ctx.posterior_identity_hash == "posterior-q-version-001"
+    assert ctx.capability_details()["posterior_identity_hash"] == "posterior-q-version-001"
 
 
 def test_market_events_authority_rows_have_topology_clock_fields():

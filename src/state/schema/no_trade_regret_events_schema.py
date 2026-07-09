@@ -52,11 +52,17 @@ CREATE INDEX IF NOT EXISTS idx_no_trade_regret_stage
     ON no_trade_regret_events(rejection_stage, created_at)
 """
 
+CREATE_CREATED_AT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_no_trade_regret_created_at
+    ON no_trade_regret_events(created_at DESC)
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     _ensure_columns(conn)
     conn.execute(CREATE_STAGE_INDEX_SQL)
+    conn.execute(CREATE_CREATED_AT_INDEX_SQL)
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:

@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-08
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -60,6 +60,7 @@ from src.state.portfolio import (
     FILL_AUTHORITY_NONE,
     PortfolioState,
     Position,
+    has_verified_trade_fill,
     load_portfolio,
 )
 
@@ -84,6 +85,13 @@ TRAILING_LOSS_STATUSES = {
 _BANKROLL_TRUTH_SOURCES_OF_RECORD = frozenset({
     "polymarket_wallet",
     "collateral_ledger_snapshot",
+})
+_RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
+    "pending_tracked",
+    "entered",
+    "day0_window",
+    "pending_exit",
+    "unknown",
 })
 
 
@@ -177,14 +185,6 @@ def _bankroll_of_record_for_riskguard() -> BankrollOfRecord | None:
         return None
 
 
-def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
-    try:
-        return load_portfolio(), "working_state_metadata"
-    except Exception:
-        logger.error("RiskGuard capital metadata load FAILED — refusing to fall back to settings", exc_info=True)
-        raise
-
-
 def _portfolio_position_from_loader_row(row: dict) -> Position:
     # B052: Enforce strict canonical fields rather than filling defaults
     required = ["trade_id", "market_id", "city", "target_date", "direction", "unit", "env", "size_usd"]
@@ -248,6 +248,107 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
     )
 
 
+def _riskguard_position_status_view_from_loader_rows(
+    rows: list[dict],
+    *,
+    excluded_trade_ids: set[str] | None = None,
+) -> dict:
+    excluded = excluded_trade_ids or set()
+    positions: list[dict] = []
+    strategy_open_counts: dict[str, int] = {}
+    chain_state_counts: dict[str, int] = {}
+    exit_state_counts: dict[str, int] = {}
+    total_exposure_usd = 0.0
+    total_unrealized_pnl = 0.0
+    unverified_entries = 0
+    day0_positions = 0
+
+    for row in rows:
+        trade_id = str(row.get("trade_id") or "")
+        if trade_id and trade_id in excluded:
+            continue
+        state = str(row.get("state") or "")
+        if state not in _RISKGUARD_OPEN_RUNTIME_STATES:
+            continue
+
+        strategy_key = str(row.get("strategy") or row.get("strategy_key") or "")
+        chain_state = str(row.get("chain_state") or "unknown")
+        exit_state = str(row.get("exit_state") or "none")
+        if state != "pending_exit":
+            exit_state = "none"
+        shares = _finite_float_or_none(row.get("shares")) or 0.0
+        mark_price = _finite_float_or_none(row.get("last_monitor_market_price"))
+        cost_basis_usd = _finite_float_or_none(row.get("cost_basis_usd"))
+        effective_cost_basis_usd = (
+            _finite_float_or_none(row.get("effective_cost_basis_usd"))
+            if row.get("effective_cost_basis_usd") is not None
+            else _finite_float_or_none(row.get("size_usd"))
+        ) or 0.0
+        unrealized_pnl = 0.0
+        if shares and mark_price is not None and cost_basis_usd is not None:
+            unrealized_pnl = round((shares * mark_price) - cost_basis_usd, 2)
+
+        positions.append({
+            "trade_id": trade_id,
+            "city": str(row.get("city") or ""),
+            "direction": str(row.get("direction") or ""),
+            "strategy": strategy_key,
+            "state": state,
+            "chain_state": chain_state,
+            "exit_state": exit_state,
+            "entry_fill_verified": bool(row.get("entry_fill_verified", False)),
+            "admin_exit_reason": str(row.get("admin_exit_reason") or ""),
+            "size_usd": effective_cost_basis_usd,
+            "submitted_size_usd": float(_finite_float_or_none(row.get("submitted_size_usd")) or 0.0),
+            "effective_cost_basis_usd": effective_cost_basis_usd,
+            "entry_economics_authority": str(row.get("entry_economics_authority") or ""),
+            "fill_authority": str(row.get("fill_authority") or ""),
+            "entry_economics_source": str(row.get("entry_economics_source") or ""),
+            "entry_price_avg_fill": float(_finite_float_or_none(row.get("entry_price_avg_fill")) or 0.0),
+            "shares_filled": float(_finite_float_or_none(row.get("shares_filled")) or 0.0),
+            "filled_cost_basis_usd": float(_finite_float_or_none(row.get("filled_cost_basis_usd")) or 0.0),
+            "execution_fact_intent_id": str(row.get("execution_fact_intent_id") or ""),
+            "execution_fact_filled_at": str(row.get("execution_fact_filled_at") or ""),
+            "shares": shares,
+            "entry_price": float(_finite_float_or_none(row.get("entry_price")) or 0.0),
+            "edge": None,
+            "bin_label": str(row.get("bin_label") or ""),
+            "decision_snapshot_id": str(row.get("decision_snapshot_id") or ""),
+            "token_id": str(row.get("token_id") or ""),
+            "no_token_id": str(row.get("no_token_id") or ""),
+            "condition_id": str(row.get("condition_id") or ""),
+            "day0_entered_at": str(row.get("day0_entered_at") or ""),
+            "mark_price": mark_price,
+            "unrealized_pnl": unrealized_pnl,
+        })
+
+        strategy_open_counts[strategy_key or "unclassified"] = (
+            strategy_open_counts.get(strategy_key or "unclassified", 0) + 1
+        )
+        chain_state_counts[chain_state] = chain_state_counts.get(chain_state, 0) + 1
+        exit_state_counts[exit_state] = exit_state_counts.get(exit_state, 0) + 1
+        total_exposure_usd += effective_cost_basis_usd
+        total_unrealized_pnl += unrealized_pnl
+        if not has_verified_trade_fill({"fill_authority": str(row.get("fill_authority") or "")}):
+            unverified_entries += 1
+        if state == "day0_window":
+            day0_positions += 1
+
+    return {
+        "status": "ok",
+        "table": "position_current",
+        "positions": positions,
+        "strategy_open_counts": strategy_open_counts,
+        "open_positions": len(positions),
+        "total_exposure_usd": round(total_exposure_usd, 2),
+        "unrealized_pnl": round(total_unrealized_pnl, 2),
+        "chain_state_counts": chain_state_counts,
+        "exit_state_counts": exit_state_counts,
+        "unverified_entries": unverified_entries,
+        "day0_positions": day0_positions,
+    }
+
+
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
     policy = choose_portfolio_truth_source(loader_view.get("status"))
@@ -255,10 +356,11 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         raise RuntimeError(
             f"riskguard requires canonical truth source, got {policy.source!r}: {policy.reason}"
         )
-    metadata_state, capital_source = _load_riskguard_capital_metadata()
+    loader_rows = list(loader_view.get("positions", []))
     positions = []
     quarantined: list[dict] = []
-    for row in loader_view.get("positions", []):
+    quarantine_reason_counts: dict[str, int] = {}
+    for row in loader_rows:
         try:
             positions.append(_portfolio_position_from_loader_row(row))
         except ValueError as exc:
@@ -272,55 +374,61 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             # the resilience is general. "Avoid silent masking" (the original B052 intent) is
             # preserved by a LOUD, COUNTED, EXPOSED quarantine (ERROR log + quarantined_count
             # in the returned truth dict) — not by crashing the whole tick.
-            logger.error(
-                "RiskGuard quarantined un-loadable canonical portfolio row "
-                "(excluded from risk view; tick CONTINUES): trade_id=%s state=%s: %s",
-                row.get("trade_id"), row.get("state"), exc,
-            )
+            reason = str(exc)
+            quarantine_reason_counts[reason] = quarantine_reason_counts.get(reason, 0) + 1
             quarantined.append(
-                {"trade_id": row.get("trade_id"), "state": row.get("state"), "reason": str(exc)}
+                {"trade_id": row.get("trade_id"), "state": row.get("state"), "reason": reason}
             )
             continue
-
-    # B053 [YELLOW / flag for SD-A authority-separation reviewer]:
-    # Dual-source consistency locking. A position-count mismatch between
-    # canonical_db (the authoritative source) and capital metadata (the
-    # blending input) indicates stale or drifted state. Elevate to ERROR
-    # log level and expose both counts on the returned dict so downstream
-    # callers can fail-close on `consistency_lock == 'mismatched'` rather
-    # than silently blend inconsistent authority sources.
-    metadata_positions = getattr(metadata_state, "positions", [])
-    # Account for quarantined rows: a KNOWN exclusion (see the loader loop) is not drift,
-    # so it must not raise a false B053 mismatch on every tick.
-    if (len(positions) + len(quarantined)) != len(metadata_positions):
+    if quarantined:
         logger.error(
-            "B053 Consistency Mismatch: canonical_db has %d positions (+%d quarantined) vs %d in capital metadata. RiskGuard blending MUST NOT proceed on the blended view without caller-side consistency_lock check.",
-            len(positions), len(quarantined), len(metadata_positions)
+            "RiskGuard quarantined %d un-loadable canonical portfolio rows "
+            "(excluded from risk view; tick CONTINUES): reasons=%s sample=%s",
+            len(quarantined),
+            quarantine_reason_counts,
+            quarantined[:5],
         )
 
-    # Bankroll truth comes from the live bankroll path upstream. This metadata
-    # value is intentionally not promoted back into bankroll authority.
-    # If metadata_state has no bankroll (or 0/falsy), do NOT fall back to a config
-    # literal — return 0.0 so downstream sizing fails-CLOSED and RiskGuard.tick()
-    # surfaces DATA_DEGRADED via the live bankroll check upstream.
-    # Removed 2026-05-04: previously fell back to retired config-literal capital;
-    # see docs/operations/task_2026-05-01_bankroll_truth_chain/.
-    bankroll = float(getattr(metadata_state, "bankroll", 0.0) or 0.0)
+    # B053 count lock, reduced to a single authoritative snapshot. RiskGuard used
+    # to call load_portfolio() here as "capital metadata", but that function reads
+    # the same canonical loader view again. Count the current loader rows instead:
+    # loaded + quarantined must account for every canonical row in this tick.
+    loader_position_count = len(loader_rows)
+    if (len(positions) + len(quarantined)) != loader_position_count:
+        logger.error(
+            "B053 Consistency Mismatch: canonical_db loaded %d positions (+%d quarantined) "
+            "from %d loader rows. RiskGuard blending MUST NOT proceed without caller-side "
+            "consistency_lock check.",
+            len(positions), len(quarantined), loader_position_count
+        )
+
+    # Bankroll truth comes from the live bankroll path upstream. Keep PortfolioState
+    # capital fields uninitialized here so analytics cannot promote loader metadata
+    # into bankroll authority.
+    bankroll = 0.0
     portfolio = PortfolioState(
         positions=positions,
         bankroll=bankroll,
-        updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
+        updated_at="",
         audit_logging_enabled=True,
-        daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
-        weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
-        recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
-        ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
+        daily_baseline_total=bankroll,
+        weekly_baseline_total=bankroll,
+        recent_exits=[],
+        ignored_tokens=[],
     )
     # B053 consistency lock accounts for QUARANTINED rows: a row excluded by the loader
     # above is a KNOWN exclusion, not silent drift, so the canonical/metadata comparison
     # adds them back. Otherwise every quarantine would falsely read as 'mismatched' and
     # could fail-close a healthy tick — re-creating the very block this fix removes.
     canonical_known_count = len(positions) + len(quarantined)
+    strategy_health_position_view = _riskguard_position_status_view_from_loader_rows(
+        loader_rows,
+        excluded_trade_ids={
+            str(row.get("trade_id") or "")
+            for row in quarantined
+            if str(row.get("trade_id") or "")
+        },
+    )
     return portfolio, {
         "source": "position_current",
         "loader_status": str(loader_view.get("status") or "unknown"),
@@ -329,11 +437,12 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "position_count": len(positions),
         "quarantined_count": len(quarantined),
         "quarantined_rows": quarantined,
-        "capital_source": "dual_source_blended",
-        "consistency_lock": "pass" if canonical_known_count == len(metadata_positions) else "mismatched",
-        # B053: expose both source counts so callers can diff explicitly
-        # rather than rely on a single boolean lock.
-        "metadata_position_count": len(metadata_positions),
+        "capital_source": "canonical_loader_view",
+        "consistency_lock": "pass" if canonical_known_count == loader_position_count else "mismatched",
+        # Preserve the legacy key while it now means the single loader snapshot
+        # count, not a second load_portfolio() pass.
+        "metadata_position_count": loader_position_count,
+        "_strategy_health_position_view": strategy_health_position_view,
     }
 
 
@@ -1463,6 +1572,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
     *,
     recommended_strategy_gate_reasons: dict[str, list[str]],
     now: str,
+    position_view: dict | None = None,
 ) -> tuple[dict, dict, dict]:
     """Run the RiskGuard AUXILIARY bookkeeping writes/reads, lock-tolerantly.
 
@@ -1505,7 +1615,11 @@ def _refresh_riskguard_auxiliary_bookkeeping(
             recommended_strategy_gate_reasons,
             issued_at=now,
         )
-        strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
+        strategy_health_refresh = refresh_strategy_health(
+            zeus_conn,
+            as_of=now,
+            position_view=position_view,
+        )
         strategy_health_snapshot = query_strategy_health_snapshot(
             zeus_conn,
             now=now,
@@ -1913,11 +2027,12 @@ def _tick_once() -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
-        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=RISKGUARD_SETTLEMENT_LIMIT)
-        brier_candidate_rows = query_authoritative_settlement_rows(
+        settlement_scan_rows = query_authoritative_settlement_rows(
             zeus_conn,
-            limit=RISKGUARD_BRIER_SCAN_LIMIT,
+            limit=max(RISKGUARD_SETTLEMENT_LIMIT, RISKGUARD_BRIER_SCAN_LIMIT),
         )
+        settlement_rows = settlement_scan_rows[:RISKGUARD_SETTLEMENT_LIMIT]
+        brier_candidate_rows = settlement_scan_rows[:RISKGUARD_BRIER_SCAN_LIMIT]
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
         settlement_storage_source = (
             settlement_row_storage_sources[0]
@@ -2130,6 +2245,7 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
             now=now,
+            position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
         if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
             if durable_action_status.get("status") == "emitted":

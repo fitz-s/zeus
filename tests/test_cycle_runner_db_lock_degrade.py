@@ -120,19 +120,88 @@ def test_exit_lifecycle_commits_before_live_venue_io():
     import src.execution.exit_lifecycle as exit_lifecycle
 
     source = inspect.getsource(exit_lifecycle._execute_live_exit)
+    helper_source = inspect.getsource(exit_lifecycle._record_exit_intent_before_execution_gates)
+    intent_index = source.index("_record_exit_intent_before_execution_gates")
+    collateral_index = source.index('_commit_before_exit_venue_io(conn, stage="collateral_refresh")')
+    cancel_index = source.index("position.last_exit_order_id")
     assert '_commit_before_exit_venue_io(conn, stage="collateral_refresh")' in source
-    assert '_commit_before_exit_venue_io(conn, stage="exit_intent")' in source
+    assert '_commit_before_exit_venue_io(conn, stage="exit_intent")' in helper_source
+    assert intent_index < collateral_index < cancel_index
 
 
-def test_heartbeat_refreshes_status_before_live_health():
-    """Status-summary freshness must not depend only on the long chain monitor job."""
+def test_heartbeat_does_not_block_on_live_health():
+    """Heartbeat freshness must not depend on composite live-health DB scans."""
 
     import src.main as main
 
     source = inspect.getsource(main._write_heartbeat)
-    pulse_index = source.index("write_cycle_pulse")
-    health_index = source.index("compute_composite_live_health")
-    assert pulse_index < health_index
+    assert "write_cycle_pulse" in source
+    assert "compute_composite_live_health" not in source
+
+
+def test_live_health_composite_runs_as_separate_scheduler_job():
+    """Composite live-health remains scheduled but cannot hold the heartbeat job open."""
+
+    import src.main as main
+
+    main_source = inspect.getsource(main.main)
+    health_job_source = inspect.getsource(main._live_health_composite_cycle)
+    assert "compute_composite_live_health" in health_job_source
+    assert "_live_health_composite_cycle" in main_source
+    assert 'id="live_health_composite"' in main_source
+    assert 'executor="observability"' in main_source
+
+
+def test_scheduler_job_marks_running_before_completion(monkeypatch):
+    """Long scheduler jobs must be visible as RUNNING before success/failure."""
+
+    import src.main as main
+
+    calls = []
+
+    def _record(job_name, **kwargs):
+        calls.append((job_name, kwargs))
+
+    monkeypatch.setattr(main, "_write_scheduler_health", _record)
+
+    @main._scheduler_job("probe_job")
+    def _probe():
+        calls.append(("body", {}))
+        return "done"
+
+    assert _probe() == "done"
+    assert calls[0] == ("probe_job", {"failed": False, "started": True})
+    assert calls[1] == ("body", {})
+    assert calls[2] == ("probe_job", {"failed": False})
+
+
+def test_scheduler_max_instance_skip_listener_records_skip(monkeypatch):
+    """APScheduler max-instance skips must surface as scheduler health skips."""
+
+    import src.main as main
+
+    calls = []
+
+    def _record(job_name, **kwargs):
+        calls.append((job_name, kwargs))
+
+    class Event:
+        job_id = "edli_event_reactor"
+
+    monkeypatch.setattr(main, "_write_scheduler_health", _record)
+
+    main._scheduler_max_instance_skip_listener(Event())
+
+    assert calls == [
+        (
+            "edli_event_reactor",
+            {
+                "failed": False,
+                "skipped": True,
+                "skip_reason": "max_instances_reached",
+            },
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

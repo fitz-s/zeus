@@ -86,6 +86,10 @@ _OPEN_VENUE_COMMAND_STATES = frozenset(
     }
 )
 
+_OPEN_NO_FILL_ENTRY_ORDER_FACT_STATES = frozenset(
+    {"LIVE", "RESTING", "PARTIALLY_MATCHED"}
+)
+
 _SIZE_MISMATCH_TOLERANCE = 0.05  # shares; below this the chain/local delta is noise.
 
 # Phases considered "still open" for the purposes of the REVIEW (e) class —
@@ -594,6 +598,101 @@ def has_open_orders_for_position(conn: sqlite3.Connection, position_id: str) -> 
     return row is not None
 
 
+def has_confirmed_exit_fill_for_position(conn: sqlite3.Connection, position_id: str) -> bool:
+    """True iff durable venue facts prove an EXIT sell filled for this position.
+
+    Chain-mirror can observe the wallet token disappearing before the exit-fill
+    projector has folded the position to economically_closed. In that race, the
+    absent token is expected exit evidence, not a REVIEW_OPEN_ABSENT marker.
+    """
+
+    if not position_id:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands cmd
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+               AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+               AND (
+                    EXISTS (
+                        SELECT 1
+                          FROM venue_trade_facts tf
+                         WHERE tf.command_id = cmd.command_id
+                           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                           AND CAST(COALESCE(tf.fill_price, '0') AS REAL) > 0
+                         LIMIT 1
+                    )
+                 OR EXISTS (
+                        SELECT 1
+                          FROM venue_order_facts ofact
+                         WHERE ofact.command_id = cmd.command_id
+                           AND ofact.state = 'MATCHED'
+                           AND CAST(COALESCE(ofact.matched_size, '0') AS REAL) > 0
+                         LIMIT 1
+                    )
+               )
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
+def has_open_entry_order_without_fill(conn: sqlite3.Connection, position_id: str) -> bool:
+    """True iff venue facts show an ENTRY buy order is open but unfilled.
+
+    A pending-entry maker order can be live on CLOB before any position token is
+    held. Chain-mirror must not turn that expected absence into a held-token
+    REVIEW_OPEN_ABSENT marker.
+    """
+
+    if not position_id:
+        return False
+    placeholders = ",".join("?" for _ in _OPEN_NO_FILL_ENTRY_ORDER_FACT_STATES)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT 1
+              FROM venue_commands cmd
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND cmd.state IN ({",".join("?" for _ in _OPEN_VENUE_COMMAND_STATES)})
+               AND EXISTS (
+                    SELECT 1
+                      FROM venue_order_facts ofact
+                     WHERE ofact.command_id = cmd.command_id
+                       AND ofact.state IN ({placeholders})
+                       AND CAST(COALESCE(ofact.matched_size, '0') AS REAL) <= 0
+                     LIMIT 1
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM venue_trade_facts tf
+                     WHERE tf.command_id = cmd.command_id
+                       AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                       AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                     LIMIT 1
+               )
+             LIMIT 1
+            """,
+            (
+                position_id,
+                *sorted(_OPEN_VENUE_COMMAND_STATES),
+                *sorted(_OPEN_NO_FILL_ENTRY_ORDER_FACT_STATES),
+            ),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
 def _has_prior_review_open_absent_marker(conn: sqlite3.Connection, position_id: str) -> bool:
     """True iff the MOST RECENT position_events row for this position is a
     chain-mirror REVIEW_OPEN_ABSENT marker (i.e. no intervening write — chain
@@ -1018,14 +1117,45 @@ def reconcile(
         # (the diff engine's reconcile() in src/reconcile/diff_engine.py has
         # this from birth for the same reason).
         try:
-            # P0b: only compute the (DB-touching) force-resolve signals when
-            # they could actually matter — held token absent from THIS
-            # snapshot and the row is in an _OPEN_LIKE_PHASES-eligible phase.
-            # Cheap in-memory checks first; avoids a wasted query on the
-            # common matched/closed path.
+            # P0b: only compute the (DB-touching) force-resolve signals when they
+            # could actually matter — held token absent from THIS snapshot and
+            # the row is in an _OPEN_LIKE_PHASES-eligible phase. Cheap in-memory
+            # checks first; avoids a wasted query on the common matched/closed path.
             prior_review_open_absent = False
             has_open_orders = False
             if row.phase in _OPEN_LIKE_PHASES and (not held or held not in chain_by_asset):
+                if row.phase == "pending_entry" and has_open_entry_order_without_fill(
+                    conn_trades, row.position_id
+                ):
+                    report.findings.append(
+                        MirrorFinding(
+                            classification=CONSISTENT,
+                            position_id=row.position_id,
+                            asset=held,
+                            writes=False,
+                            details={
+                                "reason": "open_entry_order_without_fill_pending_position",
+                                "phase": row.phase,
+                                "chain_state": row.chain_state,
+                            },
+                        )
+                    )
+                    continue
+                if has_confirmed_exit_fill_for_position(conn_trades, row.position_id):
+                    report.findings.append(
+                        MirrorFinding(
+                            classification=CONSISTENT,
+                            position_id=row.position_id,
+                            asset=held,
+                            writes=False,
+                            details={
+                                "reason": "confirmed_exit_fill_fact_pending_projection",
+                                "phase": row.phase,
+                                "chain_state": row.chain_state,
+                            },
+                        )
+                    )
+                    continue
                 prior_review_open_absent = _has_prior_review_open_absent_marker(
                     conn_trades, row.position_id
                 )

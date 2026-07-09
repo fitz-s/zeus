@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-07-08
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-07-08
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -842,12 +842,13 @@ class TestRCPV2RowCountSensor:
             "terminal_command_venue_fact_conflicts": {
                 "status": "missing_venue_commands",
                 "authority": "derived_operator_visibility",
-                "source": "venue_commands+position_current+venue_order_facts",
+                "source": "venue_commands+position_current+venue_order_facts+venue_command_events",
                 "description": (
                     "entry commands locally terminal while latest stored venue fact "
                     "is still nonterminal"
                 ),
                 "count": 0,
+                "superseded_by_terminal_event_count": 0,
                 "by_command_state": {},
                 "by_venue_state": {},
                 "by_position_phase": {},
@@ -1292,6 +1293,222 @@ class TestRCPV2RowCountSensor:
         assert conflicts["by_position_phase"] == {"economically_closed": 1}
         assert conflicts["orders"][0]["command_id"] == "cmd-terminal"
         assert conflicts["orders"][0]["remaining_size"] == 15.0
+
+    def test_terminal_event_after_nonterminal_fact_suppresses_stale_fact_conflict(self):
+        """A later positive cancel receipt can supersede a stale nonterminal fact."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            CREATE TABLE venue_command_events (
+                event_id TEXT PRIMARY KEY,
+                command_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                payload_json TEXT,
+                state_after TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-confirmed-cancel', 'ord-confirmed-cancel', 'ENTRY', 'CANCELLED',
+                'BUY', 25.0, 0.68, 'pos-confirmed-cancel',
+                '2026-07-08T10:55:00+00:00', '2026-07-08T11:17:50+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-confirmed-cancel', 'voided', 'pending', 'closed_exited',
+                'London', '2026-07-08', 'center_bin_buy'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-confirmed-cancel', 'cmd-confirmed-cancel', 'LIVE', '21.27', '0',
+                'REST', '2026-07-08T10:55:38+00:00',
+                '2026-07-08T10:55:38+00:00', 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+                event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after
+            ) VALUES (
+                'evt-cancel-acked', 'cmd-confirmed-cancel', 5, 'CANCEL_ACKED',
+                '2026-07-08T11:17:50+00:00',
+                '{"venue_order_id":"ord-confirmed-cancel","cancel_outcome":{"status":"CANCELED"}}',
+                'CANCELLED'
+            )
+            """
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 0
+        assert conflicts["orders"] == []
+        assert conflicts["superseded_by_terminal_event_count"] == 1
+
+    def test_ambiguous_not_canceled_matched_terminal_event_remains_conflict(self):
+        """NOT_CANCELED with matched ambiguity is not terminal venue proof."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            CREATE TABLE venue_command_events (
+                event_id TEXT PRIMARY KEY,
+                command_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                payload_json TEXT,
+                state_after TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-ambiguous-cancel', 'ord-ambiguous-cancel', 'ENTRY', 'CANCELLED',
+                'BUY', 25.0, 0.68, 'pos-ambiguous-cancel',
+                '2026-07-08T09:04:00+00:00', '2026-07-08T09:37:57+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-ambiguous-cancel', 'day0_window', 'partial', 'synced',
+                'Paris', '2026-07-08', 'center_bin_buy'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-ambiguous-cancel', 'cmd-ambiguous-cancel', 'PARTIALLY_MATCHED',
+                '15.84', '9.24', 'REST', '2026-07-08T09:40:58+00:00',
+                '2026-07-08T09:40:58+00:00', 2
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+                event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after
+            ) VALUES (
+                'evt-cancel-ambiguous', 'cmd-ambiguous-cancel', 5, 'CANCEL_ACKED',
+                '2026-07-08T09:37:57+00:00',
+                '{"venue_order_id":"ord-ambiguous-cancel","cancel_outcome":{"status":"NOT_CANCELED","errorMessage":"order can''t be found - already canceled or matched"}}',
+                'CANCELLED'
+            )
+            """
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 1
+        assert conflicts["superseded_by_terminal_event_count"] == 0
+        assert conflicts["orders"][0]["command_id"] == "cmd-ambiguous-cancel"
+        assert conflicts["orders"][0]["terminal_event_type"] == "CANCEL_ACKED"
+        assert conflicts["orders"][0]["venue_state"] == "PARTIALLY_MATCHED"
 
     def test_write_status_surfaces_terminal_command_venue_fact_conflict(
         self, tmp_path, monkeypatch

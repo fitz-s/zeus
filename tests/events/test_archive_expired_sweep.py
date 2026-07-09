@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-07-08
 # Authority basis: operator directive 2026-06-04 — archive expired/inactive candidates
 #                  to history (per-city LOCAL tz, Oceania-frontier anchored) so the
 #                  reactor stops re-scanning settled markets. Builds on STEP 3
@@ -519,6 +519,9 @@ def test_expired_sweep_candidate_query_uses_processing_status_index():
     )
     assert "SCAN P" not in plan and "SCAN OPPORTUNITY_EVENT_PROCESSING" not in plan, (
         f"expired sweep candidate query must not full-scan processing rows, got: {plan!r}"
+    )
+    assert "USE TEMP B-TREE" not in plan, (
+        f"expired sweep candidate query must not materialize a temp ORDER BY tree, got: {plan!r}"
     )
 
 

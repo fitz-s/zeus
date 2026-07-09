@@ -1,0 +1,631 @@
+Verdict: replace the repo’s representation layer with a small hand-written agent-law kernel plus generated/queryable metadata, and make all remaining hand-authored representation mechanically checkable. Confidence: 0.80. The contract should be: comments are illegal unless they carry non-derivable semantic facts; names are the repo ontology and must use one canonical term per concept; metadata is either generated from code/schema/tests, checked against them, or deleted; intent is represented as invariant IDs and event/certificate schemas, not narrative.
+
+The reason is not aesthetic. The repo already has the ingredients of an agent-first system: root AGENTS.md says CodeGraph is the source for structural questions, it distinguishes durable law from runtime facts and docs, and it treats unregistered/unrouted files as outside the agent’s effective context. It also already has many structured governance surfaces: invariants, negative constraints, topology, context budgets, docs registries, manifests, fatal-misread antibodies, and source rationale maps. The failure mode is that many of these are still hand-maintained semantic prose in YAML/Markdown. The existing regenerate_registries.py says full regeneration would discard “~95% of load-bearing hand-curated content,” which is exactly the warning sign: the data is valuable, but it is not yet derivable enough to be structurally incapable of rot. GitHub+3GitHub+3GitHub+3
+
+The strongest alternative I considered is to keep dense prose module books and AGENTS.md files because Claude-class agents do benefit from narrative context. I reject that as the default. Narrative earns tokens only when it states a current, non-derivable law with a stable ID and an invalidation path. Otherwise it should be a generated index, a queryable graph result, a test assertion, an event schema, or git history. This is already aligned with the repo’s own authority doctrine: current docs are not necessarily current truth, reference docs are not authority, and derived context is not authority unless tied to machine-checkable sources. GitHub+1
+
+One source limitation matters: the two named files docs/rebuild/EXECUTION_MASTER_2026-07-07.md and docs/rebuild/whole_system_first_principles_2026-07-07.md were not readable at the pinned GitHub paths and were not visible in the browsed docs/rebuild tree. I therefore integrate this contract into R0–R8 using the wave premise from your prompt, not from those two files. The smallest fact that would change this answer is if that missing execution master already defines a different generated representation framework with owners and CI gates. GitHub
+
+Representation contract: the target state
+
+The representation layer has three allowed classes.
+
+First, the hand-written kernel. This is small durable law: trading mission, authority order, money-path prohibitions, comment law, naming law, metadata law, and the query protocol. It lives in root AGENTS.md plus tiny scoped AGENTS.md files. It must be token-budgeted and checked for size and forbidden stale patterns.
+
+Second, checked policy inputs. These are small structured YAML files that cannot be generated because they encode operator law or ontology: invariant registry, negative constraints, canonical vocabulary, and representation contract. Each record must name its checker or generated evidence. No prose-only record is valid.
+
+Third, generated/queryable surfaces. Module indexes, call graphs, DB read/write ownership, deprecation indexes, test coverage maps, public API summaries, import topology, scar candidates, and boot cards are generated into a single queryable artifact, preferably SQLite plus JSONL exports for cheap agent ingestion.
+
+Everything else is deleted, archived outside boot, or converted.
+
+The hard rule is:
+
+A representation surface may exist only if writer != none and drift_detector != none.
+
+For hand-written law, the writer is the human/operator and the drift detector is a schema plus semantic checker. For generated metadata, the writer is a generator and the drift detector is deterministic regeneration plus diff. For code comments, the writer is the code author and the drift detector is a comment-law linter plus ID validation. If a surface cannot name both, it is a lie waiting to happen.
+
+Comment law
+
+The proposed comment law is right but should be tightened.
+
+A comment or docstring may exist only when it contains at least one non-derivable fact in one of these categories:
+
+World fact: units, venue semantics, WMO/HKO/DST behavior, settlement preimage, clock boundary, external API ambiguity, rate-limit behavior, market convention.
+
+Invariant reference: a stable ID such as INV-17, INV-28, NC-13, with the comment explaining only the local binding, not restating the invariant.
+
+Why-not fact: why the obvious implementation is wrong, especially where the code intentionally violates a common idiom.
+
+Proof/provenance rule: rank order of truth sources, not an anecdote about a past incident.
+
+Concurrency/ordering rule: commit-before-export, idempotency boundary, crash-recovery sequence, terminal-state caveat, side-effect ordering.
+
+Safety/rollback rule: what must remain true during partial failure, restart, or operator abort.
+
+Everything else is banned: restating control flow, narrating what the code does, dated incident history, “created/last reused/audited” headers, local TODO lore, module-purpose paragraphs, authorial explanations, and comments that duplicate CodeGraph queries.
+
+The pinned code has both good and bad specimens. command_recovery.py contains comments/docstrings that often state non-derivable semantics: a SQL reducer ranks proof strength before recency; terminal venue status alone is not enough because cancel/expire can follow partial fills; explicit matched size must not be inferred. Those are load-bearing semantic facts and should survive, but with invariant IDs and a standard shape. By contrast, replacement_forecast_materializer.py has a module header with created/reused/audited dates, “FIX” incident narration, and long operational story comments. The semantic facts inside it may be real, but the incident narrative belongs in receipts/history/git, not inline code. GitHub+2GitHub+2
+
+The required inline format should be small and parseable:
+
+# repr: kind=world_fact ids=[INV-SETTLE-ROUND] owner=contracts.settlement
+
+The next line may contain the fact, capped at one sentence:
+
+# unit=degC; venue settlement rounds official preimage, not forecast display value.
+
+For why-not comments:
+
+# repr: kind=why_not ids=[INV-28,INV-30] rejects=terminal_status_implies_zero_fill
+
+# Cancel/expire after partial fill is terminal but not proof of zero matched size.
+
+For SQL fragments or other places decorators cannot attach:
+
+# repr: kind=proof_order ids=[INV-28] artifact=venue_command_truth_cte
+
+# Proof rank dominates recency; weaker later facts cannot demote stronger earlier truth.
+
+Docstrings have a stricter law. Public exported functions/classes may have a one-line contract if it is not derivable from the type signature. Private functions get no docstring unless they bind a non-derivable fact. Multi-line prose is justified only for concurrency, safety, or external-world semantics that cannot be expressed in types, schema, or invariant IDs. The target docstring form is:
+
+Python
+
+Run
+
+def canonical_order_truth(...) -> OrderTruth:
+    """Return proof-ranked order truth, not latest venue echo. repr: ids=[INV-28,INV-30]"""
+
+For a private helper in a well-named module, the ideal is often no docstring at all. A typed signature plus canonical names should carry the local meaning; the invariant registry and event schema carry the why.
+
+Enforcement should be implemented as scripts/check_repr_contract.py --comments, integrated into the existing doctor/linter path rather than creating a new governance stack. It should fail changed files when:
+
+A comment/docstring lacks a repr: tag and is not a mechanical pragma such as # noqa, # type: ignore, shebang, encoding declaration, or generated-code marker.
+
+A comment contains date-like incident lore, FIX, HACK, created, last_reviewed, audited, reused, authority basis, or “incident” outside a receipt/test fixture.
+
+A repr: tag names a missing invariant, negative constraint, vocabulary concept, schema, or owner.
+
+A docstring for a private function merely repeats the function name, arguments, or return type.
+
+Legacy files should be advisory at first. New or touched code should be blocking immediately.
+
+Naming law
+
+Shorter names are not automatically better for LLM agents. The optimum is the shortest identifier that preserves the canonical domain concept and its authority plane. A name that saves tokens but collapses settlement, grade, observation, and venue echo is expensive because the agent will infer the wrong ontology. A name that repeats the module path wastes tokens and dilutes attention.
+
+The rule is:
+
+One canonical token per domain concept. No synonym unless the vocabulary registry declares it as an alias for migration.
+
+Do not repeat package/module context inside local identifiers.
+
+Prefer strong domain nouns over generic verbs.
+
+Use abbreviations only when they are canonical domain notation, not convenience compression.
+
+Encode authority plane when collision risk is real: served_q, venue_order, settlement_grade, forecast_snapshot, decision_receipt.
+
+Do not encode implementation trivia, temporal incident history, or module echo.
+
+The repo already documents vocabulary collisions: replacement_forecast has aliases, Day0 is overloaded, family is overloaded, and the glossary names synonym families such as shadow/diagnostic/legacy, ghost/unsubmitted/abandoned, runtime_posture/regime/mode, and substrate/book/venue. These are not style issues; they are ontology bugs for an agent. GitHub
+
+Concrete renames:
+
+Inside src/data/replacement_forecast_materializer.py, materialize_replacement_forecast should become materialize or materialize_snapshot because the module path already supplies replacement_forecast. At the import boundary, the caller should say replacement_forecast.materialize(...) or import a domain-named module alias. Module echo is expensive and adds no information.
+
+A helper named _replacement_cycle_availability_poll_if_needed should become _poll_cycle_availability_if_due inside the replacement module, or _poll_replacement_availability_if_due only if used outside that semantic scope. if_needed is weaker than if_due: “needed” hides the predicate; “due” anchors a scheduling/TTL condition.
+
+Names like posterior, belief, q, and probability need canonical boundaries. I would reserve:
+
+q: the served bin probability used by decision/execution, never an arbitrary posterior.
+
+served_q: when crossing package boundaries or persisting.
+
+belief: a distributional object before serving/calibration.
+
+posterior: only if Bayesian posterior math is actually represented and not merely a fused forecast probability.
+
+q_lcb / q_ucb: conservative bounds with explicit construction rules.
+
+Similarly:
+
+decision_receipt: immutable proof of a decision.
+
+certificate: solver/repair proof object.
+
+order_receipt: venue/execution proof object, only if it exists as a separate schema.
+
+settlement_grade: final market outcome.
+
+settle: a verb for the process, not the value.
+
+family_key: canonical governance key, not a loose market grouping. The invariant registry already treats family ID as canonical and warns against key drift. GitHub
+
+The canonical vocabulary should be a small checked YAML policy input, not prose in the glossary. The glossary can remain for humans, but the linter must read the structured vocabulary.
+
+Example schema:
+
+YAML
+
+schema_version: 1
+terms:
+  - concept_id: prob.served_q
+    canonical: q
+    allowed_forms: [q, served_q, q_lcb, q_ucb]
+    forbidden_aliases: [posterior, belief, prob, probability]
+    allowed_context:
+      - persisted served probability
+      - decision receipt probability
+    owner_invariant: INV-PROB-Q
+    migration_allowlist:
+      - src/strategy/**
+  - concept_id: governance.family_key
+    canonical: family_key
+    forbidden_aliases: [family, cluster, group]
+    owner_invariant: INV-22
+  - concept_id: venue.settlement_grade
+    canonical: settlement_grade
+    forbidden_aliases: [settle_result, outcome_value, grade]
+    owner_invariant: INV-02
+
+The naming checker should parse changed Python identifiers and fail new uses of forbidden aliases outside migration allowlists. It should also detect module echo:
+
+src/data/replacement_forecast_materializer.py defining materialize_replacement_forecast
+
+src/solve/solver.py defining solve_portfolio_solver
+
+src/decision/family_decision_engine.py defining family_decision_engine_decide
+
+The package ontology also needs repair. The browsed tree shows decision-like authority spread across src/decision, src/decision_kernel, src/engine, src/solve, and older src/strategy, while src/strategy still contains modules with inference, calibration, exit, Kelly, market fusion, family rebalance, utility ranking, and selection semantics. src/solve is the newest-generation package and its local AGENTS.md states strict solver laws: joint outcome atom axis, one-belief law, CVaR objective, single-family fail-closed, kappa ownership, and repair certificates. That is the right direction, but the ontology must be made exclusive. GitHub+4GitHub+4GitHub+4
+
+Target package meanings:
+
+forecast: constructs forecast snapshots and pre-served belief artifacts.
+
+probability: probability transforms, calibration, uncertainty bounds.
+
+decision: admission/gating and immutable decision receipts.
+
+solve: portfolio/action optimization and repair certificates.
+
+risk: hard constraints and risk actions, not probability construction.
+
+execution: side-effecting order commands, venue facts, reconciliation.
+
+engine: orchestration only; no domain decision authority.
+
+strategy: strategy profiles/configuration only; no new solver, risk, probability, or execution truth.
+
+This fixes the Wittgenstein failure mode: the repo vocabulary is the agent’s world. If seven package names all imply authority to generate a decision, the agent’s ontology admits seven authorities. The naming pass is not beautification; it is authority-plane normalization.
+
+Metadata architecture
+
+YAML sidecars are not better than comments unless they are generated or checked. A prose YAML map can silently rot exactly like a comment; it just rots in a more machine-looking syntax. The target architecture is therefore:
+
+Small hand-written YAML inputs:
+
+architecture/representation_contract.yaml
+
+architecture/canonical_vocabulary.yaml
+
+architecture/invariants.yaml, restructured
+
+architecture/negative_constraints.yaml, restructured
+
+Generated/queryable outputs:
+
+build/repr/zeus_repr.sqlite
+
+build/repr/boot_cards.jsonl
+
+build/repr/module_index.jsonl
+
+build/repr/contracts.jsonl
+
+build/repr/drift_report.json
+
+The single writer for generated outputs is scripts/generate_repr_index.py. The single checker is scripts/check_repr_contract.py --all, called by the existing topology doctor rather than becoming a fourth governance generation. Existing scripts already include topology, semantic, registry, and kernel-manifest checking; the new representation checker should reuse those paths and extend them. GitHub+3GitHub+3GitHub+3
+
+Core generated SQLite schema:
+
+SQL
+
+module(
+  path text primary key,
+  package text not null,
+  zone text,
+  public_symbols_hash text not null,
+  imports_hash text not null,
+  tests_hash text,
+  generated_purpose text,
+  local_kernel_path text,
+  scar_score real
+);
+
+symbol(
+  qualname text primary key,
+  module_path text not null,
+  kind text not null,
+  signature text,
+  exports integer not null,
+  invariant_ids text,
+  schema_ids text
+);
+
+contract(
+  id text primary key,
+  kind text not null,
+  producer text not null,
+  consumer text,
+  artifact text not null,
+  authority_plane text not null,
+  invariant_id text,
+  checker text not null
+);
+
+db_access(
+  symbol text not null,
+  db text,
+  table_name text not null,
+  access text not null,
+  mode text,
+  invariant_id text,
+  source_line text,
+  checker text not null
+);
+
+invariant_binding(
+  invariant_id text not null,
+  path text not null,
+  line integer,
+  binding_kind text not null,
+  checker text not null
+);
+
+vocab_use(
+  term text not null,
+  concept_id text,
+  path text not null,
+  line integer,
+  status text not null
+);
+
+deprecation(
+  qualname text primary key,
+  replacement text,
+  sunset_wave text,
+  fail_after text,
+  checker text not null
+);
+
+Hand-written representation contract schema:
+
+YAML
+
+schema_version: 1
+max_boot_tokens: 5000
+surfaces:
+  - path: AGENTS.md
+    class: hand_kernel
+    max_tokens: 2500
+    checker: check_boot_kernel
+  - path: src/**/AGENTS.md
+    class: scoped_hand_kernel
+    max_tokens: 500
+    checker: check_scoped_kernel
+  - path: architecture/invariants.yaml
+    class: checked_policy_input
+    checker: check_invariant_bindings
+  - path: architecture/module_manifest.yaml
+    class: generated
+    writer: generate_repr_index
+    output: build/repr/module_index.jsonl
+forbidden_unchecked_patterns:
+  - "**/*_registry.yaml"
+  - "**/*manifest*.yaml"
+  - "**/*lore*.yaml"
+
+Invariants should be kept, but normalized. The current invariant registry is high-value: it names laws such as settlement not exit, point-in-time truth, lifecycle grammar, no bare floats, commit before JSON export, chain reconciliation, RED risk sweeping, authority-loss behavior, family ID canonicality, and venue command persistence. But a valid invariant record must bind to code, test, schema, or checker. GitHub
+
+Target invariant schema:
+
+YAML
+
+schema_version: 2
+invariants:
+  - id: INV-17
+    statement: Commit authoritative DB state before exporting derived JSON.
+    authority_plane: runtime_state
+    enforcement:
+      - kind: static_check
+        ref: scripts/semantic_linter.py::check_commit_before_export
+      - kind: test
+        ref: tests/runtime/test_commit_before_export.py
+    code_bindings:
+      - symbol: src.runtime.export_state.write_snapshot
+        kind: requires
+    negative_constraints: [NC-13]
+    status: active
+
+Cross-module contracts should be generated from decorators, SQL parsing, schemas, and tests. For DB access, the code should carry small machine-readable annotations only where extraction cannot infer intent:
+
+Python
+
+Run
+
+@db_write(db="trading", table="venue_commands", mode="append", ids=["INV-28"])
+def persist_venue_command(...): ...
+
+Python
+
+Run
+
+@emits_event(schema="decision_receipt.v2", ids=["INV-04", "INV-06"])
+def build_decision_receipt(...): ...
+
+The generator parses SQL literals and function decorators. CI fails if a function writes a table without a contract, if a declared writer no longer exists, if two writers claim sole ownership, or if a reader consumes a table/event with no declared producer.
+
+Verdicts on existing surface classes:
+
+Root AGENTS.md: KEEP, but shrink into the irreducible agent-law kernel. Replace long file tables, routing tables, and registry claims with generated boot cards. The current file is doing real work, but it is larger than a kernel and mixes durable law with route metadata. GitHub
+
+Scoped AGENTS.md: KEEP only when they contain local semantic laws. src/solve/AGENTS.md is a good specimen because it encodes solver-specific danger laws, not just a file list. Move its key-file table to generated metadata and keep the laws. GitHub
+
+architecture/invariants.yaml: KEEP / REPLACE-WITH-STRUCTURED. Preserve IDs, normalize schema, require bindings and checks.
+
+architecture/negative_constraints.yaml: KEEP / REPLACE-WITH-STRUCTURED. It contains valuable prohibitions such as no implicit units, no ad hoc probability complement, no high/low mixing, no JSON before DB commit, family key drift banned, and gateway-only order placement. Make each constraint cite checker/test/schema evidence. GitHub
+
+architecture/fatal_misreads.yaml: KEEP as a structured antibody registry, but each antibody needs a checker, test fixture, or vocabulary rule. It is agent-useful because it encodes false equivalences such as API data not necessarily being settlement-correct. GitHub
+
+architecture/source_rationale.yaml: REPLACE-WITH-STRUCTURED. Keep only hazard badges that bind to invariants or vocabulary concepts. Per-file rationale should be generated from AST/import/test/schema data, not hand prose. The current file has useful hazard badges such as derived-only, no-write-path, truth-plane-collapse, and WMO rounding law, but file-by-file rationale is exactly the kind of surface that rots. GitHub
+
+architecture/module_manifest.yaml: DELETE / GENERATE. In the browsed pinned file it is essentially a hand-maintained registry header, not a populated source of truth. Module facts should come from AST, imports, package ownership, and tests. GitHub
+
+architecture/docs_registry.yaml: REPLACE-WITH-STRUCTURED / GENERATE. The current schema says docs have classification, owner, staleness horizon, and authority rank, but the browsed file is only a tiny schema shell. Generate doc inventory; hand-author only authority class overrides. GitHub
+
+architecture/script_manifest.yaml and test topology manifests: REPLACE with generated inventory plus hand-written hazard overrides. Existing checkers can audit completeness, but the long-term owner should be AST/filesystem discovery plus explicit decorators/headers only for non-derivable safety class. GitHub+1
+
+architecture/topology*.yaml: GENERATE. Structural topology belongs to CodeGraph/import graph. Hand-written topology is advisory at best; the current context budget already frames topology/root/lore as routing surfaces, not encyclopedias. GitHub
+
+architecture/context_budget.yaml and task_boot_profiles.yaml: KEEP / REPLACE-WITH-STRUCTURED. The idea is correct: task-specific boot paths and token budgets. But the values should be enforced by boot-card generation and token counting, not advisory prose. GitHub+1
+
+architecture/history_lore.yaml, failure chains, dated incident summaries: DELETE from boot; archive as query-on-demand receipts. Incident history is useful for forensic work, not for inline code or default agent context.
+
+docs/authority/*.md: KEEP only current controlling law. The authority AGENTS.md already says this directory is not a holding area for packet deliverables, ADRs, or fix-pack notes; honor that. Convert active laws into invariant IDs where possible. GitHub+1
+
+docs/reference/glossary.md: KEEP for human orientation, but move canonical terms and forbidden aliases into checked vocabulary YAML. The current glossary is valuable evidence of ontology drift. GitHub
+
+docs/rebuild/* plans and journals: KEEP only while active; close into compact receipt records after the wave. They should not be authority or boot context.
+
+Inline comments/docstrings: DELETE by default. Keep only comments satisfying comment law, with repr: tags and ID bindings.
+
+Module docstrings: REPLACE with one-line contracts or delete. No freshness metadata in source modules.
+
+README/workspace maps: KEEP as public orientation; not authority for agent decisions. Generated summaries may replace route tables.
+
+Semantics gap: how agents get WHY and intent-flow
+
+The syntax/semantics gap should be bridged with invariant bindings and event/certificate schemas, not architecture essays.
+
+The minimal intent representation is:
+
+Stable invariant IDs define durable laws.
+
+Code binds to invariant IDs through decorators, assert_inv(...), schema annotations, or SQL/comment tags where unavoidable.
+
+Events and certificates define interfaces.
+
+Generated metadata connects producers, consumers, artifacts, invariants, and tests.
+
+The runtime shape should look like this:
+
+ForecastSnapshotReady
+
+ServedBelief(q_version, q, q_lcb, mode, source_ids)
+
+CandidateSet(family_key, market_ids, eligibility_reason)
+
+DecisionReceipt(strategy_key, family_key, q_version, objective, constraints, decision_probability)
+
+SolveCertificate(objective, constraints, repair_actions, infeasible_reason?)
+
+FinalExecutionIntent(intent_id, decision_receipt_id, max_size, price_limit)
+
+VenueCommand(command_id, intent_id, command_type, idempotency_key)
+
+OrderFact(order_id, command_id, proof_rank, matched_size, venue_status)
+
+PositionEvent(position_id, order_fact_id, delta, proof_source)
+
+SettlementGrade(market_id, official_preimage, rounded_value, grade_source)
+
+Each schema is the real interface documentation. A module comment may say “emits decision_receipt.v2” or “requires served_belief.v1,” but the schema carries field semantics, freshness, units, authority plane, and invariants.
+
+Example schema:
+
+YAML
+
+schema_version: 1
+events:
+  - id: decision_receipt.v2
+    producer: src.decision
+    consumers: [src.solve, src.execution, src.observability]
+    authority_plane: decision
+    fields:
+      strategy_key:
+        type: string
+        invariant: INV-04
+      family_key:
+        type: string
+        invariant: INV-22
+      q_version:
+        type: string
+        invariant: INV-06
+      decision_probability:
+        type: decimal
+        invariant: INV-12
+      created_at_utc:
+        type: instant
+        invariant: INV-06
+    freshness:
+      frozen_after_emit: true
+    checker: tests/contracts/test_decision_receipt_schema.py
+
+Runtime assertions:
+
+Python
+
+Run
+
+assert_inv("INV-17", db_commit_lsn <= export_lsn, artifact="state_export")
+assert_inv("INV-22", receipt.family_key == canonical_family_key(market_ids))
+
+Decorators for static intent:
+
+Python
+
+Run
+
+@requires_event("served_belief.v1")
+@emits_event("decision_receipt.v2")
+@requires_inv(["INV-04", "INV-06", "INV-12", "INV-22"])
+def build_decision_receipt(...): ...
+
+SQL fallback tag:
+
+Python
+
+Run
+
+ORDER_TRUTH_CTE = """
+-- repr: kind=proof_order ids=[INV-28,INV-30]
+...
+"""
+
+Architecture decision records do not earn a new system. They are allowed only if they are still controlling, have an invalidation condition, map to invariant IDs, and are represented as one structured decision row. Otherwise, git history plus closed packet receipts is enough. The repo’s own authority AGENTS.md already rejects using authority docs as a dumping ground for ADRs and fix-pack notes. GitHub
+
+Nietzsche translated into engineering: raw “facts” are interpreted through schemas. A float is not a probability; it becomes q only when schema, provenance, freshness, bounds, and authority plane say so. A venue API response is not settlement truth; it is an observation interpreted by the contract/settlement schema. The repo already names truth planes and warns about category errors; the representation layer should force every cross-plane artifact to declare its interpretation. GitHub+1
+
+Boot-context budget: first 5K tokens
+
+The ideal first 5K tokens should be a generated boot card, not the whole root AGENTS.md plus scattered docs. The current context budget already treats root/topology/lore/module manifests as budgeted routing surfaces, but the new boot card should be stricter and generated from the representation DB. GitHub
+
+Target boot layout:
+
+0–600 tokens: agent law kernel. Money path, authority order, no stale-as-fresh, no LLM output as authority, no hand structure docs, no unchecked representation.
+
+600–1,300 tokens: task routing protocol. Use CodeGraph for structure, zctx/representation DB for contracts, invariant registry for law, runtime DB for current facts. Do not infer from stale docs.
+
+1,300–2,100 tokens: canonical ontology. q, served_q, q_lcb, family_key, strategy_key, settlement_grade, venue_order, decision_receipt, solve_certificate, runtime_posture, diagnostic, legacy, with forbidden aliases.
+
+2,100–3,100 tokens: top invariant index. Include only IDs, one-line statements, and query handles for full detail. Examples: settlement not exit, point-in-time truth, lifecycle grammar, no bare floats, commit before export, chain reconciliation, family ID canonicality, venue command persistence, no implicit units, no ad hoc complements. GitHub+1
+
+3,100–4,100 tokens: intent-flow skeleton. Forecast snapshot → served belief → candidate set → decision receipt → solve certificate → execution intent → venue command → order fact → position event → settlement grade.
+
+4,100–4,700 tokens: query commands. zctx module <path>, zctx contract <schema>, zctx inv <id>, zctx vocab <term>, zctx db table <name>, zctx scar <path>, codegraph callers <symbol>.
+
+4,700–5,000 tokens: stop rules. Stop on missing authority, missing freshness, unregistered side effect, unchecked metadata, vocabulary collision, or changed code with illegal comments.
+
+A scoped AGENTS.md should add only local hazards not derivable from generated metadata. src/solve/AGENTS.md would compress to: atom axis law, one-belief law, CVaR objective, single-family fail-closed, kappa ownership, hard cash budget, route cap, direct native route only, certificate/repair requirement, log-domain safety. Its file list becomes generated. GitHub
+
+Migration into R0–R8
+
+R0: install law, not cleanup. Add architecture/representation_contract.yaml, architecture/canonical_vocabulary.yaml, scripts/generate_repr_index.py, and scripts/check_repr_contract.py. CI blocks only new/touched violations: unchecked new comments, new unregistered metadata surfaces, new forbidden vocabulary aliases, and root/scoped AGENTS growth over budget. Generate build/repr/zeus_repr.sqlite and boot cards in advisory mode.
+
+R1–R2: migrate comments and module docstrings inside subsystems already being rewritten. Delete incident headers and narrative comments. Replace surviving comments with repr: tags and invariant IDs. Rename local identifiers where wrappers are unnecessary. Keep legacy exported names as deprecated aliases.
+
+R3–R4: move cross-module contracts into schemas/decorators. Generate DB read/write ownership from SQL/decorators. Make event/certificate schemas the interface docs for decision, solve, execution, venue, and settlement paths. Fail CI on new side-effecting table writes without ownership.
+
+R5–R6: enforce package ontology. Move or wrap old strategy decision-generation surfaces into canonical packages. Ban new solver/risk/probability authority in strategy and orchestration-only engine. Add deprecation records with replacements and sunset waves.
+
+R7: scar/load-bearing pass. Generate scar candidates from no callers, no tests, deprecated imports, legacy vocabulary, and lack of event/schema participation. Human ratification is allowed only as a wave closeout receipt, not as permanent YAML lore.
+
+R8: shrink boot surfaces. Root AGENTS.md becomes the ≤5K-token kernel input plus generated boot card output. Delete or archive stale plan/journal surfaces from default context. Make representation checker blocking repo-wide except for explicitly quarantined legacy paths.
+
+What lands now as hard law: no new unchecked comments, no new unchecked metadata files, no new vocabulary aliases, no module-echo names in new exported APIs, no new AGENTS.md file tables, and no side-effecting contract without schema/ownership.
+
+What is mass-migrated per wave: comments/docstrings, local naming, package AGENTS.md, event schemas, DB access annotations, deprecation wrappers, and scar verdicts.
+
+What is never worth retrofitting: dead or soon-deleted modules, old dated plan docs, incident prose in code, historical lore not needed for active invariants, and hand-authored module-purpose summaries for files that CodeGraph can describe on demand.
+
+Rollback is straightforward. Comment deletion is non-runtime. Naming changes use compatibility aliases with deprecation records. Generated metadata can be disabled without changing trading behavior. Checkers move from advisory to blocking by path/wave. The only risky migration is package ontology because imports can break; use wrapper modules and fail-after waves.
+
+Concurrency and ordering constraints: representation generation must be deterministic, must not read live trading state, must run after schema/code generation and before CI comparison, and must serialize edits to canonical vocabulary and invariant IDs. DB/export invariants should preserve the existing commit-before-derived-export law. Parallel rebuild waves can modify code freely, but vocabulary and invariant registry changes require a single merge owner per wave. GitHub+1
+
+Boundary cases: dynamic SQL needs explicit repr:dynamic_sql plus a contract test; generated code is exempt only if the generator is registered; temporary packet docs are excluded from boot and expire on closeout; notebooks and ad hoc scripts cannot be authority; external API semantics must enter as world-fact invariants or schema fields, not comments.
+
+Leverage and cuts
+
+Highest leverage per unit effort: comment law on changed files. It immediately stops the deadliest failure mode: plausible stale prose in the code path. It is cheap to lint and rides every rebuild wave.
+
+Second: event/certificate schemas plus DB access contracts. Agents need intent-flow and authority ownership more than module summaries. A schema-bound decision receipt or venue command contract is vastly more useful than prose saying “this module handles decisions.”
+
+Third: canonical vocabulary. This pays off because the repo has live ontology collisions: q/posterior/belief, receipt/certificate, settle/grade, family, regime/runtime_posture/mode, and multiple packages that sound like decision authorities. GitHub+1
+
+Fourth: generated module index and boot cards. Valuable, but less urgent than stopping stale comments and authority-plane ambiguity.
+
+Cut as over-engineering: a new ADR bureaucracy, per-file YAML sidecars, natural-language module summarizers, full retroactive comment cleanup across untouched legacy code, and a separate “representation governance doctor.” Extend the existing doctor/linter system instead. The repo already has enough governance surfaces; the rebuild should reduce entities, not add a fourth generation.
+
+Concrete Claude-Code-actionable contract
+
+Add this as architecture/representation_contract.yaml:
+
+YAML
+
+schema_version: 1
+principle: unchecked_representation_is_deleted
+boot:
+  max_tokens: 5000
+  root_kernel: AGENTS.md
+  generated_card: build/repr/boot_cards.jsonl
+comments:
+  default: banned
+  allowed_kinds:
+    - world_fact
+    - invariant_ref
+    - why_not
+    - proof_order
+    - concurrency_order
+    - safety_rollback
+  required_prefix: "repr:"
+  forbidden_terms:
+    - created
+    - last_reviewed
+    - audited
+    - reused
+    - incident
+    - FIX
+    - HACK
+metadata:
+  allowed_classes:
+    - hand_kernel
+    - checked_policy_input
+    - generated_output
+  rule: every_surface_names_writer_and_checker
+naming:
+  vocabulary: architecture/canonical_vocabulary.yaml
+  forbid_module_echo: true
+  forbid_unregistered_aliases: true
+generated_outputs:
+  sqlite: build/repr/zeus_repr.sqlite
+  writer: scripts/generate_repr_index.py
+  checker: scripts/check_repr_contract.py
+ci:
+  new_code_blocking: true
+  legacy_mode: advisory_until_wave_touch
+
+Add this checker command to CI:
+
+Bash
+
+python3 scripts/check_repr_contract.py --changed-files
+python3 scripts/generate_repr_index.py --check
+python3 scripts/topology_doctor.py --repr
+
+verify locally: the exact command names will need adjustment to match the repo’s current CLI conventions and import layout.
+
+Final decision: do not write better comments; make most comments impossible. Do not write richer prose registries; make registry truth generated or checked. Do not shorten names mechanically; constrain the vocabulary so the agent’s ontology has one authority per concept. Do not bridge semantics with narrative; bridge it with invariant IDs, schemas, certificates, and queryable generated metadata.
+
+Sources used: pinned repo root and README overview; root AGENTS.md; architecture/ tree; architecture/invariants.yaml, negative_constraints.yaml, context_budget.yaml, task_boot_profiles.yaml, naming_conventions.yaml, fatal_misreads.yaml, source_rationale.yaml, module_manifest.yaml, docs_registry.yaml, and script_manifest.yaml; docs/authority/AGENTS.md, zeus_current_architecture.md, and zeus_current_delivery.md; docs/reference/glossary.md; src/solve/AGENTS.md; src/data/replacement_forecast_materializer.py; src/execution/command_recovery.py; src, src/decision, src/engine, src/strategy, and src/solve trees; scripts/regenerate_registries.py, semantic_linter.py, check_kernel_manifests.py, and topology/registry checker surfaces. The named execution master and whole-system first-principles rebuild files could not be read at the pinned paths and were not visible in the browsed rebuild tree.
+
+Load-bearing assumptions: CodeGraph MCP can answer structural queries on demand as stated; R0–R8 will already touch the subsystems where most representation cleanup belongs; the trading runtime should not depend on generated representation artifacts; and the operator accepts deleting stale human-readable narrative even when it contains some recoverable insight, provided the recoverable law is moved into invariants, schemas, or receipts.

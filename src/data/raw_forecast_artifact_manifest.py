@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -334,22 +334,83 @@ def read_manifest(path: Path | str) -> RawForecastArtifactManifest:
     return RawForecastArtifactManifest(**raw)
 
 
+def manifest_matches_artifact(
+    manifest: RawForecastArtifactManifest, *, root: Path | str | None = None
+) -> bool:
+    """True iff the on-disk artifact matches the manifest's byte_size AND sha256.
+
+    A missing artifact returns False (it does not match). Callers that must
+    distinguish missing-vs-drifted use verify_artifact, which raises FileNotFoundError
+    for the missing case.
+    """
+    artifact_path = Path(manifest.artifact_path)
+    if root is not None and not artifact_path.is_absolute():
+        artifact_path = Path(root) / artifact_path
+    if not artifact_path.exists():
+        return False
+    if artifact_path.stat().st_size != manifest.byte_size:
+        return False
+    return sha256_file(artifact_path) == manifest.sha256
+
+
+def repin_manifest_from_file(
+    manifest: RawForecastArtifactManifest, *, root: Path | str | None = None
+) -> RawForecastArtifactManifest:
+    """Rebuild byte_size + sha256 from the CURRENT artifact bytes, preserving every
+    other manifest field.
+
+    Use when a present, valid artifact was rewritten AFTER its manifest was pinned -
+    e.g. the trailing ``"\\n"`` that ``_write_json`` appends (added 2026-06-24, commit
+    e2cd7a9bc): the pinned manifest then records the pre-rewrite size, so
+    ``verify_artifact`` hard-fails on the benign stat/sha drift and blocks
+    materialization. Re-pinning from the current bytes heals that without touching the
+    payload. Raises FileNotFoundError when the artifact is absent - a MISSING input is a
+    distinct, non-benign condition the caller must handle (never silently re-pinned).
+    """
+    artifact_path = Path(manifest.artifact_path)
+    if root is not None and not artifact_path.is_absolute():
+        artifact_path = Path(root) / artifact_path
+    if not artifact_path.exists():
+        raise FileNotFoundError(str(artifact_path))
+    return replace(
+        manifest,
+        byte_size=artifact_path.stat().st_size,
+        sha256=sha256_file(artifact_path),
+    )
+
+
 def write_manifest_to_db(
     conn: sqlite3.Connection,
     manifest: RawForecastArtifactManifest,
     *,
     root: Path | str | None = None,
     verify_artifact: bool = True,
+    repin_on_drift: bool = False,
 ) -> int:
     """Persist a verified raw forecast artifact manifest into forecast DB.
 
     The manifest is input provenance, not a trade-authority carrier. The returned
     artifact_id is the only value downstream materializers should use when linking
     derived rows to raw files.
+
+    ``repin_on_drift`` (default off): when the on-disk artifact is PRESENT and valid but
+    its byte_size/sha256 drifted from ``manifest`` (a benign rewrite after pinning), the
+    manifest is re-pinned from the current bytes before verify+write instead of aborting.
+    A MISSING artifact is never re-pinned - it falls through to ``verify_artifact`` which
+    raises, preserving the corruption/absence guard.
     """
 
     if not isinstance(manifest, RawForecastArtifactManifest):
         raise TypeError("manifest must be RawForecastArtifactManifest")
+    if repin_on_drift and not manifest_matches_artifact(manifest, root=root):
+        artifact_path = Path(manifest.artifact_path)
+        resolved = (
+            artifact_path
+            if (root is None or artifact_path.is_absolute())
+            else Path(root) / artifact_path
+        )
+        if resolved.exists():
+            manifest = repin_manifest_from_file(manifest, root=root)
     if verify_artifact:
         manifest.verify_artifact(root=root)
     payload = manifest.to_dict()

@@ -60,6 +60,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_learning_loop_observation.py` | Cross-module antibody: settlement-corpus->calibration update pipeline per R3 §1 #2 LEARNING_LOOP packet (created 2026-04-29) |
 | `test_learning_loop_observation_weekly.py` | End-to-end runner antibody for learning loop batch-3 weekly dispatch (created 2026-04-29) |
 | `test_main_module_scope.py` | Antibody #8: Phase 3 module-scope enforcement for src.main (two-system independence; created 2026-04-30) |
+| `test_no_edge_rule1_guard.py` | Stop-hook advisory guard antibody: Chinese/paraphrased no-edge conclusions trigger RULE 1 while real evidence-backed edge conclusions pass (created 2026-07-08) |
 | `test_no_raw_world_attach.py` | Antibody #13: no raw ATTACH DATABASE or get_trade_connection_with_world in trading-lane source modules (created 2026-04-30) |
 | `test_no_synthetic_provenance_marker.py` | Relapse antibody: blocks re-introduction of synthetic provenance markers per critic findings #6A/E (created 2026-04-28) |
 | `test_observations_k1_migration.py` | Antibody for Invariant C: observations schema migrated to K1 dual-atom shape (created 2026-05-01) |

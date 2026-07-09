@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-01
+# Last reused/audited: 2026-07-08
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -1200,6 +1200,77 @@ def test_day0_absorbing_hard_fact_route_fdr_passes_before_qkernel_false_edge():
     assert fdr.selected_post_fdr == ("h7",)
 
 
+def test_day0_monotone_hard_fact_cert_can_dominate_served_proof_q():
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(
+        q_lcb_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        selection_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        q_dot_payoff=1.0,
+    )
+
+    assert (
+        era._qkernel_cert_served_belief_rejection_reason(
+            cert,
+            proof_q_point=0.9090344934581372,
+            proof_q_lcb=0.5,
+        )
+        is None
+    )
+
+
+def test_non_hard_fact_cert_still_rejects_served_proof_q_raise():
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(q_dot_payoff=1.0)
+
+    reason = era._qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=0.9090344934581372,
+        proof_q_lcb=0.5,
+    )
+
+    assert reason is not None
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "OOF_WILSON_95",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        },
+        {
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+        },
+        {
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_abstained": None,
+        },
+    ],
+)
+def test_day0_hard_fact_cert_requires_paired_explicit_guard_fields(updates):
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(
+        q_lcb_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        selection_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        q_dot_payoff=1.0,
+    )
+    cert.update(updates)
+
+    reason = era._qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=0.9090344934581372,
+        proof_q_lcb=0.5,
+    )
+
+    assert reason is not None
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
+
+
 def test_day0_route_fdr_uses_qkernel_empirical_false_edge_when_present():
     proof = _bound_day0_qkernel_route_proof(
         q_live=0.8732666666666666,
@@ -1407,6 +1478,7 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
             "forecast_fetch_time": "2026-07-01T06:20:00+00:00",
             "forecast_available_at": "2026-07-01T06:20:00+00:00",
             "raw_payload_hash": "b" * 64,
+            "posterior_identity_hash": "qv-day0-base-001",
             "degradation_level": "OK",
             "forecast_source_role": "day0_base_distribution",
             "authority_tier": "FORECAST",
@@ -1469,6 +1541,103 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     assert payload["forecast_source_role"] == "day0_live_observation"
     assert payload["authority_tier"] == "OBSERVATION"
     assert payload["raw_payload_hash"] != forecast.payload["raw_payload_hash"]
+    assert payload["posterior_identity_hash"] == payload["raw_payload_hash"]
+    assert payload["base_posterior_identity_hash"] == "qv-day0-base-001"
     assert payload["day0_authority_certificate_hash"] == day0.certificate_hash
     assert ctx is not None
+    assert ctx.posterior_identity_hash == payload["raw_payload_hash"]
     assert ctx.integrity_errors() == ()
+
+
+def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkeypatch):
+    """Replacement forecast authority must match the proof's served posterior row."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            product_id TEXT,
+            source_id TEXT,
+            data_version TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            posterior_identity_hash TEXT
+        )
+        """
+    )
+    # Same source cycle and q vector, two materializations. The unbound query would
+    # pick the newer computed_at row; live final-intent authority must instead bind
+    # to the posterior_id that produced the selected proof.
+    conn.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, product_id, source_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at, computed_at,
+            posterior_identity_hash
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                41,
+                "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+                "Seoul",
+                "2026-07-10",
+                "high",
+                "2026-07-08T06:00:00+00:00",
+                "2026-07-08T12:31:30+00:00",
+                "2026-07-08T12:49:13+00:00",
+                "f" * 64,
+            ),
+            (
+                42,
+                "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+                "Seoul",
+                "2026-07-10",
+                "high",
+                "2026-07-08T06:00:00+00:00",
+                "2026-07-08T12:31:30+00:00",
+                "2026-07-08T12:38:00+00:00",
+                "a" * 64,
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(era, "_replacement_authority_enabled", lambda: True)
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {"Seoul": SimpleNamespace(timezone="Asia/Seoul", settlement_unit="C")},
+    )
+    monkeypatch.setattr(
+        era,
+        "_spine_multimodel_members_for_event",
+        lambda *_args, **_kwargs: ((25.0, 26.0, 27.0), None, None),
+    )
+    monkeypatch.setattr(era, "_replacement_live_input_lag_reason", lambda *_args, **_kwargs: None)
+
+    payload, _clock = era._forecast_authority_payload_and_clock(
+        conn,
+        event=SimpleNamespace(
+            event_type="FORECAST_SNAPSHOT_READY",
+            causal_snapshot_id="rmf-Seoul|2026-07-10|high|2026-07-08",
+        ),
+        family=SimpleNamespace(city="Seoul", target_date="2026-07-10", metric="high"),
+        payload={},
+        decision_time=datetime(2026, 7, 8, 17, 7, 14, tzinfo=timezone.utc),
+        bound_posterior_id=42,
+    )
+
+    assert payload["posterior_identity_hash"] == "a" * 64
+    assert payload["raw_payload_hash"] == "a" * 64
+    assert payload["captured_at"] == "2026-07-08T12:38:00+00:00"

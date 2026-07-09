@@ -15,7 +15,7 @@ import os
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from src.events.opportunity_event import OpportunityEvent
 
@@ -56,6 +56,9 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
     )
 """
 _FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
+_TERMINAL_PENDING_LAST_ERROR_PREFIXES = (
+    "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
+)
 _RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
 _FamilyNormalizer = Callable[[object, object, object], tuple[str, str, str]]
 
@@ -257,6 +260,55 @@ class EventStore:
         )
         return int(self.conn.total_changes - before)
 
+    def _active_processing_candidate_rows(
+        self,
+        select_sql: str,
+        *,
+        join_sql: str = "",
+        where_sql: str = "",
+        params: tuple[object, ...] = (),
+        order_by: str = "p.updated_at ASC",
+        batch_limit: int = 5_000,
+    ) -> list[sqlite3.Row | tuple[Any, ...]]:
+        """Read active processing candidates without multi-status temp sorts."""
+
+        limit = max(1, int(batch_limit))
+        rows: list[sqlite3.Row | tuple[Any, ...]] = []
+        for status in ("pending", "processing"):
+            rows.extend(
+                self.conn.execute(
+                    f"""
+                    SELECT {select_sql},
+                           p.updated_at AS _p_updated_at,
+                           p.event_id AS _p_event_id
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_status
+                      {join_sql}
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = ?
+                       {where_sql}
+                     ORDER BY {order_by}
+                     LIMIT ?
+                    """,
+                    (self.consumer_name, status, *params, limit),
+                ).fetchall()
+            )
+
+        def _hidden(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> str:
+            try:
+                value = row[key] if isinstance(row, sqlite3.Row) else row[index]
+            except (IndexError, KeyError):
+                value = ""
+            return str(value or "")
+
+        rows.sort(
+            key=lambda row: (
+                _hidden(row, "_p_updated_at", -2),
+                _hidden(row, "_p_event_id", -1),
+            )
+        )
+        return rows[:limit]
+
     def fetch_pending_by_event_type(
         self, *, event_type: str, decision_time: str, limit: int = 100
     ) -> list[OpportunityEvent]:
@@ -420,6 +472,9 @@ class EventStore:
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
         active_rows: list[tuple[str, int, str, int]] = []
+        # Keep the immediate-ready and retry-floor-ready pending lanes as two
+        # indexed probes. A single OR predicate over claimed_at makes SQLite
+        # materialize a temp ORDER BY tree on large live processing tables.
         active_rows.extend(
             (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
             for row in self.conn.execute(
@@ -429,8 +484,25 @@ class EventStore:
                        INDEXED BY idx_opportunity_event_processing_pending_retry_floor
                  WHERE p.consumer_name = ?
                    AND p.processing_status = 'pending'
-                   AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+                   AND p.claimed_at IS NULL
                  ORDER BY p.updated_at ASC
+                 LIMIT ?
+                """,
+                (self.consumer_name, active_limit),
+            ).fetchall()
+        )
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count, p.last_error
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND p.claimed_at IS NOT NULL
+                   AND p.claimed_at <= ?
+                 ORDER BY p.claimed_at ASC
                  LIMIT ?
                 """,
                 (self.consumer_name, parsed_decision_time.isoformat(), active_limit),
@@ -650,19 +722,17 @@ class EventStore:
         # expiry; only the local-day predicates below can expire rows.
         venue_close_ceiling = _venue_close_target_ceiling(decision_time_utc)
 
-        candidate_rows = self.conn.execute(
+        candidate_rows = self._active_processing_candidate_rows(
             """
-            SELECT e.event_id,
+                   e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
                    e.event_type,
                    e.expires_at,
                    p.last_error
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql="""
                AND e.event_type IN (
                     'FORECAST_SNAPSHOT_READY',
                     'EDLI_REDECISION_PENDING',
@@ -692,18 +762,15 @@ class EventStore:
                     OR e.expires_at IS NOT NULL
                     OR p.last_error LIKE '%selection_deadline=%'
                )
-            ORDER BY p.updated_at ASC, p.event_id ASC
-            LIMIT ?
             """,
-            (
-                self.consumer_name,
+            params=(
                 frontier_floor,
                 venue_close_ceiling,
                 day0_floor,
                 venue_close_ceiling,
-                batch_limit,
             ),
-        ).fetchall()
+            batch_limit=batch_limit,
+        )
 
         expired_ids: list[str] = []
         for row in candidate_rows:
@@ -765,17 +832,10 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        candidate_rows = self.conn.execute(
-            """
-            SELECT p.event_id
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
-             ORDER BY p.updated_at ASC, p.event_id ASC
-             LIMIT ?
-            """,
-            (self.consumer_name, batch_limit),
-        ).fetchall()
+        candidate_rows = self._active_processing_candidate_rows(
+            "p.event_id",
+            batch_limit=batch_limit,
+        )
         candidate_ids = [str(row[0]) for row in candidate_rows]
         if not candidate_ids:
             return 0
@@ -869,8 +929,9 @@ class EventStore:
         a large backlog drains across cycles without occupying the reactor worker.
         The keeper lookup is scoped to only the ``(event_type, token_id)`` keys seen
         in that candidate batch; it must not group-scan the entire channel backlog.
-        The groups are evaluated in ascending ``available_at`` order so older
-        superseded events are swept first.
+        Candidate batches are evaluated in active-processing ``updated_at`` order
+        so the query stays backed by ``idx_opportunity_event_processing_status``;
+        keeper probes still use ``MAX(available_at)`` for the supersession truth.
 
         IDEMPOTENT: re-running at the same state archives nothing new (already-expired
         rows are excluded from the ``pending``/``processing`` filter).
@@ -881,27 +942,25 @@ class EventStore:
         self._require_world_event_tables()
         type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
 
-        # Step 1: fetch the oldest active channel-event rows with parseable token_id.
+        # Step 1: fetch active channel-event rows with parseable token_id in
+        # processing-updated order.
         # This is the only unscoped scan in the sweep and is batch-limited. The prior
         # implementation first computed keepers across the whole backlog, which could
         # pin the EDLI reactor for minutes before it reached fetch_pending/receipts.
-        candidate_rows = self.conn.execute(
-            f"""
-            SELECT e.event_id,
+        candidate_rows = self._active_processing_candidate_rows(
+            """
+                   e.event_id,
                    e.event_type,
                    json_extract(e.payload_json, '$.token_id') AS token_id
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e
-              ON e.event_id = p.event_id
-            WHERE p.consumer_name = ?
-              AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql=f"""
               AND e.event_type IN ({type_placeholders})
               AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
-            ORDER BY e.available_at ASC
-            LIMIT ?
             """,
-            (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
-        ).fetchall()
+            params=tuple(self._CHANNEL_EVENT_TYPES),
+            batch_limit=batch_limit,
+        )
 
         if not candidate_rows:
             return 0
@@ -1023,28 +1082,24 @@ class EventStore:
 
         self._require_world_event_tables()
 
-        # Step 1: oldest active day0 rows with a parseable (city, target_date, metric)
-        # family key — the only unscoped scan, batch-limited.
-        candidate_rows = self.conn.execute(
+        # Step 1: active day0 rows with a parseable (city, target_date, metric)
+        # family key in processing-updated order — the only unscoped scan, batch-limited.
+        candidate_rows = self._active_processing_candidate_rows(
             """
-            SELECT e.event_id,
+                   e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
                    json_extract(e.payload_json, '$.metric')      AS metric
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e
-              ON e.event_id = p.event_id
-            WHERE p.consumer_name = ?
-              AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql="""
               AND e.event_type = 'DAY0_EXTREME_UPDATED'
               AND json_extract(e.payload_json, '$.city') IS NOT NULL
               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
               AND json_extract(e.payload_json, '$.metric') IS NOT NULL
-            ORDER BY e.available_at ASC
-            LIMIT ?
             """,
-            (self.consumer_name, batch_limit),
-        ).fetchall()
+            batch_limit=batch_limit,
+        )
 
         if not candidate_rows:
             return 0
@@ -1158,26 +1213,22 @@ class EventStore:
             normalizer = _default_family_normalizer
         admitted = {tuple(family) for family in admitted_families if all(family)}
 
-        candidate_rows = self.conn.execute(
+        candidate_rows = self._active_processing_candidate_rows(
             """
-            SELECT e.event_id,
+                   e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
                    json_extract(e.payload_json, '$.metric')      AS metric
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql="""
                AND e.event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(e.payload_json, '$.city') IS NOT NULL
                AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
                AND json_extract(e.payload_json, '$.metric') IS NOT NULL
-             ORDER BY p.updated_at ASC, p.event_id ASC
-             LIMIT ?
             """,
-            (self.consumer_name, max(1, int(batch_limit))),
-        ).fetchall()
+            batch_limit=max(1, int(batch_limit)),
+        )
         if not candidate_rows:
             return 0
 
@@ -1226,21 +1277,16 @@ class EventStore:
 
         self._require_world_event_tables()
         type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
-        rows = self.conn.execute(
-            f"""
-            SELECT e.event_id
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+        rows = self._active_processing_candidate_rows(
+            "e.event_id",
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql=f"""
                AND e.event_type IN ({type_placeholders})
                AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
-             ORDER BY e.available_at ASC
-             LIMIT ?
             """,
-            (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
-        ).fetchall()
+            params=tuple(self._CHANNEL_EVENT_TYPES),
+            batch_limit=batch_limit,
+        )
         event_ids = [str(row[0]) for row in rows]
         if not event_ids:
             return 0
@@ -1283,27 +1329,22 @@ class EventStore:
 
         self._require_world_event_tables()
 
-        candidate_rows = self.conn.execute(
+        candidate_rows = self._active_processing_candidate_rows(
             """
-            SELECT
                 e.event_id,
                 e.event_type,
                 e.entity_key,
                 json_extract(e.payload_json, '$.city') AS city,
                 json_extract(e.payload_json, '$.target_date') AS target_date,
                 json_extract(e.payload_json, '$.metric') AS metric
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql="""
                AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND e.entity_key IS NOT NULL
-             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
-             LIMIT ?
             """,
-            (self.consumer_name, batch_limit),
-        ).fetchall()
+            batch_limit=batch_limit,
+        )
         if not candidate_rows:
             return 0
 
@@ -1427,14 +1468,10 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        rows = self.conn.execute(
-            """
-            SELECT e.event_id
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+        rows = self._active_processing_candidate_rows(
+            "e.event_id",
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql="""
                AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
                AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
@@ -1461,11 +1498,9 @@ class EventStore:
                       json_extract(e.payload_json, '$.sr_expected_members')
                     ) AS INTEGER)
                )
-             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
-             LIMIT ?
             """,
-            (self.consumer_name, batch_limit),
-        ).fetchall()
+            batch_limit=batch_limit,
+        )
         event_ids = [str(row[0]) for row in rows]
         if not event_ids:
             return 0
@@ -1524,9 +1559,8 @@ class EventStore:
         parsed_decision_time = _parse_utc(decision_time)
         event_types = sorted(_NO_VALUE_REFUTATION_EVENT_TYPES)
         type_placeholders = ",".join("?" * len(event_types))
-        candidate_rows = self.conn.execute(
-            f"""
-            SELECT
+        candidate_rows = self._active_processing_candidate_rows(
+            """
                 e.event_id,
                 e.event_type,
                 json_extract(e.payload_json, '$.city') AS city,
@@ -1536,24 +1570,17 @@ class EventStore:
                 e.payload_hash,
                 e.available_at,
                 e.created_at
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status IN ('pending', 'processing')
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql=f"""
                AND e.event_type IN ({type_placeholders})
                AND json_extract(e.payload_json, '$.city') IS NOT NULL
                AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
                AND json_extract(e.payload_json, '$.metric') IS NOT NULL
-             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
-             LIMIT ?
             """,
-            (
-                self.consumer_name,
-                *event_types,
-                batch_limit,
-            ),
-        ).fetchall()
+            params=tuple(event_types),
+            batch_limit=batch_limit,
+        )
         if not candidate_rows:
             return 0
 
@@ -1657,6 +1684,78 @@ class EventStore:
                 (now, now, last_error, self.consumer_name, event_id),
             )
         return len(refuted)
+
+    def archive_terminal_last_error_events(self, *, batch_limit: int = 5_000) -> int:
+        """Expire active events whose durable retry reason is now terminal law.
+
+        Older live daemons misclassified some same-event terminal economics verdicts
+        as money-path transients, leaving rows pending forever and suppressing fresher
+        forecast emissions for the same family. This recovery mutates only the
+        processing row; the immutable opportunity event stays available as provenance.
+        """
+
+        self._require_world_event_tables()
+        limit = max(1, min(int(batch_limit or 5_000), 50_000))
+        event_types = sorted(_FORECAST_DECISION_EVENT_TYPES)
+        type_placeholders = ",".join("?" * len(event_types))
+        prefix_sql = " OR ".join(
+            "p.last_error LIKE ?" for _ in _TERMINAL_PENDING_LAST_ERROR_PREFIXES
+        )
+        candidate_rows = self._active_processing_candidate_rows(
+            """
+                p.event_id,
+                p.last_error
+            """,
+            join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
+            where_sql=f"""
+               AND e.event_type IN ({type_placeholders})
+               AND p.last_error IS NOT NULL
+               AND ({prefix_sql})
+            """,
+            params=(
+                *event_types,
+                *(f"{prefix}%" for prefix in _TERMINAL_PENDING_LAST_ERROR_PREFIXES),
+            ),
+            batch_limit=limit,
+        )
+        updates: list[tuple[str, str, str, str, str]] = []
+        now = _utc_now()
+        for row in candidate_rows:
+            event_id = str(row[0] or "").strip()
+            last_error = str(row[1] or "").strip()
+            if not event_id:
+                continue
+            if not any(
+                last_error.startswith(prefix)
+                for prefix in _TERMINAL_PENDING_LAST_ERROR_PREFIXES
+            ):
+                continue
+            updates.append(
+                (
+                    now,
+                    ("TERMINAL_LAST_ERROR_ARCHIVED:" + last_error)[:500],
+                    now,
+                    self.consumer_name,
+                    event_id,
+                )
+            )
+        if not updates:
+            return 0
+        before = self.conn.total_changes
+        self.conn.executemany(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   last_error = ?,
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND event_id = ?
+               AND processing_status IN ('pending', 'processing')
+            """,
+            updates,
+        )
+        return int(self.conn.total_changes - before)
 
     @staticmethod
     def _strictly_past_in_tz(

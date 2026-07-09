@@ -13,6 +13,7 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
+# Last reused/audited: 2026-07-08
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -1788,6 +1789,103 @@ def test_qkernel_receipt_annotation_rejects_not_actionable_rest_then_cross_polic
     assert annotated.selection_authority_applied is None
 
 
+def test_qkernel_selected_rest_policy_is_not_submit_authority():
+    """A selected qkernel proof with a no-action rest policy must no-submit."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.0842980463451396,
+        cost=0.62,
+        q_dot_payoff=0.8144224142386236,
+        point_ev=0.1944224142386236,
+        side="NO",
+    )
+    proof = _overlay_proof(
+        q_posterior=0.8144224142386236,
+        q_lcb_5pct=0.8031953517267109,
+        economics=economics,
+        direction="buy_no",
+    )
+    assert proof is not None
+    blocked = replace(proof, rest_then_cross_policy="MAKER_TAKER_FORBIDDEN")
+
+    reason = era._live_selection_rejection_reason(
+        blocked,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        enforce_win_rate_floor=False,
+    )
+
+    assert reason == "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+
+
+def test_qkernel_not_actionable_selected_proof_is_not_book_selected():
+    """The opportunity-book audit must not mark a vetoed qkernel proof selected."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.0842980463451396,
+        cost=0.62,
+        q_dot_payoff=0.8144224142386236,
+        point_ev=0.1944224142386236,
+        side="NO",
+    )
+    proof = _overlay_proof(
+        q_posterior=0.8144224142386236,
+        q_lcb_5pct=0.8031953517267109,
+        economics=economics,
+        direction="buy_no",
+    )
+    assert proof is not None
+    blocked = replace(proof, rest_then_cross_policy="MAKER_TAKER_FORBIDDEN")
+
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-rest-policy-book-no",
+        "receipt_hash": "receipt-qk-rest-policy-book-no",
+        "candidate_id": "NO:b1:DIRECT_NO:b1@proof",
+        "route_id": "DIRECT_NO:b1@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(blocked),
+        "payoff_q_point": 0.8144224142386236,
+        "payoff_q_lcb": 0.7042980463451396,
+        "edge_lcb": 0.0842980463451396,
+        "point_ev": 0.1944224142386236,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "20.0",
+        "optimal_delta_u": 0.012,
+        "q_dot_payoff": 0.8144224142386236,
+        "cost": 0.62,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb16|coarse_global",
+    }
+    book = era._opportunity_book_from_proofs(
+        event_id="event-qk-rest-policy-no",
+        family_id="family-qk-rest-policy-no",
+        proofs=(blocked,),
+        selected_proof=blocked,
+        qkernel_economics_by_bin_side={
+            (era._candidate_bin_id(blocked), "NO"): cert,
+        },
+        enforce_win_rate_floor=False,
+    )
+    payload = book.to_receipt_dict()
+
+    assert payload["selected_candidate_id"] is None
+    assert payload["actual_receipt_selected_candidate_id"] is None
+    assert "selection_authority" not in payload.get("cache_summary", {})
+    candidate = payload["candidates"][0]
+    assert candidate["live_decision_selected"] is False
+    assert candidate["missing_reason"] == (
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+    )
+    assert candidate["trade_score"] == 0.0
+
+
 def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_candidate():
     """Receipt annotation must not preserve the removed 5% direct-ROI hard hurdle.
 
@@ -3054,6 +3152,104 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         )
         assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
+
+
+def test_day0_monotone_hard_fact_overlays_stale_served_proof_q():
+    """Day0 hard facts may dominate the probabilistic proof q at overlay time."""
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    served_yes_q = [0.05, 0.80, 0.10, 0.05]
+    served_yes_lcb = [0.01, 0.65, 0.03, 0.01]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.95, 0.95, 0.95, 0.95],
+        no_asks=[0.99, 0.90, 0.99, 0.99],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.99, 0.90, 0.99, 0.99],
+    )
+    payload = _payload(
+        mu=20.0,
+        sigma=1.0,
+        members=[19.8, 20.0, 20.2, 20.4, 20.6],
+    )
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "city": CITY,
+            "target_date": TARGET_DATE,
+            "metric": METRIC,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "source": "test_day0_observation",
+            "high_so_far": 20.25,
+            "rounded_value": 20.0,
+            "observation_time": "2026-06-14T12:00:00+00:00",
+            "observation_available_at": "2026-06-14T12:01:00+00:00",
+        }
+    )
+
+    res = _drive(family, proofs, payload)
+
+    assert res.no_trade_reason is None
+    assert res.selected_proof is not None
+    assert res.selected_proof.direction == "buy_no"
+    assert res.selected_proof.candidate.condition_id == "cond-1"
+    assert res.selected_proof.q_posterior == pytest.approx(1.0)
+    assert res.selected_proof.q_lcb_5pct == pytest.approx(1.0)
+    cert = res.selected_proof.qkernel_execution_economics
+    assert cert is not None
+    assert cert["pre_qkernel_q_posterior"] == pytest.approx(0.20)
+    assert cert["pre_qkernel_q_lcb_5pct"] == pytest.approx(0.18)
+    assert cert["selection_guard_cell_key"] == "day0_monotone_hard_fact_q_lcb"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "OOF_WILSON_95",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        },
+        {
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+        },
+        {
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "q_lcb_guard_abstained": "",
+        },
+    ],
+)
+def test_qkernel_overlay_day0_hard_fact_requires_paired_guard_fields(updates):
+    cert = {
+        "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+    }
+    cert.update(updates)
+
+    reason = bridge._qkernel_served_belief_consistency_rejection_reason(
+        qkernel_execution_economics=cert,
+        qkernel_q_point=1.0,
+        qkernel_q_lcb=1.0,
+        proof_q_point=0.20,
+        proof_q_lcb=0.18,
+    )
+
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
 
 
 def test_qkernel_modal_guards_follow_served_joint_q_not_predictive_mu(monkeypatch):

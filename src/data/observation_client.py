@@ -60,6 +60,10 @@ class Day0ObservationContext:
     # PR 3: observation timing chain fields (Path F)
     observation_available_at: str = ""       # UTC ISO; harvester write-back time (MANDATORY)
     provider_reported_time: Optional[str] = None  # UTC ISO; None = source doesn't expose separate reported-at
+    source_role: str = ""
+    source_authority: str = ""
+    data_version: str = ""
+    training_allowed: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:
@@ -85,6 +89,12 @@ class Day0ObservationContext:
             "first_sample_time": self.first_sample_time,
             "last_sample_time": self.last_sample_time,
             "coverage_status": self.coverage_status,
+            "observation_available_at": self.observation_available_at,
+            "provider_reported_time": self.provider_reported_time,
+            "source_role": self.source_role,
+            "source_authority": self.source_authority,
+            "data_version": self.data_version,
+            "training_allowed": self.training_allowed,
         }
 
     # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh

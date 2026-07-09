@@ -36,6 +36,7 @@ def _final_intent(*, post_only: bool, limit: float = 0.14):
     return SimpleNamespace(
         direction="buy_no",
         post_only=post_only,
+        order_policy="post_only_passive_limit" if post_only else "marketable_limit_depth_bound",
         order_type="POST_ONLY_LIMIT" if post_only else "FOK",
         final_limit_price=Decimal(str(limit)),
         selected_token_id="tok-no",
@@ -97,7 +98,7 @@ def _patched_recapture(monkeypatch):
     import src.engine.cycle_runtime as cycle_runtime
     import src.state.snapshot_repo as repo
 
-    state = {"fresh": _fresh_snapshot(top_ask=Decimal("0.20"))}
+    state = {"fresh": _fresh_snapshot(top_ask=Decimal("0.20")), "capture_calls": 0}
 
     def fake_get_snapshot(conn, snapshot_id):
         return _stale_snapshot() if snapshot_id == "snap-stale" else state["fresh"]
@@ -106,11 +107,11 @@ def _patched_recapture(monkeypatch):
     monkeypatch.setattr(
         snap_contract, "is_fresh", lambda snap, now: snap.snapshot_id == "snap-fresh"
     )
-    monkeypatch.setattr(
-        scanner,
-        "capture_executable_market_snapshot",
-        lambda *a, **k: {"executable_snapshot_id": "snap-fresh"},
-    )
+    def fake_capture(*_args, **_kwargs):
+        state["capture_calls"] += 1
+        return {"executable_snapshot_id": "snap-fresh"}
+
+    monkeypatch.setattr(scanner, "capture_executable_market_snapshot", fake_capture)
 
     class _FakeClient:
         def __enter__(self):
@@ -266,6 +267,48 @@ def test_taker_still_validates_with_depth_sweep(_patched_recapture, monkeypatch)
         lambda **k: SimpleNamespace(depth_status="DEPTH_INSUFFICIENT", average_price=None),
     )
     with pytest.raises(ValueError, match="depth_status=DEPTH_INSUFFICIENT"):
+        _recapture_fresh_entry_snapshot_if_needed(
+            _LegacyIntent(),
+            _final_intent(post_only=False, limit=0.14),
+            conn=object(),
+            submitted_shares=10.0,
+        )
+
+
+def test_taker_recaptures_even_when_elected_snapshot_is_fresh(_patched_recapture, monkeypatch):
+    """FOK/FAK entries need submit-time depth, not merely a not-yet-expired DB snapshot."""
+    import src.contracts.executable_market_snapshot as snap_contract
+    import src.execution.executor as executor_mod
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    monkeypatch.setattr(snap_contract, "is_fresh", lambda _snap, _now: True)
+    monkeypatch.setattr(
+        executor_mod,
+        "simulate_clob_sweep",
+        lambda **_k: SimpleNamespace(depth_status="PASS", average_price=Decimal("0.14")),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=False, limit=0.14),
+        conn=object(),
+        submitted_shares=10.0,
+    )
+
+    assert _patched_recapture["capture_calls"] == 1
+    assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_taker_fails_closed_when_fresh_recapture_unavailable(_patched_recapture, monkeypatch):
+    """A taker FOK without a fresh depth witness must stop before venue submit."""
+    import src.contracts.executable_market_snapshot as snap_contract
+    import src.data.market_scanner as scanner
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    monkeypatch.setattr(snap_contract, "is_fresh", lambda _snap, _now: True)
+    monkeypatch.setattr(scanner, "capture_executable_market_snapshot", lambda *a, **k: {})
+
+    with pytest.raises(ValueError, match="TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE"):
         _recapture_fresh_entry_snapshot_if_needed(
             _LegacyIntent(),
             _final_intent(post_only=False, limit=0.14),

@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-07-08
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -940,9 +940,14 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
 
     monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", raising=False)
     monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_LOCK_WAIT_SECONDS", raising=False)
 
     assert substrate_observer._priority_refresh_interval_seconds() == pytest.approx(20.0)
     assert substrate_observer._priority_refresh_budget_seconds() == pytest.approx(18.0)
+    assert substrate_observer._priority_refresh_lock_wait_seconds() == pytest.approx(6.0)
+    assert "timeout=lock_wait_s" in inspect.getsource(
+        substrate_observer._edli_money_path_substrate_priority_cycle
+    )
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
@@ -1122,8 +1127,150 @@ def test_continuous_redecision_confirm_refresh_uses_matching_sidecar_receipt(mon
     assert result["status"] == "refreshed"
     assert result["priority_request_id"] == "req-confirm-1"
     assert result["priority_receipt_matched"] is True
+    assert result["priority_receipt_match_mode"] == "request_id"
     assert result["attempted"] == 1
     assert result["inserted"] == 1
+
+
+def test_continuous_redecision_confirm_refresh_accepts_superseding_scope_receipt(monkeypatch):
+    import src.data.substrate_priority as substrate_priority
+
+    family = ("Paris", "2026-06-20", "low")
+
+    def _mark(**_kwargs):
+        return {
+            "request_id": "req-old",
+            "families": [family],
+            "condition_ids": ["cond-1"],
+        }
+
+    def _receipt(**kwargs):
+        if kwargs.get("request_id") == "req-old":
+            return None
+        assert kwargs.get("request_id") is None
+        return {
+            "request_id": "req-new",
+            "serviced_at": "2026-06-19T12:00:02+00:00",
+            "families": [family, ("Shanghai", "2026-06-20", "high")],
+            "condition_ids": ["cond-1", "cond-extra"],
+            "summary": {"status": "refreshed", "attempted": 2, "inserted": 2},
+        }
+
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
+    monkeypatch.setattr(
+        main_module.time,
+        "sleep",
+        lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")),
+    )
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {family},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        priority_condition_ids={"cond-1"},
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["priority_request_id"] == "req-old"
+    assert result["priority_receipt_request_id"] == "req-new"
+    assert result["priority_receipt_matched"] is True
+    assert result["priority_receipt_match_mode"] == "scope_superset"
+    assert result["attempted"] == 2
+
+
+def test_continuous_redecision_confirm_refresh_rejects_stale_scope_receipt(monkeypatch):
+    import src.data.substrate_priority as substrate_priority
+
+    family = ("Paris", "2026-06-20", "low")
+
+    def _mark(**_kwargs):
+        return {
+            "request_id": "req-stale",
+            "families": [family],
+            "condition_ids": ["cond-1"],
+        }
+
+    def _receipt(**kwargs):
+        if kwargs.get("request_id") == "req-stale":
+            return None
+        assert kwargs.get("request_id") is None
+        return {
+            "request_id": "req-old-scope",
+            "serviced_at": "2026-06-19T11:59:59+00:00",
+            "families": [family],
+            "condition_ids": ["cond-1"],
+            "summary": {"status": "refreshed", "attempted": 1, "inserted": 1},
+        }
+
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "0.05")
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.05")
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {family},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        priority_condition_ids={"cond-1"},
+    )
+
+    assert result["status"] == "priority_marked"
+    assert result["priority_request_id"] == "req-stale"
+    assert result["priority_receipt_matched"] is False
+    assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "receipt_families,receipt_condition_ids",
+    [
+        ([("Shanghai", "2026-06-20", "high")], ["cond-1"]),
+        ([("Paris", "2026-06-20", "low")], ["cond-other"]),
+    ],
+)
+def test_continuous_redecision_confirm_refresh_rejects_partial_scope_receipt(
+    monkeypatch,
+    receipt_families,
+    receipt_condition_ids,
+):
+    import src.data.substrate_priority as substrate_priority
+
+    family = ("Paris", "2026-06-20", "low")
+
+    def _mark(**_kwargs):
+        return {
+            "request_id": "req-partial",
+            "families": [family],
+            "condition_ids": ["cond-1"],
+        }
+
+    def _receipt(**kwargs):
+        if kwargs.get("request_id") == "req-partial":
+            return None
+        assert kwargs.get("request_id") is None
+        return {
+            "request_id": "req-partial-scope",
+            "serviced_at": "2026-06-19T12:00:02+00:00",
+            "families": receipt_families,
+            "condition_ids": receipt_condition_ids,
+            "summary": {"status": "refreshed", "attempted": 1, "inserted": 1},
+        }
+
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "0.05")
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.05")
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {family},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        priority_condition_ids={"cond-1"},
+    )
+
+    assert result["status"] == "priority_marked"
+    assert result["priority_request_id"] == "req-partial"
+    assert result["priority_receipt_matched"] is False
+    assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
 
 
 def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypatch):

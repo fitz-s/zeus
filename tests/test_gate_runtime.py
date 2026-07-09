@@ -1,7 +1,8 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
+# Last reused or audited: 2026-07-08
 # Authority basis: IMPLEMENTATION_PLAN §6 days 68-70 (Gate 5);
-#                  ULTIMATE_DESIGN §5 Gate 5; ANTI_DRIFT_CHARTER §3 M1.
+#                  ULTIMATE_DESIGN §5 Gate 5; ANTI_DRIFT_CHARTER §3 M1;
+#                  live-money 2026-07-08: dirty runtime worktree blocks submit.
 
 """Tests for Gate 5: runtime kill-switch and settlement-window-freeze enforcement.
 
@@ -156,6 +157,34 @@ class TestGateRuntimeAllClear:
         )
 
         gate_runtime.check("live_venue_submit")
+
+    def test_deployment_freshness_dirty_runtime_worktree_blocks_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        sha = "c" * 40
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", sha)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            runtime_code_plane.subprocess,
+            "check_output",
+            lambda *_, **__: sha.encode(),
+        )
+        monkeypatch.setattr(
+            runtime_code_plane,
+            "dirty_runtime_worktree_paths",
+            lambda *_args, **_kwargs: ("src/control/live_health.py",),
+        )
+
+        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
+            gate_runtime.check("live_venue_submit")
 
     def test_deployment_freshness_non_runtime_diff_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path

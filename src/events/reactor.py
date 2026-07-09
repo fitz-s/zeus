@@ -2067,10 +2067,10 @@ class OpportunityEventReactor:
             # (daemon-restart boot windows, the chain_state poison-row crash,
             # dependency_db_locked) mass-consume the pending queue — 1100+
             # events burned on 2026-06-12 while risk truth was GREEN. Requeue
-            # with the shared bounded disposition instead: NOTHING submits
-            # while blocked (the gate is not weakened), and exhaustion after
-            # MAX retries terminates with the honest RISK_GUARD_BLOCKED cause —
-            # a sustained genuine halt still ends in a terminal label.
+            # with the shared horizon-bounded disposition instead: NOTHING
+            # submits while blocked (the gate is not weakened), and a sustained
+            # genuine halt terminalizes only when an event horizon fires, carrying
+            # the honest RISK_GUARD_BLOCKED cause.
             self._transient_requeue_reasons[event.event_id] = "RISK_GUARD_BLOCKED"
             return _EXECUTABLE_SNAPSHOT_RETRY, False
         return None, True
@@ -3285,6 +3285,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
     # later at the SUBMIT stage under their own transient bases and are unaffected.
     "QKERNEL_SPINE_NO_TRADE",
+    # Actual-submit qkernel quality is evaluated after live sizing/recapture/venue
+    # constraints. A below-floor result is a terminal no-trade verdict for this
+    # event; fresh market/belief movement must arrive as a new event, not a
+    # requeue of the same failed economics.
+    "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR",
     # Structural event-type contract violations are terminal for the event. They
     # cannot become valuable by re-running the same payload and must not clog
     # continuous redecision.

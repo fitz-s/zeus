@@ -3052,10 +3052,28 @@ def _emit_day0_window_entered_canonical_if_available(
 
 def _monitor_refreshed_phase_for_position(pos) -> str:
     state = _position_state_value(pos)
+    exit_state = _semantic_value(getattr(pos, "exit_state", ""))
+    order_status = _semantic_value(getattr(pos, "order_status", ""))
+    if (
+        state == "pending_exit"
+        or exit_state in {
+            "exit_intent",
+            "sell_placed",
+            "sell_pending",
+            "retry_pending",
+            "backoff_exhausted",
+        }
+        or order_status in {
+            "exit_intent",
+            "sell_placed",
+            "sell_pending",
+            "retry_pending",
+            "backoff_exhausted",
+        }
+    ):
+        return LifecyclePhase.PENDING_EXIT.value
     if state == "day0_window":
         return LifecyclePhase.DAY0_WINDOW.value
-    if state == "pending_exit":
-        return LifecyclePhase.PENDING_EXIT.value
     if state == "quarantined":
         return LifecyclePhase.QUARANTINED.value
     return LifecyclePhase.ACTIVE.value
@@ -3995,8 +4013,8 @@ def _quarantine_target_date_still_actionable(target_date: object, *, now_utc: da
     return target_day >= floor
 
 
-def _canonical_monitor_position_order(conn) -> list[str] | None:
-    """Return monitorable position ids from canonical position_current.
+def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -> list | None:
+    """Return monitorable canonical position_current rows in monitor order.
 
     ``None`` means the canonical projection is unavailable and callers should use
     the legacy portfolio-only fallback.  An empty list means the projection is
@@ -4019,6 +4037,10 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
             _select_expr(columns, "target_date", "target_date", "''"),
             _select_expr(columns, "chain_state", "chain_state", "''"),
             _select_expr(columns, "direction", "direction", "''"),
+            _select_expr(columns, "order_status", "order_status", "''"),
+            _select_expr(columns, "exit_retry_count", "exit_retry_count", "0"),
+            _select_expr(columns, "next_exit_retry_at", "next_exit_retry_at", "''"),
+            _select_expr(columns, "exit_reason", "exit_reason", "''"),
             _select_expr(
                 columns,
                 "last_monitor_market_price_is_fresh",
@@ -4032,7 +4054,7 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
     except Exception:
         return None
 
-    ordered: list[tuple[int, int, str, str]] = []
+    ordered: list[tuple[int, int, str, str, object]] = []
     for row in rows:
         position_id = str(_row_get(row, "position_id", "") or "").strip()
         phase = str(_row_get(row, "phase", "") or "").strip().lower()
@@ -4045,7 +4067,10 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
                 continue
             if direction not in {"buy_yes", "buy_no"}:
                 continue
-            if not _quarantine_target_date_still_actionable(_row_get(row, "target_date")):
+            if not _quarantine_target_date_still_actionable(
+                _row_get(row, "target_date"),
+                now_utc=now_utc,
+            ):
                 continue
         shares = _finite_positive_or_none(_row_get(row, "shares"))
         chain_shares = _finite_positive_or_none(_row_get(row, "chain_shares"))
@@ -4060,13 +4085,78 @@ def _canonical_monitor_position_order(conn) -> list[str] | None:
                 -market_price_stale,
                 str(_row_get(row, "updated_at", "") or ""),
                 position_id,
+                row,
             )
         )
     ordered.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return [position_id for *_unused, position_id in ordered]
+    return [row for *_unused, row in ordered]
 
 
-def _monitoring_phase_positions(portfolio, conn=None) -> list:
+def _canonical_monitor_position_order(conn, *, now_utc: datetime | None = None) -> list[str] | None:
+    """Return monitorable position ids from canonical position_current."""
+
+    rows = _canonical_monitor_position_rows(conn, now_utc=now_utc)
+    if rows is None:
+        return None
+    return [str(_row_get(row, "position_id", "") or "").strip() for row in rows]
+
+
+def _runtime_state_for_canonical_monitor_phase(phase: str) -> str:
+    if phase == "active":
+        return "entered"
+    return phase
+
+
+_PENDING_EXIT_ORDER_STATUSES = {
+    "exit_intent",
+    "sell_placed",
+    "sell_pending",
+    "retry_pending",
+    "backoff_exhausted",
+}
+
+
+def _sync_position_from_canonical_monitor_row(pos, row) -> None:
+    """Align the runtime Position view with the canonical monitor projection.
+
+    The canonical projection decides the live monitor set.  If the in-memory
+    portfolio object lags a previous canonical write, pending-exit rows must not
+    re-enter the held-position exit emitter as stale day0/active positions.
+    """
+
+    phase = str(_row_get(row, "phase", "") or "").strip().lower()
+    if phase in _CANONICAL_MONITOR_PHASE_PRIORITY:
+        pos.state = _runtime_state_for_canonical_monitor_phase(phase)
+    order_status = str(_row_get(row, "order_status", "") or "").strip()
+    if order_status:
+        pos.order_status = order_status
+    try:
+        pos.exit_retry_count = int(_row_get(row, "exit_retry_count", 0) or 0)
+    except (TypeError, ValueError):
+        pos.exit_retry_count = 0
+    next_retry = str(_row_get(row, "next_exit_retry_at", "") or "").strip()
+    pos.next_exit_retry_at = next_retry or None
+    exit_reason = str(_row_get(row, "exit_reason", "") or "").strip()
+    if exit_reason:
+        pos.exit_reason = exit_reason
+    for attr in ("shares", "chain_shares"):
+        value = _finite_positive_or_none(_row_get(row, attr))
+        if value is not None:
+            setattr(pos, attr, value)
+    if phase == "pending_exit":
+        if order_status in _PENDING_EXIT_ORDER_STATUSES:
+            pos.exit_state = order_status
+        elif pos.exit_retry_count > 0 and pos.next_exit_retry_at:
+            pos.exit_state = "retry_pending"
+        elif not str(getattr(pos, "exit_state", "") or ""):
+            pos.exit_state = "exit_intent"
+    elif str(getattr(pos, "exit_state", "") or "") in _PENDING_EXIT_ORDER_STATUSES:
+        pos.exit_state = ""
+        pos.exit_retry_count = 0
+        pos.next_exit_retry_at = None
+
+
+def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | None = None) -> list:
     """Open positions requiring exit/hold redecision.
 
     When canonical ``position_current`` is available, it owns the live monitor
@@ -4075,7 +4165,7 @@ def _monitoring_phase_positions(portfolio, conn=None) -> list:
     second-level exit-monitor loop ahead of active/pending money-risk rows.
     """
 
-    canonical_order = _canonical_monitor_position_order(conn)
+    canonical_rows = _canonical_monitor_position_rows(conn, now_utc=now_utc)
 
     out = []
     seen: set[str] = set()
@@ -4085,11 +4175,13 @@ def _monitoring_phase_positions(portfolio, conn=None) -> list:
         for pos in all_positions
         if str(getattr(pos, "trade_id", "") or "")
     }
-    if canonical_order is not None:
-        for position_id in canonical_order:
+    if canonical_rows is not None:
+        for row in canonical_rows:
+            position_id = str(_row_get(row, "position_id", "") or "").strip()
             pos = by_position_id.get(position_id)
             if pos is None:
                 continue
+            _sync_position_from_canonical_monitor_row(pos, row)
             out.append(pos)
             seen.add(position_id)
         for pos in all_positions:
@@ -4292,10 +4384,13 @@ def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[fl
     if not bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
         return None, None
     fresh_prob = _finite_float_or_none(getattr(pos, "last_monitor_prob", None))
-    fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+    fresh_edge = (
+        _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
+        if edge_ctx is not None
+        else None
+    )
     if fresh_edge is None:
-        if edge_ctx is not None:
-            fresh_edge = _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
+        fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
     if fresh_prob is None:
         return None, None
     return fresh_prob, fresh_edge
@@ -4755,7 +4850,19 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    monitor_positions = _monitoring_phase_positions(portfolio, conn=conn)
+    try:
+        monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
+    except Exception:
+        monitor_now_utc = datetime.now(timezone.utc)
+    if monitor_now_utc.tzinfo is None:
+        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
+    else:
+        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
+    monitor_positions = _monitoring_phase_positions(
+        portfolio,
+        conn=conn,
+        now_utc=monitor_now_utc,
+    )
     monitor_budget_seconds = _held_position_monitor_budget_seconds(
         held_position_monitor_budget_seconds
     )
@@ -5227,6 +5334,7 @@ def execute_monitoring_phase(
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
                     conn=conn,
+                    preserve_exit_reason=True,
                 )
                 portfolio_dirty = True
                 artifact.add_monitor_result(
@@ -5519,6 +5627,7 @@ def execute_monitoring_phase(
                         or "market_closed_non_accepting_orders"
                     ),
                     conn=conn,
+                    preserve_exit_reason=True,
                 )
                 portfolio_dirty = True
                 summary["monitor_closed_market_pending_settlement_after_eval"] = (
@@ -6230,4 +6339,3 @@ def build_settlement_day_observation_authority_row(
         "payload_json": json.dumps(payload, sort_keys=True),
         "recorded_at": recorded_at,
     }
-

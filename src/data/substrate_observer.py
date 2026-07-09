@@ -224,6 +224,17 @@ def _priority_refresh_budget_seconds() -> float:
     return min(configured, max(1.0, interval_s - 0.5))
 
 
+def _priority_refresh_lock_wait_seconds() -> float:
+    """Bounded wait so a hot priority tick is not lost behind broad substrate work."""
+
+    raw = os.environ.get("ZEUS_SUBSTRATE_PRIORITY_LOCK_WAIT_SECONDS", "6.0")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 6.0
+    return max(0.0, min(value, 15.0))
+
+
 def _priority_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
     configured = max(
         0.5,
@@ -2553,7 +2564,12 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             _attach_exc,
         )
     forecasts_conn = get_forecasts_connection_read_only()
-    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    lock_wait_s = _priority_refresh_lock_wait_seconds()
+    substrate_acquired = (
+        _market_substrate_refresh_lock.acquire(blocking=False)
+        if lock_wait_s <= 0.0
+        else _market_substrate_refresh_lock.acquire(timeout=lock_wait_s)
+    )
     if not substrate_acquired:
         summary = (
             _substrate_warm_failed_summary(
@@ -2565,6 +2581,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             if priority_marker_active
             else {"status": "skipped_in_process_lock_busy", "priority_marker_active": False}
         )
+        summary["lock_wait_seconds"] = lock_wait_s
         if priority_marker_active:
             _substrate_priority_receipt(request=priority_marker_request, summary=summary)
         logger.info("EDLI money-path substrate priority skipped: %s", summary.get("status"))

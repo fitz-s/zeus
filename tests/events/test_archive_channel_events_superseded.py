@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-07-08
 # Authority basis: operator directive 2026-06-04 — prune superseded channel
 #                  events (BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT) from the active
 #                  working set. Companion to tests/events/test_archive_expired_sweep.py
@@ -542,7 +542,7 @@ def test_keeper_query_uses_channel_token_index():
     tied_keeper_sql, tied_keeper_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "SELECT e.event_id" in sql
+        if "e.event_id" in sql
         and "AND e.available_at = ?" in sql
         and "INDEXED BY idx_opportunity_events_channel_token" in sql
     )
@@ -590,7 +590,7 @@ def test_candidate_query_uses_processing_status_index():
     candidate_sql, candidate_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "SELECT e.event_id" in sql
+        if "e.event_id" in sql
         and "json_extract(e.payload_json, '$.token_id') AS token_id" in sql
         and "WITH candidate_rows" not in sql
     )
@@ -602,6 +602,9 @@ def test_candidate_query_uses_processing_status_index():
     )
     assert "SCAN P" not in plan_text, (
         f"candidate query must not full-scan opportunity_event_processing, got: {plan_text!r}"
+    )
+    assert "USE TEMP B-TREE" not in plan_text, (
+        f"candidate query must not materialize a temp ORDER BY over active processing rows, got: {plan_text!r}"
     )
 
 
@@ -631,15 +634,23 @@ def test_fetch_pending_query_uses_processing_status_index():
 
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
-    # Locate fetch_pending's two active-working-set queries by stable signatures.
+    # Locate fetch_pending's active-working-set queries by stable signatures.
     # The hot path now reads processing rows first, then point-reads events by
     # event_id; per-city round-robin rank is computed in Python so SQLite does not
     # materialize a ROW_NUMBER/json_extract temp sort over the live working set.
-    pending_sql, pending_params = next(
+    pending_ready_sql, pending_ready_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "INDEXED BY idx_opportunity_event_processing_pending_retry_floor" in sql
+        and "p.claimed_at IS NULL" in sql
+        and "p.processing_status = 'pending'" in sql
+    )
+    pending_retry_sql, pending_retry_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
         if "INDEXED BY idx_opportunity_event_processing_pending_retry_floor" in sql
         and "p.claimed_at <= ?" in sql
+        and "p.claimed_at IS NOT NULL" in sql
         and "p.processing_status = 'pending'" in sql
     )
     stale_sql, stale_params = next(
@@ -649,8 +660,12 @@ def test_fetch_pending_query_uses_processing_status_index():
         and "p.processing_status = 'processing'" in sql
     )
 
-    plan_text = _plan_text(conn, pending_sql, pending_params) + "\n" + _plan_text(
-        conn, stale_sql, stale_params
+    plan_text = "\n".join(
+        (
+            _plan_text(conn, pending_ready_sql, pending_ready_params),
+            _plan_text(conn, pending_retry_sql, pending_retry_params),
+            _plan_text(conn, stale_sql, stale_params),
+        )
     )
 
     assert "IDX_OPPORTUNITY_EVENT_PROCESSING_PENDING_RETRY_FLOOR" in plan_text, (
@@ -662,6 +677,9 @@ def test_fetch_pending_query_uses_processing_status_index():
     assert "SCAN P" not in plan_text, (
         f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"
     )
-    hot_sql = pending_sql.upper() + "\n" + stale_sql.upper()
+    assert "USE TEMP B-TREE" not in plan_text, (
+        f"fetch_pending must not materialize temp ORDER BY trees, got: {plan_text!r}"
+    )
+    hot_sql = pending_ready_sql.upper() + "\n" + pending_retry_sql.upper() + "\n" + stale_sql.upper()
     assert "ROW_NUMBER" not in hot_sql
     assert "JSON_EXTRACT" not in hot_sql

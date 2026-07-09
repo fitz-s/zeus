@@ -31,7 +31,13 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
 )
-from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest, write_manifest_to_db  # noqa: E402
+from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
+    RawForecastArtifactManifest,
+    manifest_matches_artifact,
+    repin_manifest_from_file,
+    write_manifest,
+    write_manifest_to_db,
+)
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
     build_replacement_forecast_current_target_plan,
 )
@@ -538,10 +544,23 @@ def download_current_target_raw_inputs(
         conn.execute("BEGIN IMMEDIATE")
     try:
         for manifest in manifests:
+            # Manifest-drift guard (2026-07-08 posterior blackout): the manifest was built
+            # from the on-disk artifact above, but on the reuse path (payload_path.exists())
+            # the file can have been rewritten with a benign serialization change AFTER an
+            # earlier pin - the trailing "\n" _write_json appends (e2cd7a9bc, 2026-06-24) -
+            # or by a concurrent cycle. If the bytes on disk no longer match this manifest's
+            # byte_size/sha, re-pin from the CURRENT file so BOTH the raw_manifests/*.json
+            # file and the DB row describe the exact artifact verify_artifact will stat,
+            # instead of persisting a stale size that aborts materialization. A MISSING
+            # artifact is left to write_manifest_to_db's verify to raise (not re-pinned).
+            if not manifest_matches_artifact(manifest) and Path(manifest.artifact_path).exists():
+                manifest = repin_manifest_from_file(manifest)
             manifest_path = _write_manifest_file(output_dir, manifest)
             written_manifests.append(str(manifest_path))
             if conn is not None:
-                db_artifact_ids.append(write_manifest_to_db(conn, manifest, verify_artifact=True))
+                db_artifact_ids.append(
+                    write_manifest_to_db(conn, manifest, verify_artifact=True, repin_on_drift=True)
+                )
         if conn is not None:
             conn.commit()
     except Exception:
