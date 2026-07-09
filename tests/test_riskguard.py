@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-07-08
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -8,6 +8,7 @@
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,7 @@ import pytest
 
 import src.riskguard.policy as policy_module
 import src.riskguard.riskguard as riskguard_module
+import src.state.db as state_db_module
 import src.state.strategy_tracker as strategy_tracker_module
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.metrics import (
@@ -544,7 +546,7 @@ def _mock_trailing_loss_tick(
     monkeypatch.setattr(
         riskguard_module,
         "refresh_strategy_health",
-        lambda conn, as_of=None: {"status": "refreshed", "rows_written": 1},
+        lambda conn, as_of=None, **kwargs: {"status": "refreshed", "rows_written": 1},
     )
     monkeypatch.setattr(
         riskguard_module,
@@ -689,6 +691,37 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
+    def test_tick_reuses_single_authoritative_settlement_scan(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        risk_conn.close()
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=0.0,
+        )
+        _patch_riskguard_bankroll(monkeypatch)
+        calls: list[int | None] = []
+
+        def _query_authoritative_settlement_rows(conn, limit=50, **kwargs):  # noqa: ANN001, ARG001
+            calls.append(limit)
+            return []
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            _query_authoritative_settlement_rows,
+        )
+
+        level = riskguard_module.tick()
+
+        assert level == RiskLevel.GREEN
+        assert calls == [riskguard_module.RISKGUARD_BRIER_SCAN_LIMIT]
+
     def test_tick_floors_fresh_green_to_data_degraded_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
         """Relationship (AGENTS.md iron #6 — FAIL CONSERVATIVE): a metric DB lock
         over a fresh GREEN full row must NOT re-stamp GREEN.
@@ -869,9 +902,8 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "load_portfolio",
-            # bankroll/baseline values here are no longer the bankroll truth
-            # source; left as-is so the daily/weekly baseline annotations in
-            # details_json keep their previous values.
+            # Legacy metadata is no longer consumed by RiskGuard; this sentinel
+            # would change details_json if the redundant load_portfolio path came back.
             lambda: PortfolioState(
                 bankroll=211.37,
                 daily_baseline_total=151.0,
@@ -915,7 +947,7 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 2
-        assert details["portfolio_capital_source"] == "dual_source_blended"
+        assert details["portfolio_capital_source"] == "canonical_loader_view"
         # Bankroll truth axis: provider-sourced wallet cash plus canonical
         # open-position value, with no realized-PnL fold-in.
         assert details["initial_bankroll"] == pytest.approx(211.37)
@@ -923,10 +955,10 @@ class TestRiskGuardSettlementSource:
         assert details["account_equity_components"]["open_position_equity_usd"] == pytest.approx(25.0)
         assert details["effective_bankroll"] == pytest.approx(236.37)
         assert details["bankroll_truth_source"] == "polymarket_wallet"
-        # Baselines come from PortfolioState's daily/weekly snapshots (still
-        # provided by the legacy load_portfolio path).
-        assert details["daily_baseline_total"] == pytest.approx(151.0)
-        assert details["weekly_baseline_total"] == pytest.approx(152.0)
+        # Baselines are intentionally uninitialized here. Live bankroll truth
+        # comes from bankroll_provider, not the retired load_portfolio metadata path.
+        assert details["daily_baseline_total"] == pytest.approx(0.0)
+        assert details["weekly_baseline_total"] == pytest.approx(0.0)
         # PnL signals are still emitted for analytics, but realized PnL now
         # comes only from the strategy_health 30d read-model window.
         assert details["realized_pnl"] == pytest.approx(0.0)
@@ -1253,6 +1285,74 @@ class TestRiskGuardSettlementSource:
         assert [p.trade_id for p in portfolio.positions] == ["valid-good-1"]
         # Quarantine is a KNOWN exclusion -> consistency stays 'pass' (1 loaded + 1 quarantined == 2 metadata).
         assert truth["consistency_lock"] == "pass"
+
+    def test_loader_quarantine_logs_one_summary_for_multiple_bad_rows(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        conn = get_connection(tmp_path / "zeus.db")
+
+        valid_row = {
+            "trade_id": "valid-good-1", "market_id": "m-good", "city": "NYC",
+            "target_date": "2026-06-17", "direction": "buy_yes", "unit": "F",
+            "env": "live", "size_usd": 10.0, "shares": 4.0, "cost_basis_usd": 10.0,
+            "entry_price": 2.5, "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "none",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+        }
+        bad_row_1 = {
+            **valid_row,
+            "trade_id": "bad-dup-1",
+            "market_id": "m-bad-1",
+            "fill_authority": "venue_confirmed_full",
+        }
+        bad_row_2 = {
+            **valid_row,
+            "trade_id": "bad-dup-2",
+            "market_id": "m-bad-2",
+            "fill_authority": "venue_confirmed_full",
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_portfolio_loader_view",
+            lambda _conn, **_kw: {
+                "status": "ok",
+                "table": "position_current",
+                "positions": [valid_row, bad_row_1, bad_row_2],
+            },
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=100.0,
+                positions=[
+                    Position(trade_id="valid-good-1", market_id="m-good", city="NYC",
+                             cluster="NYC", target_date="2026-06-17", bin_label="b",
+                             direction="buy_yes"),
+                    Position(trade_id="bad-dup-1", market_id="m-bad-1", city="Houston",
+                             cluster="HOU", target_date="2026-06-17", bin_label="b",
+                             direction="buy_no"),
+                    Position(trade_id="bad-dup-2", market_id="m-bad-2", city="Austin",
+                             cluster="AUS", target_date="2026-06-17", bin_label="b",
+                             direction="buy_no"),
+                ],
+            ),
+        )
+        caplog.set_level(logging.ERROR, logger=riskguard_module.__name__)
+
+        _portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        quarantine_logs = [
+            record
+            for record in caplog.records
+            if "RiskGuard quarantined" in record.getMessage()
+        ]
+        assert truth["quarantined_count"] == 2
+        assert len(quarantine_logs) == 1
+        assert "quarantined 2 un-loadable" in quarantine_logs[0].getMessage()
 
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1630,19 +1730,10 @@ class TestRiskGuardTrailingLossSemantics:
         assert level == RiskLevel.GREEN
         assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "ok"
-        assert details["daily_loss_source"] == "risk_state_history"
-        # P0-A DEF A (followup_design.md §2.1): effective_bankroll == initial_bankroll
-        # (= wallet snapshot, no PnL math). The legacy assertion expected
-        # effective == initial minus PnL under DEF B; the structural correction
-        # is effective == initial with total_pnl preserved as analytics-only.
-        assert details["daily_loss_reference"] == {
-            "row_id": reference_id,
-            "checked_at": reference_checked_at,
-            "initial_bankroll": 211.37,
-            "total_pnl": -13.26,
-            "effective_bankroll": 211.37,
-        }
+        assert details["daily_loss_status"] == "no_settlements_in_window"
+        assert details["daily_loss_source"] == "realized_settlement_window:authoritative_settlement_rows"
+        assert details["daily_loss_reference"]["settlement_count"] == 0
+        assert details["daily_loss_reference"]["realized_pnl_window"] == pytest.approx(0.0)
 
     def test_tick_uses_trailing_7d_loss_when_reference_exists(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1680,24 +1771,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # P0-A DEF A: equity == wallet, not wallet+pnl. Both daily and weekly
-        # references use initial_bankroll at this default seed. Loss
-        # signal comes from current-equity vs reference-equity, both of which
-        # are wallet snapshots. With monkey-patched wallet truth on both sides,
-        # weekly_loss is 0 — but the test fixtures inject realized_pnl=-10 via
-        # _mock_trailing_loss_tick which moves current_total_value separately.
-        # Under DEF A this no longer changes equity; the assertion below is
-        # rewritten to lock the structural property that effective_bankroll
-        # equals initial_bankroll, NOT pnl-adjusted.
-        assert details["weekly_loss_status"] == "ok"
-        assert details["weekly_loss_source"] == "risk_state_history"
-        assert details["weekly_loss_reference"] == {
-            "row_id": weekly_reference_id,
-            "checked_at": weekly_reference_checked_at,
-            "initial_bankroll": 211.37,
-            "total_pnl": -5.0,
-            "effective_bankroll": 211.37,
-        }
+        assert details["weekly_loss"] == pytest.approx(0.0)
+        assert details["weekly_loss_status"] == "no_settlements_in_window"
+        assert details["weekly_loss_source"] == "realized_settlement_window:authoritative_settlement_rows"
+        assert details["weekly_loss_reference"]["settlement_count"] == 0
+        assert details["weekly_loss_reference"]["realized_pnl_window"] == pytest.approx(0.0)
 
     def test_tick_marks_insufficient_history_without_false_trigger(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1729,17 +1807,15 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # Per df5ce642 (RiskGuard cold-start: empty/stale → GREEN): the
-        # cold-start `insufficient_history` case is not a data-integrity
-        # failure — there's no history yet, so no loss can have occurred.
-        # Level is GREEN with explicit `bootstrap_no_history:...` status.
+        # Realized settlement loss is settlement-window based, not risk_state
+        # history based. A row without a settled exit cannot manufacture loss.
         assert level == RiskLevel.GREEN
         assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "bootstrap_no_history:insufficient_history"
+        assert details["daily_loss_status"] == "no_settlements_in_window"
         assert details["daily_loss_level"] == RiskLevel.GREEN.value
-        assert details["daily_loss_source"] == "no_trustworthy_reference_row"
-        assert details["daily_loss_reference"] is None
+        assert details["daily_loss_source"] == "realized_settlement_window:authoritative_settlement_rows"
+        assert details["daily_loss_reference"]["settlement_count"] == 0
 
     def test_tick_marks_inconsistent_history_without_false_trigger(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1772,12 +1848,12 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.DATA_DEGRADED
-        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "degraded:inconsistent_history"
-        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
-        assert details["daily_loss_reference"] is None
+        assert details["daily_loss_status"] == "no_settlements_in_window"
+        assert details["daily_loss_level"] == RiskLevel.GREEN.value
+        assert details["daily_loss_reference"]["settlement_count"] == 0
 
     def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1803,15 +1879,14 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # Per df5ce642: cold-start `no_reference_row` → GREEN with
-        # `bootstrap_no_history:...` status (no history yet means no loss).
+        # Empty risk_state history is irrelevant to realized settlement loss.
         assert level == RiskLevel.GREEN
         assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "bootstrap_no_history:no_reference_row"
+        assert details["daily_loss_status"] == "no_settlements_in_window"
         assert details["daily_loss_level"] == RiskLevel.GREEN.value
-        assert details["daily_loss_source"] == "no_trustworthy_reference_row"
-        assert details["daily_loss_reference"] is None
+        assert details["daily_loss_source"] == "realized_settlement_window:authoritative_settlement_rows"
+        assert details["daily_loss_reference"]["settlement_count"] == 0
 
     def test_tick_marks_inconsistent_when_only_older_out_of_window_row_is_trustworthy(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1854,19 +1929,10 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # P0-A DEF A (followup_design.md §2.1): equity = wallet, no pnl math.
-        # Both reference and current equity come from the same wallet
-        # (default monkeypatched in conftest), so daily_loss is structurally 0
-        # under DEF A. The original assertion (loss=2) encoded DEF B; the
-        # structural property this test guards is "stale-but-trustworthy
-        # reference is correctly selected" — preserved via the row_id check.
         assert details["daily_loss"] == pytest.approx(0.0)
-        # Per df5ce642 (cold-start follow-up): out-of-window stale row →
-        # `bootstrap_stale_reference` (not bare `stale_reference`) so
-        # observability distinguishes "history but stale" from fresh deploy.
-        assert details["daily_loss_status"] == "bootstrap_stale_reference"
-        assert details["daily_loss_source"] == "risk_state_history"
-        assert details["daily_loss_reference"]["row_id"] == stale_reference_id
+        assert details["daily_loss_status"] == "no_settlements_in_window"
+        assert details["daily_loss_source"] == "realized_settlement_window:authoritative_settlement_rows"
+        assert details["daily_loss_reference"]["settlement_count"] == 0
 
     def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1899,14 +1965,9 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # P0-A DEF A: equity == wallet on both sides → daily_loss = 0 under flat
-        # wallet. The structural property this test guards is "trustworthy
-        # within-window reference is selected" — preserved via row_id +
-        # checked_at + status="ok".
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "ok"
-        assert details["daily_loss_reference"]["row_id"] == trusted_id
-        assert details["daily_loss_reference"]["checked_at"] == trusted_checked_at
+        assert details["daily_loss_status"] == "no_settlements_in_window"
+        assert details["daily_loss_reference"]["settlement_count"] == 0
 
 
 def _patch_riskguard_bankroll(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3615,6 +3676,50 @@ def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     assert row["edge_compression_flag"] == 1
     assert snapshot["status"] == "fresh"
     assert snapshot["stale_strategy_keys"] == []
+
+
+def test_refresh_strategy_health_reuses_supplied_position_view(monkeypatch):
+    conn = _policy_conn()
+    as_of = "2026-04-04T12:00:00+00:00"
+
+    def _unexpected_status_query(_conn):
+        raise AssertionError("position_current status query should be reused by caller")
+
+    monkeypatch.setattr(
+        state_db_module,
+        "query_position_current_status_view",
+        _unexpected_status_query,
+    )
+
+    result = refresh_strategy_health(
+        conn,
+        as_of=as_of,
+        position_view={
+            "status": "ok",
+            "table": "position_current",
+            "positions": [
+                {
+                    "strategy": "center_buy",
+                    "effective_cost_basis_usd": 25.0,
+                    "size_usd": 25.0,
+                    "unrealized_pnl": 5.0,
+                }
+            ],
+        },
+    )
+    row = conn.execute(
+        """
+        SELECT open_exposure_usd, unrealized_pnl
+        FROM strategy_health
+        WHERE strategy_key = 'center_buy' AND as_of = ?
+        """,
+        (as_of,),
+    ).fetchone()
+
+    assert result["status"] == "refreshed"
+    assert result["rows_written"] == 1
+    assert row["open_exposure_usd"] == pytest.approx(25.0)
+    assert row["unrealized_pnl"] == pytest.approx(5.0)
 
 
 def test_refresh_strategy_health_omits_noncanonical_execution_strategy_rows():
