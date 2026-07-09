@@ -1,0 +1,114 @@
+Verdict: WRONG to tolerate these scars in the target; correct move is a second elimination wave before execution. Confidence: 0.84. The superior architecture is not “more guards around restart/scan/freshness”; it is immutable process deployment + one event wake path + one freshness authority + one entry authority + one settlement vocabulary + minimal governance enforced by types/tests/import boundaries.
+
+Revising round 1: I previously treated several mechanisms as “adapt/reuse” because they are currently protective. Under the ideal-test, that was too generous. The invariant often survives; the mechanism usually does not. In particular, FC-03 freshness survives, two independent FC-03 refetch layers do not; operator ARM survives, EDLI boot-stage bureaucracy does not; entry blocking survives, entries_block_registry as a mirror of scattered blockers does not; command/chain anomaly handling survives, decision-integrity quarantine lanes do not.
+
+The load-bearing premise is already in the order-engine design: speed is the alpha source; q is the only settlement belief; execution state carries utility but not belief; stale inputs must block new orders and stale resting orders must be canceled/reconciled; and one bankroll/global solve is the target. The implementation architecture also explicitly calls restart churn “a speed defect,” says the current detection floor is 60–90s scan, and identifies the CAS ledger and event cadence ordering as causal dependencies.
+
+Scar-test verdicts per named mechanism
+
+[HIGH] scar-test — file:src/main.py:119 — SCAR_DIES_WITH_WAVE(W6_IMMUTABLE_DEPLOY) — deploy-restart entries-paused-until-operator-resume exists because code can change under a running checkout and the live daemon must pause entries until restart proof catches up; an ideal process never runs from a mutable working tree — replace with content-addressed release directories, launchd pointing at an immutable current symlink, boot release certificate, and atomic old-process/new-process handoff; keep only “loaded release id matches configured release id” as a boot assertion — verify locally: git grep -n "deployment_freshness\|pause_entries(.*deployment" src tests deploy architecture.
+
+[HIGH] scar-test — file:src/main.py:120 — SCAR_DIES_WITH_WAVE(W6_IMMUTABLE_DEPLOY) — the deployment freshness pause is currently protective because the daemon compares boot SHA with current HEAD and pauses entries on divergence, but that compensates for mutable checkout deployment rather than an irreducible trading requirement — replace with immutable release packaging and make on-disk repo drift irrelevant to the already-running process; deploy by switching a release pointer and restarting through launchd health gate.
+
+[MEDIUM] scar-test — file:src/main.py:131 — SCAR_DIES_WITH_WAVE(W6_IMMUTABLE_DEPLOY) — boot-time auto-resume after deployment pause is pure scar: if stale-deploy pause disappears, auto-resume disappears with it — replace with deploy transaction state: prepared → launched → health_passed → promoted, with no durable trading pause row for normal deploys.
+
+[HIGH] scar-test — file:src/main.py:447 — SCAR_DIES_WITH_WAVE(W6_RESTART_ELIMINATION) — restart preflight evidence gates for monitor cadence, held-position belief, and pending-exit risk exist because restart is frequent and dangerous; an ideal continuously-running money path proves those invariants all the time, not as a special restart ceremony — replace with a continuously refreshed SystemStateCertificate over ledger identity, open orders, q HWM, book feed health, pending exits, and chain mirror; boot only checks certificate freshness, schema, release id, and ARM.
+
+[MEDIUM] scar-test — file:src/main.py:51 — SCAR_DIES_WITH_WAVE(W5_EDLI_COLLAPSE) — EDLI stage-readiness as a staged runtime vocabulary is migration scaffolding, not target architecture; the target has “live submit authorized or not,” not EDLI stage states — replace with a single LiveReadiness object owned by Risk/Operator Control with reasons from canonical subsystems, not stage files.
+
+[HIGH] scar-test — file:src/engine/event_reactor_adapter.py:39 — SCAR_DIES_WITH_WAVE(W2_EXECUTABLE_BOOK_AUTHORITY) — two independent FC-03 refetch layers survive only as an invariant split, not as two mechanisms: solve-time book state and submit-time witness are different responsibilities, but duplicate stale-row repair/refetch paths are scar from warm-cadence mismatch — replace with one ExecutableBookAuthority that serves snapshot_for_solve() and witness_for_submit() from the same freshness policy and records both in the decision certificate.
+
+[HIGH] scar-test — file:src/engine/event_reactor_adapter.py:217 — SCAR_DIES_WITH_WAVE(W2_EXECUTABLE_BOOK_AUTHORITY) — family-specific stale snapshot refresh at decision time exists because the warm job’s per-family cadence is slower than the price-freshness window; in the target, event-driven book ingest and submit witness eliminate this mismatch — replace “refresh when stale” with push-updated book mirror plus final executor witness; stale solve input becomes no certificate, not a local repair branch.
+
+[MEDIUM] scar-test — file:src/control/entries_block_registry.py:3 — SCAR_DIES_WITH_WAVE(W5_SINGLE_ENTRY_AUTHORITY) — entries_block_registry is explicitly not the hidden entry gate and says runtime authority remains elsewhere, so it is a mirror over scattered sources rather than the authority — replace with EntryAuthority.decide(family, action, certificate) returning one typed block reason enum from canonical control-plane, RiskGuard, feed, and ledger state.
+
+[MEDIUM] scar-test — file:src/control/block_adapters/init.py:1 — SCAR_DIES_WITH_WAVE(W5_SINGLE_ENTRY_AUTHORITY) — the current public tree shows four adapters, not seven, so revising the “7 scattered sources” claim: the count is less important than the smell; adapters still prove entry authority is distributed — replace adapters with direct fields on EntryAuthoritySnapshot; keep operator display as a rendering of that snapshot, not independent probes.
+
+[HIGH] scar-test — file:src/execution/command_recovery.py:unknown — SCAR_DIES_WITH_WAVE(W1_K0_LEDGER_W3_CERT_GATE) — decision_integrity_quarantine and entry_authority_quarantined lanes exist because uncertified or semantically invalid decisions/orders can be represented; an ideal certificate/executor boundary makes those states unconstructable — replace with certificate schema rejection before command creation plus RiskGuard RED anomaly facts for external venue/chain inconsistencies; no “quarantined entry authority” lifecycle lane.
+
+[MEDIUM] scar-test — file:src/main.py:267 — SCAR_DIES_WITH_WAVE(W1_K0_LEDGER_W3_CERT_GATE) — boot invalid-pending-entry-authority cancel is a necessary cleanup today but would not exist if pending entry rests always carried a valid certificate, q_version, reservation id, and order-state transition — replace with reducer invariant: open entry order without valid certificate is impossible; if discovered from venue externally, classify as EXTERNAL_ORDER_ANOMALY and block entries RED until canceled.
+
+[MEDIUM] scar-test — file:src/data/hole_scanner.py:0 — SCAR_DIES_WITH_WAVE(W0_SOURCE_CLOCK_AUTHORITY) — hole_scanner is useful as maintenance coverage reconciliation, but it must not be part of the live “is data fresh?” answer; ideal freshness is source-event-time HWM versus q incorporated-HWM — replace live freshness dependence with SourceClockFrontier, demote hole scanning to offline/backfill coverage audit.
+
+[LOW] scar-test — file:src/data/collection_frontier.py:1 — LOAD_BEARING — collection_frontier mostly survives because it already asks the correct ideal question: latest usable source data and why not, measured on source/event time rather than write time — promote this into the single freshness authority and delete duplicate live freshness registries around it.
+
+[LOW] scar-test — file:src/data/ingestion_guard.py:0 — LOAD_BEARING, but renamed/not freshness — IngestionGuard is not a freshness surface; it is source-fact construction validation for units, physical bounds, collection timing, DST, and provenance — keep it as ObservationFactGuard, remove it from any operator mental model of “freshness.”
+
+[HIGH] scar-test — file:src/data/freshness_registry.py:unknown — SCAR_DELETE or SCAR_DIES_WITH_WAVE(W0_SOURCE_CLOCK_AUTHORITY) — the named mechanism fails the ideal-test if it is a second registry answering the same freshness question as collection_frontier — replace with one FreshnessVerdict(source_id, track, source_issue_time, source_run_id, incorporated_by_q_version, state, reason).
+
+[HIGH] scar-test — file:settlement vocabulary translation web:unknown — SCAR_DIES_WITH_WAVE(W7_SETTLEMENT_SEMANTICS_SINGLETON) — three settlement enums/translators exist because historical DB/API/internal vocabularies diverged; ideal architecture has one canonical settlement vocabulary and adapters parse external strings only at the boundary — replace with one SettlementMetric, one SettlementStatus, one SettlementOutcomeKind, and DB CHECK constraints generated from those types; keep no runtime translation web outside boundary parsers.
+
+[MEDIUM] scar-test — file:src/main.py:33 — SCAR_DIES_WITH_WAVE(W5_EDLI_COLLAPSE) — the boot-guard cascade and “antibody” guards encode prior incidents as runtime bureaucracy; the invariant subset survives, but the cascade does not — replace with four boot guards only: immutable release id, schema/table fingerprint, K0 ledger identity, and ARM/RiskGuard/feed readiness.
+
+Restart churn verdict
+
+[BLOCKER] architecture — SCAR_DELETE target; BLOCKER before execution promotion — a daemon restarting every ~20 minutes is architecturally incoherent for a system whose alpha is speed because each restart creates websocket blind windows, cold clients, warm-cache loss, duplicate recovery surfaces, and event backlog delay — fix root cause before W3/W4 promotion; target SLO: no unscheduled trading-daemon restart during market hours, and rolling restart blind window measured in seconds, not tolerated as “pre-existing.”
+
+[HIGH] restart-scar — file:src/main.py:96 — SCAR_DIES_WITH_WAVE(W6_RESTART_ELIMINATION) — cross-restart idempotency boot tokens are scars from frequent restart plus event-source key construction; ideal event identity is deterministic from source fact and semantic sequence, not PID/time — replace with stable event ids from (event_type, family_id, source_run_id/book_seq/fill_id, semantic_version), with process id absent from money-path identity.
+
+[HIGH] restart-scar — file:src/main.py:471 — SCAR_DIES_WITH_WAVE(W1_K0_LEDGER_W6_RESTART_ELIMINATION) — boot fill-bridge recovery exists to absorb daemon death or swallowed bridge exceptions; target reducer should consume durable fill facts continuously and idempotently, with boot doing no special repair — replace with one always-on venue/user-fill reducer and a periodic audit that never changes entry authority except via RiskGuard anomaly.
+
+[MEDIUM] restart-scar — file:src/main.py:472 — SCAR_DIES_WITH_WAVE(W6_RESTART_ELIMINATION) — boot settlement/redeem recovery is tolerable for accounting but not as a live money-path crutch; target settlement/redeem is its own durable worker with idempotent cursors — replace boot sweeps with persistent settlement worker plus replayable cursor.
+
+[HIGH] restart-scar — file:src/main.py:491 — SCAR_DIES_WITH_WAVE(W1_K0_ORDER_REDUCER) — unresolved-command reconcile sweep is load-bearing today but scar in the target if it is compensating for noncanonical command state; after K0 order reducer, it becomes a venue-fact audit, not a recovery decision lane — replace with command state reducer plus anomaly table.
+
+[HIGH] restart-scar — file:src/control/block_adapters/ws_gap_guard.py:0 — LOAD_BEARING invariant, scar implementation — websocket gap detection survives because book/fill feed continuity is load-bearing, but using it to absorb routine restart blind windows is scar — replace with continuous subscription supervisor, sequence gap accounting, and event replay catch-up; entries block only when mirror cannot prove book/fill continuity.
+
+[MEDIUM] restart-scar — file:src/main.py:503 — SCAR_DIES_WITH_WAVE(W6_RESTART_ELIMINATION) — “run settlement attribution on every restart because daily cron missed while daemon cycled” is a clear scar from restart churn — replace with independent settlement-attribution daemon or durable scheduler not tied to order-daemon lifetime.
+
+Runtime efficiency floors
+
+[BLOCKER] efficiency — file:src/main.py:480 — SCAR_DIES_WITH_WAVE(W4_EVENT_WAKE) — reactor scan cadence is currently the event queue consumer and therefore directly gates A2 latency; that is a foundation defect, not an acceptable floor — replace APScheduler polling with wake-on-write event dispatch plus bounded poll backstop only for liveness.
+
+[HIGH] efficiency — file:src/main.py:483 — SCAR_DIES_WITH_WAVE(W4_EVENT_WAKE) — a configurable reactor interval is not the target; changing 60s to 10s just burns CPU/locks while preserving polling architecture — replace with EventWriter.notify() or an internal queue/condition variable so source/book/fill events trigger immediate affected-family solves.
+
+[HIGH] efficiency — file:src/main.py:474 — SCAR_DIES_WITH_WAVE(W8_RUNTIME_ORCHESTRATOR) — dedicated APScheduler pools are a scar from venue-heavy jobs starving the reactor; ideal money path has separate persistent workers, priority queues, and no blocking venue HTTP in the scheduler pool — replace APScheduler for money-path jobs with a long-lived event loop/worker graph; keep APScheduler only for maintenance/reporting.
+
+[MEDIUM] efficiency — file:src/main.py:485 — LOAD_BEARING but move owner — connection keepalive is normal low-latency engineering, not scar, but it should belong to the venue client/session pool, not a scheduler job — replace _edli_pre_submit_jit_keepalive_tick with persistent CLOB client health inside VenueGateway.
+
+[HIGH] efficiency — file:src/main.py:498 — SCAR_DIES_WITH_WAVE(W8_DB_ACCESS_MODEL) — WAL checkpoint jobs are scars from reader/writer contention and pinned WAL floors; with the three-DB law, SQLite can survive only behind single-writer append discipline and short transactions — replace checkpoint babysitting with DB-owned write queues, no network I/O in transactions, explicit read snapshots, and periodic checkpointing outside the hot path.
+
+[HIGH] efficiency — file:src/main.py:500 — SCAR_DIES_WITH_WAVE(W8_DB_ACCESS_MODEL) — the zeus_trades WAL incident directly starved priceable families; that is not an acceptable runtime floor for an alpha-speed system — replace with K0 ledger/order reducers on a single trade-DB writer and push read models to immutable snapshots.
+
+[HIGH] efficiency — file:fresh-interpreter tick scripts:unknown — SCAR_DIES_WITH_WAVE(W6_DAEMONIZATION) — fresh-interpreter ticks are unacceptable on the hot path because they cold-start imports, clients, caches, TLS, and DB connections for latency-critical decisions — replace all hot ticks with persistent daemons; allow fresh-interpreter scripts only for operator maintenance, migrations, and offline replay.
+
+Governance scar test
+
+[HIGH] governance — architecture/history_lore.yaml — SCAR_DELETE — history lore is institutional memory, not executable architecture — replace with postmortems in docs and regression tests for any surviving invariant.
+[HIGH] governance — architecture/pre_existing_failure_registry.yaml — SCAR_DELETE after referenced tests exist — replace each live failure with a failing test, a tracked bug, or deletion.
+[HIGH] governance — architecture/antibody_specs.yaml — SCAR_DIES_WITH_WAVE(W9) — keep only generated regression tests and negative constraints — replace with tests/invariants/ and import/type checks.
+[HIGH] governance — architecture/fatal_misreads.yaml — SCAR_DIES_WITH_WAVE(W9) — ideal code makes the misread unrepresentable — replace with type names, module names, and tests.
+[MEDIUM] governance — architecture/failure_chains.yaml — SCAR_DIES_WITH_WAVE(W9) — keep only chains that generate verifier tests — replace with replay fixtures and property tests.
+[MEDIUM] governance — architecture/context_pack_profiles.yaml + context_pack_schema.yaml — SCAR_DELETE — agent workflow tooling, not trading-system safety.
+[MEDIUM] governance — architecture/code_review_graph_protocol.yaml — SCAR_DELETE — review protocol belongs in contributor process.
+[LOW] governance — architecture/agent_pr_discipline_2026_05_09.md — SCAR_DELETE.
+[MEDIUM] governance — architecture/test_topology.yaml — SCAR_DIES_WITH_WAVE(W9) — replace with pytest markers, coverage queries, invariant ownership in code.
+[MEDIUM] governance — architecture/test_quality.yaml — SCAR_DIES_WITH_WAVE(W9) — load-bearing only if CI consumes it automatically.
+[MEDIUM] governance — architecture/source_rationale.yaml — SCAR_DIES_WITH_WAVE(W9) — replace with module docstrings and generated ownership.
+[LOW] governance — architecture/docs_registry.yaml — SCAR_DELETE — replace with docs index generation.
+[LOW] governance — architecture/map_maintenance.yaml — SCAR_DELETE — replace with generated architecture map from imports.
+[HIGH] governance — architecture/topology.yaml — LOAD_BEARING but shrink — replace broad topology with a small import-linter contract: probability may not import execution, executor may not import probability writers, settlement only through semantics, DB writers single-owned.
+[HIGH] governance — architecture/topology_enforcement.yaml — LOAD_BEARING but shrink — a few dedicated enforcers, no self-referential orchestrator patterns.
+[HIGH] governance — architecture/topology_surfaces.yaml — SCAR_DIES_WITH_WAVE(W9) — replace with exported protocol modules and generated docs.
+[HIGH] governance — architecture/module_manifest.yaml — LOAD_BEARING temporarily; shrink after package boundaries — replace with package-local ownership or CODEOWNERS-style mapping.
+[HIGH] governance — architecture/db_table_ownership.yaml — LOAD_BEARING — keep, but reduce to {db, table, owner_writer, allowed_readers, migration_owner}.
+[HIGH] governance — architecture/invariants.yaml — LOAD_BEARING but convert to tests — every row needs an executable verifier.
+[HIGH] governance — architecture/negative_constraints.yaml — LOAD_BEARING but convert to tests/import bans.
+[HIGH] governance — architecture/money_path_objects.yaml — LOAD_BEARING but shrink — remove obsolete strategy/gate objects as W5 deletes them.
+[MEDIUM] governance — architecture/capabilities.yaml — LOAD_BEARING if executor-bound — collapse all other capability rows into tests or config.
+[MEDIUM] governance — architecture/runtime_modes.yaml — SCAR_DIES_WITH_WAVE(W5) — replace with live_submit_authorized, read_only, maintenance.
+[MEDIUM] governance — architecture/runtime_posture.yaml — SCAR_DIES_WITH_WAVE(W5) — replace with LiveReadiness certificate.
+[HIGH] governance — architecture/city_truth_contract.yaml — LOAD_BEARING — keep under SettlementSemantics ownership.
+[HIGH] governance — architecture/settlement_dual_source_truth_2026_05_07.yaml — LOAD_BEARING until absorbed into SettlementSemantics types.
+[HIGH] governance — architecture/data_sources_registry_2026_05_08.yaml — LOAD_BEARING if domain registry — keep only source identity, release calendar, tracks, live eligibility.
+[MEDIUM] governance — architecture/preflight_overrides_2026-04-28.yaml — SCAR_DELETE — replace with time-bounded operator override rows in the control plane.
+[MEDIUM] governance — architecture/maturity_model.yaml — SCAR_DELETE.
+[MEDIUM] governance — topology doctor 16K lines — SCAR_DIES_WITH_WAVE(W9) — replace with small import-linter rules, ownership checks, DB ownership checks, generated reports; no monolithic doctor.
+
+Execution order for scar elimination
+
+[BLOCKER] wave-order — LOAD_BEARING — do not delete restart and recovery scars before the K0 ledger/order reducer and certificate gate exist; many scars are currently keeping the live path from bleeding — execute in this order: W0 SourceClock/FreshnessAuthority, W1 K0 ledger/order reducer, W2 ExecutableBookAuthority, W3 CertificateGate/Solver, W4 EventWake, W5 EntryAuthority/EDLI collapse, W6 ImmutableDeploy/Restart elimination, W7 SettlementSemantics singleton, W8 DB access model, W9 Governance collapse.
+
+[BLOCKER] final-gate — restart-cadence — no W3/W4 live promotion while the order daemon restarts frequently; prove a market-hours soak with websocket blind-window metric, no unscheduled restart, and no boot recovery mutation required.
+
+(Note: consult read public main, which lags local; the "~20-min restart" premise was falsified locally on 2026-07-07 — mesh uptime uniform 4h — but the root cause, mutable checkout deployment, remains. Full adjudication in whole_system_first_principles_2026-07-07.md §7.)

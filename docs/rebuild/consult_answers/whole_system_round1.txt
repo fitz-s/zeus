@@ -1,0 +1,353 @@
+1. APPROACH / PLAN VERDICT
+
+Verdict: CORRECT-BUT-SUBOPTIMAL. Confidence: 0.78 overall; 0.86 on the target architecture; 0.65 on exact gap sizing because the requested commit-pinned tree returned 404, so I used the accessible public main tree and the rebuild docs on main as the source of record. The approach is directionally right: the minimal system is not “cleaner versions of the existing daemons,” but a narrow, versioned decision-certificate spine: source facts → posterior q → executable venue state → bankroll-constrained solve → certified execution → settlement/grading → walk-forward calibration. That architecture matches the operator axioms and the order-engine rebuild design, which defines q as the only settlement belief, execution as utility-only state, one bankroll, freshness fail-closed, and one controller rather than layered gates. GitHub+1
+
+The suboptimal part is not the first-principles target; it is the no-shadow/no-history-cap absolutism if interpreted too broadly. “No shadow modes” makes validation and cutover materially harder because the safest proof of a new solver is usually live read-only parallel evaluation. Given that the axiom is settled, the superior practical realization is not a second shadow decision system, but event-log replay, byte-identical OFF evidence gates, and time-boxed promotion flags that are deleted after promotion—which is exactly the direction the order-engine implementation doc already takes. GitHub
+
+The strongest alternative I considered is incremental pruning of the existing cyclic daemon/reactor architecture: delete old gates, simplify the large files, and gradually converge. I reject that as the primary strategy because the current structure re-proves economics across layers and uses recovery/reconcile bookkeeping to compensate for missing canonical truth. The accessible tree still contains very large money-path files—event_reactor_adapter.py at 24,381 lines, command_recovery.py at 16,612 lines, state/db.py at 12,789 lines, main.py at 11,535 lines, cycle_runtime.py at 8,682 lines on accessible main, and executor.py at 6,766 lines—so pruning alone preserves the wrong seams. GitHub+5GitHub+5GitHub+5
+
+Minimal component graph
+
+Irreducible componentSingle responsibilityCanonical stateSeams
+
+1. Source Clock + Raw IngestAcquire weather model cycles, station observations, market books, own order/fill facts, and chain facts with source timestamps.Raw source runs, source payload hashes, provider issue/fetch/write timestamps in the appropriate DB: world, forecasts, or trades.Emits typed source events: SOURCE_RUN_ARRIVED, OBS_ARRIVED, BOOK_UPDATED, FILL_FACT, CHAIN_FACT.
+
+2. Contract + SettlementSemantics RegistryDefine family identity: city × metric × date, bin partition, rounding, settlement source role, and metric identity.Market/family topology and typed SettlementSemantics in world.All q, execution, settlement, and grading calls accept typed family/semantics, never bare city/date/float.
+
+3. Probability AuthorityProduce the only settlement belief: honest posterior q over MECE bins, plus q provenance, input high-water marks, and walk-forward eligibility.q_version, posterior vectors, input HWMs, posterior provenance, calibration artifact version, and optional joint scenario artifact in forecasts.Read API: get_q(family, as_of) and get_scenarios(families, as_of). Execution may read q; execution may not modify q.
+
+4. Market/Venue MirrorMaintain executable order book, venue metadata, own orders, fills, command receipts, and venue state reductions.Book snapshots, own-order facts, command receipts, CLOB/chain facts in trades.Provides depth-walk cost, route availability, self-trade checks, rate-limit budgets, and command state to solver/executor.
+
+5. Event Router / ReactorDeterministically route source/book/fill/schedule events to affected families and trigger solves only when inputs are fresh enough.Append-only opportunity/event log, idempotency keys, cursors, and stale/fresh reducer state.event → affected families → solve request; scans remain only a liveness backstop.
+
+6. Reservation + Bankroll Ledger K0Enforce one bankroll under concurrent reservations, fills, cancels, exits, unsettled proceeds, and conversions.CAS reservation rows, ledger events, holdings, unsettled buckets, reservation ownership, and identity checks in trades.Solver reserves; executor consumes/releases; reconciler reduces venue facts; RiskGuard trips on identity violation.
+
+7. Solver + Decision CertificateChoose maker/taker/cancel/exit/convert/no-op actions from q and executable book costs under bankroll and freshness constraints.Immutable decision certificate: q_version, book snapshot id, ledger snapshot id, solver inputs, action menu, selected plan, objective delta, constraints, and correlation rail.Emits certified commands only; no uncertified command reaches executor.
+
+8. Executor / Command GatewaySubmit/cancel/convert/split/merge certified commands idempotently with safe prefixes, self-trade guards, rate-limit guards, and receipt capture.Command intent, command attempts, venue receipts, failure classes, and reduced order state in trades.Accepts only certified commands; emits command/fill/order facts back to event log.
+
+9. Settlement + GradingResolve final settlement values only through SettlementSemantics, grade positions and decisions against frozen certificates.Settlement observations, settlement outcomes, graded positions, graded decision certificates in world/trades.Emits walk-forward-eligible outcomes to calibration only after settlement finality.
+
+10. Calibration Walk-ForwardUpdate calibration artifacts using only settled outcomes available at that historical decision time.Frozen calibration runs, training cutoff, artifact hash/version, backtest/replay provenance in forecasts.Provides calibration artifact to Probability Authority; never reaches into live future outcomes.
+
+11. Risk + Operator ControlARM, kill switch, RED/YELLOW/ORANGE state, deploy boundary, cancel sweeps, and entry blocking.Operator arm state, risk facts, policy state, incident facts.May block entries or force cancel/exit; may not mutate q.
+
+12. Observability + VerifierProve freshness, ledger identity, event determinism, solver invariants, settlement correctness, and replayability.Metrics, verifier outputs, replay traces, latency histograms, schema fingerprints.Emits fail-closed tripwires; no economics authority.
+
+This is the minimal graph because each component owns exactly one category of truth. The current architecture documents already state that Zeus is a weather-derivatives engine that ingests forecasts/observations/prices, produces settlement probabilities, trades executable books, and feeds settlement outcomes into calibration; they also state the three-DB split and frozen decision-time probability requirement. GitHub
+
+What the 358K LOC contains that the minimal system does not need
+
+These are estimates from the accessible tree and the rebuild docs; exact counts require a local import graph and cloc.
+
+Non-minimal categoryEstimated removable/adapted massWhy minimal system does not need it
+
+Repeated entry economics and anti-belief gates: q lower-bound admission, selection calibrator, market anchor, direction law, taker floors, Kelly haircut stack, coverage/licensing gates, maker fill calibration, regret ledgers.55K–85K LOC equivalentThe solver should consume q/scenarios and executable cost once. The current README still describes lower-bound gating, selection calibration, BH FDR, fractional Kelly cascades, maker escalation, and separate exit flows, while the order-engine design says these are deleted or intentionally absent. GitHub+2GitHub+2
+
+Cycle/scheduler/scan orchestration as primary control plane: broad scans, reactor scan triggers, launch daemon glue embedded in money logic, monitor refresh lanes.60K–80K LOC equivalentMinimal control is event-driven with scans only as liveness backstop. A 24K-line event reactor and 11.5K-line main.py are symptoms of orchestration owning too much policy. GitHub+1
+
+Recovery/reconcile bookkeeping compensating for missing K0 truth: command recovery surfaces, partial-fill repair, stale order repair, duplicated order state reducers.45K–65K LOC equivalentA CAS ledger plus canonical order-state reducer should make many recovery classes impossible or purely diagnostic. The implementation doc explicitly calls out live ledger TOCTOU, partial-fill gaps, and released-not-converted gaps. GitHub+1
+
+Strategy/per-side/edge-source lanes: entry strategy dispatch, separate exit strategy lane, per-leg strategy naming, attribution lanes as execution inputs.35K–55K LOC equivalentStrategy names are not irreducible. The irreducible action is a certified plan from q/book/ledger. Attribution can be reporting, not control.
+
+Mega-DB and schema glue: all-purpose DB façade, ad hoc migrations, repositories mixed with schema policy.25K–45K LOC equivalentThe three DBs stay, but table ownership should follow canonical truth owners. state/db.py at 12.8K lines is too broad for a minimal authority boundary. GitHub
+
+Validation/report/audit artifacts coupled to deleted semantics50K–80K LOC equivalentKeep replay, settlement audit, and verifier kernels; delete tests/reports that prove old gates rather than the new certificate spine.
+
+Reusable kernels to keep70K–110K LOC equivalentIngest adapters, SettlementSemantics, typed market semantics, q fusion kernels, venue adapters, event append substrate, depth-walk pricing, ARM/RiskGuard, and settlement grading are real assets rather than accidental complexity.
+
+2. CORE CORRECTNESS
+
+The core formulation is sound if implemented as a strict separation between belief, executable venue state, and utility. q must be the only settlement belief; fills, price, and book state have utility value but no settlement-information authority. This is exactly the order-engine design’s A1/A3 split: q is a MECE family vector, while order actions are FOK/FAK, post-only maker, cancel, convert/split/merge, sell, and no-op decisions under venue constraints. GitHub
+
+The load-bearing mathematical correction is to delete downstream q-derived gates and make the solver consume q directly. The q violation ledger states that q point vectors were structurally correct while downstream q_lcb, NO-leg modeling, edge, sizing, and exit logic were broken; its largest root cause was independent per-bin percentile treatment of raw non-renormalized bin-mass samples, which collapses high-belief lower bounds and poisons entry decisions. GitHub
+
+The right decision objective is expected utility under one bankroll, not filter-then-rank. The implementation doc explicitly says the current family decision engine is a filter-then-rank top-1 chooser and that the missing piece is a joint convex/global solver. GitHub The superior realization is: enumerate a discrete action menu per family, compute executable payoff vectors against settlement bins and route costs, then solve for the bankroll allocation that maximizes expected log utility or a closely related concave utility with one explicit risk knob κ. For small menus, brute-force/discrete repair around a convex relaxation is acceptable; for dependent families, scenario-based optimization dominates independent per-family water-filling.
+
+The hardest correctness boundary is cross-family dependence. Daily temperature bins across nearby cities and same model cycles are not independent. A first-principles solver needs a scenario service: either calibrated residual scenario samples, a shrinkage covariance/copula model, or a conservative dependence envelope. The implementation doc allows an interim single-family solve with caps but requires stamping the correlation rail as caps; that is acceptable only as a migration rail, not as the final architecture. GitHub
+
+The maker-order formulation is under-specified by the operator axioms. If historical fill intensities and price-conditioned belief are both disallowed, a posted maker order cannot be optimally valued in the usual expected-fill sense. The minimal safe interpretation is adversarial/conservative: a maker quote is allowed only when it remains acceptable under worst-case fill timing until the next freshness boundary, cancel latency, and self-trade/rate-limit constraints. Otherwise the solver should prefer taker actions or no-op. This is a real premise challenge: banning learned fill intensity removes a useful execution model; it may be worth the simplicity, but it makes maker optimization deliberately conservative rather than fully optimal.
+
+The settlement/grading boundary is correct and non-negotiable. Settlement values must enter only through SettlementSemantics; grading must bind the frozen decision certificate to the eventual settled outcome; calibration must consume only walk-forward-eligible settled outcomes. The current authority doc treats settlement semantics, feed roles, high/low metric identity, runtime truth ordering, and fail-closed behavior as money-path laws rather than style preferences. GitHub
+
+The most likely wrong input class is a stale or partially ordered event set: new model cycle arrives, old resting order remains live, partial fill occurs, cancellation is delayed, and the solver sees a mixed q/book/ledger snapshot. The implementation doc correctly requires the reservation ledger before event cadence, because event-driven triggering amplifies the ledger race. GitHub Therefore W1/K0 ledger and order-state reduction are correctness prerequisites, not cleanup.
+
+Security-wise, the minimal architecture is safer because only the executor can touch venue credentials and only certified commands can reach the executor. Operator ARM and RiskGuard remain the live submit boundary. The current architecture already documents OperatorArm as live-submit authorization in the daemon, and the implementation doc classifies ARM/RiskGuard as reuse kernels with a deletion trap around coverage gates. GitHub+1
+
+3. VALIDATION SOUNDNESS
+
+The current evidence is not yet a sound demonstration that the rebuilt system will make money or preserve invariants live. The design docs are strong architectural evidence, but they are not proof of q calibration, solver optimality, ledger linearizability, or live venue parity. The settlement-graded EV document explicitly caveats that it is an offline pass rather than a full live sizing/exposure replay because exact historical state was not reconstructable, and its graded after-cost EV was sign-indeterminate: mean −0.0026 with 95% CI [−0.0380, 0.0321] over 269 decisions. GitHub
+
+The single load-bearing claim still asserted but not proven is:
+
+“The Probability Authority produces an honest, timely posterior q that is positive after executable costs when acted through the new live solver under one bankroll.”
+
+To prove that claim soundly, validation must become certificate-native:
+
+Every live or replayed decision must have a frozen certificate containing q_version, input HWMs, book snapshot id, ledger snapshot id, solver menu, selected plan, and reason for no-op.
+
+Replay must be event-log deterministic under duplicate, reordered, missing, and late events.
+
+Ledger tests must be adversarial: concurrent reserve/fill/cancel/settle/convert operations must preserve the bankroll identity.
+
+Solver tests must include brute-force small-market comparisons, monotonicity checks, stale-q rejection, market-closed/no-liquidity boundaries, partial-fill prefixes, self-trade prevention, rate-limit exhaustion, and Day0 absorbing cases.
+
+Settlement tests must cover high/low dual-track identity, HK truncation, WMO half-up, final source role, and settlement-source unavailability.
+
+The existing docs acknowledge many of these gates—q tripwires, latency SLA, ledger identity, self-trade guards, REST_ELIGIBLE, and byte-identical OFF promotion gates—but the evidence is not yet the same as an adversarial verifier suite. GitHub+1
+
+4. PER-FILE / PER-STAGE FINDINGS
+
+Severity scale used throughout: BLOCKER / HIGH / MEDIUM / LOW. No explicit changed-file diff was supplied, so these findings cover the material files and migration stages implicated by the requested rebuild.
+
+[BLOCKER] concurrency — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:3 — the implementation doc identifies a live TOCTOU collateral/reservation race, so event-driven solves can overspend bankroll if W3/W4 precede W1 — build K0 CAS reservation ledger and order-state reducer before any solver promotion — verify locally: concurrent reserve/fill/cancel/settle stress test keeps free + reserved + holdings + unsettled equal to bankroll with no negative free balance. GitHub
+
+[BLOCKER] correctness — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:8 — current decisioning is described as filter-then-rank top-1 rather than one-bankroll expected-utility solve, so it can reject or under-size the best global action — build the SOLVE component using q, executable costs, payoff vectors, and bankroll ledger snapshots — verify locally: golden-vector solver tests match brute force on small multi-family menus. GitHub
+
+[BLOCKER] correctness — file:docs/rebuild/q_engine_violation_ledger.md:248 — downstream q_lcb/NO-leg/edge/sizing logic is documented as broken even when q point is structurally correct, so any old admission path kept live can poison the rebuilt system — remove q_lcb/select-calibrator/NO-scalar semantics from runtime decisions and move dispersion into Probability Authority scenarios — verify locally: adversarial obvious-EV families are not rejected by lower-bound collapse. GitHub
+
+[BLOCKER] migration — stage:W1-before-W3/W4 — event cadence amplifies the ledger race, so solver or reactor promotion before K0 ledger is unsafe — enforce migration dependency in code with startup tripwire refusing promoted solver/event mode unless K0 schema and ledger verifier are green — verify locally: launch with promotion flag and missing K0 schema fails closed before venue authorization. GitHub
+
+[HIGH] migration — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:12 — the deletion list notes an ARM/coverage trap where removing coverage/licensing lanes first can disarm operator gating — rewire ARM as the sole submit authorization before deleting coverage gates — verify locally: ARM-disabled integration test prevents every submit/cancel/convert command except explicitly allowed RED cancel sweep. GitHub
+
+[HIGH] architecture — file:src/engine/event_reactor_adapter.py:1 — a 24,381-line reactor is structurally too large to be the money-path control plane and likely mixes event routing, policy, stale handling, and submission side effects — replace it incrementally with a typed event router that calls the certificate solver through one seam while retaining append-only event writes — verify locally: replaying shuffled duplicate source/book/fill events produces identical decision certificates and command intents. GitHub
+
+[HIGH] architecture — file:src/execution/command_recovery.py:1 — a 16,612-line recovery subsystem indicates command truth is inferred after the fact rather than reduced from canonical command/order facts — shrink recovery behind a venue-order reducer after K0 order-state migration — verify locally: venue replay from command receipts plus fills reconstructs the same order state without invoking legacy recovery branches. GitHub
+
+[HIGH] correctness — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:23 — market coherence is identified as a veto/deletion issue, and vetoing market/q disagreement destroys exactly the alpha the engine is trying to capture — invert market-coherence into a diagnostic/priority router, never a no-trade gate — verify locally: q/book divergence raises solve priority and still allows a certified trade if q, freshness, book, and ledger pass. GitHub
+
+[HIGH] ordering — file:docs/rebuild/order_engine_first_principles_design_2026-07-02.md:17 — new input must stale old resting orders before new submits, or the system can hold stale maker risk across a q_version boundary — implement SOURCE_RUN_ARRIVED → STALE_PENDING_CANCEL → new q_version solve ordering with stale-fill absorption as endowment — verify locally: input arrival during partial fill/cancel produces no new submit until stale orders are resolved or explicitly absorbed. GitHub
+
+[HIGH] economics — file:docs/rebuild/order_engine_first_principles_design_2026-07-02.md:21 — REST_ELIGIBLE without a fill-intensity model cannot prove maker optimality, so maker quotes are unsafe if valued like certain execution — treat maker orders as conservative contingent options with bounded notional and cancel-latency guards, or taker/no-op dominates — verify locally: solver refuses maker posting when next expected input boundary is inside cancel p99 + submit p99 + minimum safe rest lifetime. GitHub
+
+[HIGH] migration — file:src/main.py:1 — the 11,535-line daemon entrypoint makes launchd cutover risky if new services are introduced as separate live paths — keep the launchd entrypoint stable and move internals behind registered services with one submit gateway — verify locally: read-only boot validation loads config, DB handles, ARM state, and service registry without venue credentials. GitHub+1
+
+[MEDIUM] boundary — file:docs/authority/zeus_current_architecture.md:257 — the authority doc treats typed pricing and settlement semantics as money-path boundaries, so a minimal rebuild using bare floats or ad hoc rounding would reintroduce catastrophic semantic errors — keep ExecutionPrice, SettlementSemantics, and metric identity as REUSE kernels — verify locally: type tests reject bare float prices and direct settlement-value writes outside SettlementSemantics. GitHub
+
+[MEDIUM] boundary — file:docs/authority/zeus_current_architecture.md:342 — high/low dual-track identity is first-class, so a rebuilt family key that omits metric identity can cross-contaminate q, settlement, and calibration — include metric identity in family id, q_version, certificate id, and calibration key — verify locally: same city/date high and low markets produce distinct posterior, solver, settlement, and calibration rows. GitHub
+
+[MEDIUM] validation — file:docs/rebuild/settlement_graded_ev_2026-06-15.md:239 — the EV validation is offline and not full live sizing/exposure replay, so it cannot certify money-path profitability — replace post-hoc EV tables with replay from frozen decision certificates and venue snapshots — verify locally: replay reproduces historical live action/no-op decisions byte-for-byte from stored q/book/ledger/certificate inputs. GitHub
+
+[MEDIUM] migration — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:20 — maker_rest_escalation is described as the only current GTC TTL owner, so deleting it before C3 freshness and REST_ELIGIBLE replacement can strand stale resting orders — delete maker escalation only in the same packet that installs the new stale-order owner — verify locally: stale maker order is canceled under new owner with legacy escalation disabled. GitHub
+
+[MEDIUM] architecture — file:src/state/db.py:1 — a 12,789-line DB façade creates a broad blast radius for schema and truth-owner changes — split repository ownership by canonical state while preserving the three physical DBs and schema fingerprints — verify locally: migration dry-run leaves table registry, pragma settings, and cross-DB attach behavior unchanged. GitHub
+
+[MEDIUM] stage — stage:W3-single-family-rail — interim independent family solve with risk caps is acceptable only if it is explicitly labeled as a correlation approximation — stamp every certificate with correlation_rail=caps until ScenarioService is live — verify locally: certificate schema rejects promoted W3 decisions missing a correlation rail. GitHub
+
+[LOW] operability — file:docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:30 — restart churn and websocket blind windows are called out as speed defects, so launchd restarts can silently degrade the “faster than market” axiom — add blind-window metrics and liveness backstop alerts before optimizing solver speed — verify locally: forced restart emits reconnect gap duration and missed-book interval metrics. GitHub
+
+5. IDEAL-vs-ACTUAL DIFFERENCE + SUPERIOR REALIZATIONS
+
+Ideal: one canonical bankroll ledger. Actual: scattered reservation/recovery semantics.
+
+Upgrade: K0 CAS reservation ledger first, with identity tripwire and order-state reducer. This dominates because no solver, event router, or migration is safe until cash/holdings/reservations are linearizable.
+
+Ideal: global expected-utility solver. Actual: filter-then-rank plus repeated gates.
+
+Upgrade: one solver consuming q/scenarios, executable costs, route menu, and ledger snapshot. Delete q_lcb admission, selection calibrator, market-anchor veto, direction law as economics, taker floors, and Kelly haircut layers. Keep only one explicit risk knob κ.
+
+Ideal: Probability Authority owns all belief and uncertainty. Actual: q point may be correct but downstream confidence/admission logic mutates economics.
+
+Upgrade: q service outputs posterior vector plus calibrated scenario artifact/provenance; execution never computes belief bounds. The q violation ledger makes this the highest-leverage economic deletion. GitHub
+
+Ideal: event-driven source-to-solve with scans as liveness backstop. Actual: scan/cycle/reactor layers are primary control.
+
+Upgrade: introduce typed events and affected-family routing. Keep existing broad cycle only as watchdog until event replay demonstrates deterministic equivalence.
+
+Ideal: frozen decision certificate is the accounting atom. Actual: validation and grading are partly reconstructed after the fact.
+
+Upgrade: every command, no-op, cancel, exit, and settlement grade points to the certificate that authorized or rejected it. Calibration consumes only settled, walk-forward-eligible certificates.
+
+Ideal: venue capabilities are part of the action menu. Actual: convert/split/merge and route semantics are partial or auxiliary.
+
+Upgrade: build CTF convert/split/merge, route availability, safe prefixes, self-trade checks, and rate-limit budgets as first-class solver/executor inputs. The order-engine implementation doc identifies these as true BUILD work. GitHub
+
+Ideal: repository ownership follows truth ownership. Actual: DB and daemon files are broad god objects.
+
+Upgrade: preserve the three physical DBs but split code ownership by canonical truth: source facts, q artifacts, venue facts, ledger, certificates, settlement, calibration, and operator/risk state.
+
+Ideal: validation is adversarial replay and invariant proof. Actual: offline EV evidence is sign-indeterminate and not full live replay.
+
+Upgrade: certificate replay, ledger stress tests, source-ordering fuzz tests, settlement semantic property tests, and solver brute-force comparisons.
+
+REUSE / ADAPT / BUILD / K0 judgment
+
+K0 / foundational before money-path promotion
+
+Reservation ledger with CAS semantics, reservation ownership, unsettled proceeds, partial fills, conversion release, and identity tripwire.
+
+Order state machine extension: submitted, accepted, live, partial, canceled, filled, rejected, expired, unknown-stale, recovered.
+
+Decision certificate schema: q_version, input HWM, book snapshot, ledger snapshot, solver rail, action menu, selected plan, objective delta, constraints.
+
+q_version/HWM authority boundary if current hashes are not already sufficient.
+
+REUSE as kernels
+
+Three physical DB split: world, forecasts, trades.
+
+SettlementSemantics, typed market/metric identity, high/low dual track, feed-role matrix.
+
+Raw ingest adapters and source timestamp capture where already reliable.
+
+q fusion/probability kernels that produce the point posterior.
+
+Day0 boundary logic if it already obeys settlement semantics.
+
+Depth-walk executable cost and FC-03 freshness gates, as classified in the implementation doc.
+
+Existing append-only event substrate and push websocket ingestion.
+
+OperatorArm, RiskGuard, RED fail-closed behavior, and risk allocator/governor as transitional outer rails.
+
+payoff_vector and negrisk_routes as computational kernels, not as complete execution policy.
+
+ADAPT in place
+
+src/main.py: keep launchd entry stable; reduce to boot/config/service registry/ARM wrapper.
+
+src/engine/event_reactor_adapter.py: keep event append/replay pieces; replace policy logic with typed event router.
+
+src/engine/cycle_runtime.py: keep liveness/watchdog and source refresh scheduling; demote broad scans from primary trigger to backstop.
+
+src/execution/executor.py: keep venue call wrappers; accept only certified commands; move policy out.
+
+src/execution/command_recovery.py: reduce to venue-fact reconciliation after canonical order reducer exists.
+
+src/state/db.py: preserve DB split and migrations; split repository/table ownership.
+
+Existing exit/monitor mechanics: adapt into solver-generated sell/cancel actions; delete separate exit economics.
+
+Market coherence: invert from veto to diagnostic/router.
+
+BUILD
+
+Input→q latency SLA with source issue/fetch/write/q-available timestamps.
+
+ScenarioService for cross-family dependence and correlation rail.
+
+Global expected-utility solver with discrete action menu and repair.
+
+CTF convert/split/merge, batch command support, safe-prefix execution, self-trade guard, rate-limit/cancel priority budget.
+
+REST_ELIGIBLE under conservative maker semantics.
+
+Replay verifier and adversarial event-order/fill/cancel test harness.
+
+Blind websocket-window metric and restart gap accounting.
+
+Settlement-certificate grading table and walk-forward training extractor.
+
+DELETE after migration
+
+q_lcb runtime admission and per-bin lower-bound economics.
+
+Selection-cure/selection calibrator as a trading gate.
+
+Market-anchor/coherence veto.
+
+Direction law as an economic gate, except route legality.
+
+Taker floors, win-rate floors, and historical performance caps.
+
+Kelly haircut stack after κ solver is live.
+
+Coverage/licensing gates after ARM is rewired.
+
+Maker fill calibration and maker rest escalation after C3/REST_ELIGIBLE owner is live.
+
+Separate monitor-refresh/exit strategy lane after solver emits exits/cancels.
+
+Strategy/per-side/edge-source dispatch as money-path logic.
+
+Regret/shadow ledgers as decision inputs.
+
+Reactor scan as primary trigger.
+
+Migration DAG
+
+W0 — Evidence and invariants, no behavior change.
+
+Ship read-only instrumentation: source input→q latency, q_version/HWM capture, book snapshot ids, ledger identity checker, command receipt completeness, stale order inventory, ARM boundary assertion, and certificate-shaped dry records that cannot submit. Revert by disabling instrumentation writes. This is independently shippable.
+
+W1 — K0 ledger and order-state reducer.
+
+Add CAS reservation ledger and canonical order-state reducer beside existing execution. Dual-write facts where necessary, but the legacy path remains the submitter until the verifier is green. Revert by ignoring K0 tables and using old reducers. This must precede solver or event-cadence work.
+
+W2 — Venue capability normalization.
+
+Normalize executable book cost, route menu, CTF convert/split/merge capability, self-trade checks, rate-limit budget, and safe-prefix semantics. No solver promotion yet. Revert by keeping legacy executor route selection.
+
+W3 — Solver behind promotion gate.
+
+Build the expected-utility solver and certificate store. Start with OFF-by-default evidence gates, then promote only under a time-boxed flag with ARM plus verifier requirements. Interim single-family rail may exist only with correlation_rail=caps; ScenarioService must be the final rail. Revert by deleting the promotion flag and returning all families to legacy decisioning.
+
+W4 — Event-driven triggers.
+
+Promote SOURCE_RUN_ARRIVED, book, fill, and schedule events to trigger affected-family solves. Broad scan becomes liveness backstop. Delete maker_rest_escalation only when the new stale-order owner is live. Revert by disabling event-triggered solve and re-enabling broad scan cadence.
+
+W5 — Delete old economics and recovery.
+
+After certificates, ledger, event replay, and settlement grading are stable, delete q_lcb gates, selection calibrator, market-anchor veto, taker floors, Kelly haircut stack, strategy lanes, legacy exit lane, maker fill calibration, and redundant recovery branches. Revert by restoring the previous packet, not by toggling individual old gates back on.
+
+Highest-risk stage: W3 solver promotion.
+
+Risk: a mathematically plausible solver can submit a bankroll-coherent but economically wrong action if q/book/ledger snapshots are mismatched, dependence is understated, or maker fills are valued too optimistically. Mitigation: W1 must be green first; every W3 action must have a frozen certificate; correlation rail must be explicit; maker valuation must be conservative; promotion flag must be time-boxed and deleted after success; ARM/RiskGuard must remain the only live submit boundary; replay must show byte-identical OFF evidence before promotion. This follows the implementation doc’s own W0–W5 migration direction. GitHub
+
+Top 5 structural defects a from-scratch design would never contain
+
+Economics re-proved in multiple layers. q admission, edge, sizing, floor gates, selection correction, strategy lanes, maker escalation, and exits each partially decide whether the trade is good. A first-principles design has one solver.
+
+Recovery used as substitute for canonical truth. A from-scratch system would first define order/ledger state and then make recovery a reducer over venue facts, not a 16K-line compensating subsystem.
+
+Scan/cycle orchestration as the primary money-path trigger. The irreducible trigger is source/book/fill/schedule event freshness; scanning is a watchdog.
+
+Semantic primitives not consistently enforced by type boundaries. Weather settlement systems cannot tolerate ad hoc high/low, rounding, source-role, or float-price semantics. The authority doc correctly treats these as catastrophic category errors. GitHub
+
+Large god files as authority boundaries. event_reactor_adapter.py, command_recovery.py, state/db.py, and main.py are too large to make invariants locally checkable. A minimal design makes truth ownership small enough that a verifier can exhaust its boundary.
+
+Premise challenges
+
+No shadow modes worsens validation. It reduces the ability to compare a new solver against live conditions without risk. Acceptable substitute: event replay plus byte-identical OFF evidence gates; weaker substitute: pure unit tests.
+
+No history-derived caps is good for avoiding performance overfit, but bad if it forbids operational latency bounds. Cancel p99, submit p99, websocket blind-window duration, and model-cycle arrival distributions are structural venue/system measurements, not alpha caps. The order-engine design already uses latency SLA and cancel-rest-time reasoning, so this axiom should be interpreted narrowly. GitHub
+
+q-only belief is correct for avoiding self-referential market feedback, but it can be alpha-negative if the book reflects exogenous weather information before local ingest. The compromise is: market price never updates q, but q/book divergence becomes diagnostic, priority, and validation evidence.
+
+Fail-closed freshness must distinguish entries from exits/cancels. New entries should fail closed when DB/q truth is unavailable; cancels and risk-reducing exits must keep operating where venue truth is sufficient. The current authority doc already states DB-truth unavailable blocks new entries while monitor/exit continue to operate. GitHub
+
+6. GO / NO-GO
+
+NO-GO for a whole-system cutover or W3/W4 live solver/event promotion now. GO for W0 and W1 packets now. The current design target is correct enough to act on, but the live money path should not be moved until K0 ledger/order-state, certificate evidence, ARM boundary, and replay verifiers are in place.
+
+Blockers and smallest fixes
+
+Pinned source snapshot unavailable.
+
+Smallest fix: provide an accessible archive or confirm that current public main is the intended review target. The commit-pinned tree and raw commit doc URLs returned 404 in my source pass. Invalid URL+2+2
+
+K0 CAS ledger/order reducer not proven live.
+
+Smallest fix: ship W1 with adversarial concurrent reserve/fill/cancel tests and a startup tripwire blocking solver promotion unless ledger identity is green.
+
+Solver not yet the single economics authority.
+
+Smallest fix: build W3 as OFF-by-default certificate solver with brute-force golden tests and no executor access until verifier gates pass.
+
+Downstream q_lcb/selection/edge/sizing artifacts still represent active architectural risk.
+
+Smallest fix: route all new decision certificates through q point/scenario inputs only; quarantine old q-derived gates behind legacy path until W5 deletion.
+
+ARM/coverage deletion trap.
+
+Smallest fix: rewire ARM as the sole submit authorization before deleting coverage/licensing gates.
+
+Validation does not yet prove live after-cost profitability or invariant safety.
+
+Smallest fix: certificate-native replay from q/book/ledger snapshots, plus ledger and event-order fuzzing, before any promotion.
+
+Sources used and assumptions
+
+Used: accessible public repo root/README on main; docs/rebuild/order_engine_first_principles_design_2026-07-02.md; docs/rebuild/order_engine_implementation_architecture_2026-07-02.md; docs/rebuild/q_engine_violation_ledger.md; docs/rebuild/settlement_graded_ev_2026-06-15.md; docs/authority/zeus_current_architecture.md; GitHub file metadata for the large source files cited above. I could not read the requested pinned commit 1341967a887c6690e2387f45bf8b8bfce90e66f3; the smallest fact that would change this answer is evidence that the pinned commit materially differs from accessible main in the order-engine docs, K0 ledger state, or current decision-path implementation.
+
+Load-bearing assumptions: the operator axioms are binding; the three-DB split is not negotiable; launchd remains the process supervisor; deploy is operator-only; no live parallel shadow decision path is allowed; and calibration may consume only walk-forward-eligible settled outcomes.
