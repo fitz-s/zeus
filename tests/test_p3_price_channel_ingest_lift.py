@@ -1010,7 +1010,7 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
 
 
 def test_pre_submit_book_reader_prefers_latest_without_append_scan():
-    from src.main import _edli_latest_pre_submit_book_row
+    from src.events.reactor import _edli_latest_pre_submit_book_row
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
 
     conn = sqlite3.connect(":memory:")
@@ -1049,7 +1049,7 @@ def test_pre_submit_book_reader_prefers_latest_without_append_scan():
 
 
 def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
-    from src.main import _edli_latest_pre_submit_book_row
+    from src.events.reactor import _edli_latest_pre_submit_book_row
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
 
     conn = sqlite3.connect(":memory:")

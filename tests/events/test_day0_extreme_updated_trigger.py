@@ -59,12 +59,14 @@ def _observation(**overrides):
 def test_day0_online_hook_is_trigger_local_not_cycle_runtime_side_effect():
     cycle_runtime_source = Path("src/engine/cycle_runtime.py").read_text()
     trigger_source = Path("src/events/triggers/day0_extreme_updated.py").read_text()
-    main_source = Path("src/main.py").read_text()
+    # R4-b3 (2026-07-08): the reactor cycle body (the day0_authority_catchup_
+    # scanner_enabled gate check) moved from src/main.py to src.events.reactor.
+    reactor_source = Path("src/events/reactor.py").read_text()
 
     assert "_queue_edli_day0_observation_event" not in cycle_runtime_source
     assert "def observation_context_to_live_observation(" in trigger_source
     assert "defaults to blocked" in trigger_source
-    assert "day0_authority_catchup_scanner_enabled" in main_source
+    assert "day0_authority_catchup_scanner_enabled" in reactor_source
 
 
 def test_observation_context_live_hook_marks_wu_station_match_live_authority():

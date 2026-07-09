@@ -196,11 +196,13 @@ def test_archive_unmarketed_day0_events_expires_only_non_admitted_processing_row
 
 
 def test_reactor_prune_archives_unmarketed_day0_before_legacy_repair_sweeps():
-    source = (Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    # R4-b3 (2026-07-08): _edli_prune_pending_working_set moved from src/main.py
+    # to src.events.reactor alongside the reactor cycle that is its sole caller.
+    source = (Path(__file__).resolve().parents[2] / "src" / "events" / "reactor.py").read_text()
     prune_start = source.index("def _edli_prune_pending_working_set(")
     prune_source = source[
         prune_start:
-        source.index("def _edli_day0_hourly_refresh_cycle(", prune_start)
+        source.index("def _edli_day0_fast_lane_enabled(", prune_start)
     ]
 
     unmarketed_idx = prune_source.index('archive_unmarketed_day0_events"')

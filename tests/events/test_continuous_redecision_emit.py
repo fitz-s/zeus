@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import src.main as main
+from src.events import reactor
 from src.events.event_writer import EventWriter
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
@@ -253,7 +254,7 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot(monkeypatch):
         else (default if default is not None else {}),
     )
 
-    main._edli_prune_pending_working_set(store, decision_time=decision_time)
+    reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
 
     assert stale.entity_key not in main._edli_pending_entity_keys(world)
     status = world.execute(
@@ -1247,7 +1248,7 @@ def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
 def test_redecision_admission_is_screen_job_only():
     """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
 
-    reactor_src = inspect.getsource(main._edli_event_reactor_cycle)
+    reactor_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
 
     assert "event_type=REDECISION_EVENT_TYPE" not in reactor_src
@@ -1587,7 +1588,7 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
         [("old-a", 18.0), ("old-b", 18.5), ("old-c", 19.0)],
     )
 
-    expired = main._edli_expire_unready_forecast_snapshot_pending(
+    expired = reactor._edli_expire_unready_forecast_snapshot_pending(
         world,
         forecasts,
         decision_time="2026-06-18T08:00:00+00:00",
@@ -1610,7 +1611,7 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
 
 
 def test_unready_replacement_sweep_batches_forecast_reads():
-    src = inspect.getsource(main._edli_expire_unready_forecast_snapshot_pending)
+    src = inspect.getsource(reactor._edli_expire_unready_forecast_snapshot_pending)
     assert "date(source_cycle_time)" not in src
     assert "runtime_layer = 'live'" in src
     assert "endpoint = 'single_runs'" in src
@@ -1644,12 +1645,12 @@ def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
             )
         )
 
-    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=2) == 2
-    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=10) == 3
+    assert reactor._edli_active_rmf_forecast_snapshot_pending_count(world, limit=2) == 2
+    assert reactor._edli_active_rmf_forecast_snapshot_pending_count(world, limit=10) == 3
 
-    cfg_src = inspect.getsource(main._edli_unready_fsr_prune_min_active_pending)
+    cfg_src = inspect.getsource(reactor._edli_unready_fsr_prune_min_active_pending)
     assert "reactor_unready_fsr_prune_min_active_pending" in cfg_src
-    prune_src = inspect.getsource(main._edli_prune_pending_working_set)
+    prune_src = inspect.getsource(reactor._edli_prune_pending_working_set)
     assert prune_src.index("_edli_active_rmf_forecast_snapshot_pending_count") < prune_src.index(
         "_edli_expire_unready_forecast_snapshot_pending"
     )
@@ -1963,7 +1964,7 @@ def test_held_family_condition_scope_refreshes_siblings_for_shift_selection(monk
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
     """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
 
-    src = inspect.getsource(main._edli_event_reactor_cycle)
+    src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     assert src.index("_edli_prune_pending_working_set(") < src.index("_edli_pending_entity_keys(")
 
 
@@ -1982,7 +1983,7 @@ def test_redecision_screen_opens_pending_snapshot_after_expiry_commit():
 def test_reactor_emit_lock_is_bounded_and_does_not_rescan_pending_under_lock():
     """The reactor must not let emit-stage backlog starve monitor/redecision cadence."""
 
-    src = inspect.getsource(main._edli_event_reactor_cycle)
+    src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     emit_block = src[src.index("_emit_mutex = _world_write_mutex()") : src.index(
         "trade_conn = get_trade_connection_with_world_required"
     )]
@@ -1993,7 +1994,7 @@ def test_reactor_emit_lock_is_bounded_and_does_not_rescan_pending_under_lock():
 
 def test_false_forecast_emit_limit_resolves_to_bounded_default_not_unbounded():
     for raw in (False, "false", "none", "default"):
-        resolved = main._edli_positive_int_or_unbounded(
+        resolved = reactor._edli_positive_int_or_unbounded(
             {"forecast_snapshot_emit_limit": raw},
             "forecast_snapshot_emit_limit",
             default=12,
@@ -2001,7 +2002,7 @@ def test_false_forecast_emit_limit_resolves_to_bounded_default_not_unbounded():
         )
         assert resolved == 12
     assert (
-        main._edli_positive_int_or_unbounded(
+        reactor._edli_positive_int_or_unbounded(
             {"forecast_snapshot_emit_limit": "unbounded"},
             "forecast_snapshot_emit_limit",
             default=12,
@@ -2027,7 +2028,7 @@ def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pend
 def test_reactor_prune_archives_orphan_processing_rows():
     """Active rows without opportunity_events provenance must leave the working set."""
 
-    src = inspect.getsource(main._edli_prune_pending_working_set)
+    src = inspect.getsource(reactor._edli_prune_pending_working_set)
     assert "archive_orphan_processing_rows" in src
     assert src.index("archive_orphan_processing_rows") < src.index("archive_expired_candidates")
     assert src.index("archive_expired_candidates") < src.index("repair_missing_processing_rows")
@@ -2066,7 +2067,7 @@ def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
         lambda *, batch_limit: pytest.fail("budget exhaustion should skip later prune steps"),
     )
 
-    main._edli_prune_pending_working_set(
+    reactor._edli_prune_pending_working_set(
         store,
         decision_time=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
     )
@@ -2101,9 +2102,9 @@ def test_sqlite_deadline_interrupts_and_clears():
 def test_forecast_snapshot_build_is_reactor_budgeted():
     """FSR event build is before process_pending; it must not be an unbounded reactor stage."""
 
-    src = inspect.getsource(main._edli_event_reactor_cycle)
+    src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     assert "reactor_forecast_snapshot_build_budget_seconds" in inspect.getsource(
-        main._edli_forecast_snapshot_build_budget_seconds
+        reactor._edli_forecast_snapshot_build_budget_seconds
     )
     assert "budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg)" in src
 
@@ -2111,13 +2112,13 @@ def test_forecast_snapshot_build_is_reactor_budgeted():
 def test_day0_emit_is_reactor_budgeted():
     """Day0 catch-up runs under the world mutex, so it needs a hard SQLite deadline."""
 
-    cycle_src = inspect.getsource(main._edli_event_reactor_cycle)
-    emit_src = inspect.getsource(main._edli_emit_day0_extreme_events)
+    cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+    emit_src = inspect.getsource(reactor._edli_emit_day0_extreme_events)
     assert "reactor_day0_emit_budget_seconds" in inspect.getsource(
-        main._edli_day0_emit_budget_seconds
+        reactor._edli_day0_emit_budget_seconds
     )
     assert "reactor_day0_emit_busy_timeout_ms" in inspect.getsource(
-        main._edli_day0_emit_busy_timeout_ms
+        reactor._edli_day0_emit_busy_timeout_ms
     )
     assert "budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg)" in cycle_src
     assert "_edli_install_sqlite_deadline(world_conn" in emit_src
@@ -2138,7 +2139,7 @@ def test_redecision_screen_belief_read_filters_forecast_only_inadmissible_famili
 def test_decision_triggered_refresh_delegates_to_substrate_sidecar():
     """Decision-time stale snapshots mark sidecar priority instead of writing live substrate."""
 
-    src = inspect.getsource(main._edli_decision_family_snapshot_refresher)
+    src = inspect.getsource(reactor._edli_decision_family_snapshot_refresher)
     assert "mark_money_path_substrate_priority(" in src
     assert 'reason="decision_triggered_targeted_refresh"' in src
     assert "_edli_money_path_substrate_priority_cycle()" not in src

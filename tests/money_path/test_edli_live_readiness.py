@@ -3467,9 +3467,11 @@ def test_production_executor_boundary_calls_spy_after_native_validation():
 
 
 def test_main_live_mode_wires_production_executor_boundary_source():
+    # R4-b3 (2026-07-08): the reactor cycle body (including this wiring) moved
+    # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     from pathlib import Path
 
-    source = Path("src/main.py").read_text()
+    source = Path("src/events/reactor.py").read_text()
 
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
@@ -3479,6 +3481,7 @@ def test_main_live_mode_wires_production_executor_boundary_source():
 
 def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatch):
     import src.main as main
+    from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
     import src.control.ws_gap_guard as ws_gap_guard
     import src.data.polymarket_client as polymarket_client
@@ -3534,7 +3537,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -3568,6 +3571,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
 
 def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypatch):
     import src.main as main
+    from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
     import src.control.ws_gap_guard as ws_gap_guard
     import src.data.polymarket_client as polymarket_client
@@ -3628,7 +3632,7 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
             raise AssertionError("BUY pre-submit proof must not enumerate CTF positions")
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -3654,6 +3658,7 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
 
 def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
     import src.main as main
+    from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
     import src.control.ws_gap_guard as ws_gap_guard
     import src.data.polymarket_client as polymarket_client
@@ -3708,7 +3713,7 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -3746,6 +3751,7 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
 
     import src.data.polymarket_client as polymarket_client
     import src.main as main
+    from src.events import reactor
 
     captured = {}
 
@@ -3770,7 +3776,7 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
 
     main._edli_reset_pre_submit_jit_clob_client()
     try:
-        provider = main._edli_pre_submit_jit_book_quote_provider()
+        provider = reactor._edli_pre_submit_jit_book_quote_provider()
         assert provider("yes-1")["hash"] == "book-hash"
         t = captured["public_http_timeout"]
         assert isinstance(t, httpx.Timeout), "JIT client must receive an explicit httpx.Timeout"
@@ -3787,10 +3793,11 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
 
 def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):
     import src.main as main
+    from src.events import reactor
 
     monkeypatch.delenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS", raising=False)
-    timeout = main._edli_pre_submit_inner_io_timeout_seconds()
+    timeout = reactor._edli_pre_submit_inner_io_timeout_seconds()
 
     assert 0 < timeout <= 2.0
     assert timeout * 2.0 < main._edli_pre_submit_clob_timeout_seconds()
@@ -3798,6 +3805,7 @@ def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):
 
 def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):
     import src.main as main
+    from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
     import src.control.ws_gap_guard as ws_gap_guard
     import src.data.polymarket_client as polymarket_client
@@ -3851,7 +3859,7 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -3875,6 +3883,7 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
 
 def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(monkeypatch):
     import src.main as main
+    from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
     import src.control.ws_gap_guard as ws_gap_guard
     import src.data.polymarket_client as polymarket_client
@@ -3928,7 +3937,7 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -4389,7 +4398,7 @@ def _operator_arm():
     # arm capability token for ANY real submit. Tests that exercise the executor path
     # mint the token exactly as main.py does (require_operator_arm with the operator
     # flag True), so they continue to reach the executor seam under the new gate.
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     return require_operator_arm({"edli_live_operator_authorized": True})
 
@@ -4653,6 +4662,7 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
     'quote_age_ms exceeds max_quote_age_ms'.
     """
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     # DB row carries the venue book-change stamp from 71s earlier (the live pathology).
@@ -4675,7 +4685,7 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
             "timestamp": str(int((decision_time - timedelta(seconds=71)).timestamp() * 1000)),
         }
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book,
@@ -4706,6 +4716,7 @@ def test_gate84_jit_buy_accepts_ask_only_book(monkeypatch):
     false liveness failure, not a real no-edge decision.
     """
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = _gate84_world_conn_with_stale_row(
@@ -4713,7 +4724,7 @@ def test_gate84_jit_buy_accepts_ask_only_book(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=lambda token_id: {
@@ -4738,6 +4749,7 @@ def test_gate84_jit_buy_accepts_ask_only_book(monkeypatch):
 
 def test_gate84_jit_buy_rejects_book_without_ask(monkeypatch):
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = _gate84_world_conn_with_stale_row(
@@ -4745,7 +4757,7 @@ def test_gate84_jit_buy_rejects_book_without_ask(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=lambda token_id: {
@@ -4763,6 +4775,7 @@ def test_gate84_jit_buy_rejects_book_without_ask(monkeypatch):
 
 def test_gate84_db_fallback_buy_accepts_fresh_ask_only_row(monkeypatch):
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = sqlite3.connect(":memory:")
@@ -4794,7 +4807,7 @@ def test_gate84_db_fallback_buy_accepts_fresh_ask_only_row(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=lambda token_id: (_ for _ in ()).throw(RuntimeError("transient /book failure")),
@@ -4817,6 +4830,7 @@ def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monke
     against the actual observation instant, not the old cycle timestamp.
     """
     import src.main as main
+    from src.events import reactor
     from src.engine.event_reactor_adapter import _pre_submit_revalidation_payload_from_final_intent
 
     decision_time = datetime.now(timezone.utc) - timedelta(seconds=25)
@@ -4825,7 +4839,7 @@ def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monke
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=lambda token_id: {
@@ -4973,6 +4987,7 @@ def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
     carrying a stale quote that would pass the gate. No fabricated freshness.
     """
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = _gate84_world_conn_with_stale_row(
@@ -4983,7 +4998,7 @@ def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
     def _jit_book_fails(token_id: str) -> dict:
         raise RuntimeError("CLOB /book 503")
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book_fails,
@@ -4998,6 +5013,7 @@ def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
     (within bound), the existing DB-row path still works (backward compatible).
     """
     import src.main as main
+    from src.events import reactor
 
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = _gate84_world_conn_with_stale_row(
@@ -5005,7 +5021,7 @@ def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
     )

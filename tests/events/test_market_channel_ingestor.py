@@ -1250,7 +1250,7 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
     returns None -> EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED.
     """
 
-    from src.main import _edli_latest_pre_submit_book_row
+    from src.events.reactor import _edli_latest_pre_submit_book_row
 
     snap_conn = _snapshot_universe_table_with_candidate_and_fillers(600)
     # Universe with candidate pinned (mirrors the live wiring in main.py).

@@ -63,6 +63,7 @@ import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 import src.data.market_scanner as market_scanner
 import src.data.substrate_observer as substrate_observer
+from src.events import reactor
 
 
 def _create_minimal_trade_exposure_tables(conn: sqlite3.Connection) -> None:
@@ -192,7 +193,7 @@ def test_day0_live_family_admission_uses_market_events_without_coldboot_flood():
         ("Paris", "2026-06-29", "low"),
     )
 
-    admission = main_module._edli_day0_live_family_admission(
+    admission = reactor._edli_day0_live_family_admission(
         forecasts_conn,
         trade_conn,
         decision_time=datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc),
@@ -229,7 +230,7 @@ def test_day0_live_family_admission_uses_city_local_day_not_utc_floor(monkeypatc
         ],
     )
 
-    admission = main_module._edli_day0_live_family_admission(
+    admission = reactor._edli_day0_live_family_admission(
         forecasts_conn,
         trade_conn,
         decision_time=datetime(2026, 6, 29, 2, 0, tzinfo=timezone.utc),
@@ -247,7 +248,7 @@ def test_day0_live_family_admission_empty_market_events_does_not_admit_unexposed
         "CREATE TABLE market_events (city TEXT, target_date TEXT, temperature_metric TEXT)"
     )
 
-    admission = main_module._edli_day0_live_family_admission(
+    admission = reactor._edli_day0_live_family_admission(
         forecasts_conn,
         trade_conn,
         decision_time=datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc),
@@ -382,7 +383,7 @@ def test_reactor_cycle_does_not_refresh_inline():
     Static-source assertion (the inline call is a direct lexical call in the cycle
     body) so the test is deterministic and does not depend on DB/venue state.
     """
-    src = inspect.getsource(main_module._edli_event_reactor_cycle)
+    src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     assert "_refresh_pending_family_snapshots(" not in src, (
         "reactor cycle still calls _refresh_pending_family_snapshots INLINE — the "
         "expensive universe Gamma scan + per-token CLOB capture must be decoupled to "
@@ -796,7 +797,7 @@ def test_substrate_snapshot_write_lease_covers_sqlite_busy_floor(monkeypatch):
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     """Stale event requeues must trigger the same targeted family recapture path."""
 
-    cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
+    cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     assert "_reactor_family_snapshot_refresher = _decision_family_snapshot_refresher" in cycle_src
     assert "family_snapshot_refresher=_reactor_family_snapshot_refresher" in cycle_src
 
@@ -804,7 +805,7 @@ def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
 def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeypatch):
     """Selected-row stale handling refreshes exact substrate without owning producer code."""
 
-    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    refresh_src = inspect.getsource(reactor._edli_decision_family_snapshot_refresher)
     assert "mark_money_path_substrate_priority(" in refresh_src
     assert "refresh_money_path_substrate_now(" in refresh_src
     assert "_edli_money_path_substrate_priority_cycle()" not in refresh_src
@@ -835,7 +836,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
     monkeypatch.setattr(substrate_observer_module, "refresh_money_path_substrate_now", _refresh_now)
     monkeypatch.setattr(main_module, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
 
-    refresher = main_module._edli_decision_family_snapshot_refresher(None)
+    refresher = reactor._edli_decision_family_snapshot_refresher(None)
     assert refresher(
         city="Paris",
         target_date="2026-06-20",
@@ -915,7 +916,7 @@ def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure(
 
 
 def test_targeted_decision_refresh_has_no_inline_quota_knobs():
-    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    refresh_src = inspect.getsource(reactor._edli_decision_family_snapshot_refresher)
 
     assert "reactor_decision_refresh_cycle_budget_seconds" not in refresh_src
     assert "reactor_decision_refresh_max_per_cycle" not in refresh_src
@@ -1511,7 +1512,7 @@ def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
     monkeypatch.setenv("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "0.01")
     monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
 
-    authority, observation = main_module._edli_scan_day0_with_lock_retry(
+    authority, observation = reactor._edli_scan_day0_with_lock_retry(
         trigger=trigger,
         world_conn=world_conn,
         trade_conn=trade_conn,
@@ -1530,7 +1531,7 @@ def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
 
 
 def test_day0_emit_lock_exhaustion_is_caught_at_reactor_boundary():
-    source = inspect.getsource(main_module._edli_event_reactor_cycle)
+    source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
 
     assert "_edli_emit_day0_extreme_events" in source
     assert "_edli_is_sqlite_lock_error(_day0_emit_lock_exc)" in source
@@ -2506,8 +2507,8 @@ def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
 
 
 def test_money_path_targeted_refresh_marks_substrate_priority():
-    cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
-    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+    refresh_src = inspect.getsource(reactor._edli_decision_family_snapshot_refresher)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
     producer_src = inspect.getsource(substrate_observer.refresh_money_path_substrate_now)
 
@@ -2980,7 +2981,7 @@ def test_open_rest_priority_requires_live_command_and_remaining_rest():
         )
 
     expected = [("Singapore", "2026-06-26", "high")]
-    assert main_module._open_rest_family_rows_for_refresh(conn) == expected
+    assert reactor._open_rest_family_rows_for_refresh(conn) == expected
     assert substrate_observer._open_rest_family_rows_for_refresh(conn) == expected
 
 

@@ -285,7 +285,9 @@ def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
     fail-closed (force no-submit) when the refresh did not configure."""
     from pathlib import Path
 
-    source = Path("src/main.py").read_text()
+    # R4-b3 (2026-07-08): the EDLI cycle body (including this call site) moved
+    # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
+    source = Path("src/events/reactor.py").read_text()
 
     assert "_edli_refresh_global_allocator_for_live_bridge" in source
     # The refresh must be invoked from the EDLI cycle.
@@ -304,7 +306,9 @@ def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
     """
     from pathlib import Path
 
-    source = Path("src/main.py").read_text()
+    # R4-b3 (2026-07-08): the EDLI cycle body moved from src/main.py to
+    # src.events.reactor.run_edli_event_reactor_cycle.
+    source = Path("src/events/reactor.py").read_text()
 
     assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
     assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source

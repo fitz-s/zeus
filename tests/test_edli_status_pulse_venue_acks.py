@@ -18,7 +18,7 @@ from __future__ import annotations
 
 
 def _call_pulse(**overrides):
-    from src.main import _build_edli_status_pulse
+    from src.events.reactor import _build_edli_status_pulse
 
     defaults = dict(
         started_at="2026-06-09T18:00:00+00:00",
@@ -65,7 +65,7 @@ def test_venue_acks_can_be_less_than_submit_attempts() -> None:
 def test_venue_acks_default_is_zero() -> None:
     """live_venue_acks defaults to 0 (backward-compat for existing callers
     that do not pass the new parameter)."""
-    from src.main import _build_edli_status_pulse
+    from src.events.reactor import _build_edli_status_pulse
 
     pulse = _build_edli_status_pulse(
         started_at="2026-06-09T18:00:00+00:00",

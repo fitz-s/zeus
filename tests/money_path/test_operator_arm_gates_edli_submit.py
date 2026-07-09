@@ -25,7 +25,7 @@ from src.riskguard.risk_level import RiskLevel
 # --- require_operator_arm: the token is constructible ONLY when authorized -----------
 
 def test_require_operator_arm_returns_none_unless_operator_authorized() -> None:
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     assert require_operator_arm({}) is None
     assert require_operator_arm({"edli_live_operator_authorized": False}) is None
@@ -41,7 +41,7 @@ def test_require_operator_arm_returns_none_unless_operator_authorized() -> None:
 def test_operator_arm_is_frozen_and_typed() -> None:
     from dataclasses import FrozenInstanceError
 
-    from src.main import OperatorArm, require_operator_arm
+    from src.events.reactor import OperatorArm, require_operator_arm
 
     arm = require_operator_arm({"edli_live_operator_authorized": True})
     assert isinstance(arm, OperatorArm)
@@ -155,7 +155,7 @@ def test_live_adapter_submit_blocks_when_operator_arm_is_none(monkeypatch) -> No
 
 def test_live_adapter_entries_pause_blocks_before_live_cap_and_command(monkeypatch) -> None:
     """Operator pause must stop before live-cap reserve / ExecutionCommandCreated."""
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
     from src.engine import event_reactor_adapter as adapter
 
     event = _forecast_event()
@@ -231,7 +231,7 @@ def test_live_adapter_submit_passes_arm_guard_when_operator_arm_present(monkeypa
     PAST the arm guard (it reaches the live-order build path, which here surfaces a
     different/no OPERATOR_ARM_REQUIRED outcome). The arm guard is the only thing under
     test, so the reason must never be OPERATOR_ARM_REQUIRED."""
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     arm = require_operator_arm({"edli_live_operator_authorized": True})
     executor_called = {"called": False}
@@ -252,7 +252,7 @@ def test_live_builder_not_selected_when_operator_not_authorized(live_execution_m
     (live_submit_effective AND operator_arm is not None). With operator_authorized
     false, require_operator_arm returns None, so for BOTH live-submit modes the
     selector predicate is False and the no-submit builder is chosen."""
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     edli_cfg = {
         "live_execution_mode": live_execution_mode,
@@ -274,7 +274,7 @@ def test_live_builder_selected_when_operator_authorized(live_execution_mode: str
     """With operator_authorized true, require_operator_arm mints the token, so for BOTH
     live-submit modes the selector predicate is True and the real-submit live adapter
     is reachable."""
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     edli_cfg = {
         "live_execution_mode": live_execution_mode,

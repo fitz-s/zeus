@@ -107,7 +107,7 @@ def _accepted_no_submit_receipt(event):
 
 def _build_adapter(monkeypatch, event, *, edli_live_scope: str, executor_called: dict[str, bool]):
     from src.engine import event_reactor_adapter as adapter
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     monkeypatch.setattr(
         adapter,
@@ -150,7 +150,7 @@ def test_non_live_scopes_reject_before_submit(monkeypatch, scope: str, event_fac
 
 def test_non_live_scope_writes_no_venue_commands(monkeypatch) -> None:
     from src.engine import event_reactor_adapter as adapter
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     event = _day0_event()
     conn = sqlite3.connect(":memory:")
@@ -196,7 +196,7 @@ def test_forecast_plus_day0_admits_live_event_types_to_proof_build(monkeypatch, 
 
 def test_default_scope_is_forecast_plus_day0(monkeypatch) -> None:
     from src.engine import event_reactor_adapter as adapter
-    from src.main import require_operator_arm
+    from src.events.reactor import require_operator_arm
 
     event = _day0_event()
     monkeypatch.setattr(

@@ -213,39 +213,45 @@ def test_edli_online_invariants_market_channel_and_submit_are_armed():
 
 
 def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
+    # R4-b3 (2026-07-08): the EDLI event-reactor cycle BODY moved from
+    # src/main.py to src.events.reactor.run_edli_event_reactor_cycle; main.py
+    # keeps only the thin scheduler hook + job registration. Assertions about
+    # the cycle's internal wiring now read reactor.py; job-registration-level
+    # assertions still read main.py.
     source = Path("src/main.py").read_text()
+    reactor_source = Path("src/events/reactor.py").read_text()
     assert "edli_event_reactor" in source
     assert "edli_market_channel_ingestor" not in source
     assert 'id="edli_user_channel_reconcile"' not in source
     assert "_edli_emit_forecast_snapshot_events" in source
-    assert "_edli_emit_day0_extreme_events" in source
-    assert "day0_authority_catchup_scanner_enabled" in source
-    assert "event_bound_no_submit_adapter_from_trade_conn" in source
-    assert "event_bound_live_adapter_from_trade_conn" in source
-    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
-    assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in source
+    assert "_edli_emit_day0_extreme_events" in reactor_source
+    assert "day0_authority_catchup_scanner_enabled" in reactor_source
+    assert "event_bound_no_submit_adapter_from_trade_conn" in reactor_source
+    assert "event_bound_live_adapter_from_trade_conn" in reactor_source
+    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in reactor_source
+    assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in reactor_source
     # Wave-2 item 8: taker_fok_fak_effective deleted (taker law unconditional).
-    assert "taker_fok_fak_effective" not in source
-    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
-    assert "real submit disabled this cycle because portfolio_state_unavailable" in source
-    assert "if real_submit_effective and _portfolio_state_provider is None" in source
-    assert "submit_existing_cycle_for_event" not in source
-    assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
-    assert "real_order_submit_enabled=real_order_submit_enabled" in source
+    assert "taker_fok_fak_effective" not in reactor_source
+    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in reactor_source
+    assert "real submit disabled this cycle because portfolio_state_unavailable" in reactor_source
+    assert "if real_submit_effective and _portfolio_state_provider is None" in reactor_source
+    assert "submit_existing_cycle_for_event" not in reactor_source
+    assert 'edli_cfg.get("real_order_submit_enabled", False)' in reactor_source
+    assert "real_order_submit_enabled=real_order_submit_enabled" in reactor_source
     # Wave-1 2026-06-12: the canary on/off flag and no_submit_proof_limit cap reads are DELETED.
-    assert 'edli_cfg.get("live_canary_enabled"' not in source
-    assert 'edli_cfg.get("no_submit_proof_limit"' not in source
-    assert "forecast_snapshot_emit_limit" in source
-    assert "process_pending_decision_time = datetime.now(timezone.utc)" in source
-    assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in source
-    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
-    assert "decision_time=process_pending_decision_time" in source
-    assert "_edli_positive_int_or_unbounded" in source
-    live_adapter_call = source[
-        source.index("event_bound_live_adapter_from_trade_conn(") :
-        source.index(
+    assert 'edli_cfg.get("live_canary_enabled"' not in reactor_source
+    assert 'edli_cfg.get("no_submit_proof_limit"' not in reactor_source
+    assert "forecast_snapshot_emit_limit" in reactor_source
+    assert "process_pending_decision_time = datetime.now(timezone.utc)" in reactor_source
+    assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in reactor_source
+    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in reactor_source
+    assert "decision_time=process_pending_decision_time" in reactor_source
+    assert "_edli_positive_int_or_unbounded" in reactor_source
+    live_adapter_call = reactor_source[
+        reactor_source.index("event_bound_live_adapter_from_trade_conn(") :
+        reactor_source.index(
             "replacement_forecast_runtime_flags=replacement_forecast_runtime_flags",
-            source.index("event_bound_live_adapter_from_trade_conn("),
+            reactor_source.index("event_bound_live_adapter_from_trade_conn("),
         )
     ]
     assert "live_cap_conn=conn" not in live_adapter_call
@@ -256,9 +262,12 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     # the fill-authority assertion now follows the producer to its new host.
     lane_source = Path("src/ingest/price_channel_ingest.py").read_text()
     assert "user_channel_or_reconcile_only" in lane_source
-    edli_start = source.index("def _edli_event_reactor_cycle")
-    edli_end = source.index("@_scheduler_job", edli_start + 1)
-    edli_source = source[edli_start:edli_end]
+    # R4-b3: the cycle body itself lives at run_edli_event_reactor_cycle now.
+    import inspect
+
+    from src.events import reactor as reactor_module
+
+    edli_source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
     assert "run_cycle" not in edli_source
     assert "_assert_live_execution_mode_contract" in source
     assert "live_execution_mode == \"legacy_cron\"" in source

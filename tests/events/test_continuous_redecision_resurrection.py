@@ -1585,7 +1585,9 @@ def test_open_maker_rests_skip_unresolved_orders_from_redecision_screen():
 
 
 def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
-    import src.main as main
+    # R4-b3 (2026-07-08): _open_rest_family_rows_for_refresh moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster.
+    from src.events import reactor
 
     trade = _mem_trade()
     trade.execute(
@@ -1622,7 +1624,7 @@ def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
     trade.commit()
     captured = _SqlCaptureConn(trade)
 
-    families = main._open_rest_family_rows_for_refresh(captured)
+    families = reactor._open_rest_family_rows_for_refresh(captured)
 
     assert families == [("Wuhan", "2026-06-12", "high")]
     statements = "\n".join(captured.statements).upper()
@@ -1632,7 +1634,9 @@ def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
 
 
 def test_open_rest_priority_uses_snapshot_family_before_position_projection():
-    import src.main as main
+    # R4-b3 (2026-07-08): _open_rest_family_rows_for_refresh moved from
+    # src/main.py to src.events.reactor with the reactor+prune cluster.
+    from src.events import reactor
 
     trade = _mem_trade()
     trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN event_id TEXT")
@@ -1678,7 +1682,7 @@ def test_open_rest_priority_uses_snapshot_family_before_position_projection():
     trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-live", "LIVE", 1))
     trade.commit()
 
-    families = main._open_rest_family_rows_for_refresh(trade)
+    families = reactor._open_rest_family_rows_for_refresh(trade)
 
     assert families == [("Chongqing", "2026-06-21", "high")]
 

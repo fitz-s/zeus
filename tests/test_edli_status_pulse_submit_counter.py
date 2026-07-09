@@ -12,7 +12,7 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 def _call_pulse(**overrides):
-    from src.main import _build_edli_status_pulse
+    from src.events.reactor import _build_edli_status_pulse
 
     defaults = dict(
         started_at="2026-06-09T18:00:00+00:00",

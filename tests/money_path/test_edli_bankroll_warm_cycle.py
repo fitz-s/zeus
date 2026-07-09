@@ -45,6 +45,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import src.main as main_module
+from src.events import reactor
 from src.runtime import bankroll_provider
 from src.state.collateral_ledger import (
     CollateralLedger,
@@ -212,7 +213,7 @@ def test_event_reactor_bankroll_warm_is_snapshot_only() -> None:
     """Static money-path guard: reactor must not do wallet network refreshes."""
     import inspect
 
-    source = inspect.getsource(main_module._edli_event_reactor_cycle)
+    source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
 
     assert "warm_from_collateral_snapshot" in source
     assert "current(max_age_seconds=0.0)" not in source
