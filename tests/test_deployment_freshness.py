@@ -1,9 +1,10 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-06-30
+# Last reused or audited: 2026-07-08
 # Authority basis: 2026-05-17 cascade incident (daemon ran 5h+ on pre-PR-#139 abs() code after merge)
 #                  + PR-S6 critic R1 (C1 dedicated flag file, auto-pause at 4h, scheduler integration,
 #                    boot-capture fail-loud)
 #                  + live-money 2026-06-30: stale runtime SHA mismatch pauses immediately
+#                  + live-money 2026-07-08: dirty same-SHA runtime worktree is stale live code
 """Antibody tests for PR-S6 deployment freshness gate (_check_deployment_freshness).
 
 R1 revisions (critic APPROVE_WITH_REVISION):
@@ -52,6 +53,7 @@ def _run(
     git_raises: Exception | None = None,
     pause_entries_mock=None,
     state_path_return=None,
+    dirty_runtime_paths: tuple[str, ...] = (),
     **kwargs,
 ):
     """Run _check_deployment_freshness with controlled inputs."""
@@ -63,6 +65,10 @@ def _run(
 
     env_val = "1" if accept_stale_env else ""
     env_patch = {"ZEUS_ACCEPT_STALE_DEPLOY": env_val}
+    tmp_state = None
+    if state_path_return is None:
+        tmp_state = tempfile.TemporaryDirectory()
+        state_path_return = Path(tmp_state.name) / "deployment_freshness.json"
 
     def fake_check_output(cmd, **kw):
         if git_raises:
@@ -79,12 +85,17 @@ def _run(
     ctx = [
         patch.dict(os.environ, env_patch, clear=False),
         patch("subprocess.check_output", side_effect=fake_check_output),
+        patch(
+            "src.control.runtime_code_plane.dirty_runtime_worktree_paths",
+            return_value=dirty_runtime_paths,
+        ),
         patch("os.kill"),
+        patch("src.config.state_path", return_value=state_path_return),
     ]
+    if tmp_state is not None:
+        ctx.append(tmp_state)
     if pause_entries_mock is not None:
         ctx.append(patch("src.control.control_plane.pause_entries", pause_entries_mock))
-    if state_path_return is not None:
-        ctx.append(patch("src.config.state_path", return_value=state_path_return))
 
     # Enter all contexts
     entered = []
@@ -144,6 +155,33 @@ class TestNoAction:
         assert flag["current_sha"] == BOOT_SHA
         assert flag["pause_reason"] is None
         assert flag["status"] == "fresh"
+
+    def test_same_sha_dirty_runtime_worktree_pauses_entries(self, tmp_path):
+        """Same HEAD is not fresh when runtime source edits are uncommitted/unloaded."""
+        pause_mock = MagicMock()
+        df_path = tmp_path / "deployment_freshness.json"
+
+        _run(
+            boot_sha=BOOT_SHA,
+            current_sha=BOOT_SHA,
+            boot_ts_hours_ago=1.0,
+            pause_entries_mock=pause_mock,
+            state_path_return=df_path,
+            dirty_runtime_paths=("src/control/live_health.py", "src/execution/exit_lifecycle.py"),
+        )
+
+        pause_mock.assert_called_once()
+        assert pause_mock.call_args[0][0] == "deployment_freshness_mismatch"
+        flag = json.loads(df_path.read_text())
+        assert flag["status"] == "dirty_runtime_worktree"
+        assert flag["pause_reason"] == "deployment_freshness_mismatch"
+        assert flag["code_plane_status"] == "same_sha"
+        assert flag["runtime_code_changed"] is True
+        assert flag["worktree_runtime_dirty"] is True
+        assert flag["dirty_runtime_paths_sample"] == [
+            "src/control/live_health.py",
+            "src/execution/exit_lifecycle.py",
+        ]
 
     def test_boot_state_not_captured_silent(self):
         """If boot SHA is None (capture failed), function returns silently."""
@@ -230,6 +268,7 @@ class TestStaleAlert:
                         current_sha=DIFF_SHA,
                         now_hours_after_boot=8.0,
                         boot_ts_hours_ago=0.0,
+                        state_path_return=df_path,
                     )
 
         assert "deployment_freshness_diverged_total" in caplog.text
@@ -246,6 +285,7 @@ class TestStaleAlert:
                     current_sha=DIFF_SHA,
                     now_hours_after_boot=8.0,
                     boot_ts_hours_ago=0.0,
+                    state_path_return=df_path,
                 )
 
         assert df_path.exists(), "deployment_freshness.json must be written"
@@ -273,6 +313,7 @@ class TestStaleAlert:
                     current_sha=DIFF_SHA,
                     now_hours_after_boot=8.0,
                     boot_ts_hours_ago=0.0,
+                    state_path_return=df_path,
                 )
 
         # Simulate a control_plane write (overwrites the entire file with {commands, acks}).
@@ -295,6 +336,7 @@ class TestStaleAlert:
                     current_sha=DIFF_SHA,
                     now_hours_after_boot=8.0,
                     boot_ts_hours_ago=0.0,
+                    state_path_return=df_path,
                 )
 
         pause_mock.assert_called_once()
@@ -315,6 +357,7 @@ class TestStaleAlert:
                     current_sha=DIFF_SHA,
                     now_hours_after_boot=12.0,
                     boot_ts_hours_ago=0.0,
+                    state_path_return=df_path,
                 )
 
     def test_pause_entries_idempotent_not_spam(self, tmp_path):
@@ -604,15 +647,20 @@ class TestApschedulerSignal:
             with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": ""}, clear=False):
                 with patch("subprocess.check_output", side_effect=_fake_git):
                     with patch("os.kill", side_effect=_mock_kill):
-                        try:
-                            _check_deployment_freshness(
-                                boot_sha=stale_sha,
-                                boot_ts=boot_ts,
-                                repo_root=Path("/fake"),
-                                now=datetime.now(timezone.utc),
-                            )
-                        except SystemExit:
-                            pass  # trailing raise; expected in direct-call path
+                        with tempfile.TemporaryDirectory() as tmp_state:
+                            with patch(
+                                "src.config.state_path",
+                                side_effect=lambda name: Path(tmp_state) / name,
+                            ):
+                                try:
+                                    _check_deployment_freshness(
+                                        boot_sha=stale_sha,
+                                        boot_ts=boot_ts,
+                                        repo_root=Path("/fake"),
+                                        now=datetime.now(timezone.utc),
+                                    )
+                                except SystemExit:
+                                    pass  # trailing raise; expected in direct-call path
             job_done.set()
 
         scheduler = BackgroundScheduler(timezone=ZoneInfo("UTC"))

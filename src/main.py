@@ -1250,6 +1250,7 @@ def _scheduler_job(job_name: str):
         @functools.wraps(fn)
         def _wrapper(*args, **kwargs):
             try:
+                _write_scheduler_health(job_name, failed=False, started=True)
                 result = fn(*args, **kwargs)
                 _write_scheduler_health(job_name, failed=False)
                 return result
@@ -1260,6 +1261,21 @@ def _scheduler_job(job_name: str):
         return _wrapper
 
     return _decorator
+
+
+def _scheduler_max_instance_skip_listener(event: Any) -> None:
+    """Surface APScheduler max-instance skips as live scheduler health."""
+
+    job_name = str(getattr(event, "job_id", "") or "").strip()
+    if not job_name:
+        return
+    logger.warning("scheduler job skipped: job=%s reason=max_instances_reached", job_name)
+    _write_scheduler_health(
+        job_name,
+        failed=False,
+        skipped=True,
+        skip_reason="max_instances_reached",
+    )
 
 
 
@@ -1496,12 +1512,6 @@ def _write_heartbeat() -> None:
             write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
         except Exception:
             pass
-        # Relationship-F: surface composite live-health on every heartbeat cycle
-        try:
-            from src.control.live_health import compute_composite_live_health
-            compute_composite_live_health()
-        except Exception:
-            pass  # observability write must never mask heartbeat success
         _heartbeat_fails = 0
     except Exception as exc:
         _heartbeat_fails += 1
@@ -1518,6 +1528,15 @@ def _write_heartbeat() -> None:
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
             os._exit(1)
+
+
+@_scheduler_job("live_health_composite")
+def _live_health_composite_cycle() -> None:
+    """Refresh composite live-health without blocking the heartbeat pulse."""
+
+    from src.control.live_health import compute_composite_live_health
+
+    compute_composite_live_health()
 
 
 _venue_heartbeat_supervisor = None
@@ -3017,7 +3036,10 @@ def _check_deployment_freshness(
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
     df_path = state_path("deployment_freshness.json")
     try:
-        from src.control.runtime_code_plane import runtime_code_plane_diff
+        from src.control.runtime_code_plane import (
+            dirty_runtime_worktree_paths,
+            runtime_code_plane_diff,
+        )
 
         code_plane = runtime_code_plane_diff(
             _repo_root,
@@ -3025,8 +3047,10 @@ def _check_deployment_freshness(
             current_sha=current_sha,
             timeout=5,
         )
+        dirty_runtime_paths = dirty_runtime_worktree_paths(_repo_root, timeout=5)
     except Exception as exc:  # noqa: BLE001
         code_plane = None
+        dirty_runtime_paths = ()
         logger.warning(
             "deployment_freshness: runtime code-plane classification failed (%s); "
             "treating SHA drift as executable",
@@ -3042,7 +3066,7 @@ def _check_deployment_freshness(
         except Exception as _exc:
             logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
 
-    if current_sha == _boot_sha:
+    if current_sha == _boot_sha and not dirty_runtime_paths:
         if df_path.exists():
             _write_deployment_freshness_state(
                 {
@@ -3058,7 +3082,7 @@ def _check_deployment_freshness(
             )
         return  # No divergence.
 
-    if code_plane is not None and not code_plane.runtime_code_changed:
+    if code_plane is not None and not code_plane.runtime_code_changed and not dirty_runtime_paths:
         _write_deployment_freshness_state(
             {
                 "boot_sha": _boot_sha,
@@ -3081,12 +3105,22 @@ def _check_deployment_freshness(
         )
         return
 
+    stale_status = "dirty_runtime_worktree" if dirty_runtime_paths else "mismatch"
+    changed_paths_sample = (
+        list(code_plane.changed_paths[:20]) if code_plane is not None else []
+    )
+    dirty_paths_sample = list(dirty_runtime_paths[:20])
     if uptime_hours >= 24.0:
         import signal as _signal
         logger.critical(
-            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh. "
+            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh "
+            "(status=%s dirty_runtime_paths=%s). "
             "Signaling SIGTERM to escape APScheduler exception boundary.",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
+            _boot_sha[:8],
+            current_sha[:8],
+            uptime_hours,
+            stale_status,
+            dirty_paths_sample[:5],
         )
         # os.kill(SIGTERM) propagates to the process's signal handler OUTSIDE
         # APScheduler's BaseException catch in run_job(), ensuring the daemon
@@ -3095,14 +3129,20 @@ def _check_deployment_freshness(
         os.kill(os.getpid(), _signal.SIGTERM)
         raise SystemExit(
             f"DEPLOYMENT_STALE — daemon loaded SHA {_boot_sha[:8]} but filesystem "
-            f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
+            f"has {current_sha[:8]} for >{uptime_hours:.1f}h "
+            f"(status={stale_status}). "
             f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
         )
     else:
         logger.error(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — merged code not reloaded; pausing entries immediately",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
+            "uptime_hours=%.1f status=%s dirty_runtime_paths=%s — runtime code not cleanly "
+            "loaded; pausing entries immediately",
+            _boot_sha[:8],
+            current_sha[:8],
+            uptime_hours,
+            stale_status,
+            dirty_paths_sample[:5],
         )
         # Write advisory flag to dedicated state/deployment_freshness.json.
         # NOT control_plane.json — that file is overwritten on every cycle by
@@ -3115,14 +3155,14 @@ def _check_deployment_freshness(
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
                 "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
-                "status": "mismatch",
+                "status": stale_status,
                 "code_plane_status": (
                     code_plane.status if code_plane is not None else "classification_failed"
                 ),
                 "runtime_code_changed": True,
-                "changed_paths_sample": (
-                    list(code_plane.changed_paths[:20]) if code_plane is not None else []
-                ),
+                "changed_paths_sample": changed_paths_sample,
+                "worktree_runtime_dirty": bool(dirty_runtime_paths),
+                "dirty_runtime_paths_sample": dirty_paths_sample,
             }
         )
         # Pause new entries immediately. Exit submits are also protected at the
@@ -3208,7 +3248,10 @@ def _boot_deployment_freshness_auto_resume() -> None:
             )
             return
         try:
-            from src.control.runtime_code_plane import runtime_code_plane_diff
+            from src.control.runtime_code_plane import (
+                dirty_runtime_worktree_paths,
+                runtime_code_plane_diff,
+            )
 
             code_plane = runtime_code_plane_diff(
                 PROJECT_ROOT,
@@ -3216,12 +3259,55 @@ def _boot_deployment_freshness_auto_resume() -> None:
                 current_sha=current_sha,
                 timeout=5,
             )
+            dirty_runtime_paths = dirty_runtime_worktree_paths(PROJECT_ROOT, timeout=5)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "deployment_freshness_auto_resume: runtime code-plane classification failed "
                 "(%s); cannot verify SHA match",
                 exc,
             )
+            return
+        if dirty_runtime_paths:
+            logger.warning(
+                "deployment_freshness_auto_resume: runtime worktree is dirty at boot "
+                "(boot=%s current=%s paths=%s) — NOT auto-resuming",
+                boot_sha[:8],
+                current_sha[:8],
+                list(dirty_runtime_paths[:5]),
+            )
+            try:
+                df_path = state_path("deployment_freshness.json")
+                detected_at = datetime.now(timezone.utc)
+                boot_ts = _BOOT_STATE.get("ts")
+                uptime_hours = 0.0
+                if isinstance(boot_ts, datetime):
+                    uptime_hours = max(
+                        0.0,
+                        (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                    )
+                payload = {
+                    "boot_sha": boot_sha,
+                    "current_sha": current_sha,
+                    "uptime_hours": round(uptime_hours, 2),
+                    "detected_at": detected_at.isoformat(),
+                    "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
+                    "status": "dirty_runtime_worktree",
+                    "code_plane_status": code_plane.status,
+                    "runtime_code_changed": True,
+                    "changed_paths_sample": list(code_plane.changed_paths[:20]),
+                    "worktree_runtime_dirty": True,
+                    "dirty_runtime_paths_sample": list(dirty_runtime_paths[:20]),
+                }
+                tmp_path = str(df_path) + ".tmp"
+                with open(tmp_path, "w") as f:
+                    json.dump(payload, f, indent=2)
+                os.replace(tmp_path, str(df_path))
+            except Exception as exc:
+                logger.warning(
+                    "deployment_freshness_auto_resume: failed to write dirty worktree "
+                    "deployment_freshness.json (%s)",
+                    exc,
+                )
             return
         if current_sha != boot_sha and code_plane.runtime_code_changed:
             logger.warning(
@@ -11122,12 +11208,20 @@ def main():
         scheduler_kwargs["executors"] = {
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
+            "observability": _APThreadPoolExecutor(1),
         }
     except ModuleNotFoundError:
         if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
             raise
 
     scheduler = BlockingScheduler(**scheduler_kwargs)
+    try:
+        from apscheduler.events import EVENT_JOB_MAX_INSTANCES
+
+        scheduler.add_listener(_scheduler_max_instance_skip_listener, EVENT_JOB_MAX_INSTANCES)
+    except ModuleNotFoundError:
+        if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
+            raise
 
     # max_instances=1: prevent concurrent execution if previous cycle still running
     edli_cfg = _settings_section("edli", {})
@@ -11307,6 +11401,15 @@ def main():
     )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
+    scheduler.add_job(
+        _live_health_composite_cycle,
+        "interval",
+        seconds=60,
+        id="live_health_composite",
+        max_instances=1,
+        coalesce=True,
+        executor="observability",
+    )
     # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
     # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db so the -wal file cannot
     # grow unboundedly when a reader transiently pins the floor between part-1

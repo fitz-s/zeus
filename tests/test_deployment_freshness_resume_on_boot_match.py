@@ -1,9 +1,9 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-07-08
 # Authority basis: PIPELINE_REVIEW.md §8, SYNTHESIS.md §8.7
 #   5/18 incident: PR #149 deployment_freshness_4h_divergence pause persisted
 #   across daemon restart because boot sequence had no auto-resume logic.
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: antibody — deployment_freshness boot-time SHA-match auto-resume (PR #149 fix)
 # Reuse: Run when modifying boot_check logic, deployment_freshness pause/resume, or control_plane boot sequence.
 """Antibody tests for boot-time deployment_freshness auto-resume.
@@ -97,6 +97,7 @@ def _run_auto_resume(
     git_diff_paths: tuple[str, ...] = ("src/main.py",),
     git_raises: Exception | None = None,
     state_dir: Path | None = None,
+    dirty_runtime_paths: tuple[str, ...] = (),
 ) -> None:
     """Run _boot_deployment_freshness_auto_resume with controlled git output."""
     def _fake_git(cmd, **kw):
@@ -108,14 +109,18 @@ def _run_auto_resume(
 
     with patch.object(main_module, "_BOOT_STATE", {"sha": boot_sha, "ts": datetime.now(_UTC)}):
         with patch("subprocess.check_output", side_effect=_fake_git):
-            if state_dir is not None:
-                with patch("src.config.state_path", side_effect=lambda name: state_dir / name):
-                    _boot_deployment_freshness_auto_resume()
-            else:
-                with tempfile.TemporaryDirectory() as tmp_state:
-                    tmp_dir = Path(tmp_state)
-                    with patch("src.config.state_path", side_effect=lambda name: tmp_dir / name):
+            with patch(
+                "src.control.runtime_code_plane.dirty_runtime_worktree_paths",
+                return_value=dirty_runtime_paths,
+            ):
+                if state_dir is not None:
+                    with patch("src.config.state_path", side_effect=lambda name: state_dir / name):
                         _boot_deployment_freshness_auto_resume()
+                else:
+                    with tempfile.TemporaryDirectory() as tmp_state:
+                        tmp_dir = Path(tmp_state)
+                        with patch("src.config.state_path", side_effect=lambda name: tmp_dir / name):
+                            _boot_deployment_freshness_auto_resume()
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +226,35 @@ class TestAutoResumeOnShaMatch:
         assert payload["pause_reason"] is None
         assert payload["boot_sha"] == BOOT_SHA
         assert payload["current_sha"] == BOOT_SHA
+
+    def test_r1_sha_match_dirty_runtime_worktree_does_not_clear_pause(self, tmp_path):
+        """Boot auto-resume requires a clean runtime worktree, not just matching SHA."""
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(
+                    boot_sha=BOOT_SHA,
+                    current_sha=BOOT_SHA,
+                    state_dir=tmp_path,
+                    dirty_runtime_paths=("src/control/live_health.py",),
+                )
+
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is True
+        payload = json.loads((tmp_path / "deployment_freshness.json").read_text())
+        assert payload["status"] == "dirty_runtime_worktree"
+        assert payload["pause_reason"] == "deployment_freshness_mismatch"
+        assert payload["worktree_runtime_dirty"] is True
+        assert payload["dirty_runtime_paths_sample"] == ["src/control/live_health.py"]
 
 
 # ---------------------------------------------------------------------------
