@@ -272,6 +272,25 @@ _MONITOR_SNAPSHOT_COLUMNS = frozenset(
     }
 )
 _CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
+_MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES = frozenset(
+    {
+        "exit_intent",
+        "retry_pending",
+        "backoff_exhausted",
+        "sell_pending",
+        "sell_placed",
+        "sell_pending_confirmation",
+    }
+)
+_MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS = frozenset(
+    {
+        "phase",
+        "order_status",
+        "exit_reason",
+        "exit_retry_count",
+        "next_exit_retry_at",
+    }
+)
 
 
 def _preserve_existing_monitor_refresh_authority(
@@ -288,17 +307,33 @@ def _preserve_existing_monitor_refresh_authority(
         for column in CANONICAL_POSITION_CURRENT_COLUMNS
         if column in _MONITOR_REFRESH_PRESERVED_COLUMNS and column in current_columns
     )
-    if not preserved:
+    pending_exit_guard_columns = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS
+        and column in current_columns
+    )
+    selected = tuple(dict.fromkeys((*preserved, *pending_exit_guard_columns)))
+    if not selected:
         return projection
     row = conn.execute(
-        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
         (position_id,),
     ).fetchone()
     if row is None:
         return projection
     merged = dict(projection)
-    for index, column in enumerate(preserved):
-        merged[column] = row[index]
+    current = {column: row[index] for index, column in enumerate(selected)}
+    for column in preserved:
+        merged[column] = current[column]
+    if (
+        str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
+        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
+        and str(current.get("order_status") or "")
+        in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
+    ):
+        for column in pending_exit_guard_columns:
+            merged[column] = current[column]
     if _has_positive_chain_observation(merged) and str(
         merged.get("chain_state") or ""
     ) in {"", "unknown", "local_only"}:
