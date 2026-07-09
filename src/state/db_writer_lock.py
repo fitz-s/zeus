@@ -886,6 +886,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/reconcile_realized_fees.py",  # read_only_ro_uri: venue_order_facts trade-level fee fields + position_current cost-basis arithmetic via file:...?mode=ro; SELECT-only; writes state/fee_reconciliation.json
         # --- R2-core (2026-07-08): certificate/event-native replay harness (docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R2-a/R2-b item 6) ---
         "src/reconcile/replay.py",  # read_only_ro_uri: main() demo/ops entry point opens trades+forecasts DBs via file:...?mode=ro uri; SELECT-only replay_window() call (apply=False always); never writes any canonical DB
+        # --- allday improvement loop v3 (2026-07-08): sandboxed-tick query escrow ---
+        "scripts/ops/loop_guard.py",  # read_only_ro_uri: run-queries opens forecasts/world/trades DBs via file:...?mode=ro uri + PRAGMA query_only + an authorizer denying ATTACH/DETACH; executes tick-authored SQL from loop/queries/pending/*.sql; SELECT-only, no canonical DB write path
     }
 )
 
