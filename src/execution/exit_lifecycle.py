@@ -159,6 +159,7 @@ DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS = 10.0
 # correct reversal exit sells once the channel recovers instead of being abandoned.
 CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
 EXIT_LOCKED_COOLDOWN_SECONDS = 60
+RUNTIME_SUBMIT_GATE_BLOCK_COOLDOWN_SECONDS = 15 * 60
 _ACTIVE_EXIT_SELL_STATES = frozenset(
     {
         "INTENT_CREATED",
@@ -288,6 +289,35 @@ def _is_exit_transient_lock_error(error: str) -> bool:
         or ("active orders" in e and "not enough balance" in e)
         or "ctf_tokens_insufficient" in e
     )
+
+
+def _is_runtime_submit_gate_block_error(error: str) -> bool:
+    """True for deterministic runtime/code-plane blocks before venue submit."""
+
+    if not error:
+        return False
+    e = error.lower()
+    return (
+        "[gate_runtime] blocked" in e
+        and "live_venue_submit" in e
+        and (
+            "deployment_freshness_mismatch" in e
+            or "loaded_sha_mismatch" in e
+            or "process_loaded_code_stale" in e
+        )
+    )
+
+
+def _runtime_submit_gate_currently_allows_submit() -> bool:
+    """Return whether the runtime gate would currently allow a live venue submit."""
+
+    try:
+        from src.architecture import gate_runtime
+
+        gate_runtime.check("live_venue_submit")
+        return True
+    except Exception:  # noqa: BLE001 - monitor must fail closed on gate uncertainty.
+        return False
 
 
 def _row_value(row: object, key: str, index: int) -> object:
@@ -1840,6 +1870,12 @@ def is_exit_cooldown_active(position: Position) -> bool:
         return False
     deadline = _parse_iso(position.next_exit_retry_at)
     if deadline is None:
+        return False
+    if (
+        _utcnow() < deadline
+        and _is_runtime_submit_gate_block_error(str(getattr(position, "last_exit_error", "") or ""))
+        and _runtime_submit_gate_currently_allows_submit()
+    ):
         return False
     return _utcnow() < deadline
 
@@ -4891,6 +4927,10 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if position.exit_state != "retry_pending":
         return False
 
+    previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
+    previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
+    previous_error = str(getattr(position, "last_exit_error", "") or "")
+
     dust_error = _latest_snapshot_min_order_dust_error(position, conn=conn)
     if dust_error:
         current_reason = str(getattr(position, "exit_reason", "") or "EXIT_RETRY_PENDING")
@@ -4907,12 +4947,34 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
         )
         return False
 
-    if is_exit_cooldown_active(position):
-        return False  # Still cooling down
+    runtime_gate_block = _is_runtime_submit_gate_block_error(previous_error)
+    if runtime_gate_block and not _runtime_submit_gate_currently_allows_submit():
+        if not is_exit_cooldown_active(position):
+            current_reason = str(getattr(position, "exit_reason", "") or "RUNTIME_SUBMIT_GATE_BLOCKED")
+            position.exit_state = "retry_pending"
+            position.order_status = "retry_pending"
+            position.next_exit_retry_at = (
+                _utcnow() + timedelta(seconds=RUNTIME_SUBMIT_GATE_BLOCK_COOLDOWN_SECONDS)
+            ).isoformat()
+            _dual_write_canonical_pending_exit_if_available(
+                conn,
+                position,
+                reason=current_reason,
+                error=previous_error,
+                event_type="EXIT_ORDER_REJECTED",
+                extra_payload={
+                    "status": "runtime_submit_gate_blocked",
+                    "runtime_submit_gate_block": True,
+                    "previous_retry_count": previous_retry_count,
+                    "previous_next_retry_at": previous_next_retry_at,
+                    "next_retry_at": position.next_exit_retry_at,
+                    "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+                },
+            )
+        return False
 
-    previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
-    previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
-    previous_error = str(getattr(position, "last_exit_error", "") or "")
+    if not runtime_gate_block and is_exit_cooldown_active(position):
+        return False  # Still cooling down
 
     # Cooldown expired — position is eligible for exit re-evaluation
     position.exit_state = ""  # Reset to allow new exit attempt
@@ -5422,6 +5484,35 @@ def _mark_exit_retry(
         )
         logger.info(
             "EXIT LOCKED %s: %s (budget NOT consumed; next retry %s)",
+            position.trade_id,
+            reason,
+            position.next_exit_retry_at,
+        )
+        return
+
+    if _is_runtime_submit_gate_block_error(error):
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
+        position.next_exit_retry_at = (
+            _utcnow() + timedelta(seconds=RUNTIME_SUBMIT_GATE_BLOCK_COOLDOWN_SECONDS)
+        ).isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+            extra_payload={
+                "status": "runtime_submit_gate_blocked",
+                "runtime_submit_gate_block": True,
+                "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+                "next_retry_at": position.next_exit_retry_at,
+            },
+        )
+        logger.warning(
+            "EXIT RUNTIME-SUBMIT-GATE-BLOCKED %s: %s "
+            "(budget NOT consumed; recheck gate by %s)",
             position.trade_id,
             reason,
             position.next_exit_retry_at,

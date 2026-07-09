@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-09
 # Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-07-02
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -948,6 +948,89 @@ def test_pending_exit_fill_poller_releases_expired_retry_without_order_id(conn):
     assert event["venue_status"] == "ready"
     assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
     assert payload["previous_retry_count"] == 1
+
+
+def test_runtime_submit_gate_block_holds_retry_until_gate_recovers(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    error = (
+        "[gate_runtime] BLOCKED cap='live_venue_submit': condition "
+        "'deployment_freshness_mismatch' is active"
+    )
+    position = Position(
+        trade_id="pos-runtime-gate-block",
+        market_id="mkt-runtime-gate-block",
+        city="Taipei",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="36C",
+        direction="buy_no",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=11.0,
+        entry_price=0.57,
+        shares=19.0,
+        cost_basis_usd=11.0,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-07-09T00:30:00+00:00",
+        entered_at="2026-07-08T15:38:27+00:00",
+        exit_state="",
+        order_status="filled",
+        token_id=NO_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-runtime-gate-block",
+        exit_retry_count=0,
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+    )
+
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        error=error,
+        conn=conn,
+    )
+
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert position.exit_retry_count == 0
+    first_retry_at = position.next_exit_retry_at
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["status"] == "runtime_submit_gate_blocked"
+    assert payload["runtime_submit_gate_block"] is True
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_runtime_submit_gate_currently_allows_submit",
+        lambda: False,
+    )
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 0
+    assert position.next_exit_retry_at == first_retry_at
+    assert exit_lifecycle.is_exit_cooldown_active(position) is True
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_runtime_submit_gate_currently_allows_submit",
+        lambda: True,
+    )
+    assert exit_lifecycle.is_exit_cooldown_active(position) is False
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+    assert position.next_exit_retry_at == ""
 
 
 def test_pending_exit_without_order_releases_for_redecision(conn):
