@@ -202,32 +202,45 @@ so only the aggregate pass/fail/error counts from the progress-dot stream
 are available. A re-run with `-v --tb=no` after fixing or excluding the
 remaining hang would recover the full list.
 
-## 4. Running total vs. the blueprint's 867
+## 4. CORRECTED total (full flat-bucket run, supersedes the 535 estimate)
+
+**The "535 / extrapolated 650–700" figure below §4-orig was WRONG** — caused by a
+regex bug in the parsing script that only counted continuation dot-lines and
+silently dropped the FIRST result of every one of ~1000 files. A full clean flat
+run (13,218 selected tests, 391s, excluding only the 5 known-hang tests + the 1
+pathologically-slow file, keeping the bogus-proxy network workaround) completed
+and was re-parsed strictly (`^FAILED tests/` and `^ERROR tests/`, log-ERROR lines
+excluded — verified: only 10 `^ERROR <logger>` log lines in the whole log).
 
 | | count |
 |---|---|
 | Named domains (32, complete) | **127** |
-| Flat bucket (partial, 71% coverage) | **408** (382F + 26E) |
-| **Confirmed real red so far** | **535** |
-| Flat bucket remaining (~29%, unmeasured) | unknown — blocked by §3.2 |
+| Flat bucket (full run, strict) | **3985** (3026F + 959E) |
+| **Raw grand total** | **4112** |
 
-535 confirmed failures already exceed the blueprint's implicit budget (a
-`pre_existing_failure_registry` of only 3 entries), and the true total is
-higher still once the remaining ~29% of the flat bucket is measured. If the
-failure rate holds roughly steady across the unmeasured remainder
-(382+26 in 9,490 tests ≈ 4.3% red rate), the full flat bucket would land
-around 570 red, putting the true grand total in the **650–700** range — in
-the neighborhood of the blueprint's 867 but not a match, and this is an
-extrapolation, not a count. **The blueprint's 867 cannot be confirmed or
-refuted precisely without finishing the flat-bucket run**; what's certain is
-that the true number is not "3" and a `pre_existing_failure_registry` with 3
-entries is not a defensible gate baseline.
+**Contamination audited (main-thread verification of flat_v9.log):**
+- Config confound: only **4 distinct test files** cite a missing `config/cities.json`
+  (the 613 path mentions are those 4 files' verbose retry logging; cities.json is
+  tracked and normally present — this is a test-env CWD/root-resolution issue, not
+  a mass gap).
+- Proxy confound: **≤404** FAILED/ERROR lines have network-ish test names
+  (gamma/network/scan/fetch/ingest/http) and *may* be artifacts of the bogus-proxy
+  fail-fast workaround; spot-checks (test_aifs / test_antibody / test_authority_rebuild)
+  confirmed several are real assertion/AttributeError failures, not proxy noise.
+- **Conservative real floor after subtracting the entire ≤404 network set: ~3,700 real red.**
+
+**Honest number: the real red baseline is ~3,700–4,100 — thousands, not 535, not
+867.** The blueprint's 867 is a **~4–5× undercount**; the registry's "3" is off by
+**~3 orders of magnitude**. The deeper finding is that **no clean number exists
+because the suite is not hermetically runnable** (network-hang tests §3.1, config/CWD
+dependence, no isolated test env) — establishing a true baseline requires making the
+suite hermetic first, which is itself a governance packet.
 
 ## 5. What this means for the `pre_existing_failure_registry`
 
 The registry needs to be rebuilt from a full, clean run of this suite (fix or
 mock out §3.1/§3.3 first, or every future run silently dies on the same two
 hangs and nobody notices). Until then, any packet gating on "0 NEW failures
-vs a known pre-existing set" is gating against a registry that is off by at
-least two orders of magnitude (3 vs. 535+), which means the gate currently
-passes almost anything.
+vs a known pre-existing set" is gating against a registry that is off by
+~3 orders of magnitude (3 vs. ~3,700–4,100 — see corrected §4), which means the
+gate currently passes almost anything.
