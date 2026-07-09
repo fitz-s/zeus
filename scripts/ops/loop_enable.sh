@@ -1,35 +1,26 @@
 #!/usr/bin/env bash
-# Created: 2026-07-08
-# Last reused/audited: 2026-07-08
-# Authority: docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md
-#   §6 (enable/disable) + docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C1
-#   (deploy is operator-only).
+# Zeus improvement loop v3 — enable preflight (print-only).
+# Authority: docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md §7.
 #
-# WHAT: preflight-checks the loop v2 machinery and PRINTS (never runs) the
+# WHAT: preflight-checks the loop v3 machinery and PRINTS (never runs) the
 #   exact launchctl bootstrap commands the operator would type to enable
-#   loop/tick.sh (L1 hourly) and loop/daily.sh (L2 daily). This script never
-#   calls launchctl itself — enabling the loop is an operator action, full
-#   stop, per the packet's hard boundary ("nothing in this packet may
-#   schedule/launch anything itself").
+#   loop/tick.sh. Enabling the loop is an operator action, full stop.
 #
-# WHO WRITES: nothing (read-only). WHO READS: the operator, once, when
-#   deciding whether to enable the loop. WHAT BREAKS IF THIS SILENTLY STOPS
-#   WORKING: nothing at runtime — this is a one-shot preflight+print tool,
-#   not part of the loop's own execution path.
+# WHO WRITES: nothing (read-only). WHO READS: the operator, when deciding
+#   whether to enable the loop. WHAT BREAKS IF THIS SILENTLY STOPS WORKING:
+#   nothing at runtime — one-shot preflight+print, not on the loop's path.
 #
-# PREFLIGHT CHECKS (all must pass before the printed commands are safe to run):
-#   1. loop/HALT does not exist (a fresh enable should start un-halted).
+# PREFLIGHT CHECKS:
+#   1. loop/HALT does not exist.
 #   2. loop/JOURNAL.md exists and is writable.
-#   3. `claude` CLI is on PATH.
-#   4. loop/allowlist_auto.txt parses (scripts/ops/loop_guard.py load path).
-#   5. deploy/launchd/com.zeus.loop-tick.plist and
-#      com.zeus.loop-daily.plist exist under this repo.
+#   3. `codex` CLI on PATH (the v3 engine).
+#   4. loop/allowlist_auto.txt parses.
+#   5. deploy/launchd/com.zeus.loop-tick.plist exists.
 #
 # SAFETY: read-only. Does not touch ~/Library/LaunchAgents, does not run
 #   launchctl, does not modify loop/** or deploy/**.
 #
-# USAGE:
-#   scripts/ops/loop_enable.sh
+# USAGE: scripts/ops/loop_enable.sh
 
 set -euo pipefail
 
@@ -40,7 +31,7 @@ PY="$REPO_ROOT/.venv/bin/python"
 
 fail=0
 
-echo "== loop_enable.sh preflight =="
+echo "== loop_enable.sh preflight (v3) =="
 echo ""
 
 # 1. HALT absent
@@ -61,11 +52,11 @@ else
   fail=1
 fi
 
-# 3. claude CLI present
-if command -v claude >/dev/null 2>&1; then
-  echo "OK    claude CLI on PATH ($(command -v claude))"
+# 3. codex CLI present (v3 engine)
+if command -v codex >/dev/null 2>&1; then
+  echo "OK    codex CLI on PATH ($(command -v codex))"
 else
-  echo "FAIL  claude CLI not found on PATH — tick.sh/daily.sh cannot run without it"
+  echo "FAIL  codex CLI not found on PATH — tick.sh cannot run without it"
   fail=1
 fi
 
@@ -91,15 +82,20 @@ else
   fail=1
 fi
 
-# 5. plist templates present
-for plist in com.zeus.loop-tick.plist com.zeus.loop-daily.plist; do
-  if [ -f "$LAUNCHD_DIR/$plist" ]; then
-    echo "OK    deploy/launchd/$plist present"
-  else
-    echo "FAIL  deploy/launchd/$plist missing"
-    fail=1
-  fi
-done
+# 5. plist template present
+if [ -f "$LAUNCHD_DIR/com.zeus.loop-tick.plist" ]; then
+  echo "OK    deploy/launchd/com.zeus.loop-tick.plist present"
+else
+  echo "FAIL  deploy/launchd/com.zeus.loop-tick.plist missing"
+  fail=1
+fi
+
+# Cadence info (not a gate — missing INTERVAL means default 1h)
+if [ -f "$LOOP_DIR/INTERVAL" ]; then
+  echo "INFO  loop/INTERVAL = $(cat "$LOOP_DIR/INTERVAL") hour(s)"
+else
+  echo "INFO  loop/INTERVAL absent — default cadence 1 hour (echo N > loop/INTERVAL to change)"
+fi
 
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -112,11 +108,10 @@ echo ""
 echo "This script does NOT run these commands — copy/paste them yourself once ready:"
 echo ""
 echo "  cp '$LAUNCHD_DIR/com.zeus.loop-tick.plist' ~/Library/LaunchAgents/"
-echo "  cp '$LAUNCHD_DIR/com.zeus.loop-daily.plist' ~/Library/LaunchAgents/"
 echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.zeus.loop-tick.plist"
-echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.zeus.loop-daily.plist"
 echo ""
-echo "To disable at any time (either stops all future ticks immediately):"
-echo "  touch '$LOOP_DIR/HALT'                                    # soft: leaves daemons loaded, next tick no-ops"
-echo "  launchctl bootout gui/\$(id -u)/com.zeus.loop-tick        # hard: unloads the L1 daemon"
-echo "  launchctl bootout gui/\$(id -u)/com.zeus.loop-daily       # hard: unloads the L2 daemon"
+echo "Cadence (anytime, no plist edit): echo <hours> > '$LOOP_DIR/INTERVAL'   # e.g. 1..6"
+echo ""
+echo "To disable at any time:"
+echo "  touch '$LOOP_DIR/HALT'                                   # soft: daemon stays loaded, next tick no-ops"
+echo "  launchctl bootout gui/\$(id -u)/com.zeus.loop-tick       # hard: unloads the daemon"

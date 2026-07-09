@@ -33,6 +33,8 @@
 """Tests for scripts/ops/loop_guard.py."""
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -110,6 +112,24 @@ def _enforce(repo: Path, snapshot: Path, allowlist_ref: str, journal: Path, tier
             str(journal),
             "--tier",
             tier,
+        ]
+    )
+
+
+def _commit_auto(repo: Path, snapshot: Path, allowlist_ref: str, journal: Path, tier: str = "l1") -> int:
+    return loop_guard.main(
+        [
+            "commit-auto",
+            "--repo-root",
+            str(repo),
+            "--allowlist-git-ref",
+            allowlist_ref,
+            "--pre-snapshot",
+            str(snapshot),
+            "--tier",
+            tier,
+            "--journal",
+            str(journal),
         ]
     )
 
@@ -733,6 +753,315 @@ def test_flock_run_rejects_concurrent_overlap(tmp_path):
         assert not marker.exists()  # second invocation never ran the command
     finally:
         holder.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------
+# interval-check: loop/INTERVAL turns the launchd-fixed hourly cadence into
+# an operator-adjustable dial
+# --------------------------------------------------------------------------
+def test_interval_check_first_run_proceeds_and_stamps(tmp_path):
+    loop_dir = tmp_path / "loop"
+    loop_dir.mkdir()
+    # Missing .last_tick_epoch defaults last=0, so any realistic epoch "now"
+    # (far more than one hour past the Unix epoch) naturally clears the
+    # default 1h window — use a real-ish epoch, not a tiny test value.
+    now = 10_000_000
+    rc = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", str(now)])
+    assert rc == 0
+    assert (loop_dir / ".last_tick_epoch").read_text() == str(now)
+
+
+def test_interval_check_skips_inside_window_without_touching_stamp(tmp_path):
+    loop_dir = tmp_path / "loop"
+    loop_dir.mkdir()
+    (loop_dir / ".last_tick_epoch").write_text("1000")
+    rc = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", "1500"])
+    assert rc == 4
+    assert (loop_dir / ".last_tick_epoch").read_text() == "1000"
+
+
+def test_interval_check_honors_operator_hours_value(tmp_path):
+    loop_dir = tmp_path / "loop"
+    loop_dir.mkdir()
+    (loop_dir / "INTERVAL").write_text("3")
+    (loop_dir / ".last_tick_epoch").write_text("0")
+
+    almost = 2 * 3600 + 59 * 60  # 2h59m
+    rc = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", str(almost)])
+    assert rc == 4
+    assert (loop_dir / ".last_tick_epoch").read_text() == "0"
+
+    exactly = 3 * 3600
+    rc2 = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", str(exactly)])
+    assert rc2 == 0
+    assert (loop_dir / ".last_tick_epoch").read_text() == str(exactly)
+
+
+def test_interval_check_invalid_interval_falls_back_to_one_hour(tmp_path):
+    loop_dir = tmp_path / "loop"
+    loop_dir.mkdir()
+    (loop_dir / "INTERVAL").write_text("not-a-number")
+    (loop_dir / ".last_tick_epoch").write_text("0")
+
+    rc = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", "3599"])
+    assert rc == 4
+    rc2 = loop_guard.main(["interval-check", "--loop-dir", str(loop_dir), "--now", "3600"])
+    assert rc2 == 0
+
+
+# --------------------------------------------------------------------------
+# run-queries: query escrow — the sandboxed tick authors SQL, this trusted
+# command executes it read-only against the canonical DBs
+# --------------------------------------------------------------------------
+def _make_db(path: Path, rows: int = 3) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+    for i in range(rows):
+        conn.execute("INSERT INTO t (val) VALUES (?)", (f"v{i}",))
+    conn.commit()
+    conn.close()
+
+
+def _write_pending(loop_dir: Path, name: str, sql: str) -> Path:
+    pending = loop_dir / "queries" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    p = pending / name
+    p.write_text(sql)
+    return p
+
+
+def test_run_queries_executes_select_against_attached_alias_and_writes_result(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    _make_db(repo / "state" / "zeus-forecasts.db", rows=3)
+    _write_pending(loop_dir, "probe.sql", "SELECT * FROM forecasts.t ORDER BY 1")
+
+    rc = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["processed"] == ["probe.sql"]
+    assert summary["errors"] == []
+
+    result = json.loads((loop_dir / "queries" / "results" / "probe.json").read_text())
+    assert result["error"] is None
+    assert result["columns"] == ["id", "val"]
+    assert result["row_count"] == 3
+    assert result["rows"][0][1] == "v0"
+    assert result["attached"] == ["forecasts"]
+
+
+def test_run_queries_write_statement_recorded_as_error_and_db_unchanged(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    db_path = repo / "state" / "zeus-forecasts.db"
+    _make_db(db_path, rows=2)
+    _write_pending(loop_dir, "bad.sql", "INSERT INTO forecasts.t (val) VALUES ('x')")
+
+    rc = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["processed"] == ["bad.sql"]
+    assert summary["errors"] and summary["errors"][0]["file"] == "bad.sql"
+
+    result = json.loads((loop_dir / "queries" / "results" / "bad.json").read_text())
+    assert result["error"] is not None
+
+    conn = sqlite3.connect(str(db_path))
+    count = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+    conn.close()
+    assert count == 2
+
+
+def test_run_queries_attach_denied(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    _make_db(repo / "state" / "zeus-forecasts.db", rows=1)
+    evil_db = tmp_path / "evil.db"
+    _write_pending(loop_dir, "evil.sql", f"ATTACH DATABASE '{evil_db}' AS evil")
+
+    rc = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc == 0
+    result = json.loads((loop_dir / "queries" / "results" / "evil.json").read_text())
+    assert result["error"] is not None
+    assert not evil_db.exists()
+
+
+def test_run_queries_row_cap_truncates(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    _make_db(repo / "state" / "zeus-forecasts.db", rows=5)
+    _write_pending(loop_dir, "probe.sql", "SELECT * FROM forecasts.t ORDER BY 1")
+
+    rc = loop_guard.main(
+        ["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir), "--max-rows", "3"]
+    )
+    assert rc == 0
+    result = json.loads((loop_dir / "queries" / "results" / "probe.json").read_text())
+    assert result["row_count"] == 3
+    assert result["truncated"] is True
+
+
+def test_run_queries_reruns_standing_query_and_overwrites_result(tmp_path, capsys):
+    """No idempotent skip: standing orientation probes (e.g. "new
+    settlements in last 3 days") must re-run every tick — a stale cached
+    result would silently freeze the tick's view of the world. A one-shot
+    probe is retired by the tick deleting its own pending/*.sql, not by
+    this command caching results."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    db_path = repo / "state" / "zeus-forecasts.db"
+    _make_db(db_path, rows=2)
+    _write_pending(loop_dir, "probe.sql", "SELECT * FROM forecasts.t ORDER BY 1")
+
+    rc1 = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc1 == 0
+    result_path = loop_dir / "queries" / "results" / "probe.json"
+    result1 = json.loads(result_path.read_text())
+    assert result1["row_count"] == 2
+    capsys.readouterr()
+
+    # A new row lands between ticks (world moved) — the tick file itself is
+    # untouched, but the re-run must reflect the new data, not a cache.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO t (val) VALUES ('v2')")
+    conn.commit()
+    conn.close()
+
+    rc2 = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc2 == 0
+    summary2 = json.loads(capsys.readouterr().out)
+    assert summary2["processed"] == ["probe.sql"]
+    assert "skipped" not in summary2
+
+    result2 = json.loads(result_path.read_text())
+    assert result2["row_count"] == 3
+
+
+def test_run_queries_prunes_orphaned_results(tmp_path, capsys):
+    """A results/*.json with no matching pending/<stem>.sql — its probe was
+    retired, or it was planted directly into results/ — must be deleted,
+    not left behind: results/ is fully wrapper-regenerated every
+    invocation, so nothing a sandboxed tick writes there ever survives."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    results_dir = loop_dir / "queries" / "results"
+    results_dir.mkdir(parents=True)
+    (results_dir / "old.json").write_text("{}\n")
+
+    rc = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["pruned"] == ["old.json"]
+    assert not (results_dir / "old.json").exists()
+
+
+def test_run_queries_missing_canonical_db_is_not_fatal(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    loop_dir = repo / "loop"
+    _make_db(repo / "state" / "zeus-forecasts.db", rows=1)
+    _write_pending(loop_dir, "probe.sql", "SELECT * FROM forecasts.t")
+
+    rc = loop_guard.main(["run-queries", "--repo-root", str(repo), "--loop-dir", str(loop_dir)])
+    assert rc == 0
+    result = json.loads((loop_dir / "queries" / "results" / "probe.json").read_text())
+    assert result["error"] is None
+    assert result["attached"] == ["forecasts"]
+
+
+# --------------------------------------------------------------------------
+# commit-auto: the sandboxed tick has no .git write access, so a trusted
+# command commits new-this-tick allowlisted paths after `enforce` has run.
+# Scope is the SAME --allowlist-git-ref as `enforce` — one source of truth,
+# not a loop/**-only carve-out.
+# --------------------------------------------------------------------------
+def test_commit_auto_commits_allowlisted_paths_not_just_loop(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    allowlist_ref = _allowlist_ref(repo)
+    snapshot = _snapshot(repo)
+    journal = repo / "loop" / "journal_out.md"
+
+    # In-scope (docs/** is allowlisted, same as enforce) and out-of-scope.
+    (repo / "docs" / "new_note.md").write_text("evidence\n")
+    (repo / "src" / "other.py").write_text("y = 2\n")
+
+    rc = _commit_auto(repo, snapshot, allowlist_ref, journal)
+    assert rc == 0
+
+    committed = _run_git(repo, "show", "--stat", "--name-only", "HEAD").stdout
+    assert "docs/new_note.md" in committed
+    assert "src/other.py" not in committed
+
+    status = _run_git(repo, "status", "--porcelain", "--untracked-files=all").stdout
+    assert "src/other.py" in status  # co-tenant file left dirty, untouched
+
+
+def test_commit_auto_noop_when_nothing_new(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    allowlist_ref = _allowlist_ref(repo)
+    snapshot = _snapshot(repo)
+    journal = repo / "loop" / "journal_out.md"
+    head_before = _base_sha(repo)
+
+    rc = _commit_auto(repo, snapshot, allowlist_ref, journal)
+    assert rc == 0
+    assert not journal.exists()
+    assert _base_sha(repo) == head_before
+
+
+def test_commit_auto_excludes_guard_immutable_results(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    allowlist_ref = _allowlist_ref(repo)
+    snapshot = _snapshot(repo)
+    journal = repo / "loop" / "journal_out.md"
+
+    results_dir = repo / "loop" / "queries" / "results"
+    results_dir.mkdir(parents=True)
+    (results_dir / "x.json").write_text("{}\n")
+
+    rc = _commit_auto(repo, snapshot, allowlist_ref, journal)
+    assert rc == 0
+    assert not journal.exists()  # nothing eligible -> noop, not a violation report
+    status = _run_git(repo, "status", "--porcelain", "--untracked-files=all").stdout
+    assert "loop/queries/results/x.json" in status  # left uncommitted
+
+
+def test_commit_auto_bad_git_ref_fails_closed_commits_nothing(tmp_path):
+    """Same fail-closed contract as enforce's --allowlist-git-ref: a bad ref
+    yields zero patterns, so nothing new-this-tick can pass entry_allowed,
+    and commit-auto must commit nothing rather than fall back to some
+    implicit default scope."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    snapshot = _snapshot(repo)
+    journal = repo / "loop" / "journal_out.md"
+    head_before = _base_sha(repo)
+
+    (repo / "docs" / "new_note.md").write_text("evidence\n")
+
+    rc = _commit_auto(repo, snapshot, "0" * 40 + ":loop/allowlist_auto.txt", journal)
+    assert rc == 0
+    assert not journal.exists()
+    assert _base_sha(repo) == head_before
+    status = _run_git(repo, "status", "--porcelain", "--untracked-files=all").stdout
+    assert "docs/new_note.md" in status  # left uncommitted
+
+
+def test_results_dir_is_guard_immutable():
+    entry_results = loop_guard.DirtyEntry(" M", "loop/queries/results/x.json")
+    entry_pending = loop_guard.DirtyEntry(" M", "loop/queries/pending/x.sql")
+    assert loop_guard.is_guard_immutable(entry_results)
+    assert not loop_guard.is_guard_immutable(entry_pending)
 
 
 if __name__ == "__main__":

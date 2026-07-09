@@ -1,4 +1,4 @@
-# AUTO-tier path allowlist for loop/tick.sh (L1) and loop/daily.sh (L2).
+# AUTO-tier path allowlist for loop/tick.sh (v3 single tick).
 #
 # One glob per line; '#' starts a comment; blank lines ignored. Matched by
 # scripts/ops/loop_guard.py::path_allowed against every path that changed
@@ -11,11 +11,12 @@
 # glob translator local to loop_guard.py, not stdlib fnmatch.
 #
 # Source of truth for scope:
-#   docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md §3
-#   (AUTO row) + docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C2.
+#   docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md §5
+#   (AUTO row; v2 design §3 is the method authority) +
+#   docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C2.
 #
 # WHO WRITES THIS FILE: only a human/operator commit. A tick can NEVER
-# widen its own scope by editing this file (or loop/tick.sh, loop/daily.sh,
+# widen its own scope by editing this file (or loop/tick.sh,
 # loop/prompts/**) even though those paths sit under loop/** — they are
 # GUARD_IMMUTABLE in scripts/ops/loop_guard.py::cmd_enforce, checked
 # unconditionally before the allowlist itself. Any tick-made change to any
@@ -29,7 +30,7 @@
 # a tick's Bash tool can locate — inside the repo via a documented naming
 # convention, or outside it via straightforward $TMPDIR enumeration (same
 # OS user as the wrapper, no process isolation) — is a file it can tamper.
-# tick.sh/daily.sh now capture `BASE_SHA=$(git rev-parse HEAD)` BEFORE
+# tick.sh now captures `BASE_SHA=$(git rev-parse HEAD)` BEFORE
 # claude runs and enforce reads the allowlist via
 # `git show "$BASE_SHA:loop/allowlist_auto.txt"` — an IMMUTABLE, content-
 # addressed git object. A tick can create new commits, but nothing it does
@@ -58,8 +59,17 @@
 loop/**
 docs/**
 tests/**
-architecture/*.yaml
 
+# architecture/*.yaml was REMOVED in v3 (was AUTO in v2). Three reasons
+# (design v3 §0): the v2 checklist #5 DESIGN-RISK (an unattended loop
+# silently rewriting invariants/money_path_objects and self-merging) is
+# resolved by narrowing; the codex sandbox already denies the write, so
+# allowlist and sandbox now express the same boundary; and architecture/
+# is a runtime_code_plane prefix (src/control/runtime_code_plane.py) — a
+# loop commit touching it would trip the deployment-freshness gate and
+# pause live entries. With this list = exactly the non-runtime plane, a
+# loop commit can never pause trading. Registry fixes route via PREPARE.
+#
 # scripts/** is intentionally NOT allowlisted here. The design's AUTO row
 # only admits scripts/** entries with no dangerous_if_run/write_targets in
 # architecture/script_manifest.yaml and no plist/manifest reference — that

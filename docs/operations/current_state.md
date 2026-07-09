@@ -17,7 +17,7 @@ Active execution packet: none (work routes through the plans index below; freeze
 - Live improvement journal: `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md`
 - Plan index: `docs/operations/current/plans/INDEX.md`
 - Gate-stack simplification: `docs/operations/current/plans/gate_stack_simplification_2026-07-06.md`
-- 24/7 loop design (PROPOSED): `docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md`
+- 24/7 loop v3 (ACTIVE design + machinery in `loop/`): `docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md` (v2 = method authority: `allday_improvement_loop_design_2026-07-06.md`)
 
 ## Current-fact companions
 

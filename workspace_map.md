@@ -50,7 +50,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
-| `loop/` | 24/7 improvement loop v2 (L1 hourly / L2 daily wrappers, HALT/JOURNAL/LEDGER 3-file state, prompts) — template machinery, inert until the operator loads the launchd plists | `loop/tick.sh`, `loop/daily.sh` headers; design: `docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md` |
+| `loop/` | 24/7 improvement loop v3 (codex-sandbox single tick, INTERVAL cadence knob, query escrow `queries/`, HALT/JOURNAL/LEDGER state, prompts) — inert until the operator loads the launchd plist | `loop/tick.sh` header; design: `docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md` (method authority: v2 design doc) |
 | `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
 | artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
 | historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |

@@ -54,8 +54,15 @@ else
   echo "HALT        : absent — loop is not halted"
 fi
 
+# Cadence knob (v3): loop/INTERVAL hours, default 1 when absent.
+if [ -f "$LOOP_DIR/INTERVAL" ]; then
+  echo "INTERVAL    : $(cat "$LOOP_DIR/INTERVAL") hour(s) (operator knob)"
+else
+  echo "INTERVAL    : absent — default 1 hour"
+fi
+
 # launchd daemon state (best-effort; loop may not be enabled at all)
-for label in com.zeus.loop-tick com.zeus.loop-daily; do
+for label in com.zeus.loop-tick; do
   if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
     state="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/state = /{print $2; exit}')"
     echo "daemon      : $label loaded (state=${state:-unknown})"
@@ -67,7 +74,7 @@ done
 echo ""
 
 # Last tick log per tier
-for tier in l1 l2; do
+for tier in l1; do
   last_log=""
   last_log_mtime=0
   while IFS= read -r -d '' candidate; do

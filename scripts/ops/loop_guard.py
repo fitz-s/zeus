@@ -6,7 +6,7 @@
 #   docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C (deploy operator-only,
 #   never touch dirty files, never stash).
 #
-# WHAT: the testable core of loop/tick.sh and loop/daily.sh. Pure Python so
+# WHAT: the testable core of loop/tick.sh (v3 single tick). Pure Python so
 #   the safety-critical logic (allowlist enforcement, quarantine restore,
 #   diff circuit breaker, HALT check, non-blocking single-flight lock) has
 #   unit test coverage instead of living only in shell. The wrapper scripts
@@ -110,6 +110,38 @@
 #       <command...> for its duration. If the lock is already held, prints
 #       LOCK_BUSY to stderr and exits 75 (EX_TEMPFAIL) WITHOUT running the
 #       command — this is the single-flight overlap guard.
+#   interval-check --loop-dir DIR [--now EPOCH_INT]
+#       turns loop/INTERVAL (operator-owned, gitignored, hours as a float;
+#       missing/empty/unparsable/nonpositive all fall back to 1.0 — no
+#       hardcoded upper bound) into the effective tick cadence, since
+#       launchd itself fires at a fixed finest cadence (hourly). Compares
+#       against loop/.last_tick_epoch (missing/unparsable -> 0). Enough time
+#       elapsed: stamps .last_tick_epoch, prints PROCEED, exit 0. Else:
+#       prints SKIP without touching the stamp, exit 4.
+#   run-queries --repo-root DIR --loop-dir DIR [--timeout-seconds N] [--max-rows N]
+#       query escrow: the sandboxed tick cannot open the live SQLite DBs
+#       directly (WAL needs -shm write the sandbox denies), so it authors
+#       SQL into loop/queries/pending/*.sql and this trusted wrapper command
+#       executes EVERY one of them, EVERY invocation, READ-ONLY — attached
+#       via mode=ro + PRAGMA query_only + an authorizer denying
+#       ATTACH/DETACH — against the three canonical DBs
+#       (forecasts/world/trades), overwriting loop/queries/results/<stem>.json
+#       with a fresh ran_at each time (standing orientation probes must
+#       re-run every tick). Then prunes: any results/*.json with no matching
+#       pending/<stem>.sql (probe retired, or planted directly into
+#       results/) is deleted — results/ is fully wrapper-regenerated every
+#       invocation, so nothing survives there that this command didn't just
+#       write. A failed query is a recorded outcome, never a crash. Prints
+#       a JSON summary ({"processed", "errors", "pruned"}), exit 0 always.
+#   commit-auto --repo-root DIR --allowlist-git-ref REF --pre-snapshot {PATH|-}
+#            --tier {l1,l2} --journal PATH
+#       the sandboxed tick has no .git write access (so it cannot commit
+#       its own loop-state changes — deliberate, keeps the BASE_SHA
+#       immutability assumption airtight). Runs AFTER `enforce`: stages (by
+#       explicit pathspec, never -A) and commits new-this-tick paths that
+#       pass the SAME --allowlist-git-ref allowlist as `enforce` (one
+#       source of truth for scope) and are not guard-immutable. A failed
+#       `git commit` appends a FALLBACK journal line instead of raising.
 #
 # KNOWN LIMITATION (accepted, not fixed — operator's accept-or-scope call):
 #   this guard is repo-scoped. It detects and reverts stray changes to
@@ -125,15 +157,18 @@
 #   heavier fix than anything in this file and is NOT attempted here. For
 #   unattended enablement on a live-money host, wrap the claude subprocess
 #   in sandbox-exec first (follow-up, not this packet).
-"""Testable core for loop/tick.sh and loop/daily.sh (24/7 improvement loop v2)."""
+"""Testable core for loop/tick.sh (24/7 improvement loop v3)."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -371,8 +406,12 @@ def path_allowed(path: str, patterns: list[str]) -> bool:
 GUARD_IMMUTABLE_PATTERNS = [
     "loop/allowlist_auto.txt",
     "loop/tick.sh",
-    "loop/daily.sh",
+    "loop/daily.sh",  # retired in v3; kept so a tick cannot plant a fake one
     "loop/prompts/**",
+    # results are wrapper-written evidence; a tick editing them is evidence
+    # tampering and always a violation. loop/queries/pending/** stays
+    # tick-writable — authoring probes IS the tick's job.
+    "loop/queries/results/**",
 ]
 
 
@@ -756,6 +795,225 @@ def cmd_flock_run(argv: list[str]) -> int:
         os.close(fd)
 
 
+# ---------------------------------------------------------------------------
+# interval-check
+# ---------------------------------------------------------------------------
+def _read_interval_hours(path: Path) -> float:
+    """loop/INTERVAL: operator-owned runtime knob (gitignored), a float
+    number of hours. Missing/empty/unparsable/nonpositive all fall back to
+    1.0. Deliberately NO hardcoded upper bound (operator's call — this is a
+    runtime dial, not a compile-time constant); 1-6h is intended usage,
+    documented only, never enforced here."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return 1.0
+    if not text:
+        return 1.0
+    try:
+        hours = float(text)
+    except ValueError:
+        return 1.0
+    return hours if hours > 0 else 1.0
+
+
+def _read_last_tick_epoch(path: Path) -> int:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def cmd_interval_check(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="loop_guard.py interval-check")
+    ap.add_argument("--loop-dir", required=True)
+    ap.add_argument("--now", type=int, default=None)
+    args = ap.parse_args(argv)
+
+    loop_dir = Path(args.loop_dir)
+    hours = _read_interval_hours(loop_dir / "INTERVAL")
+    last = _read_last_tick_epoch(loop_dir / ".last_tick_epoch")
+    now = args.now if args.now is not None else int(time.time())
+
+    elapsed = now - last
+    window = hours * 3600
+    if elapsed >= window:
+        (loop_dir / ".last_tick_epoch").write_text(str(now), encoding="utf-8")
+        print("PROCEED")
+        return 0
+    print(f"SKIP ({int(window - elapsed)}s remaining)")
+    return 4
+
+
+# ---------------------------------------------------------------------------
+# run-queries: query escrow
+# ---------------------------------------------------------------------------
+# Fixed alias -> canonical DB path mapping. "trades" -> zeus_trades.db
+# (underscore) IS canonical — zeus-trades.db (hyphen) is a 0-byte decoy.
+def _escrow_db_paths(repo_root: Path) -> dict[str, Path]:
+    return {
+        "forecasts": repo_root / "state" / "zeus-forecasts.db",
+        "world": repo_root / "state" / "zeus-world.db",
+        "trades": repo_root / "state" / "zeus_trades.db",
+    }
+
+
+def run_escrow_query(repo_root: Path, sql_text: str, timeout_seconds: int, max_rows: int) -> dict:
+    """Execute one read-only SELECT against the canonical Zeus DBs, attached
+    under fixed aliases. Never raises: any failure (bad SQL, denied ATTACH,
+    timeout) lands in "error" — a bad tick-authored query is a recorded
+    outcome, not a crash that aborts the rest of the batch."""
+    result: dict = {"attached": [], "columns": [], "rows": [], "row_count": 0, "truncated": False, "error": None}
+    conn = sqlite3.connect(":memory:", uri=True)
+    timer: threading.Timer | None = None
+    try:
+        for alias, db_path in _escrow_db_paths(repo_root).items():
+            if db_path.exists():
+                conn.execute(f"ATTACH DATABASE 'file:{db_path.resolve()}?mode=ro' AS {alias}")
+                result["attached"].append(alias)
+
+        conn.execute("PRAGMA query_only=ON")
+
+        def _authorizer(action: int, *_rest: object) -> int:
+            if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(_authorizer)
+
+        timer = threading.Timer(timeout_seconds, conn.interrupt)
+        timer.start()
+
+        cur = conn.execute(sql_text)
+        columns = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchmany(max_rows + 1)
+        truncated = len(rows) > max_rows
+        if truncated:
+            rows = rows[:max_rows]
+
+        result["columns"] = columns
+        result["rows"] = [list(r) for r in rows]
+        result["row_count"] = len(rows)
+        result["truncated"] = truncated
+    except Exception as exc:  # noqa: BLE001 - any failure is a recorded outcome
+        result["error"] = str(exc)
+        result["columns"] = []
+        result["rows"] = []
+        result["row_count"] = 0
+        result["truncated"] = False
+    finally:
+        if timer is not None:
+            timer.cancel()
+        conn.close()
+    return result
+
+
+def cmd_run_queries(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="loop_guard.py run-queries")
+    ap.add_argument("--repo-root", required=True)
+    ap.add_argument("--loop-dir", required=True)
+    ap.add_argument("--timeout-seconds", type=int, default=120)
+    ap.add_argument("--max-rows", type=int, default=5000)
+    args = ap.parse_args(argv)
+
+    repo_root = Path(args.repo_root).resolve()
+    loop_dir = Path(args.loop_dir)
+    pending_dir = loop_dir / "queries" / "pending"
+    results_dir = loop_dir / "queries" / "results"
+
+    summary: dict = {"processed": [], "errors": [], "pruned": []}
+    sql_files = sorted(pending_dir.glob("*.sql")) if pending_dir.is_dir() else []
+    valid_stems = {sql_path.stem for sql_path in sql_files}
+
+    if sql_files:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for sql_path in sql_files:
+            result_path = results_dir / f"{sql_path.stem}.json"
+            sql_text = sql_path.read_text(encoding="utf-8")
+            result = run_escrow_query(repo_root, sql_text, args.timeout_seconds, args.max_rows)
+            payload = {"query_file": sql_path.name, "ran_at": _now_iso(), **result}
+            result_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            summary["processed"].append(sql_path.name)
+            if result["error"] is not None:
+                summary["errors"].append({"file": sql_path.name, "error": result["error"]})
+
+    # Orphan sweep: a result whose pending/<stem>.sql no longer exists (probe
+    # retired) is deleted, not left behind — otherwise a sandboxed tick that
+    # once wrote directly into results/ (or a stale prior run) could leave
+    # evidence that outlives its probe and never gets re-verified. This
+    # makes results/ fully wrapper-regenerated every invocation.
+    if results_dir.is_dir():
+        for result_path in sorted(results_dir.glob("*.json")):
+            if result_path.stem not in valid_stems:
+                result_path.unlink()
+                summary["pruned"].append(result_path.name)
+
+    print(json.dumps(summary))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# commit-auto
+# ---------------------------------------------------------------------------
+def cmd_commit_auto(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="loop_guard.py commit-auto")
+    ap.add_argument("--repo-root", required=True)
+    ap.add_argument(
+        "--allowlist-git-ref",
+        required=True,
+        help="Same `git show`-compatible object spec as `enforce --allowlist-git-ref` "
+        "(see that flag's --help) — one source of truth for scope. Fails CLOSED: any "
+        "git error yields zero patterns, so nothing is committed.",
+    )
+    ap.add_argument(
+        "--pre-snapshot",
+        required=True,
+        help="Path to the dirty-at-start baseline, or '-' for stdin (same convention as `enforce`).",
+    )
+    ap.add_argument("--tier", required=True, choices=["l1", "l2"])
+    ap.add_argument("--journal", required=True)
+    args = ap.parse_args(argv)
+
+    repo_root = Path(args.repo_root).resolve()
+    pre_text = _read_pre_snapshot_text(args.pre_snapshot)
+    pre = {line for line in pre_text.splitlines() if line}
+
+    entries = parse_status(repo_root)
+    new_entries = [e for e in entries if e.path not in pre]
+    patterns = load_allowlist_from_git(repo_root, args.allowlist_git_ref)
+    candidates = [e for e in new_entries if entry_allowed(e, patterns) and not is_guard_immutable(e)]
+
+    if not candidates:
+        print(json.dumps({"committed": False, "paths": []}))
+        return 0
+
+    paths: list[str] = []
+    for e in candidates:
+        for p in _entry_paths(e):
+            _git(repo_root, "add", "--", p)
+            paths.append(p)
+
+    message = f"loop({args.tier}): tick {_now_iso()} — {len(candidates)} path(s)"
+    commit = _git(repo_root, "commit", "-m", message)
+    if commit.returncode != 0:
+        append_journal(
+            args.journal,
+            f"FALLBACK: commit-auto ({args.tier}) git commit failed rc={commit.returncode}: "
+            f"{commit.stderr[:200]}",
+        )
+        print(json.dumps({"committed": False, "paths": paths}))
+        return 1
+
+    sha = _git(repo_root, "rev-parse", "HEAD").stdout.strip()
+    print(json.dumps({"committed": True, "sha": sha, "paths": paths}))
+    return 0
+
+
 COMMANDS = {
     "halt-check": cmd_halt_check,
     "snapshot": cmd_snapshot,
@@ -764,6 +1022,9 @@ COMMANDS = {
     "db-sentinel-check": cmd_db_sentinel_check,
     "fallback-entry": cmd_fallback_entry,
     "flock-run": cmd_flock_run,
+    "interval-check": cmd_interval_check,
+    "run-queries": cmd_run_queries,
+    "commit-auto": cmd_commit_auto,
 }
 
 

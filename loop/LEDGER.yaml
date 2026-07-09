@@ -1,7 +1,7 @@
 # Loop hypothesis ledger + improvement queue (24/7 improvement loop v2).
 #
-# WHO WRITES: loop/tick.sh (L1) and loop/daily.sh (L2) invocations, via the
-# claude -p run they launch (per loop/prompts/l1.md / l2.md ACTION step —
+# WHO WRITES: loop/tick.sh tick invocations, via the sandboxed codex exec
+# run they launch (per loop/prompts/l1.md ACTION step —
 # NOT scripts/ops/loop_guard.py, which never touches this file). WHO READS:
 # the next L1/L2 tick's ORIENT step (this file's `next_action` fields ARE
 # the work queue — there is no separate queue file). WHAT BREAKS IF THIS
@@ -54,7 +54,9 @@ statuses: [open, supported, refuted, blocked]
 # - id: <short-slug>-<YYYY-MM-DD>
 #   claim: <one falsifiable sentence>
 #   opened_at: <ISO8601 UTC>
-#   prereg_query: <exact query/probe, written before looking at data>
+#   prereg_query: <exact query/probe, written before looking at data —
+#     for DB claims this is a loop/queries/pending/<name>.sql filename;
+#     the escrow's write-now/see-next-tick timing IS the preregistration>
 #   prereg_date: <YYYY-MM-DD the query is scheduled to run>
 #   evidence: []              # list of {date, n, result, file_or_query_ref}
 #   status: open              # open | supported | refuted | blocked
@@ -62,3 +64,22 @@ statuses: [open, supported, refuted, blocked]
 #   fail_count: 0              # consecutive tick failures on this item; 3 -> blocked + ESCALATION
 
 entries: []
+
+# Scoreboard (v3 §6): the loop's single scoring function — settled realized
+# capital gains, walk-forward. Updated by the tick's settlement-grading step
+# from the settlement-join standing probe ONLY (query escrow results, never
+# runtime-derived numbers). Windows are append-only; the newest window is
+# the loop's report card.
+#
+# Window shape:
+# - window: <YYYY-MM-DD..YYYY-MM-DD>
+#   graded_n: <int>            # settled outcomes graded this window
+#   skill_win: <int>           # only positive evidence category
+#   lucky_win_as_miss: <int>
+#   skill_loss: <int>
+#   unlucky_loss: <int>
+#   no_edge: <int>
+#   insufficient: <int>
+#   settled_pnl_usd: <float>   # realized, after cost, this window
+#   notes: <loss-mode distribution / what changed>
+scoreboard: []

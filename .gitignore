@@ -218,6 +218,14 @@ loop/.lock
 loop/logs/*.log
 loop/logs/*.err
 !loop/logs/.gitkeep
+# v3 additions (design: allday_improvement_loop_v3_codex_2026-07-09.md):
+# loop/INTERVAL: operator-owned cadence knob (hours); runtime state, not law.
+# loop/.last_tick_epoch: interval-check's last-PROCEED stamp.
+# loop/queries/results/: wrapper-regenerated every tick from pending/*.sql —
+#   volatile evidence, never committed (pending/ probes ARE committed).
+loop/INTERVAL
+loop/.last_tick_epoch
+loop/queries/results/
 
 # ----------------------------------------------------------------------
 # Local config overlays
