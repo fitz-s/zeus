@@ -4658,11 +4658,17 @@ def check_pending_exits(
         # exit_intent with no order ID = stranded from exception during place_sell_order
         if pos.exit_state == "exit_intent":
             if not pos.last_exit_error:
-                pos.exit_state = ""
-                if str(getattr(pos, "order_status", "") or "") == "exit_intent":
-                    pos.order_status = "filled"
-                _release_pending_exit(pos)
-                stats["unchanged"] += 1
+                if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                    stats["retried"] += 1
+                    stats["released_no_order"] = stats.get("released_no_order", 0) + 1
+                    continue
+                if not _last_exit_order_id(pos, conn=conn):
+                    pos.exit_state = ""
+                    if str(getattr(pos, "order_status", "") or "") == "exit_intent":
+                        pos.order_status = "filled"
+                    _release_pending_exit(pos)
+                    stats["unchanged"] += 1
+                    continue
                 continue
             _mark_exit_retry(pos, reason="STRANDED_EXIT_INTENT", error="exception_during_sell", conn=conn)
             if conn is not None:
