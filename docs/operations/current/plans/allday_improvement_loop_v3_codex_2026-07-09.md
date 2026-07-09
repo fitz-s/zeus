@@ -28,11 +28,12 @@ launchd com.zeus.loop-tick(每小时 :17,最细触发粒度)
       4  run-queries:执行 loop/queries/pending/*.sql(只读 escrow,§4)→ loop/queries/results/*.json
       5  codex exec(OS 沙箱,§2)跑 loop/prompts/l1.md,wall-clock timeout
       6  enforce:BASE_SHA 不可变 git object 里的 allowlist 对照本 tick 新增改动;越界硬还原 + VIOLATION;>20 文件 / >600 行熔断 ESCALATION
-      7  db-sentinel-check:state/**.db* mtime/size 差 → 自 HALT
-      8  INTERVAL 防篡改:内容变 → 还原 + VIOLATION(节奏是操作员旋钮,tick 无权自调)
-      9  commit-auto:allowlist 内新改动逐路径 add + 单 commit(loop(l1): tick …)
-      10 codex 非零退出 → FALLBACK journal 行
+      7  INTERVAL 防篡改:内容变 → 还原 + VIOLATION(节奏是操作员旋钮,tick 无权自调)
+      8  commit-auto:allowlist 内新改动逐路径 add + 单 commit(loop(l1): tick …)
+      9  codex 非零退出 → FALLBACK journal 行
 ```
+
+v2 的 DB sentinel 在 v3 wrapper 中退役:live 主机上 co-tenant daemon 每秒写 state/ DB,该检查会在几乎每个 tick 上误 ESCALATE 自 HALT;其威胁模型(tick 写 DB)已被内核关死(state/ 不在沙箱可写根内,实测连 `mode=ro` 都打不开)。loop_guard 的 db-sentinel-* 子命令保留供测试/手动审计。
 
 模型:`gpt-5.5` + reasoning effort high(env 可覆盖)。预算 = wall-clock timeout(默认 45min)——codex exec 无 max-turns,时间墙即预算,与 1–6h 节奏兼容。
 

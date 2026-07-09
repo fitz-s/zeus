@@ -29,13 +29,20 @@
 #        or outside the BASE_SHA allowlist is hard-restored + VIOLATION;
 #        >20 files or >600 lines trips the circuit breaker (ESCALATION,
 #        restore everything new).
-#     7. db-sentinel-check: any state/**.db* delta -> ESCALATION + self-HALT.
-#     8. Cadence anti-tamper: restore loop/INTERVAL / loop/.last_tick_epoch
+#     7. Cadence anti-tamper: restore loop/INTERVAL / loop/.last_tick_epoch
 #        if the tick rewrote them (both gitignored, so invisible to 6).
-#     9. commit-auto: the tick has no .git write access (sandbox), so the
+#     8. commit-auto: the tick has no .git write access (sandbox), so the
 #        wrapper commits its legitimate allowlisted changes — explicit
 #        per-path add (never -A; co-tenant work is never swept), one commit.
-#    10. codex exited non-zero -> mechanical FALLBACK journal entry.
+#     9. codex exited non-zero -> mechanical FALLBACK journal entry.
+#
+#   The v2 DB sentinel (state/**.db* mtime/size delta -> self-HALT) is
+#   RETIRED from this wrapper: on a live host the co-tenant daemons write
+#   those DBs every second, so the check would false-ESCALATE and self-HALT
+#   on effectively every tick, and its threat model (the tick writing a DB)
+#   is now closed at the kernel — state/ is outside the sandbox's writable
+#   roots (measured: the tick cannot even OPEN a WAL DB read-only). The
+#   loop_guard.py db-sentinel-* subcommands remain for tests/manual audit.
 #
 # WHO WRITES: launchd or the operator, manually. WHO READS: nothing reads
 #   this script; it produces loop/JOURNAL.md entries and loop/logs/*.log.
@@ -83,7 +90,6 @@ mkdir -p "$LOOP_DIR/logs"
 # 3. Control state, captured into this process's memory only.
 BASE_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 DIRTY_AT_START="$("$PY" "$GUARD_PY" snapshot --repo-root "$REPO_ROOT")"
-DB_SENTINEL_PRE="$("$PY" "$GUARD_PY" db-sentinel-snapshot --repo-root "$REPO_ROOT")"
 INTERVAL_PRE="$(cat "$LOOP_DIR/INTERVAL" 2>/dev/null || true)"
 STAMP_PRE="$(cat "$LOOP_DIR/.last_tick_epoch" 2>/dev/null || true)"
 
@@ -138,11 +144,7 @@ printf '%s' "$DIRTY_AT_START" | "$PY" "$GUARD_PY" enforce --repo-root "$REPO_ROO
   --allowlist-git-ref "$BASE_SHA:loop/allowlist_auto.txt" \
   --pre-snapshot - --journal "$JOURNAL" --tier l1 || true
 
-# 7. DB sentinel (self-halts on any state/**.db* delta).
-printf '%s' "$DB_SENTINEL_PRE" | "$PY" "$GUARD_PY" db-sentinel-check --repo-root "$REPO_ROOT" \
-  --pre-snapshot - --journal "$JOURNAL" --loop-dir "$LOOP_DIR" --tier l1 || true
-
-# 8. Cadence anti-tamper: INTERVAL and .last_tick_epoch are operator knobs,
+# 7. Cadence anti-tamper: INTERVAL and .last_tick_epoch are operator knobs,
 #    gitignored (invisible to enforce) but inside the sandbox-writable loop/.
 INTERVAL_POST="$(cat "$LOOP_DIR/INTERVAL" 2>/dev/null || true)"
 if [ "$INTERVAL_POST" != "$INTERVAL_PRE" ]; then
@@ -155,13 +157,13 @@ if [ "$STAMP_POST" != "$STAMP_PRE" ]; then
   if [ -n "$STAMP_PRE" ]; then printf '%s' "$STAMP_PRE" > "$LOOP_DIR/.last_tick_epoch"; fi
 fi
 
-# 9. Commit the tick's legitimate output (the sandbox denies it .git access;
+# 8. Commit the tick's legitimate output (the sandbox denies it .git access;
 #    the wrapper is the only committer). Same allowlist source as enforce.
 printf '%s' "$DIRTY_AT_START" | "$PY" "$GUARD_PY" commit-auto --repo-root "$REPO_ROOT" \
   --allowlist-git-ref "$BASE_SHA:loop/allowlist_auto.txt" \
   --pre-snapshot - --journal "$JOURNAL" --tier l1 || true
 
-# 10. Engine crash trace.
+# 9. Engine crash trace.
 if [ "$RC" -ne 0 ]; then
   "$PY" "$GUARD_PY" fallback-entry --journal "$JOURNAL" --tier l1 \
     --reason "codex exit=$RC (see $LOG_FILE)"
