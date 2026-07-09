@@ -4,7 +4,7 @@ Root operating contract for `/Users/leofitz/zeus`: durable law, money-path menta
 
 ## Boot Digest (SessionStart injection slice — NOT a reading surface)
 
-SessionStart injects only a prefix of this file; this digest keeps the whole law in outline under truncation. **Reading contract: the digest licenses orientation only.** Before touching any surface a digest line names, Read that section (§N) plus the scoped `AGENTS.md` of the subtree — the digest omits the tables and gates that make the law executable. Citing "Boot Digest" as authority is itself a misread. Reading this file directly? Skip the digest; read §0–§6.
+SessionStart injects only a prefix of this file; this digest keeps the whole law in outline under truncation. **Reading contract: the digest licenses orientation only.** Before touching any surface a digest line names, Read that section (§N) plus the scoped `AGENTS.md` of the subtree — the digest omits the tables and gates that make the law executable. Citing "Boot Digest" as authority is itself a misread. Reading this file directly? Skip the digest; read §0–§7.
 
 **Mission [full law: §0].** Zeus trades Polymarket weather derivatives: `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`. Every non-trivial change states where it sits on that chain and how it behaves on re-decision. The chain is CYCLIC; no decision final until settlement; §0 carries the re-decision lanes this omits.
 
@@ -27,6 +27,8 @@ SessionStart injects only a prefix of this file; this digest keeps the whole law
 **Change control [§5].** Commits `type(scope): subject`; no destructive git; preserve unrelated dirty work; PRs only at milestone level (paid review once — batch).
 
 **Review [§6 + REVIEW.md first].** Runtime-risk order (Tier 0 live-money before all); empty findings + partial coverage ≠ clean pass.
+
+**Code discipline [§7].** Concise/precise code and comments; trim names; entities earn existence only when the problem demands it; runtime mechanism = precision+simplicity; fix syntax-semantics gaps in the shape, not a comment; minimum tokens, maximum precision.
 
 **END OF DIGEST.** Law starts at §0. Context ends here = boot slice truncated: Read this file in full before acting on any named surface.
 
@@ -274,3 +276,7 @@ Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, fo
 For code review, PR review, `/review`, automated review, ultrareview, or manual Claude/Codex/GitHub Copilot review: read `REVIEW.md` first; for deeper context read `docs/review/code_review.md` and `docs/review/review_scope_map.md`; review by runtime-risk surface, not GitHub file order; exhaust Tier 0 live-money/runtime safety before Tier 1 data/probability/persistence; review Tier 3 docs and agent-instruction surfaces only if budget remains.
 
 Default-skip the canonical skip-list in `docs/review/review_scope_map.md` unless a skipped path demonstrably changes runtime. Cite `architecture/invariants.yaml` invariant IDs for invariant-protected behavior. For large PRs, state coverage limits explicitly; empty findings plus partial coverage is not a clean pass. Trust the PR template's "AI Review Scope" before traversing alphabetically. Severity-model drift between `REVIEW.md`, `docs/review/code_review.md`, `.github/copilot-instructions.md`, and `.github/instructions/*.instructions.md` is an Important Tier 3 finding. The review doctrine surface is owned by `docs/review/AGENTS.md`.
+
+## 7. Code And Comment Discipline
+
+Code and comments earn their length: precise beats clever. Trim variable names to the shortest form still unambiguous in scope. First principles over precedent, repo-wide: an entity earns existence only when the problem demands it (Occam's razor). Runtime mechanism: precision and simplicity are one axis — fewest moving parts, exact guaranteed behavior. Where syntax and semantics diverge, fix the shape, not a comment around the gap. The limits of language are the limits of the world (Wittgenstein). Minimum tokens, maximum precision.
