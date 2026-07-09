@@ -1931,6 +1931,84 @@ def _pending_exit_release_loop_surface(
             "missing_columns": missing_position_columns,
         }
 
+    optional_position_columns = (
+        "city",
+        "target_date",
+        "bin_label",
+        "direction",
+        "exit_reason",
+        "updated_at",
+    )
+    optional_position_select = ",\n               ".join(
+        (
+            f"pc.{column}"
+            if column in position_columns
+            else f"NULL AS {column}"
+        )
+        for column in optional_position_columns
+    )
+    no_command_order_by = (
+        "datetime(pc.updated_at) DESC, pc.position_id"
+        if "updated_at" in position_columns
+        else "pc.position_id"
+    )
+
+    no_command_sample: list[dict] = []
+    no_command_skip_reason: str | None = None
+    command_columns, command_column_err = _sqlite_ro_table_columns(
+        trade_db,
+        "venue_commands",
+    )
+    if command_column_err:
+        return {
+            "ok": False,
+            "issue": f"PENDING_EXIT_RELEASE_LOOP_READ_UNAVAILABLE:{command_column_err}",
+            "evaluated": True,
+        }
+    if not command_columns:
+        no_command_skip_reason = "VENUE_COMMANDS_TABLE_MISSING"
+    else:
+        required_command_columns = {"position_id", "intent_kind"}
+        missing_command_columns = sorted(required_command_columns - command_columns)
+        if missing_command_columns:
+            no_command_skip_reason = (
+                "VENUE_COMMANDS_COLUMN_MISSING:" + ",".join(missing_command_columns)
+            )
+        else:
+            no_command_sample, no_command_err = _sqlite_ro_rows(
+                trade_db,
+                f"""
+                SELECT pc.position_id,
+                       pc.phase,
+                       pc.order_status,
+                       pc.shares,
+                       pc.chain_shares,
+                       {optional_position_select}
+                  FROM position_current pc
+                 WHERE pc.phase = 'pending_exit'
+                   AND pc.order_status = 'exit_intent'
+                   AND (
+                       COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                       OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_commands vc
+                        WHERE vc.position_id = pc.position_id
+                          AND vc.intent_kind = 'EXIT'
+                   )
+                 ORDER BY {no_command_order_by}
+                 LIMIT ?
+                """,
+                (PENDING_EXIT_RELEASE_LOOP_SAMPLE_LIMIT,),
+            )
+            if no_command_err:
+                return {
+                    "ok": False,
+                    "issue": f"PENDING_EXIT_RELEASE_LOOP_READ_UNAVAILABLE:{no_command_err}",
+                    "evaluated": True,
+                }
+
     cutoff = (
         now.astimezone(timezone.utc)
         - timedelta(seconds=PENDING_EXIT_RELEASE_LOOP_LOOKBACK_SECONDS)
@@ -2209,10 +2287,14 @@ def _pending_exit_release_loop_surface(
     loop_count = len(sample)
     reassert_count = len(reassert_sample)
     active_churn_count = len(active_churn_sample)
+    no_command_count = len(no_command_sample)
     detail = {
         "evaluated": True,
         "lookback_seconds": PENDING_EXIT_RELEASE_LOOP_LOOKBACK_SECONDS,
         "cutoff_at": cutoff,
+        "pending_exit_no_command_count": no_command_count,
+        "pending_exit_no_command_sample": no_command_sample,
+        "pending_exit_no_command_skip_reason": no_command_skip_reason,
         "pending_exit_release_loop_count": loop_count,
         "pending_exit_release_loop_sample": sample,
         "pending_exit_reassert_loop_count": reassert_count,
@@ -2230,6 +2312,12 @@ def _pending_exit_release_loop_surface(
         "pending_exit_churn_historical_stabilized_count": len(historical_churn_sample),
         "pending_exit_churn_historical_stabilized_sample": historical_churn_sample,
     }
+    if no_command_count > 0:
+        return {
+            "ok": False,
+            "issue": f"PENDING_EXIT_NO_EXIT_COMMAND:n={no_command_count}",
+            **detail,
+        }
     if loop_count > 0:
         return {
             "ok": False,
