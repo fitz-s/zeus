@@ -1,12 +1,12 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08 (R2 fix: caller-side no-regression invariants —
+# Last reused or audited: 2026-07-08 (R2 fix: caller-side no-regression invariants —
 #   the original lift left 3 test modules bound to src.main for the lifted producers)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=never
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-07-08
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -1007,6 +1007,89 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
     ]
     assert ordered == ["stale-token", "newer-token"]
     assert append_reads == []
+
+
+def test_pre_submit_book_reader_prefers_latest_without_append_scan():
+    from src.main import _edli_latest_pre_submit_book_row
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            created_at, schema_version
+        ) VALUES (
+            'tok-latest', 'buy_yes', 'latest-1', 'event-1', 'cond-1', 'YES',
+            '2026-06-24T08:00:00+00:00', 'hash-latest', 0.42, 0.44,
+            '2026-06-24T08:00:00+00:00', 1
+        )
+        """
+    )
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    row = _edli_latest_pre_submit_book_row(
+        conn,
+        token_id="tok-latest",
+        side="BUY",
+        decision_time=datetime.fromisoformat("2026-06-24T08:00:01+00:00"),
+    )
+
+    append_reads = [
+        sql
+        for sql in traces
+        if "FROM execution_feasibility_evidence" in sql and "sqlite_master" not in sql
+    ]
+    assert row is not None
+    assert row[1] == "hash-latest"
+    assert append_reads == []
+
+
+def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
+    from src.main import _edli_latest_pre_submit_book_row
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            created_at, schema_version
+        ) VALUES (
+            'tok-fallback', 'sell_yes', 'latest-bid-only', 'event-latest', 'cond-1', 'YES',
+            '2026-06-24T08:00:00+00:00', 'hash-bid-only', 0.42, NULL,
+            '2026-06-24T08:00:00+00:00', 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            created_at, schema_version
+        ) VALUES (
+            'append-ask', 'event-append', 'cond-1', 'tok-fallback', 'YES',
+            'buy_yes', '2026-06-24T07:59:00+00:00', 'hash-append', 0.41, 0.43,
+            '2026-06-24T07:59:00+00:00', 1
+        )
+        """
+    )
+
+    row = _edli_latest_pre_submit_book_row(
+        conn,
+        token_id="tok-fallback",
+        side="BUY",
+        decision_time=datetime.fromisoformat("2026-06-24T08:00:01+00:00"),
+    )
+
+    assert row is not None
+    assert row[1] == "hash-append"
 
 
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
