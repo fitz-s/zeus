@@ -782,14 +782,14 @@ scripts:
     required_tests: [tests/scripts/test_check_edli_live_canary_gate.py]
   live_health_probe.py:
     # Created: 2026-05-11
-    # Last reused or audited: 2026-05-18
+    # Last reused or audited: 2026-07-09
     # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
     class: diagnostic
     lifecycle: long_lived
     status: active
     authority_scope: offline_no_promotion
     canonical_command: "python3 scripts/live_health_probe.py"
-    read_targets: [state/daemon-heartbeat.json, state/forecast-live-heartbeat.json, state/status_summary.json, process_table, git_repo_metadata]
+    read_targets: [state/daemon-heartbeat.json, state/forecast-live-heartbeat.json, state/status_summary.json, state/live_health_composite.json, state/zeus_trades.db, process_table, git_repo_metadata]
     write_targets: [/tmp/zeus_health_snapshot.json, stdout]
     dry_run_default: true
     apply_flag: null
@@ -799,7 +799,7 @@ scripts:
     promotion_barrier: "Runtime diagnostic only; cannot authorize live restart, live submit, DB truth mutation, or venue action."
     required_helpers: []
     required_tests: [tests/test_live_health_probe_forecast_owner.py]
-    reason: "One-shot live health probe for daemon, forecast-live owner, riskguard, status summary, entry capability, and stale runtime signals. Forecast-live is the canonical OpenData owner after the data-daemon split; legacy ingest absence is not by itself an alert."
+    reason: "One-shot live health probe for daemon, forecast-live owner, riskguard, status summary, entry capability, stale runtime signals, active ENTRY q-version provenance, pending-exit release loops, and monitor-probability freshness. Forecast-live is the canonical OpenData owner after the data-daemon split; legacy ingest absence is not by itself an alert. When daemon-written live_health_composite.json is stale-schema, the probe computes selected HEAD read-only surfaces directly rather than treating missing composite keys as unknown monitor truth."
   check_daemon_heartbeat.py:
     class: runtime_support
     module_owner: scripts

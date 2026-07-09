@@ -3,7 +3,7 @@
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
@@ -67,6 +67,10 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
     "day0_decision_trace",
     "status_summary",
     "execution_capability",
+)
+DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
+    "pending_exit_release_loop",
+    "monitor_probability_freshness",
 )
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
@@ -613,6 +617,52 @@ def _entry_q_version_status(root):
     finally:
         conn.close()
 
+def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
+    """Compute HEAD read-only surfaces when the daemon-written composite is stale."""
+
+    state_dir = Path(root) / "state"
+    trade_db = state_dir / "zeus_trades.db"
+    if not trade_db.exists():
+        skipped = {
+            "ok": True,
+            "evaluated": False,
+            "issue": "TRADE_DB_MISSING",
+        }
+        return {surface: dict(skipped) for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES}
+    root_path = str(Path(root).resolve())
+    if root_path not in sys.path:
+        sys.path.insert(0, root_path)
+    try:
+        from src.control.live_health import (
+            _main_daemon_surface,
+            _monitor_probability_freshness_surface,
+            _pending_exit_release_loop_surface,
+        )
+    except Exception as exc:  # noqa: BLE001 - health probe must be best-effort.
+        return {
+            surface: {
+                "ok": False,
+                "evaluated": False,
+                "issue": f"HEAD_SURFACE_IMPORT_FAILED:{type(exc).__name__}:{exc}",
+            }
+            for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES
+        }
+
+    now_dt = datetime.now(timezone.utc)
+    main_daemon = _main_daemon_surface(status_summary, heartbeat)
+    return {
+        "pending_exit_release_loop": _pending_exit_release_loop_surface(
+            state_dir,
+            now_dt,
+            main_daemon_surface=main_daemon,
+        ),
+        "monitor_probability_freshness": _monitor_probability_freshness_surface(
+            state_dir,
+            now_dt,
+            main_daemon_surface=main_daemon,
+        ),
+    }
+
 def _classify_alerts(report, ss_age):
     alerts = []
     code_plane = report.get("code_plane", {})
@@ -646,6 +696,13 @@ def _classify_alerts(report, ss_age):
     entry_q_version = report.get("entry_q_version", {})
     if entry_q_version.get("ok") is False:
         alerts.append(entry_q_version.get("issue") or "ENTRY_Q_VERSION_UNHEALTHY")
+    for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        direct_surface = report.get(surface, {})
+        if direct_surface.get("ok") is False:
+            alerts.append(
+                f"LIVE_HEALTH_{surface.upper()}="
+                f"{direct_surface.get('issue') or 'DEGRADED'}"
+            )
     status_process = report.get("status_process", {})
     if status_process.get("ok") is False:
         alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
@@ -658,7 +715,7 @@ def _classify_alerts(report, ss_age):
         ]
         if missing_surfaces:
             alerts.append(
-                "LIVE_HEALTH_COMPOSITE_SURFACES_MISSING="
+                "LIVE_HEALTH_COMPOSITE_SCHEMA_STALE_MISSING="
                 + "|".join(missing_surfaces[:8])
             )
     if composite.get("status") == "DEGRADED" or composite.get("healthy") is False:
@@ -716,10 +773,12 @@ def main():
     report["status_summary_age_s"] = ss_age
     composite_path = os.path.join(ROOT, "state/live_health_composite.json")
     report["live_health_composite"] = _load_json(composite_path)
+    status_payload_for_direct_surfaces = None
     try:
         ss = _load_json(ss_path)
         if ss.get("error"):
             raise RuntimeError(ss["error"])
+        status_payload_for_direct_surfaces = ss
         cycle = ss.get("cycle", {})
         runtime = ss.get("runtime", {})
         risk = ss.get("risk", {})
@@ -760,6 +819,14 @@ def main():
         }
     except Exception as e:
         report["cycle_error"] = str(e)
+
+    report.update(
+        _direct_head_live_health_surfaces(
+            ROOT,
+            status_summary=status_payload_for_direct_surfaces,
+            heartbeat=d if isinstance(d, dict) and not d.get("error") else None,
+        )
+    )
 
     # Compute delta vs last snapshot
     try:

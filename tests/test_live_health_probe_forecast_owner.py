@@ -2,7 +2,7 @@
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -421,10 +421,20 @@ def test_live_probe_alerts_when_composite_schema_is_missing_required_surfaces(
 
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
-    assert "LIVE_HEALTH_COMPOSITE_SURFACES_MISSING=" in out
+    assert "LIVE_HEALTH_COMPOSITE_SCHEMA_STALE_MISSING=" in out
     assert "process_code" in out
     assert "entry_q_version" in out
     assert "pending_exit_release_loop" in out
+    assert module._load_json(module.SNAPSHOT_FILE)["pending_exit_release_loop"] == {
+        "ok": True,
+        "evaluated": False,
+        "issue": "TRADE_DB_MISSING",
+    }
+    assert module._load_json(module.SNAPSHOT_FILE)["monitor_probability_freshness"] == {
+        "ok": True,
+        "evaluated": False,
+        "issue": "TRADE_DB_MISSING",
+    }
 
 
 def test_live_probe_alerts_when_status_summary_process_pid_is_stale(
