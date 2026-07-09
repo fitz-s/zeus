@@ -314,12 +314,18 @@ def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
 
 
 def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
-    """Held-position exits must not run before the risk allocator singleton is configured."""
+    """Held-position exits must not run before the risk allocator singleton is configured.
+
+    R4-b (2026-07-08): the exit-monitor job BODY moved from src.main._exit_monitor_cycle
+    (now a thin scheduler-hook delegate) to src.execution.exit_lifecycle.run_exit_monitor_cycle
+    (its owning module — same P1 order-daemon process, same scheduled job). The ordering
+    invariant this test protects now lives there.
+    """
     import inspect
 
-    import src.main as main
+    from src.execution import exit_lifecycle
 
-    source = inspect.getsource(main._exit_monitor_cycle)
+    source = inspect.getsource(exit_lifecycle.run_exit_monitor_cycle)
 
     assert "_refresh_global_allocator_for_held_position_monitor(" in source
     assert source.index("_refresh_global_allocator_for_held_position_monitor(") < source.index(
@@ -328,14 +334,17 @@ def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
 
 
 def test_chain_sync_read_lane_cannot_submit_exits():
-    """Restart safety: the chain-sync read lane cannot submit exits."""
+    """Restart safety: the chain-sync read lane cannot submit exits.
+
+    R4-b (2026-07-08): exit-monitor body moved to exit_lifecycle.run_exit_monitor_cycle
+    (see test_held_position_monitor_refreshes_allocator_before_exit_monitor above).
+    """
     import inspect
 
-    import src.main as main
-    from src.execution import post_trade_capital
+    from src.execution import exit_lifecycle, post_trade_capital
 
     chain_source = inspect.getsource(post_trade_capital.chain_sync_read_cycle)
-    exit_source = inspect.getsource(main._exit_monitor_cycle)
+    exit_source = inspect.getsource(exit_lifecycle.run_exit_monitor_cycle)
 
     assert "_run_chain_sync(portfolio, clob, conn)" in chain_source
     assert "conn.commit()" in chain_source

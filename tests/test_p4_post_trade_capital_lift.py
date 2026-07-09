@@ -172,15 +172,25 @@ def test_no_regression_settlement_commands_enqueue_is_idempotent():
 
 
 def test_no_regression_exit_submit_phase_stays_in_src_main():
-    """The exit-monitoring / exit-SUBMIT phase MUST stay in src.main and still post sell orders.
+    """The exit-monitoring / exit-SUBMIT phase MUST stay in the P1 order daemon
+    (src.main's scheduler) and still post sell orders — as opposed to being lifted
+    to the P4 process like chain-sync was.
 
     §4.3 CAVEAT: '_execute_monitoring_phase posts real sell orders on RED/force-exit;
     that is order-runtime and STAYS.' The exit job must still call the monitoring phase
     and thread exit_order_submit_enabled through it.
+
+    R4-b (2026-07-08, main.py slimming): the job BODY may now be a same-process,
+    same-daemon extraction into its owning module (src.execution.exit_lifecycle,
+    which already owns all other exit-lifecycle state transitions) rather than
+    inline in src.main — main.py's scheduler hook is a thin delegating call. That
+    is not a P4-style process lift (still scheduled from src.main's APScheduler,
+    still runs in the order daemon), so this check follows one level of
+    delegation to find _execute_monitoring_phase rather than requiring it inline.
     """
     import src.main as main_mod  # must import (boot not broken)
 
-    # The exit-monitor cycle stays defined in src.main and calls _execute_monitoring_phase.
+    # The exit-monitor cycle stays REGISTERED in src.main (the P1 scheduler owns it).
     exit_fn = None
     for cand in ("_exit_monitor_cycle", "_chain_sync_and_exit_monitor_cycle"):
         if hasattr(main_mod, cand):
@@ -191,9 +201,41 @@ def test_no_regression_exit_submit_phase_stays_in_src_main():
     )
     node = _find_func(_MAIN_PY, exit_fn)
     calls = _calls_named(node)
-    assert "_execute_monitoring_phase" in calls, (
-        f"src.main:{exit_fn} must still run _execute_monitoring_phase (posts real sell "
-        "orders on RED/force-exit) — the exit-SUBMIT phase STAYS in P1."
+    if "_execute_monitoring_phase" in calls:
+        return  # pre-R4-b shape: inline in src.main — still fine.
+
+    # R4-b delegation shape: follow the local `from <module> import <name>` inside
+    # exit_fn to the owning module and check IT calls _execute_monitoring_phase —
+    # the exit-SUBMIT phase must still exist somewhere in the P1 process's call
+    # graph reachable from the scheduled job, not have vanished.
+    delegate_targets: list[tuple[str, str]] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.ImportFrom) and sub.module:
+            for alias in sub.names:
+                called_name = alias.asname or alias.name
+                if called_name in calls:
+                    delegate_targets.append((sub.module, alias.name))
+    assert delegate_targets, (
+        f"src.main:{exit_fn} calls neither _execute_monitoring_phase directly nor "
+        "delegates via a local `from <module> import <fn>` — the exit-SUBMIT phase "
+        "may have been silently dropped from the P1 order daemon."
+    )
+    found = False
+    for module_dotted, func_name in delegate_targets:
+        module_path = _REPO_ROOT / (module_dotted.replace(".", "/") + ".py")
+        if not module_path.exists():
+            continue
+        delegate_node = _find_func(module_path, func_name)
+        if delegate_node is None:
+            continue
+        if "_execute_monitoring_phase" in _calls_named(delegate_node):
+            found = True
+            break
+    assert found, (
+        f"src.main:{exit_fn} delegates to {delegate_targets!r}, none of which call "
+        "_execute_monitoring_phase (posts real sell orders on RED/force-exit) — "
+        "the exit-SUBMIT phase must STAY reachable from the P1 order daemon's "
+        "scheduled exit-monitor job."
     )
 
 

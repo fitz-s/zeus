@@ -6231,7 +6231,9 @@ def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
 
 
 def test_allocator_refresh_release_updates_db_and_loaded_position(conn):
-    import src.main as main_module
+    # R4-b (2026-07-08): moved from src.main to its owning module (single
+    # caller was src.main._exit_monitor_cycle, also moved there).
+    from src.execution import exit_lifecycle as main_module
 
     position = SimpleNamespace(
         trade_id="exit-allocator-config",

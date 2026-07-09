@@ -1771,6 +1771,10 @@ def _run_ws_gap_reconcile_if_required(
         )
         conn.commit()
         if result.get("status") == "cleared":
+            from src.execution.exit_lifecycle import (
+                _release_ws_gap_blocked_exit_retries_after_m5_clear,
+            )
+
             released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
                 conn,
                 observed_at=current,
@@ -1796,245 +1800,12 @@ def _run_ws_gap_reconcile_if_required(
             conn.close()
 
 
-def _release_ws_gap_blocked_exit_retries_after_m5_clear(
-    conn,
-    *,
-    observed_at: datetime,
-) -> dict:
-    """Release reduce-only exit retries that were delayed only by the M5 WS latch.
-
-    M5 clearing proves the user-channel gap has been reconciled. Keeping positions
-    that were rejected for ``ws_gap...m5_reconcile_required=True`` on exponential
-    backoff after that proof delays exits for no additional safety evidence.
-    """
-
-    now_iso = observed_at.isoformat()
-    recent_cutoff = (observed_at - timedelta(minutes=10)).isoformat()
-    try:
-        rows = conn.execute(
-            """
-            SELECT pc.position_id
-              FROM position_current pc
-             WHERE COALESCE(pc.exit_retry_count, 0) > 0
-               AND COALESCE(pc.next_exit_retry_at, '') > ?
-               AND COALESCE(pc.phase, '') IN ('active', 'day0_window', 'pending_exit')
-               AND (
-                    COALESCE(pc.chain_shares, 0) > 0
-                 OR (
-                        COALESCE(pc.chain_shares, 0) = 0
-                    AND COALESCE(pc.shares, 0) > 0
-                    AND COALESCE(pc.chain_state, '') = 'synced'
-                    )
-               )
-               AND EXISTS (
-                    SELECT 1
-                      FROM position_events pe
-                     WHERE pe.position_id = pc.position_id
-                       AND pe.event_type = 'EXIT_ORDER_REJECTED'
-                       AND pe.occurred_at >= ?
-                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') LIKE 'ws_gap=%'
-                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') LIKE '%m5_reconcile_required=True%'
-               )
-             ORDER BY pc.next_exit_retry_at, pc.position_id
-            """,
-            (now_iso, recent_cutoff),
-        ).fetchall()
-    except Exception as exc:  # noqa: BLE001 - maintenance must not crash heartbeat.
-        logger.warning("M5 exit-retry release query failed closed: %s", exc)
-        return {"released": 0, "position_ids": [], "error": str(exc)}
-    position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
-    if not position_ids:
-        return {"released": 0, "position_ids": []}
-    released = _append_exit_retry_release_events_and_update_projection(
-        conn,
-        position_ids,
-        observed_at=observed_at,
-        release_reason="M5_WS_GAP_RECONCILE_CLEARED",
-        release_error="ws_gap_m5_reconcile_cleared",
-    )
-    changed = int(released.get("released", 0) or 0)
-    position_ids = list(released.get("position_ids", []) or [])
-    logger.info(
-        "M5 cleared WS latch; released %d ws-gap-blocked exit retries: %s",
-        changed,
-        position_ids,
-    )
-    return released
-
-
-def _append_exit_retry_release_events_and_update_projection(
-    conn,
-    position_ids: list[str],
-    *,
-    observed_at: datetime,
-    release_reason: str,
-    release_error: str,
-) -> dict:
-    """Append retry-release evidence before shortening projection cooldowns."""
-
-    if not position_ids:
-        return {"released": 0, "position_ids": []}
-    now_iso = observed_at.isoformat()
-    placeholders = ",".join("?" for _ in position_ids)
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT position_id,
-                   COALESCE(phase, '') AS phase,
-                   COALESCE(strategy_key, '') AS strategy_key,
-                   COALESCE(order_id, '') AS order_id,
-                   COALESCE(exit_retry_count, 0) AS exit_retry_count,
-                   COALESCE(next_exit_retry_at, '') AS next_exit_retry_at
-              FROM position_current
-             WHERE position_id IN ({placeholders})
-             ORDER BY position_id
-            """,
-            tuple(position_ids),
-        ).fetchall()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("exit-retry release projection read failed closed: %s", exc)
-        return {"released": 0, "position_ids": [], "error": str(exc)}
-
-    changed = 0
-    released_ids: list[str] = []
-    for row in rows:
-        position_id = str(row[0] or "")
-        if not position_id:
-            continue
-        try:
-            conn.execute("SAVEPOINT exit_retry_release")
-            sequence_row = conn.execute(
-                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
-                (position_id,),
-            ).fetchone()
-            sequence_no = int(sequence_row[0] or 0) + 1
-            payload = {
-                "status": "ready",
-                "exit_reason": release_reason,
-                "error": release_error,
-                "retry_count": int(row[4] or 0),
-                "previous_next_retry_at": str(row[5] or ""),
-                "next_retry_at": now_iso,
-                "release_reason": release_reason,
-            }
-            conn.execute(
-                """
-                INSERT INTO position_events (
-                    event_id, position_id, event_version, sequence_no, event_type,
-                    occurred_at, phase_before, phase_after, strategy_key, decision_id,
-                    snapshot_id, order_id, command_id, caused_by, idempotency_key,
-                    venue_status, source_module, payload_json, env
-                ) VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED',
-                          ?, ?, ?, ?, NULL, NULL, ?, NULL, ?,
-                          ?, 'ready', 'src.main', ?, 'live')
-                """,
-                (
-                    f"{position_id}:exit_retry_released:{sequence_no}",
-                    position_id,
-                    sequence_no,
-                    now_iso,
-                    str(row[1] or "pending_exit"),
-                    str(row[1] or "pending_exit"),
-                    str(row[2] or ""),
-                    str(row[3] or "") or None,
-                    release_reason,
-                    f"{position_id}:exit_retry_released:{sequence_no}",
-                    json.dumps(payload, sort_keys=True),
-                ),
-            )
-            cur = conn.execute(
-                """
-                UPDATE position_current
-                   SET next_exit_retry_at = ?,
-                       updated_at = ?
-                 WHERE position_id = ?
-                """,
-                (now_iso, now_iso, position_id),
-            )
-            if int(cur.rowcount or 0) > 0:
-                changed += int(cur.rowcount or 0)
-                released_ids.append(position_id)
-                conn.execute("RELEASE SAVEPOINT exit_retry_release")
-            else:
-                conn.execute("ROLLBACK TO SAVEPOINT exit_retry_release")
-                conn.execute("RELEASE SAVEPOINT exit_retry_release")
-        except Exception as exc:  # noqa: BLE001
-            try:
-                conn.execute("ROLLBACK TO SAVEPOINT exit_retry_release")
-                conn.execute("RELEASE SAVEPOINT exit_retry_release")
-            except Exception:  # noqa: BLE001
-                pass
-            logger.warning(
-                "exit-retry release append/update failed closed for %s: %s",
-                position_id,
-                exc,
-            )
-    return {"released": changed, "position_ids": released_ids}
-
-
-def _release_allocator_config_blocked_exit_retries_after_refresh(
-    conn,
-    portfolio,
-    *,
-    observed_at: datetime,
-) -> dict:
-    """Release exits delayed only because allocator refresh had not run yet."""
-
-    now_iso = observed_at.isoformat()
-    recent_cutoff = (observed_at - timedelta(minutes=10)).isoformat()
-    try:
-        rows = conn.execute(
-            """
-            SELECT pc.position_id
-              FROM position_current pc
-             WHERE COALESCE(pc.exit_retry_count, 0) > 0
-               AND COALESCE(pc.next_exit_retry_at, '') > ?
-               AND COALESCE(pc.phase, '') IN ('active', 'day0_window', 'pending_exit')
-               AND (
-                    COALESCE(pc.chain_shares, 0) > 0
-                 OR (
-                        COALESCE(pc.chain_shares, 0) = 0
-                    AND COALESCE(pc.shares, 0) > 0
-                    AND COALESCE(pc.chain_state, '') = 'synced'
-                    )
-               )
-               AND EXISTS (
-                    SELECT 1
-                      FROM position_events pe
-                     WHERE pe.position_id = pc.position_id
-                       AND pe.event_type = 'EXIT_ORDER_REJECTED'
-                       AND pe.occurred_at >= ?
-                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') = 'allocator_not_configured'
-               )
-             ORDER BY pc.next_exit_retry_at, pc.position_id
-            """,
-            (now_iso, recent_cutoff),
-        ).fetchall()
-    except Exception as exc:  # noqa: BLE001 - maintenance must not crash monitor.
-        logger.warning("Allocator-config exit-retry release query failed closed: %s", exc)
-        return {"released": 0, "position_ids": [], "error": str(exc)}
-    position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
-    if not position_ids:
-        return {"released": 0, "position_ids": []}
-    released = _append_exit_retry_release_events_and_update_projection(
-        conn,
-        position_ids,
-        observed_at=observed_at,
-        release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
-        release_error="allocator_not_configured_released",
-    )
-    changed = int(released.get("released", 0) or 0)
-    position_ids = list(released.get("position_ids", []) or [])
-    id_set = set(position_ids)
-    for pos in getattr(portfolio, "positions", []) or []:
-        if str(getattr(pos, "trade_id", "")) in id_set:
-            pos.next_exit_retry_at = now_iso
-    logger.info(
-        "Allocator configured; released %d allocator-not-configured exit retries: %s",
-        changed,
-        position_ids,
-    )
-    return released
+# R4-b (2026-07-08): _release_ws_gap_blocked_exit_retries_after_m5_clear,
+# _append_exit_retry_release_events_and_update_projection, and
+# _release_allocator_config_blocked_exit_retries_after_refresh moved to
+# src.execution.exit_lifecycle (owning module for exit-retry-release state).
+# See that module's R4-b section header. The one other call site
+# (_run_ws_gap_reconcile_if_required above) imports from there directly.
 
 
 def _refresh_reconcile_findings_if_required(
@@ -4309,59 +4080,9 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
-def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict:
-    """Configure risk allocator before held-position exit decisions run.
-
-    The held-position monitor is an independent live lane and can run before the
-    EDLI reactor's allocator refresh after daemon restart. It must not reach the
-    executor with unconfigured risk singletons, because that turns real exit
-    decisions into ``allocator_not_configured`` backoff.
-    """
-
-    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
-    from src.control.ws_gap_guard import summary as _ws_gap_summary
-    from src.risk_allocator import configure_global_allocator, refresh_global_allocator
-    from src.riskguard.riskguard import get_current_level
-
-    try:
-        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
-        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
-        _drawdown_pct = (
-            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
-            if _baseline > 0.0
-            else 0.0
-        )
-        result = refresh_global_allocator(
-            conn,
-            ledger={
-                "current_drawdown_pct": _drawdown_pct,
-                "risk_level": get_current_level().value,
-            },
-            heartbeat=_heartbeat_summary(),
-            ws_status=_ws_gap_summary(),
-        )
-        logger.info(
-            "held-position monitor allocator refresh: configured=%r drawdown_pct=%.3f",
-            result.get("configured"),
-            _drawdown_pct,
-        )
-        return result
-    except Exception as exc:  # noqa: BLE001 - fail closed with explicit state.
-        try:
-            configure_global_allocator(None, None)
-        except Exception:  # noqa: BLE001
-            pass
-        logger.error(
-            "held-position monitor allocator refresh FAILED: %s; exit submit remains fail-closed",
-            exc,
-            exc_info=True,
-        )
-        return {
-            "configured": False,
-            "fail_closed": True,
-            "error": str(exc),
-            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
-        }
+# R4-b (2026-07-08): _refresh_global_allocator_for_held_position_monitor moved
+# to src.execution.exit_lifecycle (single caller was _exit_monitor_cycle,
+# also moved there as run_exit_monitor_cycle).
 
 
 # WIRING FIX (operator Point-1 directive 2026-06-08): the BAYES_PRECISION_FUSION/replacement forecast
@@ -10784,246 +10505,27 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
 # code. What code CAN do is flag the gap on the first cycle after recovery: if
 # the newest MONITOR_REFRESHED is older than ~2× the interval, the cadence broke.
 # This is detection only; it does not (and must not) re-drive the schedule.
-_EXIT_MONITOR_INTERVAL_SECONDS = 120.0
-_MONITOR_CADENCE_GAP_FACTOR = 2.0
-
-
-def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
-    """Flag when MONITOR_REFRESHED cadence has lapsed beyond ~2× the interval.
-
-    Reads the newest canonical MONITOR_REFRESHED occurred_at from position_events
-    (same trade DB this conn owns) and compares to now. Detection only — records
-    the gap in ``summary`` and logs a warning so operator supervision can act;
-    never restarts or back-fills. Returns the watchdog record dict when a gap is
-    flagged, else None. Fail-soft: any read/parse error returns None.
-    """
-    if conn is None:
-        return None
-    threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
-    try:
-        row = conn.execute(
-            """
-            SELECT MAX(occurred_at)
-              FROM position_events
-             WHERE event_type = 'MONITOR_REFRESHED'
-            """
-        ).fetchone()
-    except Exception:
-        return None
-    if row is None or row[0] is None:
-        return None
-    last_refresh_raw = str(row[0])
-    try:
-        last_refresh = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if last_refresh.tzinfo is None:
-        last_refresh = last_refresh.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    gap_seconds = (now - last_refresh.astimezone(timezone.utc)).total_seconds()
-    summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
-    if gap_seconds <= threshold_seconds:
-        return None
-    record = {
-        "last_monitor_refreshed_at": last_refresh_raw,
-        "observed_at": now.isoformat(),
-        "gap_seconds": round(gap_seconds, 1),
-        "interval_seconds": _EXIT_MONITOR_INTERVAL_SECONDS,
-        "threshold_seconds": threshold_seconds,
-        "gap_factor": round(gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS, 2),
-    }
-    summary["monitor_cadence_gap_flagged"] = record
-    logger.warning(
-        "MONITOR_CADENCE_GAP: last MONITOR_REFRESHED was %s (%.1fs ago, %.1f× the "
-        "%.0fs interval > %.1f× threshold). exit_monitor cadence lapsed — likely a "
-        "daemon/scheduler process gap (operator supervision, out of code).",
-        last_refresh_raw,
-        gap_seconds,
-        gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
-        _EXIT_MONITOR_INTERVAL_SECONDS,
-        _MONITOR_CADENCE_GAP_FACTOR,
-    )
-    return record
+# R4-b (2026-07-08): _EXIT_MONITOR_INTERVAL_SECONDS, _MONITOR_CADENCE_GAP_FACTOR,
+# _check_monitor_cadence_watchdog moved to src.execution.exit_lifecycle
+# (single caller was _exit_monitor_cycle, also moved there).
 
 
 @_scheduler_job("exit_monitor")
 def _exit_monitor_cycle() -> None:
-    """Standalone exit-lifecycle monitoring job owned by the order daemon.
+    """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
+    extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
+    docstring for the held-position monitoring / exit-submit lane it runs.
 
-    The chain-truth READ phase was lifted to the P4 post-trade-capital daemon.
-    This order-runtime job keeps only the live exit-SUBMIT lane: held-position
-    monitoring, exit preflight, pending-exit state transitions, and gated sell
-    order submission when ``real_order_submit_enabled`` is true.
+    The held-position-monitor Event and its completion callback are cross-job
+    scheduling coordination state (5 other EDLI jobs defer while this one
+    runs via ``_defer_for_held_position_monitor``), so they stay owned here
+    and are injected into the extracted function.
     """
-    from src.data.polymarket_client import PolymarketClient
-    from src.engine.cycle_runner import (
-        _execute_monitoring_phase,
-        get_connection,
-        get_tracker,
-        load_portfolio,
-        save_tracker,
-        save_portfolio,
-    )
-    from src.state.canonical_write import commit_then_export
-    from src.state.decision_chain import CycleArtifact
-    from src.state.decision_chain import store_artifact
+    from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
-    edli_cfg = _settings_section("edli", {})
-    real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
-    if _held_position_monitor_active.is_set():
-        logger.warning("exit_monitor skipped: previous monitor cycle is still running")
-        return
-    _held_position_monitor_active.set()
-
-    conn = get_connection()
-    if conn is None:
-        logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
-        _mark_held_position_monitor_complete()
-        return
-
-    summary: dict = {"monitors": 0, "exits": 0}
-    # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
-    # silence) on the first cycle after recovery. Detection only; the underlying
-    # daemon supervision is operator infra.
-    try:
-        _check_monitor_cadence_watchdog(conn, summary)
-    except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
-        logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
-    try:
-        portfolio = load_portfolio()
-        held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
-            conn,
-            portfolio,
-        )
-        summary["held_monitor_allocator_refresh"] = held_monitor_allocator_refresh
-        if held_monitor_allocator_refresh.get("configured"):
-            summary["held_monitor_allocator_retry_release"] = (
-                _release_allocator_config_blocked_exit_retries_after_refresh(
-                    conn,
-                    portfolio,
-                    observed_at=datetime.now(timezone.utc),
-                )
-            )
-        with PolymarketClient() as clob:
-            tracker = get_tracker()
-            artifact = CycleArtifact(
-                mode="exit_monitor",
-                started_at=datetime.now(timezone.utc).isoformat(),
-                summary=summary,
-            )
-            portfolio_dirty = False
-            tracker_dirty = False
-            try:
-                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
-                    conn,
-                    clob,
-                    portfolio,
-                    artifact,
-                    tracker,
-                    summary,
-                    exit_order_submit_enabled=real_order_submit_enabled,
-                    run_exit_preflight=True,
-                )
-            except Exception as exc:
-                logger.error(
-                    "exit_monitor: monitoring phase failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-                summary["monitoring_error"] = str(exc)
-
-            # DAY0 resting-order cancel sweep (adversarial review
-            # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
-            # open resting ENTRY orders whose day0 bin is hard-fact dead for the
-            # order's side, or whose family is oracle-anomaly paused. Cancels
-            # only REDUCE standing risk; gated to live-submit mode because in
-            # submit-disabled posture no real resting orders of ours exist (and
-            # the venue cancel is a real API call). Fail-soft.
-            if real_order_submit_enabled and bool(
-                edli_cfg.get("day0_dead_bin_order_cancel_enabled", True)
-            ):
-                try:
-                    from src.config import runtime_cities_by_name
-                    from src.execution.day0_hard_fact_exit import (
-                        cancel_day0_dead_bin_resting_entries,
-                    )
-
-                    cancelled = cancel_day0_dead_bin_resting_entries(
-                        clob=clob,
-                        conn=conn,
-                        cities_by_name=runtime_cities_by_name(),
-                    )
-                    if cancelled:
-                        summary["day0_dead_bin_orders_cancelled"] = cancelled
-                except Exception as exc:  # noqa: BLE001 — sweep is additive
-                    logger.warning(
-                        "exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
-                        exc,
-                    )
-
-        # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
-        # then export the derived portfolio/tracker JSON with the committed artifact id —
-        # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
-        # never lead the DB.
-        _aid_box: list = [None]
-
-        def _db_op():
-            _aid_box[0] = store_artifact(conn, artifact)
-            return _aid_box[0]
-
-        def _export_portfolio():
-            if portfolio_dirty:
-                save_portfolio(
-                    portfolio,
-                    last_committed_artifact_id=_aid_box[0],
-                    source="exit_monitor",
-                )
-
-        def _export_tracker():
-            if tracker_dirty:
-                save_tracker(tracker)
-
-        commit_then_export(
-            conn, db_op=_db_op, json_exports=[_export_portfolio, _export_tracker]
-        )
-    except Exception as exc:
-        logger.error(
-            "exit_monitor: unexpected error: %s", exc, exc_info=True
-        )
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        _mark_held_position_monitor_complete()
-
-    # EDLI status-summary freshness writer (release-gate surface).
-    # In EDLI event-driven modes run_cycle() is never called, so the legacy
-    # _export_status -> write_cycle_pulse path is silent and state/status_summary.json
-    # goes stale -> the live-release gate fails status_summary / edli_stage_readiness.
-    # This exit monitor runs under ALL EDLI modes, so emit a genuine business-plane
-    # status pulse here each cycle. write_cycle_pulse re-reads the live DB read model
-    # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
-    # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
-    # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
-    try:
-        from src.observability.status_summary import write_cycle_pulse
-        write_cycle_pulse(summary)
-    except Exception as exc:
-        logger.error(
-            "exit_monitor: status pulse failed (non-fatal): %s",
-            exc,
-            exc_info=True,
-        )
-
-    _write_scheduler_health(
-        "exit_monitor",
-        failed=False,
-        extra={
-            "exit_order_submit_enabled": real_order_submit_enabled,
-            "monitors": summary.get("monitors", 0),
-            "exits": summary.get("exits", 0),
-        },
+    run_exit_monitor_cycle(
+        held_position_monitor_active=_held_position_monitor_active,
+        mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
     )
 
 
