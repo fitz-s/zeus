@@ -9015,25 +9015,6 @@ def _edli_day0_settlement_semantics(observation: dict):
     )
 
 
-def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | None) -> list[dict]:
-    condition = str(condition_id or "").strip()
-    if not condition:
-        return list(markets)
-    filtered = []
-    for market in markets:
-        if str(market.get("condition_id") or market.get("market_id") or "") == condition:
-            filtered.append(market)
-            continue
-        outcomes = market.get("outcomes", []) or []
-        if any(
-            str(outcome.get("condition_id") or outcome.get("market_id") or "") == condition
-            for outcome in outcomes
-            if isinstance(outcome, dict)
-        ):
-            filtered.append(market)
-    return filtered
-
-
 def _edli_pre_submit_clob_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
     if raw in (None, ""):
@@ -9952,14 +9933,6 @@ class _EdliJsonlVenueReconcileReader:
         return None
 
 
-def _edli_user_channel_reader(edli_cfg: dict) -> _EdliJsonlUserChannelReader:
-    return _EdliJsonlUserChannelReader(edli_cfg.get("edli_user_channel_message_queue_path"))
-
-
-def _edli_venue_reconcile_reader(edli_cfg: dict) -> _EdliJsonlVenueReconcileReader:
-    return _EdliJsonlVenueReconcileReader(edli_cfg.get("edli_venue_reconcile_facts_path"))
-
-
 def _parse_edli_runtime_time(payload: dict, *, default: datetime) -> datetime:
     for key in ("occurred_at", "observed_at", "timestamp", "created_at"):
         value = payload.get(key)
@@ -10015,60 +9988,6 @@ def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
         return f"{event_id}:{final_intent_id}"
     raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_AGGREGATE_UNRESOLVED")
 
-
-def _edli_user_channel_message_seen(conn, *, aggregate_id: str, message_hash: str) -> bool:
-    import json as _json
-
-    if not message_hash:
-        return False
-    rows = conn.execute(
-        """
-        SELECT payload_json
-        FROM edli_live_order_events
-        WHERE aggregate_id = ? AND event_type IN ('UserOrderObserved','UserTradeObserved')
-        """,
-        (aggregate_id,),
-    ).fetchall()
-    for row in rows:
-        payload = _json.loads(str(_row_get(row, "payload_json")))
-        if payload.get("raw_user_channel_message_hash") == message_hash:
-            return True
-    return False
-
-
-def _edli_user_channel_message_not_stale(conn, *, aggregate_id: str, occurred_at: datetime) -> None:
-    row = conn.execute(
-        """
-        SELECT occurred_at
-        FROM edli_live_order_events
-        WHERE aggregate_id = ? AND event_type = 'ExecutionCommandCreated'
-        ORDER BY event_sequence DESC
-        LIMIT 1
-        """,
-        (aggregate_id,),
-    ).fetchone()
-    if row is None:
-        return
-    command_time = datetime.fromisoformat(str(_row_get(row, "occurred_at")))
-    if command_time.tzinfo is None:
-        command_time = command_time.replace(tzinfo=timezone.utc)
-    if occurred_at < command_time:
-        raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_STALE_BEFORE_COMMAND")
-
-
-def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
-    return list(
-        conn.execute(
-            """
-            SELECT aggregate_id, event_id, final_intent_id, venue_order_id
-            FROM edli_live_order_projection
-            WHERE pending_reconcile = 1
-            ORDER BY updated_at ASC
-            LIMIT ?
-            """,
-            (max(0, limit),),
-        ).fetchall()
-    )
 
 
 
@@ -10166,72 +10085,6 @@ def _edli_boot_settlement_redeem_recovery() -> None:
             exc,
             exc_info=True,
         )
-
-
-def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
-    """Tokens the EDLI reactor has recently decided on — the candidate universe.
-
-    These are the YES/NO tokens of opportunity families the reactor actually
-    evaluates. They MUST be pinned into the market-channel ingestor universe so a
-    fresh ``execution_feasibility_evidence`` row exists for each by the time the
-    reactor decides on it (Blocker #52). ``no_trade_regret_events`` records every
-    reactor decision (incl. the witness-failure rejections we are fixing), so its
-    recent token set is a precise, self-maintaining candidate signal — no
-    cross-DB topology read in the hot path.
-    """
-
-    if world_conn is None:
-        return set()
-    try:
-        has_table = world_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
-        ).fetchone()
-    except Exception:
-        return set()
-    if not has_table:
-        return set()
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
-    try:
-        rows = world_conn.execute(
-            """
-            SELECT DISTINCT token_id
-            FROM no_trade_regret_events
-            WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
-              AND created_at >= ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (cutoff, int(limit)),
-        ).fetchall()
-    except Exception:
-        return set()
-    return {str(r[0]) for r in rows if r and r[0]}
-
-
-def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
-    """Build refresh_executable_market_substrate_snapshots kwargs for a market-channel action.
-
-    Authority is always VERIFIED (snapshots come from verified Gamma/CLOB data);
-    the EDLI channel trigger reason is carried as non-authoritative refresh_reason
-    metadata so it appears in the summary log without polluting the capture contract.
-
-    Separating these two carriers fixes P1-1: the original code passed
-    ``scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}"`` which caused
-    capture_executable_market_snapshot to raise ExecutableSnapshotCaptureError on
-    every attempt (it requires scan_authority == "VERIFIED"), making the entire
-    reactive snapshot-refresh path silently dead.
-    """
-    return dict(
-        markets=markets,
-        clob=clob,
-        captured_at=captured_at,
-        scan_authority="VERIFIED",
-        refresh_reason=f"EDLI_MARKET_CHANNEL:{action.reason}",
-        max_outcomes=20,
-        budget_seconds=15.0,
-    )
-
-
 
 
 # FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on a 2-min
