@@ -93,6 +93,12 @@ _NONTERMINAL_VENUE_ORDER_STATES = {
     "OPEN",
     "RESTING",
 }
+_TERMINAL_COMMAND_EVENT_TYPES = {
+    "CANCEL_ACKED",
+    "EXPIRED",
+    "FILL_CONFIRMED",
+    "SUBMIT_REJECTED",
+}
 _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE = {
     "mode",
     "started_at",
@@ -644,6 +650,62 @@ def _float_or_none(value) -> float | None:
         return None
 
 
+def _parse_status_time(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _status_time_not_before(left, right) -> bool:
+    left_dt = _parse_status_time(left)
+    right_dt = _parse_status_time(right)
+    if left_dt is None or right_dt is None:
+        return False
+    return left_dt >= right_dt
+
+
+def _payload_mapping(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _cancel_ack_payload_confirms_terminal_cancel(payload, *, venue_order_id: str) -> bool:
+    payload_map = _payload_mapping(payload)
+    payload_order_id = str(payload_map.get("venue_order_id") or "")
+    if payload_order_id and payload_order_id != str(venue_order_id or ""):
+        return False
+    cancel_outcome = payload_map.get("cancel_outcome")
+    cancel_outcome = cancel_outcome if isinstance(cancel_outcome, dict) else {}
+    status = str(cancel_outcome.get("status") or "").strip().upper()
+    return status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"}
+
+
+def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
+    event_type = str(row["terminal_event_type"] or "").upper()
+    if event_type not in _TERMINAL_COMMAND_EVENT_TYPES:
+        return False
+    if not _status_time_not_before(row["terminal_event_at"], row["venue_observed_at"]):
+        return False
+    if event_type == "CANCEL_ACKED":
+        return _cancel_ack_payload_confirms_terminal_cancel(
+            row["terminal_event_payload_json"],
+            venue_order_id=str(row["venue_order_id"] or ""),
+        )
+    return True
+
+
 def _get_risk_level() -> str:
     """Read actual RiskGuard level instead of hardcoding GREEN."""
     try:
@@ -736,7 +798,7 @@ def _query_current_open_entry_orders(conn) -> dict:
     empty = {
         "status": "skipped_no_connection",
         "authority": "derived_operator_visibility",
-        "source": "venue_commands+position_current+venue_order_facts",
+        "source": "venue_commands+position_current+venue_order_facts+venue_command_events",
         "count": 0,
         "pending_entry_count": 0,
         "by_strategy": {},
@@ -865,6 +927,7 @@ def _terminal_entry_command_conflict_empty() -> dict:
             "is still nonterminal"
         ),
         "count": 0,
+        "superseded_by_terminal_event_count": 0,
         "by_command_state": {},
         "by_venue_state": {},
         "by_position_phase": {},
@@ -884,6 +947,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         return {**empty, "status": "missing_venue_order_facts"}
 
     has_position_current = _table_exists(conn, "main", "position_current")
+    has_command_events = _table_exists(conn, "main", "venue_command_events")
     pc_select = (
         "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
         "pc.target_date, pc.strategy_key"
@@ -894,6 +958,39 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         )
     )
     pc_join = "LEFT JOIN position_current pc ON pc.position_id = vc.position_id" if has_position_current else ""
+    event_cte = ""
+    event_select = (
+        "NULL AS terminal_event_type, NULL AS terminal_event_at, "
+        "NULL AS terminal_event_state_after, NULL AS terminal_event_payload_json"
+    )
+    event_join = ""
+    event_params: tuple[str, ...] = ()
+    if has_command_events:
+        event_cte = """,
+            latest_terminal_events AS (
+                SELECT command_id, event_type, occurred_at, state_after, payload_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY command_id
+                           ORDER BY COALESCE(sequence_no, 0) DESC,
+                                    COALESCE(occurred_at, '') DESC
+                       ) AS rn
+                  FROM venue_command_events
+                 WHERE event_type IN ({terminal_event_placeholders})
+            )
+        """.format(
+            terminal_event_placeholders=",".join("?" for _ in _TERMINAL_COMMAND_EVENT_TYPES)
+        )
+        event_select = (
+            "lte.event_type AS terminal_event_type, "
+            "lte.occurred_at AS terminal_event_at, "
+            "lte.state_after AS terminal_event_state_after, "
+            "lte.payload_json AS terminal_event_payload_json"
+        )
+        event_join = (
+            "LEFT JOIN latest_terminal_events lte "
+            "ON lte.command_id = vc.command_id AND lte.rn = 1"
+        )
+        event_params = tuple(sorted(_TERMINAL_COMMAND_EVENT_TYPES))
 
     rows = conn.execute(
         f"""
@@ -905,18 +1002,21 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
                                 COALESCE(observed_at, '') DESC,
                                 COALESCE(ingested_at, '') DESC,
                                 fact_id DESC
-                   ) AS rn
+                       ) AS rn
               FROM venue_order_facts
         )
+        {event_cte}
         SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
                vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
                vc.updated_at, {pc_select},
                lof.state AS venue_state, lof.remaining_size, lof.matched_size,
-               lof.observed_at AS venue_observed_at
+               lof.observed_at AS venue_observed_at,
+               {event_select}
           FROM venue_commands vc
           JOIN latest_order_facts lof
             ON lof.venue_order_id = vc.venue_order_id
            AND lof.rn = 1
+          {event_join}
           {pc_join}
          WHERE upper(COALESCE(vc.intent_kind, '')) = 'ENTRY'
            AND vc.venue_order_id IS NOT NULL
@@ -925,15 +1025,20 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
            AND upper(COALESCE(lof.state, '')) IN ({",".join("?" for _ in _NONTERMINAL_VENUE_ORDER_STATES)})
          ORDER BY vc.updated_at DESC, vc.created_at DESC, vc.command_id
         """,
-        tuple(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        event_params
+        + tuple(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
         + tuple(sorted(_NONTERMINAL_VENUE_ORDER_STATES)),
     ).fetchall()
 
     by_command_state: dict[str, int] = {}
     by_venue_state: dict[str, int] = {}
     by_position_phase: dict[str, int] = {}
+    superseded_by_terminal_event_count = 0
     orders: list[dict] = []
     for row in rows:
+        if _terminal_event_supersedes_nonterminal_fact(row):
+            superseded_by_terminal_event_count += 1
+            continue
         command_state = str(row["command_state"] or "UNKNOWN").upper()
         venue_state = str(row["venue_state"] or "UNKNOWN").upper()
         phase = str(row["phase"] or "unknown")
@@ -960,6 +1065,9 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
                 "matched_size": _float_or_none(row["matched_size"]),
                 "updated_at": str(row["updated_at"] or ""),
                 "venue_observed_at": str(row["venue_observed_at"] or ""),
+                "terminal_event_type": str(row["terminal_event_type"] or ""),
+                "terminal_event_at": str(row["terminal_event_at"] or ""),
+                "terminal_event_state_after": str(row["terminal_event_state_after"] or ""),
             }
         )
 
@@ -967,6 +1075,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         **empty,
         "status": "ok",
         "count": len(orders),
+        "superseded_by_terminal_event_count": superseded_by_terminal_event_count,
         "by_command_state": by_command_state,
         "by_venue_state": by_venue_state,
         "by_position_phase": by_position_phase,
