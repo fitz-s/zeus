@@ -2741,5 +2741,8 @@ scripts:
   # extend the manifest schema for subdirectories or relocate these scripts to top-level
   # scripts/. None of the loop-build additions are dangerous_if_run or write_targets a
   # live DB: loop_guard.py only touches loop/** + whatever the post-run enforce call
-  # hard-restores (git restore/rm, never a raw write), loop_enable.sh is read-only
-  # (prints commands, never runs them), loop_status.sh is read-only.
+  # hard-restores (git restore/rm, never a raw write) + commit-auto's explicit-pathspec
+  # commits of allowlisted tick output; its run-queries subcommand (loop v3 query
+  # escrow) opens the three canonical DBs STRICTLY read-only (ATTACH ?mode=ro +
+  # PRAGMA query_only + authorizer denying ATTACH/DETACH). loop_enable.sh is
+  # read-only (prints commands, never runs them), loop_status.sh is read-only.
