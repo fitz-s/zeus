@@ -25,10 +25,11 @@ COMMANDS
         Start one daemon (short label, e.g. "live-trading") or all of
         them. REFUSES when the live checkout's src/ or config/ has
         uncommitted changes, OR when HEAD != origin/<branch> (unpushed) —
-        printing exactly what is dirty / unpushed. Pass --allow-dirty to
-        bypass only the git-surface gate with a loud warning. live-trading
-        restarts also reload the live prerequisite sidecars before preflight,
-        and still require scripts/check_live_restart_preflight.py to pass.
+        printing exactly what is dirty / unpushed. Pass --allow-unpushed to
+        bypass only the pushed-state gate for an otherwise clean tree, or
+        --allow-dirty to bypass the full git-surface gate with a loud warning.
+        live-trading restarts also reload the live prerequisite sidecars before
+        preflight, and still require scripts/check_live_restart_preflight.py to pass.
 
 SAFETY
     Read-mostly: the only state-changing action is `launchctl bootout` followed
@@ -42,6 +43,7 @@ SAFETY
     USAGE
     .venv/bin/python scripts/deploy_live.py status
     .venv/bin/python scripts/deploy_live.py restart live-trading
+    .venv/bin/python scripts/deploy_live.py restart live-trading --allow-unpushed
     .venv/bin/python scripts/deploy_live.py restart all --allow-dirty
 """
 from __future__ import annotations
@@ -626,7 +628,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _gate(allow_dirty: bool) -> tuple[bool, list[str]]:
+def _gate(allow_dirty: bool, allow_unpushed: bool = False) -> tuple[bool, list[str]]:
     """Return (ok_to_restart, blockers). ok=False means refuse."""
     try:
         _require_live_repo()
@@ -634,18 +636,26 @@ def _gate(allow_dirty: bool) -> tuple[bool, list[str]]:
         return False, [str(exc)]
     branch = current_branch()
     blockers: list[str] = []
+    dirty_blockers: list[str] = []
+    unpushed_blockers: list[str] = []
     dirty = dirty_runtime_files()
     if dirty:
         if any(line.startswith("GIT_STATUS_FAILED:") for line in dirty):
-            blockers.append("git status failed for runtime surface (fail-closed):")
+            dirty_blockers.append("git status failed for runtime surface (fail-closed):")
         else:
-            blockers.append(f"{len(dirty)} uncommitted runtime file(s) in src/ config/ scripts/ deploy/launchd/:")
-        blockers.extend(f"   {ln}" for ln in dirty)
+            dirty_blockers.append(f"{len(dirty)} uncommitted runtime file(s) in src/ config/ scripts/ deploy/launchd/:")
+        dirty_blockers.extend(f"   {ln}" for ln in dirty)
     unpushed, push_detail = unpushed_state(branch)
     if unpushed:
-        blockers.append(f"unpushed: {push_detail}")
-    if blockers and not allow_dirty:
+        unpushed_blockers.append(f"unpushed: {push_detail}")
+    if dirty_blockers and not allow_dirty:
+        blockers.extend(dirty_blockers)
+    if unpushed_blockers and not (allow_dirty or allow_unpushed):
+        blockers.extend(unpushed_blockers)
+    if blockers:
         return False, blockers
+    blockers.extend(dirty_blockers)
+    blockers.extend(unpushed_blockers)
     return True, blockers
 
 
@@ -870,17 +880,24 @@ def cmd_restart(args: argparse.Namespace) -> int:
         print(f"unknown daemon '{target}'. known: {', '.join(DAEMONS)}, or 'all'", file=sys.stderr)
         return 2
 
-    ok, blockers = _gate(args.allow_dirty)
+    ok, blockers = _gate(args.allow_dirty, args.allow_unpushed)
     if not ok:
         print("REFUSING to restart — live runtime surface is not deploy-clean:")
         for b in blockers:
             print(f"  {b}")
-        print("\nCommit + push the runtime changes, or pass --allow-dirty to override.")
+        print("\nCommit runtime changes, push HEAD, pass --allow-unpushed for a clean local HEAD, or pass --allow-dirty to override.")
         return 1
     if blockers and args.allow_dirty:
         print("!" * 64)
         print("WARNING --allow-dirty: restarting with a DIRTY / UNPUSHED live tree.")
         print("This boots uncommitted runtime code into LIVE money. Blockers:")
+        for b in blockers:
+            print(f"  {b}")
+        print("!" * 64)
+    elif blockers and args.allow_unpushed:
+        print("!" * 64)
+        print("WARNING --allow-unpushed: restarting a clean but unpushed live HEAD.")
+        print("This permits local committed runtime code into LIVE money. Blockers:")
         for b in blockers:
             print(f"  {b}")
         print("!" * 64)
@@ -992,6 +1009,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_restart = sub.add_parser("restart", help="bootstrap or kickstart a daemon (gated on clean live tree)")
     p_restart.add_argument("daemon", help="short daemon label or 'all'")
+    p_restart.add_argument("--allow-unpushed", action="store_true",
+                           help="allow clean committed HEAD that is not at origin/<branch>; dirty runtime files still block")
     p_restart.add_argument("--allow-dirty", action="store_true",
                            help="bypass the clean-tree gate (loud warning)")
     p_restart.set_defaults(func=cmd_restart)

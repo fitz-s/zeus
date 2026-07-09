@@ -527,7 +527,7 @@ def test_deploy_live_resolve_repo_fails_closed_without_live_plist(tmp_path, monk
 
 
 def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
-    """The clean-tree gate refuses a dirty/unpushed checkout and respects --allow-dirty."""
+    """The clean-tree gate refuses dirty checkout even when only unpushed is allowed."""
     dl = _load("deploy_live_smoke2", "deploy_live.py")
     # Build a throwaway git repo with an uncommitted src/ file and no remote.
     import subprocess
@@ -548,9 +548,47 @@ def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
     assert blockers  # has at least the dirty-file + unpushed blockers
     blob = " ".join(blockers)
     assert "uncommitted" in blob or "unpushed" in blob
+    ok_unpushed, unpushed_blockers = dl._gate(allow_dirty=False, allow_unpushed=True)
+    assert ok_unpushed is False
+    assert "uncommitted" in " ".join(unpushed_blockers)
     # --allow-dirty overrides the refusal.
     ok2, _ = dl._gate(allow_dirty=True)
     assert ok2 is True
+
+
+def test_deploy_live_gate_allows_clean_unpushed_without_dirty_override(tmp_path):
+    """A clean committed local HEAD can be allowed without allowing dirty files."""
+    dl = _load("deploy_live_clean_unpushed", "deploy_live.py")
+    import subprocess
+
+    repo = tmp_path / "fake_live"
+    remote = tmp_path / "remote.git"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "-C", str(tmp_path), "init", "--bare", str(remote), "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-qb", "main"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+    (repo / "src" / "x.py").write_text("# committed runtime file\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
+    (repo / "src" / "y.py").write_text("# committed but unpushed runtime file\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "local"], check=True)
+    dl.LIVE_REPO = str(repo)
+
+    ok, blockers = dl._gate(allow_dirty=False, allow_unpushed=False)
+    assert ok is False
+    assert "unpushed" in " ".join(blockers)
+
+    ok_unpushed, unpushed_blockers = dl._gate(
+        allow_dirty=False,
+        allow_unpushed=True,
+    )
+    assert ok_unpushed is True
+    assert "unpushed" in " ".join(unpushed_blockers)
 
 
 def test_deploy_live_gate_fails_closed_when_git_status_fails(monkeypatch):
@@ -1218,7 +1256,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
 
-    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
 
@@ -1269,9 +1307,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
-        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
+        *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
+        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
@@ -1373,7 +1412,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     dl = _load("deploy_live_restart_order_all", "deploy_live.py")
     calls = []
 
-    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
@@ -1432,7 +1471,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
     non_live_launches = [
-        call for call in calls[:recovery_index]
+        call for call in calls[recovery_index:preflight_index]
         if call[0] == "launch"
     ]
     assert {label for _, label in non_live_launches} == {
@@ -1444,7 +1483,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
     calls = []
 
-    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
@@ -1478,9 +1517,10 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
-        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("stop", dl.LIVE_TRADING_LABEL),
+        *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
+        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
