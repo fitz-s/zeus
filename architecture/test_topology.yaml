@@ -370,7 +370,7 @@ test_trust_policy:
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_decision_evidence_entry_emission.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_decision_evidence_persistence.py: {created: "2026-04-23", last_used: "2026-04-23"}
-    tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-05-08"}
+    tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-07-09", note: "Extended with Day0 post-peak confidence smoothing antibody: runtime fractional local-hour context interpolates hourly empirical p_high_set cells, preventing no-new-observation monitor probability cliffs at hour boundaries."}
     tests/test_diurnal_curves_empty_hk_handled.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_boot_check_writer_registry.py: {created: "2026-05-18", last_used: "2026-05-19"}
     tests/test_db.py: {created: "2026-03-30", last_used: "2026-04-25"}

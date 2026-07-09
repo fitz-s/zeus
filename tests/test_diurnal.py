@@ -4,6 +4,9 @@
 from datetime import date, datetime, timezone
 import sqlite3
 from unittest.mock import patch, MagicMock
+
+import pytest
+
 from src.signal.diurnal import get_peak_hour_context, build_day0_temporal_context
 
 @patch('src.state.db.get_world_connection')
@@ -185,6 +188,81 @@ def test_build_day0_temporal_context_prefers_observation_timestamp(mock_get_conn
     assert ctx.current_utc_timestamp == datetime(2026, 4, 1, 13, 45, tzinfo=timezone.utc)
     assert ctx.current_local_timestamp.isoformat() == "2026-04-01T09:45:00-04:00"
     assert ctx.current_local_hour == 9.75
+
+
+@patch('src.state.db.get_world_connection')
+def test_day0_temporal_context_interpolates_post_peak_confidence_within_hour(mock_get_conn):
+    """Minute-level Day0 confidence must not jump only because the hour rolled."""
+
+    monthly_confidence = {
+        12: 0.7777777777777778,
+        13: 0.9206349206349206,
+    }
+
+    class FakeConn:
+        def execute(self, query, params=()):
+            query = " ".join(query.split())
+            if "FROM diurnal_curves" in query:
+                return type("Cursor", (), {
+                    "fetchall": lambda self: [
+                        {
+                            "hour": h,
+                            "avg_temp": 24.0 + min(h, 13) - max(0, h - 13) * 0.5,
+                            "std_temp": 1.5,
+                            "p_high_set": None,
+                        }
+                        for h in range(0, 24)
+                    ]
+                })()
+            if "FROM diurnal_peak_prob" in query:
+                hour = int(params[2])
+                return type("Cursor", (), {
+                    "fetchone": lambda self: (
+                        {"p_high_set": monthly_confidence[hour]}
+                        if hour in monthly_confidence
+                        else None
+                    )
+                })()
+            if "FROM solar_daily" in query:
+                return type("Cursor", (), {"fetchone": lambda self: {
+                    "timezone": "Asia/Taipei",
+                    "sunrise_local": "2026-07-09T05:10+08:00",
+                    "sunset_local": "2026-07-09T18:48+08:00",
+                    "sunrise_utc": "2026-07-08T21:10+00:00",
+                    "sunset_utc": "2026-07-09T10:48+00:00",
+                    "utc_offset_minutes": 480,
+                    "dst_active": 0,
+                }})()
+            raise AssertionError(query)
+
+        def close(self):
+            return None
+
+    mock_get_conn.return_value = FakeConn()
+
+    before_hour = build_day0_temporal_context(
+        "Taipei",
+        date(2026, 7, 9),
+        "Asia/Taipei",
+        observation_time="2026-07-09T04:58:00+00:00",
+        observation_source="wu_icao_history",
+    )
+    at_hour = build_day0_temporal_context(
+        "Taipei",
+        date(2026, 7, 9),
+        "Asia/Taipei",
+        observation_time="2026-07-09T05:00:00+00:00",
+        observation_source="wu_icao_history",
+    )
+
+    assert before_hour is not None
+    assert at_hour is not None
+    assert before_hour.current_local_hour == pytest.approx(12 + 58 / 60)
+    assert before_hour.confidence_source == "monthly_empirical"
+    assert at_hour.confidence_source == "monthly_empirical"
+    assert before_hour.post_peak_confidence > 0.91
+    assert at_hour.post_peak_confidence == pytest.approx(0.9206349206349206)
+    assert abs(at_hour.post_peak_confidence - before_hour.post_peak_confidence) < 0.006
 
 
 @patch('src.state.db.get_world_connection')
