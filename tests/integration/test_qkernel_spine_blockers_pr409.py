@@ -13,6 +13,7 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
+# Last reused/audited: 2026-07-08
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -3054,6 +3055,104 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         )
         assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
+
+
+def test_day0_monotone_hard_fact_overlays_stale_served_proof_q():
+    """Day0 hard facts may dominate the probabilistic proof q at overlay time."""
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    served_yes_q = [0.05, 0.80, 0.10, 0.05]
+    served_yes_lcb = [0.01, 0.65, 0.03, 0.01]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.95, 0.95, 0.95, 0.95],
+        no_asks=[0.99, 0.90, 0.99, 0.99],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.99, 0.90, 0.99, 0.99],
+    )
+    payload = _payload(
+        mu=20.0,
+        sigma=1.0,
+        members=[19.8, 20.0, 20.2, 20.4, 20.6],
+    )
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "city": CITY,
+            "target_date": TARGET_DATE,
+            "metric": METRIC,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "source": "test_day0_observation",
+            "high_so_far": 20.25,
+            "rounded_value": 20.0,
+            "observation_time": "2026-06-14T12:00:00+00:00",
+            "observation_available_at": "2026-06-14T12:01:00+00:00",
+        }
+    )
+
+    res = _drive(family, proofs, payload)
+
+    assert res.no_trade_reason is None
+    assert res.selected_proof is not None
+    assert res.selected_proof.direction == "buy_no"
+    assert res.selected_proof.candidate.condition_id == "cond-1"
+    assert res.selected_proof.q_posterior == pytest.approx(1.0)
+    assert res.selected_proof.q_lcb_5pct == pytest.approx(1.0)
+    cert = res.selected_proof.qkernel_execution_economics
+    assert cert is not None
+    assert cert["pre_qkernel_q_posterior"] == pytest.approx(0.20)
+    assert cert["pre_qkernel_q_lcb_5pct"] == pytest.approx(0.18)
+    assert cert["selection_guard_cell_key"] == "day0_monotone_hard_fact_q_lcb"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "OOF_WILSON_95",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        },
+        {
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+        },
+        {
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "q_lcb_guard_abstained": "",
+        },
+    ],
+)
+def test_qkernel_overlay_day0_hard_fact_requires_paired_guard_fields(updates):
+    cert = {
+        "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+    }
+    cert.update(updates)
+
+    reason = bridge._qkernel_served_belief_consistency_rejection_reason(
+        qkernel_execution_economics=cert,
+        qkernel_q_point=1.0,
+        qkernel_q_lcb=1.0,
+        proof_q_point=0.20,
+        proof_q_lcb=0.18,
+    )
+
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
 
 
 def test_qkernel_modal_guards_follow_served_joint_q_not_predictive_mu(monkeypatch):

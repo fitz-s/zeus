@@ -1787,6 +1787,7 @@ def _overlay_spine_economics_onto_proof_with_reason(
     qkernel_execution_economics["q_lcb_authority"] = "qkernel_payoff_bound"
     qkernel_execution_economics["probability_authority"] = "qkernel_payoff_direct_route"
     served_belief_reason = _qkernel_served_belief_consistency_rejection_reason(
+        qkernel_execution_economics=qkernel_execution_economics,
         qkernel_q_point=qkernel_q_point,
         qkernel_q_lcb=qkernel_q_lcb,
         proof_q_point=proof_q_point,
@@ -1881,6 +1882,7 @@ def _qkernel_selection_guard_rejection_reason(
 
 def _qkernel_served_belief_consistency_rejection_reason(
     *,
+    qkernel_execution_economics: Mapping[str, Any],
     qkernel_q_point: float,
     qkernel_q_lcb: float,
     proof_q_point: float,
@@ -1901,19 +1903,83 @@ def _qkernel_served_belief_consistency_rejection_reason(
         and 0.0 <= proof_q_lcb <= proof_q_point <= 1.0
     ):
         return "QKERNEL_SERVED_BELIEF_INVALID"
+    day0_hard_fact_override = _qkernel_day0_monotone_hard_fact_override_allowed(
+        qkernel_execution_economics,
+        qkernel_q_point=qkernel_q_point,
+        qkernel_q_lcb=qkernel_q_lcb,
+        tolerance=tolerance,
+    )
     if not math.isclose(qkernel_q_point, proof_q_point, rel_tol=1e-9, abs_tol=tolerance):
+        if day0_hard_fact_override:
+            return ""
         return (
             "QKERNEL_SERVED_BELIEF_POINT_MISMATCH:"
             f"payoff_q_point={qkernel_q_point:.9f}:"
             f"served_q_point={proof_q_point:.9f}"
         )
     if qkernel_q_lcb > proof_q_lcb + tolerance:
+        if day0_hard_fact_override:
+            return ""
         return (
             "QKERNEL_SERVED_BELIEF_LCB_LOOSENED:"
             f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
             f"served_q_lcb={proof_q_lcb:.9f}"
         )
     return ""
+
+
+def _qkernel_day0_monotone_hard_fact_override_allowed(
+    qkernel_execution_economics: Mapping[str, Any],
+    *,
+    qkernel_q_point: float,
+    qkernel_q_lcb: float,
+    tolerance: float = 1e-6,
+) -> bool:
+    """Allow Day0 monotone hard facts to dominate the pre-guard proof q.
+
+    The generic served-belief rule is intentionally strict: qkernel must not mint a
+    new point probability while overlaying an executable proof. Day0 monotone hard
+    facts are the exception because the observed running extreme is stronger than the
+    remaining-day probabilistic proof. Only the explicit hard-fact cell may override,
+    and only when the qkernel emits the degenerate 0/1 probability that the monotone
+    fact proves.
+    """
+
+    if (
+        str(qkernel_execution_economics.get("q_lcb_guard_basis") or "").strip()
+        != "DAY0_REMAINING_DAY_Q_LCB"
+        or str(qkernel_execution_economics.get("selection_guard_basis") or "").strip()
+        != "DAY0_REMAINING_DAY_Q_LCB"
+    ):
+        return False
+    if (
+        str(qkernel_execution_economics.get("q_lcb_guard_cell_key") or "").strip()
+        != "day0_monotone_hard_fact_q_lcb"
+        or str(qkernel_execution_economics.get("selection_guard_cell_key") or "").strip()
+        != "day0_monotone_hard_fact_q_lcb"
+    ):
+        return False
+
+    def _explicit_false(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value is False
+        if value in (None, ""):
+            return False
+        return str(value).strip().lower() in {"0", "false", "no"}
+
+    for key in ("q_lcb_guard_abstained", "selection_guard_abstained"):
+        if not _explicit_false(qkernel_execution_economics.get(key)):
+            return False
+    if not (
+        math.isfinite(qkernel_q_point)
+        and math.isfinite(qkernel_q_lcb)
+        and math.isclose(qkernel_q_point, qkernel_q_lcb, rel_tol=1e-9, abs_tol=tolerance)
+    ):
+        return False
+    return (
+        math.isclose(qkernel_q_point, 0.0, rel_tol=0.0, abs_tol=tolerance)
+        or math.isclose(qkernel_q_point, 1.0, rel_tol=0.0, abs_tol=tolerance)
+    )
 
 
 def _qkernel_execution_direction_admitted(

@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-01
+# Last reused/audited: 2026-07-08
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -1198,6 +1198,77 @@ def test_day0_absorbing_hard_fact_route_fdr_passes_before_qkernel_false_edge():
     assert fdr is not None
     assert fdr.passed is True
     assert fdr.selected_post_fdr == ("h7",)
+
+
+def test_day0_monotone_hard_fact_cert_can_dominate_served_proof_q():
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(
+        q_lcb_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        selection_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        q_dot_payoff=1.0,
+    )
+
+    assert (
+        era._qkernel_cert_served_belief_rejection_reason(
+            cert,
+            proof_q_point=0.9090344934581372,
+            proof_q_lcb=0.5,
+        )
+        is None
+    )
+
+
+def test_non_hard_fact_cert_still_rejects_served_proof_q_raise():
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(q_dot_payoff=1.0)
+
+    reason = era._qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=0.9090344934581372,
+        proof_q_lcb=0.5,
+    )
+
+    assert reason is not None
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "q_lcb_guard_cell_key": "day0_remaining_day_q_lcb",
+            "selection_guard_basis": "OOF_WILSON_95",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+        },
+        {
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_remaining_day_q_lcb",
+        },
+        {
+            "q_lcb_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_cell_key": "day0_monotone_hard_fact_q_lcb",
+            "selection_guard_abstained": None,
+        },
+    ],
+)
+def test_day0_hard_fact_cert_requires_paired_explicit_guard_fields(updates):
+    cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
+    cert.update(
+        q_lcb_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        selection_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        q_dot_payoff=1.0,
+    )
+    cert.update(updates)
+
+    reason = era._qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=0.9090344934581372,
+        proof_q_lcb=0.5,
+    )
+
+    assert reason is not None
+    assert reason.startswith("QKERNEL_SERVED_BELIEF_POINT_MISMATCH")
 
 
 def test_day0_route_fdr_uses_qkernel_empirical_false_edge_when_present():
