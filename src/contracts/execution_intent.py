@@ -810,6 +810,7 @@ class DecisionSourceContext:
     forecast_fetch_time: str = ""
     forecast_available_at: str = ""
     raw_payload_hash: str = ""
+    posterior_identity_hash: str = ""
     degradation_level: str = ""
     forecast_source_role: str = ""
     authority_tier: str = ""
@@ -866,6 +867,7 @@ class DecisionSourceContext:
             forecast_fetch_time=_context_text(context.get("forecast_fetch_time") or context.get("fetch_time")),
             forecast_available_at=_context_text(context.get("forecast_available_at") or context.get("available_at")),
             raw_payload_hash=_context_text(context.get("raw_payload_hash")),
+            posterior_identity_hash=_context_text(context.get("posterior_identity_hash")),
             degradation_level=_context_text(context.get("degradation_level")),
             forecast_source_role=_context_text(context.get("forecast_source_role")),
             authority_tier=_context_text(context.get("authority_tier")),
@@ -1037,7 +1039,7 @@ class DecisionSourceContext:
         return tuple(errors)
 
     def capability_details(self) -> dict[str, str]:
-        return {
+        details = {
             "source_id": self.source_id,
             "model_family": self.model_family,
             "forecast_issue_time": self.forecast_issue_time,
@@ -1051,6 +1053,9 @@ class DecisionSourceContext:
             "decision_time": self.decision_time,
             "decision_time_status": self.decision_time_status,
         }
+        if self.posterior_identity_hash:
+            details["posterior_identity_hash"] = self.posterior_identity_hash
+        return details
 
 
 @dataclass(frozen=True)

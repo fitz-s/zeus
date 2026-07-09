@@ -30,6 +30,7 @@ import contextlib
 import datetime
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -43,6 +44,14 @@ UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
     "UNKNOWN",
     "REVIEW_REQUIRED",
 )
+
+
+def _strict_live_entry_q_version_required() -> bool:
+    return (
+        str(os.environ.get("ZEUS_ENTRY_Q_VERSION_STRICT", "")).lower()
+        in {"1", "true", "yes", "on"}
+        or str(os.environ.get("XPC_SERVICE_NAME", "")) == "com.zeus.live-trading"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -825,9 +834,9 @@ def insert_command(
 
     q_version (SCH-W1.2-ORDER-STATE): the forecast_posteriors.posterior_identity_hash
     of the q this command's decision was made against, write-once at creation.
-    Nullable — NULL BY RULE for commands with no fresh decision-basis q (e.g.
-    reconciliation backfills, which write venue_commands directly and never call
-    this function). Never re-stamped after insert.
+    Required for live-mode ENTRY commands at this repo boundary; nullable only for
+    non-entry commands, offline fixtures/replay, and direct recovery/backfill
+    writes that intentionally bypass this function. Never re-stamped after insert.
     """
     # MAJOR-1: enum-grammar validation at the repo seam. Imported lazily so
     # this module stays import-light and the type module doesn't have to
@@ -845,6 +854,12 @@ def insert_command(
 
     snapshot_id_value = snapshot_id.strip() if isinstance(snapshot_id, str) else snapshot_id
     q_version_value = q_version.strip() or None if isinstance(q_version, str) else q_version
+    if (
+        intent_kind == _IntentKind.ENTRY.value
+        and q_version_value is None
+        and _strict_live_entry_q_version_required()
+    ):
+        raise ValueError("ENTRY venue command requires non-empty q_version")
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,
