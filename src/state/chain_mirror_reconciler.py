@@ -21,6 +21,10 @@ Public surface:
         writer; also called directly by src.state.chain_reconciliation's size-mismatch
         branch (P0b) as the ungated fallback when no canonical baseline is available.
     reconcile(conn_trades, conn_forecasts, chain_by_asset, *, apply, now) -> ReconcileReport
+    run_cycle() — scheduler entrypoint (fetches chain positions + DB conns,
+        calls reconcile(apply=True), commits). R4-b: moved from
+        src.main::_chain_mirror_reconcile_cycle (main.py registers it on a
+        10-minute APScheduler cadence).
 
 No network I/O and no venue mutation happens in this module. The CLI wrapper
 (scripts/reconcile_chain_mirror.py) owns adapter construction; this module only
@@ -1216,3 +1220,70 @@ def reconcile(
             report.errors.append({"asset": asset, "error": str(exc)})
 
     return report
+
+
+def run_cycle() -> None:
+    """Scheduler entrypoint (R4-b extraction from src/main.py::_chain_mirror_reconcile_cycle).
+
+    Standing chain-mirror invariant (operator directive 2026-07-04): the local
+    position book must mirror on-chain state. Reads the wallet's full position
+    set from the venue data-api (read-only GET /positions — no order
+    construction, no signing, no redeem submission), diffs every
+    position_current row and every chain token per
+    docs/rebuild/chain_mirror_state_model_2026-07-04.md, and auto-applies the
+    two safe repair classes: (a) settlement closes when a graded position's
+    held token is absent from chain and its market has a VERIFIED
+    settlement_outcomes row, and (b) chain_shares corrections when a held
+    token's chain size differs from the local record. Every other class
+    (foreign tokens, missing local rows, open-but-absent ambiguity) is logged
+    as a finding only — never written.
+
+    This is the "no row stays quarantined past one reconcile cycle" backstop:
+    it reclassifies every local row via chain truth on every tick regardless
+    of its current phase, so a quarantined row with a gradable chain outcome
+    drains into settled within one cycle without requiring every quarantine
+    writer to be rewired (see design doc §5 for the scoped follow-up).
+
+    Called from the main daemon's ``chain_mirror_reconcile`` scheduler job
+    (10-minute cadence). Behavior-preserving relocation — was inline in
+    src/main.py.
+    """
+    from src.config import get_mode
+    from src.data.polymarket_client import PolymarketClient
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection
+
+    if get_mode() != "live":
+        return
+    try:
+        raw_positions = PolymarketClient().get_positions_from_api() or []
+    except Exception as exc:
+        logger.warning("chain_mirror_reconcile: chain read failed, skipping cycle: %s", exc)
+        return
+
+    chain_by_asset = load_chain_positions_by_asset(raw_positions)
+    conn_trades = get_trade_connection(write_class="live")
+    conn_trades.row_factory = sqlite3.Row
+    conn_forecasts = None
+    try:
+        try:
+            # Genuinely read-only (mode=ro) — grading never writes to
+            # zeus-forecasts.db (INV-37: single-DB writes, zeus_trades.db only).
+            conn_forecasts = get_forecasts_connection_read_only()
+            conn_forecasts.row_factory = sqlite3.Row
+        except Exception as exc:
+            logger.warning(
+                "chain_mirror_reconcile: forecasts connection unavailable, "
+                "grading skipped this cycle: %s", exc,
+            )
+            conn_forecasts = None
+        report = reconcile(conn_trades, conn_forecasts, chain_by_asset, apply=True)
+        conn_trades.commit()
+        if report.applied or report.by_classification():
+            logger.info(
+                "chain_mirror_reconcile: applied=%d counts=%s",
+                report.applied, report.by_classification(),
+            )
+    finally:
+        conn_trades.close()
+        if conn_forecasts is not None:
+            conn_forecasts.close()

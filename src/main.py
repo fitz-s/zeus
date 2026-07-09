@@ -5167,65 +5167,12 @@ def _edli_command_recovery_cycle() -> None:
 
 @_scheduler_job("chain_mirror_reconcile")
 def _chain_mirror_reconcile_cycle() -> None:
-    """Standing chain-mirror invariant (operator directive 2026-07-04): the
-    local position book must mirror on-chain state.
+    """Scheduler hook — body owned by src.state.chain_mirror_reconciler (R4-b
+    extraction, 2026-07-08). See that module's ``run_cycle`` docstring for the
+    chain-mirror invariant (operator directive 2026-07-04)."""
+    from src.state.chain_mirror_reconciler import run_cycle
 
-    Reads the wallet's full position set from the venue data-api (read-only
-    GET /positions — no order construction, no signing, no redeem
-    submission), diffs every position_current row and every chain token per
-    docs/rebuild/chain_mirror_state_model_2026-07-04.md, and auto-applies the
-    two safe repair classes: (a) settlement closes when a graded position's
-    held token is absent from chain and its market has a VERIFIED
-    settlement_outcomes row, and (b) chain_shares corrections when a held
-    token's chain size differs from the local record. Every other class
-    (foreign tokens, missing local rows, open-but-absent ambiguity) is
-    logged as a finding only — never written.
-
-    This is the "no row stays quarantined past one reconcile cycle" backstop:
-    it reclassifies every local row via chain truth on every tick regardless
-    of its current phase, so a quarantined row with a gradable chain outcome
-    drains into settled within one cycle without requiring every quarantine
-    writer to be rewired (see design doc §5 for the scoped follow-up).
-    """
-    if get_mode() != "live":
-        return
-    try:
-        from src.data.polymarket_client import PolymarketClient
-        from src.state.chain_mirror_reconciler import load_chain_positions_by_asset, reconcile
-        from src.state.db import get_forecasts_connection_read_only, get_trade_connection
-
-        raw_positions = PolymarketClient().get_positions_from_api() or []
-    except Exception as exc:
-        logger.warning("chain_mirror_reconcile: chain read failed, skipping cycle: %s", exc)
-        return
-
-    chain_by_asset = load_chain_positions_by_asset(raw_positions)
-    conn_trades = get_trade_connection(write_class="live")
-    conn_trades.row_factory = sqlite3.Row
-    conn_forecasts = None
-    try:
-        try:
-            # Genuinely read-only (mode=ro) — grading never writes to
-            # zeus-forecasts.db (INV-37: single-DB writes, zeus_trades.db only).
-            conn_forecasts = get_forecasts_connection_read_only()
-            conn_forecasts.row_factory = sqlite3.Row
-        except Exception as exc:
-            logger.warning(
-                "chain_mirror_reconcile: forecasts connection unavailable, "
-                "grading skipped this cycle: %s", exc,
-            )
-            conn_forecasts = None
-        report = reconcile(conn_trades, conn_forecasts, chain_by_asset, apply=True)
-        conn_trades.commit()
-        if report.applied or report.by_classification():
-            logger.info(
-                "chain_mirror_reconcile: applied=%d counts=%s",
-                report.applied, report.by_classification(),
-            )
-    finally:
-        conn_trades.close()
-        if conn_forecasts is not None:
-            conn_forecasts.close()
+    run_cycle()
 
 
 def _edli_boot_command_recovery_once() -> None:
