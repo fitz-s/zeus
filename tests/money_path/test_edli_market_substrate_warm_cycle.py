@@ -940,9 +940,14 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
 
     monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", raising=False)
     monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_LOCK_WAIT_SECONDS", raising=False)
 
     assert substrate_observer._priority_refresh_interval_seconds() == pytest.approx(20.0)
     assert substrate_observer._priority_refresh_budget_seconds() == pytest.approx(18.0)
+    assert substrate_observer._priority_refresh_lock_wait_seconds() == pytest.approx(6.0)
+    assert "timeout=lock_wait_s" in inspect.getsource(
+        substrate_observer._edli_money_path_substrate_priority_cycle
+    )
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():

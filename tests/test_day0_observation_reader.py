@@ -1,7 +1,7 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-07-08
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
-# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Lifecycle: created=2026-05-22; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
 # Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
 """Tests for src/data/day0_observation_reader.py — Root C regression antibody.
@@ -225,6 +225,7 @@ def test_context_reader_builds_executable_wu_context_without_temp_current():
             running_min=running_min,
             temp_current=None,
             station_id="SAEZ",
+            imported_at=f"2026-07-01T{hour + 3:02d}:11:00+00:00",
             authority="VERIFIED",
             training_allowed=1,
             causality_status="OK",
@@ -252,6 +253,93 @@ def test_context_reader_builds_executable_wu_context_without_temp_current():
     assert obs.high_so_far == 15.0
     assert obs.low_so_far == 10.0
     assert obs.current_temp == 10.0
+    assert obs.observation_available_at == "2026-07-01T08:11:00+00:00"
+    assert obs.provider_reported_time == "canonical_observation_instants"
+    assert obs.source_role == "historical_hourly"
+    assert obs.source_authority == "VERIFIED"
+    assert obs.data_version == "v1.wu-native"
+    assert obs.training_allowed is True
+    assert obs.causality_status == "OK"
+
+
+def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            timezone_name TEXT NOT NULL,
+            local_hour REAL,
+            local_timestamp TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            temp_current REAL,
+            running_max REAL,
+            running_min REAL,
+            authority TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            training_allowed INTEGER DEFAULT 1,
+            causality_status TEXT DEFAULT 'OK',
+            source_role TEXT
+        )
+        """
+    )
+    for hour in range(6):
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_hour,
+                local_timestamp, utc_timestamp, temp_current, running_max, running_min,
+                authority, data_version, training_allowed, causality_status, source_role
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Hong Kong",
+                "2026-07-01",
+                "hko_hourly_accumulator",
+                "Asia/Hong_Kong",
+                float(hour),
+                f"2026-07-01T{hour:02d}:00:00+08:00",
+                f"2026-06-30T{16 + hour:02d}:00:00+00:00",
+                27.0 + hour,
+                27.0 + hour,
+                27.0,
+                "ICAO_STATION_NATIVE",
+                "v1.hko-native",
+                0,
+                "OK",
+                "runtime_monitoring",
+            ),
+        )
+    conn.commit()
+
+    class CityLike:
+        name = "Hong Kong"
+        timezone = "Asia/Hong_Kong"
+        settlement_unit = "C"
+        settlement_source_type = "hko"
+        wu_station = "HKO"
+
+    obs = read_day0_observation_context_from_instants(
+        conn,
+        city=CityLike(),
+        target_date="2026-07-01",
+        decision_time_utc=datetime(2026, 6, 30, 23, 0, tzinfo=timezone.utc),
+    )
+
+    assert obs is not None
+    assert obs.source == "hko_hourly_accumulator"
+    assert obs.station_id == ""
+    assert obs.unit == "C"
+    assert obs.observation_available_at == "2026-06-30T23:00:00+00:00"
+    assert obs.source_role == "runtime_monitoring"
+    assert obs.source_authority == "ICAO_STATION_NATIVE"
+    assert obs.data_version == "v1.hko-native"
+    assert obs.training_allowed is False
+    assert obs.causality_status == "OK"
+    assert obs.current_temp == 32.0
 
 
 # ---------------------------------------------------------------------------
