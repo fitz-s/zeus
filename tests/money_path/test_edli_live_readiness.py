@@ -3750,7 +3750,6 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
     import httpx
 
     import src.data.polymarket_client as polymarket_client
-    import src.main as main
     from src.events import reactor
 
     captured = {}
@@ -3774,7 +3773,7 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
     # cold-handshake floor is expressible (NOT under an artificially tight guard).
     monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "6.0")
 
-    main._edli_reset_pre_submit_jit_clob_client()
+    reactor._edli_reset_pre_submit_jit_clob_client()
     try:
         provider = reactor._edli_pre_submit_jit_book_quote_provider()
         assert provider("yes-1")["hash"] == "book-hash"
@@ -3788,7 +3787,7 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
             "must stay under outer guard 6.0s"
         )
     finally:
-        main._edli_reset_pre_submit_jit_clob_client()
+        reactor._edli_reset_pre_submit_jit_clob_client()
 
 
 def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):

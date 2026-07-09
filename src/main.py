@@ -4955,121 +4955,18 @@ def _edli_pre_submit_clob_timeout_seconds() -> float:
 
 
 
-def _edli_pre_submit_jit_book_timeout():
-    """STRICT connect/read timeout for the submit-time JIT ``/book`` fetch (GATE #84).
-
-    Runs inside the pre-submit guard's worker thread, so it must fail-closed BEFORE
-    the outer daemon guard (the 2026-06-19 invariant). httpcore applies the connect
-    timeout to ``connect_tcp`` AND ``start_tls`` separately, so the worst-case connect
-    cost is ``2*connect``; bound ``2*connect + read + write + pool`` strictly under the
-    outer guard. With outer=6.0 this yields connect≈2.25 (worst case 2*2.25+0.85+0.25+
-    0.10 = 5.70 < 6.0). This connect budget is a FAIL-CLOSED bound, not the normal
-    path — the boot pre-warm + keepalive pinger keep the socket warm so the submit-time
-    fetch reuses an established connection (~0.66s, measured forward 2026-06-22) and
-    does not pay a cold handshake here. Cold handshakes (~2.2-2.7s) are absorbed by the
-    generous warmup timeout OUTSIDE the worker.
-    """
-
-    import httpx
-
-    outer = _edli_pre_submit_clob_timeout_seconds()
-    # A 0.55s read cap was below observed live /book tail latency and caused the
-    # armed submit path to fall back to stale DB feasibility rows. Keep the full
-    # worst-case httpcore budget inside the outer guard, but give the warm read
-    # enough room to complete on real CLOB tails.
-    read, write, pool = 1.75, 0.20, 0.08
-    connect = max(0.25, min(1.80, (outer - read - write - pool - 0.25) / 2.0))
-    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
-
-
-
-
-def _edli_pre_submit_jit_warmup_timeout():
-    """GENEROUS connect timeout for the JIT client's boot pre-warm + keepalive ping.
-
-    Used ONLY by ``_edli_prewarm_pre_submit_jit_client`` / the pinger tick, which run
-    OUTSIDE the submit worker, so a connect budget large enough to absorb a cold TLS
-    handshake (~2.2-2.7s, with margin) does not threaten the pre-submit outer guard.
-    The read budget stays tight (the ``/time`` health probe is tiny).
-    """
-
-    import httpx
-
-    return httpx.Timeout(connect=4.5, read=0.75, write=0.25, pool=0.10)
-
-
-_PRE_SUBMIT_JIT_CLOB_CLIENT = None
-_PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK = threading.Lock()
-
-
-def _edli_reset_pre_submit_jit_clob_client():
-    """Drop and close the warm JIT CLOB client (clean shutdown + test isolation)."""
-
-    global _PRE_SUBMIT_JIT_CLOB_CLIENT
-    with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
-        client = _PRE_SUBMIT_JIT_CLOB_CLIENT
-        _PRE_SUBMIT_JIT_CLOB_CLIENT = None
-    if client is not None:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001 - best-effort close on shutdown
-            pass
-
-
-def _edli_pre_submit_jit_clob_client():
-    """Return a WARM, reused CLOB client for the submit-time JIT ``/book`` fetch.
-
-    Reusing one client keeps its TLS connection warm (httpx keepalive) across
-    submit candidates, so each fetch skips the ~2.2-2.7s cold handshake that timed
-    out 118/120 submits (warm reuse drops the fetch to ~0.66s, measured forward
-    2026-06-22). Thread-safe: httpx.Client is safe to share across the pre-submit
-    guard's worker threads; construction is lock-guarded (double-checked).
-    """
-
-    global _PRE_SUBMIT_JIT_CLOB_CLIENT
-    client = _PRE_SUBMIT_JIT_CLOB_CLIENT
-    if client is None:
-        with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
-            client = _PRE_SUBMIT_JIT_CLOB_CLIENT
-            if client is None:
-                from src.data.polymarket_client import (
-                    PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
-                    PolymarketClient,
-                )
-
-                client = PolymarketClient(
-                    public_http_timeout=_edli_pre_submit_jit_book_timeout(),
-                    public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
-                )
-                _PRE_SUBMIT_JIT_CLOB_CLIENT = client
-    return client
-
-
-def _edli_prewarm_pre_submit_jit_client() -> bool:
-    """Construct the warm JIT CLOB client and complete a cold TLS handshake OUTSIDE
-    the submit worker (boot + keepalive pinger). Uses the generous warmup timeout so
-    a slow cold handshake is absorbed here, never on the money path. Fail-soft."""
-
-    try:
-        client = _edli_pre_submit_jit_clob_client()
-        ok = client.warm_public_connection(timeout=_edli_pre_submit_jit_warmup_timeout())
-        return bool(ok)
-    except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block boot
-        return False
-
-
 @_scheduler_job("edli_presubmit_jit_keepalive")
 def _edli_pre_submit_jit_keepalive_tick() -> None:
-    """Keepalive pinger: keep the submit-time JIT CLOB connection warm across reactor
-    cycles (keepalive_expiry=90s > 60s cycle) so an edge-positive submit candidate
-    never pays a cold TLS handshake at the pre-submit gate. Read-only /time probe;
-    touches NO trading state; logs success/failure only (GATE #84, 2026-06-22)."""
+    """Scheduler hook -- body owned by src.events.reactor (R4-b4 pre-submit-JIT
+    cluster extraction, 2026-07-08) as ``run_edli_presubmit_jit_keepalive_cycle``.
+    The warm CLOB client singleton (construct/reset) moved with it: R4-b3 kept
+    it in main.py because it was shared with this pinger; now that the pinger
+    has moved too, every consumer (this tick + reactor's book-quote provider)
+    lives in the same module, so the singleton has no more cross-module reader.
+    """
+    from src.events.reactor import run_edli_presubmit_jit_keepalive_cycle
 
-    warmed = _edli_prewarm_pre_submit_jit_client()
-    if warmed:
-        logger.debug("pre-submit JIT keepalive: connection warm")
-    else:
-        logger.warning("pre-submit JIT keepalive: warm-up probe failed (will retry next tick)")
+    run_edli_presubmit_jit_keepalive_cycle()
 
 
 

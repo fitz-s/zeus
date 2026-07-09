@@ -47,8 +47,9 @@ def test_jit_book_strict_timeout_fails_closed_before_outer_guard_with_double_app
     so the worst-case connect cost is 2*connect. 2*connect + read + write + pool must
     stay strictly under the outer daemon guard so the inner venue IO times out FIRST."""
     import src.main as main
+    from src.events import reactor
 
-    t = main._edli_pre_submit_jit_book_timeout()
+    t = reactor._edli_pre_submit_jit_book_timeout()
     outer = main._edli_pre_submit_clob_timeout_seconds()
 
     assert t.connect and t.connect > 0
@@ -66,9 +67,9 @@ def test_jit_warmup_timeout_connect_clears_cold_handshake_floor():
     """The pre-warm/pinger run OUTSIDE the submit worker and must give a cold TLS
     handshake (~2.2-2.7s measured) enough connect budget to complete there, so the
     submit-time fetch reuses an already-warm connection."""
-    import src.main as main
+    from src.events import reactor
 
-    w = main._edli_pre_submit_jit_warmup_timeout()
+    w = reactor._edli_pre_submit_jit_warmup_timeout()
     assert w.connect and w.connect > 2.7, (
         f"warmup connect {w.connect} must exceed the cold-handshake floor (~2.7s)"
     )
@@ -85,7 +86,7 @@ def test_jit_client_limits_keepalive_spans_reactor_cycle():
 def test_jit_book_provider_reuses_warm_client_across_calls(monkeypatch):
     """The provider must construct the CLOB client AT MOST ONCE across repeated
     fetches (warm reuse), not a fresh cold-handshaking client per call."""
-    import src.main as main
+    from src.events import reactor
     import src.data.polymarket_client as pmc
 
     constructed = {"count": 0}
@@ -104,14 +105,11 @@ def test_jit_book_provider_reuses_warm_client_across_calls(monkeypatch):
             pass
 
     monkeypatch.setattr(pmc, "PolymarketClient", _StubClient)
-    main._edli_reset_pre_submit_jit_clob_client()
+    reactor._edli_reset_pre_submit_jit_clob_client()
     try:
-        # R4-b3 (2026-07-08): _edli_pre_submit_jit_book_quote_provider moved
-        # from src/main.py to src.events.reactor with the reactor+prune
-        # cluster; the warm-client reset/construct primitives it wraps stay
-        # in main.py (shared with the boot pre-warm + keepalive pinger).
-        from src.events import reactor
-
+        # R4-b4 (2026-07-08): _edli_pre_submit_jit_book_quote_provider (R4-b3)
+        # and the warm-client reset/construct primitives it wraps (R4-b4) both
+        # now live in src.events.reactor -- no more cross-module singleton.
         fetch = reactor._edli_pre_submit_jit_book_quote_provider()
         for _ in range(3):
             book = fetch("token-xyz")
@@ -121,13 +119,13 @@ def test_jit_book_provider_reuses_warm_client_across_calls(monkeypatch):
             "fetches — each construction is a cold TLS handshake (the regression)"
         )
     finally:
-        main._edli_reset_pre_submit_jit_clob_client()
+        reactor._edli_reset_pre_submit_jit_clob_client()
 
 
 def test_prewarm_uses_warmup_timeout_and_keepalive_tick_is_fail_soft(monkeypatch):
     """Pre-warm must warm the connection with the GENEROUS warmup timeout; the
     keepalive tick must never raise even if the probe fails (fail-soft)."""
-    import src.main as main
+    from src.events import reactor
     import src.data.polymarket_client as pmc
 
     seen = {"timeouts": [], "raise": False}
@@ -149,16 +147,16 @@ def test_prewarm_uses_warmup_timeout_and_keepalive_tick_is_fail_soft(monkeypatch
             pass
 
     monkeypatch.setattr(pmc, "PolymarketClient", _StubClient)
-    main._edli_reset_pre_submit_jit_clob_client()
+    reactor._edli_reset_pre_submit_jit_clob_client()
     try:
-        assert main._edli_prewarm_pre_submit_jit_client() is True
-        warmup = main._edli_pre_submit_jit_warmup_timeout()
+        assert reactor._edli_prewarm_pre_submit_jit_client() is True
+        warmup = reactor._edli_pre_submit_jit_warmup_timeout()
         assert seen["timeouts"] and seen["timeouts"][0].connect == warmup.connect, (
             "pre-warm must pass the generous warmup timeout to warm_public_connection"
         )
         # Fail-soft: a raising probe must not propagate out of the keepalive tick.
         seen["raise"] = True
-        main._edli_reset_pre_submit_jit_clob_client()
-        main._edli_pre_submit_jit_keepalive_tick()  # must not raise
+        reactor._edli_reset_pre_submit_jit_clob_client()
+        reactor.run_edli_presubmit_jit_keepalive_cycle()  # must not raise
     finally:
-        main._edli_reset_pre_submit_jit_clob_client()
+        reactor._edli_reset_pre_submit_jit_clob_client()
