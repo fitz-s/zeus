@@ -2970,12 +2970,39 @@ def _execute_live_exit(
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
 
-    snapshot_context = _latest_or_capture_exit_snapshot_context(
-        conn,
-        clob,
-        position,
-        token_id,
-    )
+    try:
+        snapshot_context = _latest_or_capture_exit_snapshot_context(
+            conn,
+            clob,
+            position,
+            token_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
+        snapshot_error = (
+            f"exit_executable_snapshot_error:{type(exc).__name__}:{str(exc)[:400]}"
+        )
+        _mark_exit_retry(
+            position,
+            reason=snapshot_reason,
+            error=snapshot_error,
+            conn=conn,
+        )
+        if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=snapshot_reason,
+                error=snapshot_error,
+            )
+            log_exit_retry_event(
+                conn,
+                position,
+                reason=snapshot_reason,
+                error=snapshot_error,
+            )
+        return "exit_blocked: executable_snapshot_error"
     dust_error = _below_snapshot_min_order_error(position, snapshot_context)
     if dust_error:
         dust_reason = f"{exit_context.exit_reason} [DUST: {dust_error}]"
