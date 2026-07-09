@@ -565,7 +565,7 @@ def _verify_actionable_qkernel_economics(
             "actionable qkernel optimal_stake_usd must be positive"
         )
     try:
-        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
         max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001

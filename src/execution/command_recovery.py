@@ -5411,10 +5411,25 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
     return [_dict_row(row) for row in rows]
 
 
-def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], list[object]]:
+# R2-core hole closure (a) (R0 verifier finding; docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+# §E R2 brief item 4a): the phases this repair ever writes a `settled`/
+# `economically_closed` terminal_phase into -- the two phases
+# src.state.projection._REALIZED_PNL_REQUIRED_PHASES actually gates. voided/
+# admin_closed are deliberately excluded (that guard's own comment: "not
+# economic close-and-realize-P&L events").
+_HARD_TERMINAL_REPAIR_REALIZED_PNL_PHASES = frozenset({"settled", "economically_closed"})
+
+
+def _terminal_projection_repair_field_updates(candidate: dict) -> tuple[dict, Optional[float]]:
+    """Field overlay for a hard-terminal projection repair. Pure.
+
+    Returns ``(fields, coalesce_exit_price)``: ``fields`` are unconditional
+    overwrites; ``coalesce_exit_price`` (when not None) is only applied by the
+    caller if the position's CURRENT exit_price is still NULL -- mirrors the
+    original raw-SQL ``exit_price = COALESCE(exit_price, ?)`` semantics.
+    """
     terminal_phase = str(candidate.get("phase_after") or "").strip().lower()
-    updates: list[str] = ["phase = ?", "updated_at = ?"]
-    params: list[object] = [terminal_phase, _now_iso()]
+    fields: dict[str, object] = {}
     payload = _json_dict(candidate.get("payload_json"))
     chain_zero_admin_void = (
         terminal_phase == "voided"
@@ -5426,47 +5441,34 @@ def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], lis
         )
     )
     if chain_zero_admin_void:
-        updates.extend(
-            [
-                "chain_state = ?",
-                "chain_shares = ?",
-                "order_status = ?",
-                "exit_retry_count = ?",
-                "next_exit_retry_at = ?",
-                "exit_reason = ?",
-            ]
-        )
-        params.extend(
-            [
-                "chain_confirmed_zero",
-                0.0,
-                "voided",
-                0,
-                None,
-                "CHAIN_CONFIRMED_ZERO",
-            ]
+        fields.update(
+            {
+                "chain_state": "chain_confirmed_zero",
+                "chain_shares": 0.0,
+                "order_status": "voided",
+                "exit_retry_count": 0,
+                "next_exit_retry_at": None,
+                "exit_reason": "CHAIN_CONFIRMED_ZERO",
+            }
         )
     economic_close_exit_fill = (
         terminal_phase == "economically_closed"
         and str(candidate.get("event_type") or "") == "EXIT_ORDER_FILLED"
     )
+    coalesce_exit_price = None
     if economic_close_exit_fill:
-        updates.extend(
-            [
-                "order_status = ?",
-                "exit_retry_count = ?",
-                "next_exit_retry_at = ?",
-                "chain_shares = ?",
-                "chain_avg_price = ?",
-                "chain_cost_basis_usd = ?",
-            ]
+        fields.update(
+            {
+                "order_status": "sell_filled",
+                "exit_retry_count": 0,
+                "next_exit_retry_at": None,
+                "chain_shares": 0.0,
+                "chain_avg_price": 0.0,
+                "chain_cost_basis_usd": 0.0,
+            }
         )
-        params.extend(["sell_filled", 0, None, 0.0, 0.0, 0.0])
-        exit_price = _float_or_none(payload.get("fill_price") or payload.get("exit_price"))
-        if exit_price is not None:
-            updates.append("exit_price = COALESCE(exit_price, ?)")
-            params.append(exit_price)
-    return updates, params
+        coalesce_exit_price = _float_or_none(payload.get("fill_price") or payload.get("exit_price"))
+    return fields, coalesce_exit_price
 
 
 def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection) -> dict:
@@ -5475,7 +5477,24 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
     This repairs projection drift only. It does not invent a terminal event and
     it does not touch venue/chain state; the latest position_events terminal row
     is the authority.
+
+    R2-core hole closure (a) (R0 verifier finding, EXECUTION_MASTER §E R2 item
+    4a): this used to write ``phase`` via a raw ``UPDATE position_current``,
+    bypassing src.state.projection.upsert_position_current entirely -- which
+    let a position land in ``settled``/``economically_closed`` with
+    realized_pnl_usd left NULL forever. It now builds a full projection dict
+    and routes through upsert_position_current, so R0-a's
+    MissingRealizedPnlOnCloseError backstop applies here too. realized_pnl_usd
+    is sourced from the terminal event's own payload (the canonical writer
+    that appended it already computed it -- position_settled.v1's "pnl" key)
+    when present; otherwise it is recomputed via the shared close-economics
+    formula from an available exit_price. If neither is available the guard
+    raises, which this function's existing per-candidate try/except already
+    catches (rollback + log + count as an error) -- fail-closed instead of a
+    silent NULL, exactly the R0-a backstop's purpose.
     """
+    from src.state.close_economics import compute_realized_pnl_usd
+    from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, upsert_position_current
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for candidate in _hard_terminal_projection_repair_candidates(conn):
@@ -5490,21 +5509,51 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
         )[:80]
         conn.execute("SAVEPOINT " + sp_name)
         try:
-            updates, params = _terminal_projection_repair_updates(candidate)
-            params.append(position_id)
-            cursor = conn.execute(
-                f"""
-                UPDATE position_current
-                   SET {", ".join(updates)}
-                 WHERE position_id = ?
-                """,
-                tuple(params),
-            )
-            conn.execute("RELEASE SAVEPOINT " + sp_name)
-            if cursor.rowcount > 0:
-                summary["advanced"] += 1
-            else:
+            current = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?", (position_id,)
+            ).fetchone()
+            if current is None:
+                conn.execute("RELEASE SAVEPOINT " + sp_name)
                 summary["stayed"] += 1
+                continue
+            projection = {
+                col: current[col] for col in CANONICAL_POSITION_CURRENT_COLUMNS if col in current.keys()
+            }
+            for col in CANONICAL_POSITION_CURRENT_COLUMNS:
+                projection.setdefault(col, None)
+
+            fields, coalesce_exit_price = _terminal_projection_repair_field_updates(candidate)
+            projection.update(fields)
+            if coalesce_exit_price is not None and projection.get("exit_price") is None:
+                projection["exit_price"] = coalesce_exit_price
+            projection["phase"] = terminal_phase
+            projection["updated_at"] = _now_iso()
+
+            if (
+                terminal_phase in _HARD_TERMINAL_REPAIR_REALIZED_PNL_PHASES
+                and projection.get("realized_pnl_usd") is None
+            ):
+                payload = _json_dict(candidate.get("payload_json"))
+                payload_pnl = _float_or_none(payload.get("pnl"))
+                if payload_pnl is not None:
+                    projection["realized_pnl_usd"] = round(payload_pnl, 2)
+                else:
+                    exit_price = _float_or_none(
+                        projection.get("exit_price") or payload.get("exit_price") or payload.get("fill_price")
+                    )
+                    if exit_price is not None:
+                        shares = _float_or_none(projection.get("chain_shares")) or _float_or_none(
+                            projection.get("shares")
+                        ) or 0.0
+                        cost_basis = _float_or_none(projection.get("cost_basis_usd")) or 0.0
+                        projection["realized_pnl_usd"] = compute_realized_pnl_usd(
+                            shares=shares, exit_price=exit_price, cost_basis_usd=cost_basis,
+                        )
+                        projection.setdefault("exit_price", exit_price)
+
+            upsert_position_current(conn, projection)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            summary["advanced"] += 1
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
             conn.execute("RELEASE SAVEPOINT " + sp_name)
@@ -6073,21 +6122,25 @@ def _append_exit_filled_projection(
     if filled_size is None or fill_price is None:
         raise ValueError("exit fill projection requires positive fill size and price")
 
-    # Bug A (truth-path PnL booking, 2026-07-07): this SimpleNamespace stands in
-    # for a Position but is not one, so it never carries the .pnl that
-    # src.state.portfolio._compute_realized_pnl sets on a real in-memory close.
-    # Without an explicit "pnl" key, _settled_economics_value(position, "pnl")
-    # returns None and realized_pnl_usd is booked NULL forever. Mirror
-    # _compute_realized_pnl's formula (shares * exit_price - cost_basis_usd,
-    # guarded by entry_price > 0) using the same close-share count set as
-    # "shares" below.
+    # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
+    # 2026-07-08): this SimpleNamespace stands in for a Position but is not
+    # one, so it never carries the .pnl that src.state.portfolio's Position
+    # close mutators set on a real in-memory close. Without an explicit "pnl"
+    # key, _settled_economics_value(position, "pnl") returns None and
+    # realized_pnl_usd is booked NULL forever. Compute it via the single
+    # shared close-economics formula (src.state.close_economics) using the
+    # same close-share count set as "shares" below.
+    from src.state.close_economics import compute_realized_pnl_usd
+
     close_shares = _positive_decimal_or_none(current.get("shares")) or filled_size
     cost_basis = _decimal_or_none(current.get("cost_basis_usd")) or Decimal("0")
     entry_price_guard = _decimal_or_none(current.get("entry_price"))
-    if entry_price_guard is None or entry_price_guard <= 0:
-        realized_pnl = Decimal("0.00")
-    else:
-        realized_pnl = (close_shares * fill_price - cost_basis).quantize(Decimal("0.01"))
+    realized_pnl = compute_realized_pnl_usd(
+        shares=float(close_shares),
+        exit_price=float(fill_price),
+        cost_basis_usd=float(cost_basis),
+        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    )
 
     position = SimpleNamespace(
         **{
@@ -6103,7 +6156,7 @@ def _append_exit_filled_projection(
             "last_exit_order_id": venue_order_id,
             "last_exit_at": occurred_at,
             "exit_price": _decimal_text(fill_price),
-            "pnl": _decimal_text(realized_pnl),
+            "pnl": realized_pnl,
             "exit_reason": current.get("exit_reason") or "COMMAND_RECOVERY_EXIT_FILL",
             "shares": current.get("shares") or _decimal_text(filled_size),
             "chain_shares": 0.0,
@@ -7987,364 +8040,6 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             summary["errors"] += 1
     return summary
 
-
-def _spurious_model_divergence_pending_exit_candidates(conn: sqlite3.Connection) -> list[dict]:
-    if not (
-        _table_exists(conn, "position_current")
-        and _table_exists(conn, "position_events")
-        and _table_exists(conn, "venue_commands")
-    ):
-        return []
-    rows = conn.execute(
-        """
-        WITH latest_event AS (
-            SELECT pe.*
-              FROM position_events pe
-             WHERE pe.sequence_no = (
-                   SELECT MAX(newer.sequence_no)
-                     FROM position_events newer
-                    WHERE newer.position_id = pe.position_id
-             )
-        )
-        SELECT pc.*,
-               latest_event.event_id AS latest_event_id,
-               latest_event.event_type AS latest_event_type,
-               latest_event.sequence_no AS latest_sequence_no,
-               latest_event.phase_before AS latest_phase_before,
-               latest_event.payload_json AS latest_payload_json
-          FROM position_current pc
-          JOIN latest_event
-            ON latest_event.position_id = pc.position_id
-         WHERE pc.phase = 'pending_exit'
-           AND pc.exit_reason LIKE 'MODEL_DIVERGENCE_PANIC%'
-           AND latest_event.event_type IN ('EXIT_INTENT', 'EXIT_ORDER_REJECTED')
-           AND latest_event.payload_json LIKE '%MODEL_DIVERGENCE_PANIC%'
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM venue_commands vc
-                WHERE vc.position_id = pc.position_id
-                  AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
-           )
-         ORDER BY pc.updated_at
-        """
-    ).fetchall()
-    return [_dict_row(row) for row in rows]
-
-
-def repair_spurious_model_divergence_pending_exits(conn: sqlite3.Connection) -> dict:
-    """Release pending_exit rows caused by the forbidden buy-NO zero-probability bug.
-
-    This is deliberately narrow: it does not touch any position with an EXIT
-    command, any non-MODEL_DIVERGENCE reason, or any pending_exit whose latest
-    event does not itself carry the panic reason.
-    """
-
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for row in _spurious_model_divergence_pending_exit_candidates(conn):
-        summary["scanned"] += 1
-        position_id = str(row.get("position_id") or "")
-        phase_before = str(row.get("phase") or "pending_exit")
-        phase_after = str(row.get("latest_phase_before") or "active")
-        if phase_after not in {"active", "day0_window"}:
-            phase_after = "active"
-        now = _now_iso()
-        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
-        sp_name = f"sp_spurious_model_divergence_release_{safe_position_id}"
-        payload = {
-            "schema_version": 1,
-            "reason": "spurious_model_divergence_pending_exit_released",
-            "proof_class": "no_exit_command_model_divergence_panic_from_missing_buy_no_authority",
-            "position_id": position_id,
-            "phase_before": phase_before,
-            "phase_after": phase_after,
-            "exit_reason": str(row.get("exit_reason") or ""),
-            "latest_event_id": str(row.get("latest_event_id") or ""),
-            "latest_event_type": str(row.get("latest_event_type") or ""),
-            "required_predicates": {
-                "position_phase_pending_exit": True,
-                "exit_reason_model_divergence_panic": True,
-                "latest_event_carries_model_divergence_panic": True,
-                "no_exit_command_for_position": True,
-            },
-            "source_proof": {
-                "source_function": "command_recovery.repair_spurious_model_divergence_pending_exits",
-                "source_reason": "buy_no_monitor_probability_zero_bug",
-            },
-        }
-        try:
-            conn.execute(f"SAVEPOINT {sp_name}")
-            next_sequence = int(row.get("latest_sequence_no") or 0) + 1
-            conn.execute(
-                """
-                INSERT INTO position_events (
-                    event_id, position_id, event_version, sequence_no,
-                    event_type, occurred_at, phase_before, phase_after,
-                    strategy_key, decision_id, snapshot_id, order_id,
-                    command_id, caused_by, idempotency_key, venue_status,
-                    source_module, payload_json, env
-                ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?, ?, ?, NULL,
-                          NULL, ?, ?, 'spurious_panic_released', ?, ?, 'live')
-                """,
-                (
-                    f"{position_id}:spurious_model_divergence_release:{next_sequence}",
-                    position_id,
-                    next_sequence,
-                    now,
-                    phase_before,
-                    phase_after,
-                    str(row.get("strategy_key") or "unknown"),
-                    str(row.get("decision_snapshot_id") or ""),
-                    str(row.get("decision_snapshot_id") or ""),
-                    str(row.get("latest_event_id") or ""),
-                    f"{position_id}:spurious_model_divergence_release:{next_sequence}",
-                    "src.execution.command_recovery",
-                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE position_current
-                   SET phase = ?,
-                       exit_reason = NULL,
-                       last_monitor_prob = NULL,
-                       last_monitor_edge = NULL,
-                       updated_at = ?
-                 WHERE position_id = ?
-                   AND phase = 'pending_exit'
-                   AND exit_reason LIKE 'MODEL_DIVERGENCE_PANIC%'
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM venue_commands vc
-                        WHERE vc.position_id = position_current.position_id
-                          AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
-                   )
-                """,
-                (phase_after, now, position_id),
-            )
-            if conn.total_changes <= 0:
-                raise RuntimeError("position_current update did not affect a row")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            summary["advanced"] += 1
-        except Exception as exc:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            logger.error(
-                "recovery: spurious model-divergence pending_exit repair failed for %s: %s",
-                position_id,
-                exc,
-            )
-            summary["errors"] += 1
-    return summary
-
-
-def _structural_win_pending_exit_candidates(conn: sqlite3.Connection) -> list[dict]:
-    if not (
-        _table_exists(conn, "position_current")
-        and _table_exists(conn, "position_events")
-        and _table_exists(conn, "venue_commands")
-    ):
-        return []
-    rows = conn.execute(
-        """
-        WITH latest_bad_exit AS (
-            SELECT pe.*
-              FROM position_events pe
-             WHERE pe.event_type = 'EXIT_INTENT'
-               AND pe.phase_after = 'pending_exit'
-               AND pe.payload_json LIKE '%CI_SEPARATED_REVERSAL%'
-               AND pe.sequence_no = (
-                   SELECT MAX(newer.sequence_no)
-                     FROM position_events newer
-                    WHERE newer.position_id = pe.position_id
-                      AND newer.event_type = 'EXIT_INTENT'
-                      AND newer.phase_after = 'pending_exit'
-                      AND newer.payload_json LIKE '%CI_SEPARATED_REVERSAL%'
-               )
-        )
-        SELECT pc.*,
-               latest_bad_exit.event_id AS latest_exit_event_id,
-               latest_bad_exit.sequence_no AS latest_exit_sequence_no,
-               latest_bad_exit.phase_before AS latest_exit_phase_before,
-               latest_bad_exit.payload_json AS latest_exit_payload_json,
-               (
-                   SELECT MAX(any_event.sequence_no)
-                     FROM position_events any_event
-                    WHERE any_event.position_id = pc.position_id
-               ) AS latest_any_sequence_no
-          FROM position_current pc
-          JOIN latest_bad_exit
-            ON latest_bad_exit.position_id = pc.position_id
-         WHERE pc.phase = 'pending_exit'
-           AND COALESCE(pc.chain_state, '') = 'synced'
-           AND COALESCE(pc.shares, 0) > 0
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM venue_commands vc
-                WHERE vc.position_id = pc.position_id
-                  AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
-                  AND COALESCE(vc.venue_order_id, '') <> ''
-           )
-         ORDER BY pc.updated_at
-        """
-    ).fetchall()
-    return [_dict_row(row) for row in rows]
-
-
-def repair_structural_win_pending_exits(conn: sqlite3.Connection) -> dict:
-    """Release false pending_exit rows when live hard facts prove held-side win.
-
-    This is not a generic undo. It requires all of:
-      * pending_exit came from a CI_SEPARATED_REVERSAL EXIT_INTENT,
-      * chain projection still says the held shares are synced,
-      * no EXIT command has a venue order id,
-      * current hard-fact evaluation returns HOLD_STRUCTURAL_WIN.
-    """
-
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    candidates = _structural_win_pending_exit_candidates(conn)
-    if not candidates:
-        return summary
-    try:
-        from src.config import runtime_cities_by_name
-        from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("recovery: structural-win pending_exit repair unavailable: %s", exc)
-        summary["errors"] += len(candidates)
-        return summary
-
-    cities = runtime_cities_by_name()
-    now_dt = datetime.now(timezone.utc)
-    for row in candidates:
-        summary["scanned"] += 1
-        position_id = str(row.get("position_id") or "")
-        city_name = str(row.get("city") or "")
-        city = cities.get(city_name)
-        if city is None:
-            summary["stayed"] += 1
-            continue
-        pos = SimpleNamespace(**row)
-        setattr(pos, "trade_id", position_id)
-        try:
-            verdict = evaluate_hard_fact_exit(
-                position=pos,
-                city=city,
-                now=now_dt,
-                world_conn=conn,
-                durable_only=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "recovery: structural-win pending_exit hard-fact proof failed for %s: %s",
-                position_id,
-                exc,
-            )
-            summary["errors"] += 1
-            continue
-        if verdict is None or verdict.action != "HOLD_STRUCTURAL_WIN":
-            summary["stayed"] += 1
-            continue
-
-        phase_before = str(row.get("phase") or "pending_exit")
-        phase_after = str(row.get("latest_exit_phase_before") or "day0_window")
-        if phase_after not in {"active", "day0_window"}:
-            phase_after = "day0_window"
-        now = _now_iso()
-        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
-        sp_name = f"sp_structural_win_pending_exit_release_{safe_position_id}"
-        next_sequence = int(row.get("latest_any_sequence_no") or row.get("latest_exit_sequence_no") or 0) + 1
-        payload = {
-            "schema_version": 1,
-            "reason": "structural_win_pending_exit_released",
-            "proof_class": "day0_hard_fact_structural_win_no_exit_venue_order",
-            "position_id": position_id,
-            "phase_before": phase_before,
-            "phase_after": phase_after,
-            "latest_exit_event_id": str(row.get("latest_exit_event_id") or ""),
-            "latest_exit_payload_json": str(row.get("latest_exit_payload_json") or ""),
-            "hard_fact": {
-                "action": verdict.action,
-                "reason": verdict.reason,
-                "metric": verdict.metric,
-                "rounded_extreme": verdict.rounded_extreme,
-                "source": verdict.source,
-            },
-            "required_predicates": {
-                "position_phase_pending_exit": True,
-                "chain_state_synced": True,
-                "shares_positive": True,
-                "latest_exit_intent_ci_separated_reversal": True,
-                "no_exit_command_with_venue_order_id": True,
-                "hard_fact_hold_structural_win": True,
-            },
-            "source_proof": {
-                "source_function": "command_recovery.repair_structural_win_pending_exits",
-                "source_reason": "day0_absorbing_hard_fact_dominates_estimator_reversal",
-            },
-        }
-        try:
-            conn.execute(f"SAVEPOINT {sp_name}")
-            conn.execute(
-                """
-                INSERT INTO position_events (
-                    event_id, position_id, event_version, sequence_no,
-                    event_type, occurred_at, phase_before, phase_after,
-                    strategy_key, decision_id, snapshot_id, order_id,
-                    command_id, caused_by, idempotency_key, venue_status,
-                    source_module, payload_json, env
-                ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?, ?, ?, NULL,
-                          NULL, ?, ?, 'structural_win_pending_exit_released', ?, ?, 'live')
-                """,
-                (
-                    f"{position_id}:structural_win_pending_exit_release:{next_sequence}",
-                    position_id,
-                    next_sequence,
-                    now,
-                    phase_before,
-                    phase_after,
-                    str(row.get("strategy_key") or "unknown"),
-                    str(row.get("decision_snapshot_id") or ""),
-                    str(row.get("decision_snapshot_id") or ""),
-                    str(row.get("latest_exit_event_id") or ""),
-                    f"{position_id}:structural_win_pending_exit_release:{next_sequence}",
-                    "src.execution.command_recovery",
-                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
-                ),
-            )
-            cursor = conn.execute(
-                """
-                UPDATE position_current
-                   SET phase = ?,
-                       exit_reason = NULL,
-                       last_monitor_prob = 1.0,
-                       last_monitor_edge = NULL,
-                       updated_at = ?
-                 WHERE position_id = ?
-                   AND phase = 'pending_exit'
-                   AND COALESCE(chain_state, '') = 'synced'
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM venue_commands vc
-                        WHERE vc.position_id = position_current.position_id
-                          AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
-                          AND COALESCE(vc.venue_order_id, '') <> ''
-                   )
-                """,
-                (phase_after, now, position_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("position_current update did not affect exactly one row")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            summary["advanced"] += 1
-        except Exception as exc:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            logger.error(
-                "recovery: structural-win pending_exit repair failed for %s: %s",
-                position_id,
-                exc,
-            )
-            summary["errors"] += 1
-    return summary
 
 
 def _confirmed_phantom_void_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -15463,18 +15158,6 @@ def _reconcile_passes_inline(
         summary["stayed"] += exit_lifecycle_alignment_summary["stayed"]
         summary["errors"] += exit_lifecycle_alignment_summary["errors"]
 
-        spurious_panic_summary = repair_spurious_model_divergence_pending_exits(conn)
-        summary["spurious_model_divergence_pending_exit_repair"] = spurious_panic_summary
-        summary["advanced"] += spurious_panic_summary["advanced"]
-        summary["stayed"] += spurious_panic_summary["stayed"]
-        summary["errors"] += spurious_panic_summary["errors"]
-
-        structural_win_exit_summary = repair_structural_win_pending_exits(conn)
-        summary["structural_win_pending_exit_repair"] = structural_win_exit_summary
-        summary["advanced"] += structural_win_exit_summary["advanced"]
-        summary["stayed"] += structural_win_exit_summary["stayed"]
-        summary["errors"] += structural_win_exit_summary["errors"]
-
         confirmed_phantom_void_summary = repair_confirmed_phantom_voids(conn)
         summary["confirmed_phantom_void_repair"] = confirmed_phantom_void_summary
         summary["advanced"] += confirmed_phantom_void_summary["advanced"]
@@ -16600,12 +16283,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              reconcile_exit_pending_projections, "exit_pending_projections")
     _db_pass("exit_lifecycle_alignment_repair",
              reconcile_exit_lifecycle_alignment_repairs, "exit_lifecycle_alignment_repair")
-    _db_pass("spurious_model_divergence_pending_exit_repair",
-             repair_spurious_model_divergence_pending_exits,
-             "spurious_model_divergence_pending_exit_repair")
-    _db_pass("structural_win_pending_exit_repair",
-             repair_structural_win_pending_exits,
-             "structural_win_pending_exit_repair")
     _db_pass("confirmed_phantom_void_repair",
              repair_confirmed_phantom_voids, "confirmed_phantom_void_repair")
     _db_pass(

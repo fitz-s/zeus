@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-07-08 (R0-f plist migration prep; this job's plist was
+  live-only until now — see docs/rebuild/r0f_plist_migration.md).
+  Authority basis: docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R0-f.
+
+  ARTIFACT ONLY. Weekly calibration-transfer-eval job
+  (scripts.evaluate_calibration_transfer_oos --refresh --skip-lock-check),
+  scheduled Sunday 04:00 local via StartCalendarInterval. No secret
+  EnvironmentVariables are present on the live plist for this job, so no
+  wrapper-exec rewrite is needed.
+
+  INSTALL (operator):
+    cp deploy/launchd/com.zeus.calibration-transfer-eval.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.zeus.calibration-transfer-eval 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.calibration-transfer-eval.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/leofitz/zeus/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.calibration-transfer-eval</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>-m</string>
+		<string>scripts.evaluate_calibration_transfer_oos</string>
+		<string>--refresh</string>
+		<string>--skip-lock-check</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/logs/calibration-transfer-eval.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/logs/calibration-transfer-eval.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+		<key>Weekday</key>
+		<integer>0</integer>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

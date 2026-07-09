@@ -139,6 +139,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--slug", default=None, metavar="SLUG", help="Slug for --arrange (e.g. my-task-name)")
     parser.add_argument("--file-arrangement-audit", action="store_true", help="Advisory: scan repo for file-arrangement findings (exit always 0)")
     parser.add_argument("--explain-path", default=None, metavar="PATH", help="Advisory: classify and explain where PATH belongs")
+    parser.add_argument("--repr", action="store_true", help="Advisory: representation-contract checks (banned comment patterns, forbidden vocabulary aliases, AGENTS.md token budgets) on --files or changed-vs-HEAD; exit always 0")
 
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
@@ -584,6 +585,17 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
             print(f"artifact_kind: {payload['artifact_kind']}")
             print(f"recommended_path: {payload['recommended_path']}")
             print(f"reason: {payload['reason']}")
+        return 0
+    # Representation-contract advisory checks (contract Sec 4; always exit 0).
+    if getattr(args, "repr", False):
+        payload = api.run_repr_audit(getattr(args, "files", None))
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            count = payload["finding_count"]
+            print(f"repr audit: {count} advisory finding(s) (exit 0 always)")
+            for f in payload["findings"]:
+                print(f"  [{f['severity']}] {f['code']}: {f['path']}: {f['message']}")
         return 0
     return None
 

@@ -1,27 +1,48 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-07-08
 # Authority basis: operator law 2026-06-10 (ABSOLUTE): "Zeus NEVER submits redeem
 #   transactions again" — redemption is EXTERNAL; Zeus only does EXTERNAL_REDEMPTION
 #   accounting. External deep-review finding (2026-06-12): the residual override
 #   escape hatch (ZEUS_OPERATOR_REDEEM_OVERRIDE token) + autonomous-broadcast body
 #   must be made UNCONSTRUCTABLE, not merely double-gated.
+#   R6-a (2026-07-08): the dead redeem-submission machinery this file's Layer 1/3
+#   tests used to exercise (submit_redeem, _redeem_submitter_cycle,
+#   reseat_stub_deferred_rows_for_autonomous_retry, ~650 lines of
+#   construct/sign/broadcast in polymarket_v2_adapter.py's _redeem_via_safe /
+#   _redeem_via_negrisk_safe) was DELETED, not merely re-gated. Per the R0-d
+#   antibody precedent, deletion IS the strongest antibody — the behavioral
+#   "raises before any side effect" tests for that machinery are replaced below
+#   with structural absence assertions: the submission surface no longer exists
+#   to raise from. Layer 2 (the venue adapter's redeem() entry point) still
+#   exists as the permanent typed guard for any legacy/compat caller, so its
+#   behavioral test is UNCHANGED.
 """Redeem-submission-FORBIDDEN antibody: no codepath can broadcast a redeem tx.
 
-The guard is now UNCONDITIONAL — there is no env, flag, or override token that
-re-arms redemption. Three layers, each pinned:
-1. submit_redeem raises REDEEM_SUBMISSION_FORBIDDEN BEFORE any side effect
-   (no adapter contact, no DB write), regardless of any env/override.
-2. The venue adapter's redeem() raises at the (now-deleted) tx-broadcast boundary.
-3. The scheduler job calm-skips (redeem_submission_allowed() is always False).
+Two enforcement shapes now, each pinned:
+1. STRUCTURAL ABSENCE — the submission surfaces do not exist:
+   submit_redeem, _redeem_submitter_cycle, reseat_stub_deferred_rows_for_
+   autonomous_retry, and polymarket_v2_adapter's _redeem_via_safe /
+   _redeem_via_negrisk_safe broadcast bodies are all deleted symbols. No
+   "redeem_submitter" scheduler job is registered in the P4 daemon.
+2. BEHAVIORAL RAISE — the venue adapter's redeem() entry point (kept as a
+   permanent typed guard for any caller still reaching it) raises
+   REDEEM_SUBMISSION_FORBIDDEN unconditionally, and never contains a quoted
+   eth_sendRawTransaction broadcast call in its own body.
+3. The accounting guard (assert_redeem_submission_allowed /
+   redeem_submission_allowed) is KEPT and still unconditional — it is what
+   adapter.redeem() routes through, and remains the citable enforcement
+   point for any future caller.
 
 NOTE: tests/conftest.py installs an autouse fixture that monkeypatches
 ``assert_redeem_submission_allowed`` to a no-op so the receipt-classification
-ACCOUNTING suites can bootstrap REDEEM_TX_HASHED fixture state. These antibody
-tests RESTORE the real guard first (``_restore_real_guard``) so they observe the
-genuine unconditional raise — the production teeth live here, not in that fixture.
+ACCOUNTING suites can bootstrap REDEEM_TX_HASHED fixture state. The Layer 2/3
+tests below RESTORE the real guard first (``_restore_real_guard``) so they
+observe the genuine unconditional raise — the production teeth live here, not
+in that fixture.
 """
 
-import importlib
+import ast
+import pathlib
 
 import pytest
 
@@ -30,54 +51,69 @@ from src.execution.settlement_commands import (
     RedeemSubmissionAbandonedError,
     assert_redeem_submission_allowed as _real_assert,
     redeem_submission_allowed,
-    submit_redeem,
 )
 
 _AUTONOMOUS_FLAG = "ZEUS_AUTONOMOUS_REDEEM_ENABLED"
 _STRAY_OVERRIDE_ENV = "ZEUS_OPERATOR_REDEEM_OVERRIDE"
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+
 
 @pytest.fixture(autouse=True)
 def _restore_real_guard(monkeypatch):
     """Undo conftest's session-wide no-op patch so these tests see the real,
-    unconditional guard. Without this, submit_redeem would proceed past the
-    guard (the conftest patch exists only for accounting-setup suites)."""
+    unconditional guard. Without this, a legacy caller would proceed past
+    the guard (the conftest patch exists only for accounting-setup suites)."""
     monkeypatch.setattr(sc, "assert_redeem_submission_allowed", _real_assert)
 
 
-class _ExplodingAdapter:
-    """Any contact proves the antibody failed — no venue/RPC method may be invoked."""
+class TestLayer1SubmitRedeemStructuralAbsence:
+    """R6-a: submit_redeem and its private helpers no longer exist. Deletion
+    is the antibody -- there is no "raises before side effect" behavior to
+    test because there is no submission function to call at all."""
 
-    def __getattr__(self, name):
-        raise AssertionError(f"adapter must never be touched (attr {name!r} accessed)")
+    def test_submit_redeem_symbol_does_not_exist(self):
+        assert not hasattr(sc, "submit_redeem"), (
+            "submit_redeem must stay deleted (operator law 2026-06-10, R6-a); "
+            "if this fails, redeem-submission machinery was re-introduced"
+        )
 
+    def test_reseat_autonomous_retry_symbol_does_not_exist(self):
+        assert not hasattr(sc, "reseat_stub_deferred_rows_for_autonomous_retry"), (
+            "reseat_stub_deferred_rows_for_autonomous_retry must stay deleted "
+            "(R6-a) -- it existed only to autonomously re-arm submit_redeem"
+        )
 
-class TestLayer1SubmitRedeem:
-    def test_refuses_unconditionally(self, monkeypatch):
-        monkeypatch.delenv(_STRAY_OVERRIDE_ENV, raising=False)
-        with pytest.raises(
-            RedeemSubmissionAbandonedError, match="REDEEM_SUBMISSION_FORBIDDEN"
-        ):
-            submit_redeem("cmd-x", _ExplodingAdapter(), None)
+    def test_venue_adapter_broadcast_bodies_do_not_exist(self):
+        from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
-    def test_refuses_even_with_autonomous_flag_on(self, monkeypatch):
-        """The old kill-switch flag must never re-arm redemption."""
-        monkeypatch.setenv(_AUTONOMOUS_FLAG, "1")
-        with pytest.raises(RedeemSubmissionAbandonedError):
-            submit_redeem("cmd-x", _ExplodingAdapter(), None)
+        for name in ("_redeem_via_safe", "_redeem_via_negrisk_safe"):
+            assert not hasattr(PolymarketV2Adapter, name), (
+                f"{name} must stay deleted (R6-a) -- it built real "
+                "eth_sendRawTransaction redeem calldata with zero production "
+                "callers (redeem() below always raised before reaching it)"
+            )
 
-    def test_refuses_even_with_any_override_token(self, monkeypatch):
-        """The override escape hatch is DELETED — no token value re-arms it."""
-        monkeypatch.setenv(_STRAY_OVERRIDE_ENV, "operator-confirmed-manual-redeem")
-        monkeypatch.setenv(_AUTONOMOUS_FLAG, "1")
-        with pytest.raises(RedeemSubmissionAbandonedError):
-            submit_redeem("cmd-x", _ExplodingAdapter(), None)
-
-    def test_raise_is_a_runtime_error(self, monkeypatch):
-        """Contract type: the raise is a RuntimeError subclass."""
-        monkeypatch.delenv(_STRAY_OVERRIDE_ENV, raising=False)
-        with pytest.raises(RuntimeError, match="REDEEM_SUBMISSION_FORBIDDEN"):
-            submit_redeem("cmd-x", _ExplodingAdapter(), None)
+    def test_venue_adapter_module_has_no_broadcast_call_anywhere(self):
+        """Source-text sweep of the whole adapter module (not just redeem()):
+        no eth_sendRawTransaction literal may survive outside the wrap/CTF
+        split/merge/convert paths (which are KEEP, W2 design, unrelated to
+        redeem). This guards against the broadcast body being re-added under
+        a new method name."""
+        src_path = REPO_ROOT / "src" / "venue" / "polymarket_v2_adapter.py"
+        tree = ast.parse(src_path.read_text())
+        redeem_adjacent_methods = {"redeem", "_redeem_via_safe", "_redeem_via_negrisk_safe"}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in redeem_adjacent_methods:
+                # Only "redeem" can exist post-R6-a; the other two must be absent
+                # (covered by test_venue_adapter_broadcast_bodies_do_not_exist).
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Constant) and sub.value == "eth_sendRawTransaction":
+                        pytest.fail(
+                            f"{node.name}() contains a quoted eth_sendRawTransaction "
+                            "literal -- redeem broadcast is FORBIDDEN (operator law "
+                            "2026-06-10)"
+                        )
 
 
 class TestLayer2VenueAdapter:
@@ -122,13 +158,32 @@ class TestLayer2VenueAdapter:
 
 
 class TestLayer3Scheduler:
-    def test_scheduler_job_calm_skips(self, monkeypatch):
-        """_redeem_submitter_cycle returns immediately without touching locks,
-        credentials, or the DB — redeem_submission_allowed() is always False."""
-        monkeypatch.delenv(_STRAY_OVERRIDE_ENV, raising=False)
-        import src.main as main_module
+    def test_redeem_submitter_cycle_does_not_exist(self):
+        """R6-a structural absence: _redeem_submitter_cycle (post_trade_capital.py)
+        and its scheduler registration are deleted, not merely calm-skipping --
+        it already unconditionally calm-skipped every cycle
+        (redeem_submission_allowed() is always False), so deletion changes
+        nothing about production behavior."""
+        import src.execution.post_trade_capital as post_trade_capital
 
-        assert main_module._redeem_submitter_cycle() is None
+        assert not hasattr(post_trade_capital, "_redeem_submitter_cycle")
+
+    def test_no_redeem_submitter_scheduler_registration(self):
+        """No job id "redeem_submitter" is registered anywhere in the P4
+        post-trade-capital daemon's boot sequence, and _redeem_submitter_cycle
+        is not imported (a stray mention in an explanatory comment is fine --
+        this checks the AST for an actual import, not any text occurrence)."""
+        src_path = REPO_ROOT / "src" / "ingest" / "post_trade_capital_daemon.py"
+        text = src_path.read_text()
+        assert 'id="redeem_submitter"' not in text
+        tree = ast.parse(text)
+        imported_names = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert "_redeem_submitter_cycle" not in imported_names
 
     def test_helper_is_unconditionally_false(self, monkeypatch):
         """No env value flips redeem_submission_allowed() True anymore."""

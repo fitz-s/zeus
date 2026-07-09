@@ -115,10 +115,8 @@ READER_SITE_ALLOWLIST: frozenset[str] = frozenset(
         "decision_kernel/compiler.py:162",
         "decision_kernel/compiler.py:283",
         "decision_kernel/compiler.py:331",
-        # decision_kernel/clock.py — seeded from decision_time (structural default)
-        "decision_kernel/clock.py:26",
-        # decision_kernel/adapters/quote_adapter.py — seeded from decision_time (book snapshot)
-        "decision_kernel/adapters/quote_adapter.py:61",
+        # decision_kernel/clock.py and decision_kernel/adapters/quote_adapter.py removed
+        # 2026-07-08 (R0-c zero-caller corpse purge); their allowlist rows removed with them.
         # --- C1-AVAIL-CLOCK triage 2026-06-16 (timing audit Part V ANTIBODY 1) ---
         # contracts/semantic_types.py — DecisionSnapshotRef.available_at default '' is a
         #   structural sentinel (no stamped time); producers fill it. Not a fabricated value.

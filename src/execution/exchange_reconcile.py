@@ -4754,19 +4754,22 @@ def _ensure_exit_fill_position_event(
     shares_dec, exit_price_dec = fill_economics
     occurred_at = observed_at.isoformat()
     exit_reason = _strategy_exit_reason_for_reconciled_fill(conn, position_id, current)
-    # Bug A (truth-path PnL booking, 2026-07-07): mirror
-    # src.state.portfolio._compute_realized_pnl's formula (shares * exit_price -
-    # cost_basis_usd, guarded by entry_price > 0) so this SimpleNamespace
-    # stand-in carries a "pnl" attribute -- without it,
-    # _settled_economics_value(position, "pnl") returns None and
-    # realized_pnl_usd is booked NULL forever.
+    # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
+    # 2026-07-08): mirror the single shared close-economics formula
+    # (src.state.close_economics) so this SimpleNamespace stand-in carries a
+    # "pnl" attribute -- without it, _settled_economics_value(position, "pnl")
+    # returns None and realized_pnl_usd is booked NULL forever.
+    from src.state.close_economics import compute_realized_pnl_usd
+
     close_shares = _positive_decimal_or_none(current.get("shares")) or shares_dec
     cost_basis = _positive_decimal_or_none(current.get("cost_basis_usd")) or Decimal("0")
     entry_price_guard = _positive_decimal_or_none(current.get("entry_price"))
-    if entry_price_guard is None:
-        realized_pnl = Decimal("0.00")
-    else:
-        realized_pnl = (close_shares * exit_price_dec - cost_basis).quantize(Decimal("0.01"))
+    realized_pnl = compute_realized_pnl_usd(
+        shares=float(close_shares),
+        exit_price=float(exit_price_dec),
+        cost_basis_usd=float(cost_basis),
+        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    )
     position = SimpleNamespace(
         **{
             **current,
@@ -4781,7 +4784,7 @@ def _ensure_exit_fill_position_event(
             "last_exit_order_id": venue_order_id,
             "last_exit_at": occurred_at,
             "exit_price": _decimal_text(exit_price_dec),
-            "pnl": _decimal_text(realized_pnl),
+            "pnl": realized_pnl,
             "exit_reason": exit_reason,
             "shares": current.get("shares") or _decimal_text(shares_dec),
             "chain_shares": 0.0,

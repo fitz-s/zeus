@@ -210,9 +210,6 @@ test_trust_policy:
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_canary_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_forecast_authority_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_quote_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_market_channel_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -404,7 +401,6 @@ test_trust_policy:
     tests/test_main_scheduler_timezone.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_onboard_pipeline_completeness.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_ingest_status_v2_rollup.py: {created: "2026-05-18", last_used: "2026-05-19"}
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_physical_bounds.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -646,7 +642,6 @@ test_trust_policy:
     tests/test_schema_introspection.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_selection_coverage_mode.py: {created: "2026-05-07", last_used: "2026-05-18"}
     tests/test_settle_positions_uses_enqueue_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
-    tests/test_settlement_commands_gating.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_severity_tier_invariant.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_severity_tier_runtime.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_source_family_collision.py: {created: "2026-05-17", last_used: "2026-05-17"}
@@ -691,8 +686,6 @@ test_trust_policy:
     # negRisk ATTACH world fix + dry-run signed-tx leak fix antibodies.
     tests/test_deployment_freshness_resume_on_boot_match.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_boundary_rule_majority_threshold.py: {created: "2026-05-19", last_used: "2026-05-19"}
-    tests/test_settlement_commands_negrisk_world_attach.py: {created: "2026-05-19", last_used: "2026-05-19"}
-    tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #192 — negRisk-misroute reconcile-guard antibody (Karachi root-cause permanent fix).
     tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR redeem-reconciler-wiring — PR-I.5 completion: reconciler wiring antibody (Karachi auto-recovery).
@@ -704,11 +697,9 @@ test_trust_policy:
     # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
     tests/test_inv_codehash_drift_detection.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
-    tests/test_reseat_negrisk_misrouted_allowlist.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #213 — codereview-may19 P1-1: IMMINENT_OPEN_CAPTURE registered in MODE_TIMEOUTS.
     tests/test_executor_mode_timeouts.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #213 — codereview-may19 P0-2: redeem dry-run no signed raw_tx_hex leak in logs/payload.
-    tests/test_redeem_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #213 — codereview-may19 P1-3: settlement_commands.polymarket_end_anchor_source DEFAULT unknown_legacy.
     tests/test_settlement_commands_anchor_source_default.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 kill-switch unblock: reconciler resolves exchange_ghost_order findings when subject disappears from get_open_orders().
@@ -772,11 +763,9 @@ test_trust_policy:
     tests/test_wave3_entry_quote_evidence.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave4_family_portfolio_activation.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave6_unified_uncertainty_budget.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27).
-    tests/test_exit_observation_constraint.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_constrained_posterior.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_family_optimizer.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_exit_strategy_relationship.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27) removed 2026-07-08
+    # (R0-c zero-caller corpse purge — exit_observation_constraint/exit_constrained_posterior/
+    # exit_family_optimizer were never wired into the live path).
     # stat-whole-refactor wave (PR #361): residual-ledger seam, pairing contracts, OOS gate, migration antibodies.
     tests/test_aggregation_window_product_derived.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_analytic_p_raw_equivalence.py: {created: "2026-05-29", last_used: "2026-05-29"}
@@ -977,7 +966,6 @@ categories:
     - tests/test_market_topology_state_schema.py
     - tests/test_discovery_idempotency.py
     - tests/test_hk_settlement_floor_rounding.py
-    - tests/test_ingest_isolation.py
     - tests/test_live_safe_strategies.py
     - tests/test_obs_v2_dst_missing_hour_flag.py
     - tests/test_obs_v2_physical_bounds.py
@@ -1111,8 +1099,6 @@ categories:
     # negRisk ATTACH world fix, dry-run signed-tx leak, deployment_freshness boot resume, boundary majority.
     - tests/test_deployment_freshness_resume_on_boot_match.py
     - tests/test_boundary_rule_majority_threshold.py
-    - tests/test_settlement_commands_negrisk_world_attach.py
-    - tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py
     - tests/test_settlement_commands_negrisk_misroute_recovery.py
     # PR redeem-reconciler-wiring — reconciler wiring antibody.
     - tests/test_main_redeem_reconciler_wiring.py
@@ -1121,7 +1107,6 @@ categories:
     # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
     - tests/test_inv_codehash_drift_detection.py
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
-    - tests/test_reseat_negrisk_misrouted_allowlist.py
     # codereview-may19-2.md relationship F — composite live-health surfaces run_mode failure
     - tests/test_run_mode_failure_surfaces.py
     # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
@@ -1353,7 +1338,6 @@ categories:
     - tests/test_schema_introspection.py
     - tests/test_selection_coverage_mode.py
     - tests/test_settle_positions_uses_enqueue_redeem.py
-    - tests/test_settlement_commands_gating.py
     - tests/test_settlement_commands_schema.py
     - tests/test_settlement_semantics_f_to_c.py
     - tests/test_severity_tier_invariant.py
@@ -1519,7 +1503,6 @@ law_gate:
       - tests/test_strategy_benchmark.py
     protects:
       - src/strategy/benchmark_suite.py
-      - src/strategy/data_lake.py
       - src/strategy/candidates/__init__.py
   RISK_ALLOCATOR_GOVERNOR:
     tests:
@@ -1629,7 +1612,6 @@ law_gate:
       - tests/test_fdr.py
       - tests/test_architecture_contracts.py
     protects:
-      - src/strategy/fdr_filter.py
       - src/strategy/selection_family.py
   NO_DIAGNOSTIC_PROMOTION:
     tests:
@@ -2632,46 +2614,6 @@ test_metadata:
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
-  tests/test_settlement_commands_negrisk_world_attach.py:
-    modules: [execution, state]
-    category: core_law_antibody
-    profile: pr195_negrisk_world_attach_guard
-    blocks_commit: true
-    asserted_invariants:
-      - NEGRISK-WORLD-ATTACH-BEFORE-QUERY
-      - NEGRISK-FACT-MISSING-FAILS-CLOSED
-    source_under_test:
-      - src/execution/settlement_commands.py
-      - src/state/db.py
-    law_dependencies:
-      - .omc/plans/pr195-live-entries-hardening-2026-05-19.md
-    notes: >
-      Antibody for PR #195 P1 fix: submit_redeem() with a plain trade connection
-      must ATTACH world before world.executable_market_snapshots query. Verifies
-      no OperationalError and snapshot lookup succeeds for negRisk market.
-    created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
-
-  tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py:
-    modules: [venue]
-    category: core_law_antibody
-    profile: pr195_dry_run_no_raw_tx_leak
-    blocks_commit: true
-    asserted_invariants:
-      - DRY-RUN-NO-RAW-TX-HEX-IN-PAYLOAD
-      - DRY-RUN-NO-RAW-TX-HEX-IN-LOG
-    source_under_test:
-      - src/venue/polymarket_v2_adapter.py
-    law_dependencies:
-      - .omc/plans/pr195-live-entries-hardening-2026-05-19.md
-    notes: >
-      Security antibody for PR #195 P1 fix: ZEUS_AUTONOMOUS_REDEEM_DRY_RUN path
-      must NOT expose raw_tx_hex in returned payload or log messages. Only
-      dry_run_fingerprint (SHA-256[:16]) is permitted. Broadcast replay impossible
-      with fingerprint alone.
-    created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
-
   tests/test_settlement_commands_negrisk_misroute_recovery.py:
     modules: [execution, state, venue]
     category: core_law_antibody
@@ -2693,28 +2635,6 @@ test_metadata:
       Four contracts: C1 primary (Karachi case), C2 negative control (standard CTF ok),
       C3 positive control (negRisk correct adapter ok), C4 fail-safe (missing world DB).
       Sed-flip verified 2026-05-19: disabling guard causes C1 → RED.
-    created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
-
-  tests/test_reseat_negrisk_misrouted_allowlist.py:
-    modules: [execution, state]
-    category: core_law_antibody
-    profile: pr208_reseat_negrisk_misrouted_allowlist
-    blocks_commit: true
-    asserted_invariants:
-      - REDEEM-NEGRISK-MISROUTED-AUTONOMOUS-RETRY
-    source_under_test:
-      - src/execution/settlement_commands.py
-    law_dependencies:
-      - architecture/invariants.yaml
-    notes: >
-      Antibody for PR-208 5th-iter Karachi fix: adds REDEEM_NEGRISK_MISROUTED to
-      _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS so reseat_stub_deferred_rows_for_autonomous_retry
-      promotes rows back to REDEEM_RETRYING. Without this, PR-207 antibody correctly
-      parks Karachi in OPERATOR_REQUIRED but the submitter never retries via NegRiskAdapter.
-      Five contracts: T1 primary promotion, T2 env-gate blocks, T3 allowlist closed,
-      T4 sed-flip (allowlist membership assertion), T5 end-to-end Karachi-pattern seed.
-      Sed-flip: removing REDEEM_NEGRISK_MISROUTED from allowlist → T1 and T5 → RED.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 

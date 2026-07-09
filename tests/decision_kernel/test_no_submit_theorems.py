@@ -9,7 +9,6 @@ import pytest
 
 from src.decision_kernel import claims
 from src.decision_kernel.certificate import build_certificate
-from src.decision_kernel.certificates.evidence import build_market_channel_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.verifier import assert_market_channel_not_fill
 
@@ -92,18 +91,6 @@ def test_no_submit_certificate_rejects_missing_proof_accepted():
 
     with pytest.raises(CertificateVerificationError, match="proof_accepted=true"):
         verify_no_submit_decision(cert, ())
-
-
-def test_quote_feasibility_is_not_fill_feasibility():
-    now = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
-    quote = build_market_channel_certificate(
-        certificate_type=claims.QUOTE_FEASIBILITY,
-        semantic_key="quote:token",
-        decision_time=now,
-        payload={"best_ask": 0.42, "visible_depth": 25.0},
-    )
-    assert quote.certificate_type == claims.QUOTE_FEASIBILITY
-    assert quote.certificate_type != claims.FILL_FEASIBILITY
 
 
 def test_market_channel_certificate_cannot_be_fill_certificate():

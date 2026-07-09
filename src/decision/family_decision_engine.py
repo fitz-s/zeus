@@ -12,8 +12,11 @@
 #   selected = max ROI-frontier candidate) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
-#   is telemetry only — it CANNOT select. This is the ONLY decision authority; it
-#   ASSEMBLES the already-built spine modules, never re-implements them).
+#   is telemetry only — it CANNOT select. This is the decision authority on the
+#   w3_solve_enabled()-OFF path; the flag ON wraps it with SolveEngineShim
+#   (src/solve/solver.py), which composes it for scaffolding and replaces selection
+#   with the joint solver. It ASSEMBLES the already-built spine modules, never
+#   re-implements them).
 #   Live dependencies (ALL already built; imported, never re-implemented):
 #     - src/probability/event_resolution.py::{event_resolution_for_city, EventResolution}
 #     - src/probability/outcome_space.py::{OutcomeSpace, OutcomeBin}

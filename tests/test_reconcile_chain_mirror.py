@@ -725,3 +725,54 @@ def test_position_events_table_is_append_only_trigger_enforced(trades_conn, fore
         trades_conn.execute(
             "DELETE FROM position_events WHERE position_id='pos-append-only'"
         )
+
+
+# -----------------------------------------------------------------------------
+# R2-core hole closure (b): per-row isolation (R0 verifier finding -- this
+# loop previously had no per-row try/except, so one raising row aborted the
+# whole pass).
+# -----------------------------------------------------------------------------
+
+
+def test_reconcile_isolates_a_raising_position_and_continues(
+    trades_conn, forecasts_conn, monkeypatch
+):
+    _insert_position_current(
+        trades_conn, position_id="pos-raises", phase="quarantined",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_yes", token_id="tok-milan-yes-raises",
+    )
+    _insert_position_current(
+        trades_conn, position_id="pos-ok", phase="quarantined",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_yes", token_id="tok-milan-yes-ok",
+    )
+    _insert_settlement(forecasts_conn, city="milan", target_date="2026-06-23", winning_bin="40°C")
+
+    import src.state.chain_mirror_reconciler as chain_mirror_module
+
+    original = chain_mirror_module.classify_local_position
+
+    def _raising_classify(row, *args, **kwargs):
+        if row.position_id == "pos-raises":
+            raise RuntimeError("synthetic classify failure")
+        return original(row, *args, **kwargs)
+
+    monkeypatch.setattr(chain_mirror_module, "classify_local_position", _raising_classify)
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert len(report.errors) == 1
+    assert report.errors[0]["position_id"] == "pos-raises"
+    ok_findings = [f for f in report.findings if f.position_id == "pos-ok"]
+    assert len(ok_findings) == 1
+    assert ok_findings[0].classification == CLOSED_REDEEMED
+    # The raising row's own write never happened; the OTHER row's did.
+    raises_row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-raises'"
+    ).fetchone()
+    assert raises_row["phase"] == "quarantined"
+    ok_row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-ok'"
+    ).fetchone()
+    assert ok_row["phase"] == "settled"

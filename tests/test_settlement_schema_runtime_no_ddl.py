@@ -99,43 +99,9 @@ def _fake_negrisk_lookup(monkeypatch):
                         lambda conn, cid: False)
 
 
-def test_c1_submit_redeem_no_ddl(initialized_conn, monkeypatch):
-    """C1: submit_redeem on an initialized schema must not emit DDL."""
-    sniffer = _DDLSnifferConn(initialized_conn)
-
-    # Seed a submittable row directly
-    initialized_conn.execute(
-        """INSERT INTO settlement_commands
-           (command_id, state, condition_id, market_id, payout_asset, requested_at)
-           VALUES ('sc-ddl-c1', ?, 'cond-ddl', 'cond-ddl', 'USDC', ?)""",
-        (SettlementState.REDEEM_INTENT_CREATED.value, NOW.isoformat()),
-    )
-    initialized_conn.commit()
-
-    # Patch cutover to allow and adapter to return a stub
-    import src.execution.settlement_commands as sc
-    monkeypatch.setattr(sc, "redemption_decision",
-                        lambda: MagicMock(allow_redemption=True, block_reason=None,
-                                          state=MagicMock(value="LIVE")))
-    monkeypatch.setattr(sc, "require_pusd_redemption_allowed", lambda x: x)
-
-    fake_adapter = MagicMock()
-    fake_adapter.redeem.return_value = {
-        "success": False,
-        "errorCode": "REDEEM_DEFERRED_TO_R1",
-    }
-    fake_ledger = MagicMock()
-
-    from src.architecture.gate_runtime import check as _gate_check
-    monkeypatch.setattr("src.architecture.gate_runtime.check", lambda *a, **kw: None)
-
-    from src.execution.settlement_commands import submit_redeem
-    submit_redeem("sc-ddl-c1", fake_adapter, fake_ledger, conn=sniffer)
-
-    assert not sniffer.ddl_statements, (
-        f"C1 FAIL: submit_redeem emitted DDL on initialized schema: "
-        f"{sniffer.ddl_statements}"
-    )
+# test_c1_submit_redeem_no_ddl DELETED 2026-07-08 (R6-a): submit_redeem is
+# deleted (dead redeem-submission machinery, Zeus never submits redeem tx,
+# operator law 2026-06-10).
 
 
 def test_c2_reconcile_no_ddl(initialized_conn, monkeypatch):

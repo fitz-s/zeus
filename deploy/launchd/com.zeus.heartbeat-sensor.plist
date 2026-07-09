@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-07-08 (R0-f plist migration prep; this job's plist was
+  live-only until now — see docs/rebuild/r0f_plist_migration.md).
+  Authority basis: docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R0-f.
+
+  ARTIFACT ONLY. No secret EnvironmentVariables are present on the live
+  plist for this job, so no wrapper-exec rewrite is needed.
+
+  NOTE (operator-machine-specific path, preserved as-is from the live
+  plist, not invented by this migration): ProgramArguments[1] and
+  WorkingDirectory point outside the zeus repo, at a companion tool
+  (~/.openclaw/workspace-venus/bin/heartbeat_sensor.py) that polls the
+  zeus daemon heartbeat JSON files under zeus/state/. This plist is
+  therefore only portable to a machine that also has that companion tool
+  checked out at the same relative path; if that assumption stops holding,
+  the operator should update ProgramArguments accordingly before install.
+
+  INSTALL (operator):
+    cp deploy/launchd/com.zeus.heartbeat-sensor.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.zeus.heartbeat-sensor 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/leofitz/zeus/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.heartbeat-sensor</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>/Users/leofitz/.openclaw/workspace-venus/bin/heartbeat_sensor.py</string>
+		<string>--heartbeat-files</string>
+		<string>zeus/state/daemon-heartbeat.json,zeus/state/daemon-heartbeat-ingest.json,zeus/state/daemon-heartbeat-substrate-observer.json,zeus/state/daemon-heartbeat-price-channel-ingest.json,zeus/state/daemon-heartbeat-post-trade-capital.json</string>
+		<string>--stale-threshold-seconds</string>
+		<string>300</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/logs/heartbeat-sensor.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/logs/heartbeat-sensor.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Minute</key>
+			<integer>28</integer>
+		</dict>
+		<dict>
+			<key>Minute</key>
+			<integer>58</integer>
+		</dict>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz</string>
+</dict>
+</plist>

@@ -57,6 +57,7 @@ CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
 DOCS_REGISTRY_PATH = ROOT / "architecture" / "docs_registry.yaml"
 MODULE_MANIFEST_PATH = ROOT / "architecture" / "module_manifest.yaml"
+CANONICAL_VOCABULARY_PATH = ROOT / "architecture" / "canonical_vocabulary.yaml"
 CODE_REVIEW_GRAPH_DB_PATH = ROOT / ".code-review-graph" / "graph.db"
 SKIP_PATTERN = re.compile(r"pytest\.mark\.skip|pytest\.skip\(")
 DANGEROUS_REVERSE_ANTIBODY_PATTERNS = (
@@ -509,6 +510,10 @@ def load_script_manifest() -> dict[str, Any]:
 
 def load_naming_conventions() -> dict[str, Any]:
     return _load_yaml(NAMING_CONVENTIONS_PATH)
+
+
+def load_canonical_vocabulary() -> dict[str, Any]:
+    return _load_yaml(CANONICAL_VOCABULARY_PATH)
 
 
 def load_data_rebuild_topology() -> dict[str, Any]:
@@ -1003,6 +1008,23 @@ def run_explain_path(path: str) -> dict[str, Any]:
     manifest = fa.load_file_arrangement_manifest(ROOT)
     finding = fa.explain_path(path, ROOT, manifest)
     return finding.to_dict()
+
+
+def _repr_checks():
+    """Lazy-import wrapper for the advisory representation-contract checker family."""
+    try:
+        from scripts import topology_doctor_repr_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_repr_checks  # type: ignore[no-redef]
+    return topology_doctor_repr_checks
+
+
+def run_repr_audit(files: list[str] | None = None) -> dict[str, Any]:
+    """Run the advisory --repr representation-contract checks. Exit: always 0.
+
+    Returns dict with keys: ok (always True), advisory (always True), finding_count, findings.
+    """
+    return _repr_checks().run_repr(sys.modules[__name__], files)
 
 
 def _docs_mode_excluded_roots(topology: dict[str, Any]) -> list[Path]:

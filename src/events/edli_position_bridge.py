@@ -315,7 +315,7 @@ def _entry_authority_from_certificates(
         return None, q_live, ci_width, entry_method
 
     from src.contracts.decision_evidence import DecisionEvidence
-    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+    from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
     return (
         DecisionEvidence(

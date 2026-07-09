@@ -114,6 +114,9 @@ plane (requirements A–F with acceptance tests). Delivered as 3 structural deci
   table (SCHEMA_FORECASTS_VERSION 6→7, idempotent UPSERT, backfill-cannot-refresh-live invariant).
 - Decision 1 (A+F): ZEUS_DATA_COLLECTION_MODE=registry (DEFAULT) | legacy (rollback); both ingest
   daemons build from the registry via a fail-fast boot assert (one spec source, two consumers).
+  DELETED (R3, 2026-07-08): the legacy mode and ZEUS_DATA_COLLECTION_MODE/
+  ZEUS_USE_LEGACY_DATA_COLLECTION/ZEUS_SCHEDULER_REGISTRY_ENABLED flags are gone — registry-built
+  scheduling is unconditional now (zero-caller-verified: no plist ever set the rollback flags).
 
 Final opus critic: ACCEPT-WITH-RESERVATIONS, all 9 substance probes pass. Folded SEV-2 #1
 (heartbeat-lane starvation: pool 1→3 workers) + #2 (forecast_live boot fragility: invariant encoded
@@ -121,4 +124,6 @@ in expected_registry_job_ids, not the plist) + #3 (forecast_live boot tests). SE
 
 DEPLOY (operator-gated, held): stop daemons → init_schema_forecasts(get_forecasts_connection())
 +commit (schema 7) → restart → grep "registry scheduler built N jobs" → rollback via
-ZEUS_USE_LEGACY_DATA_COLLECTION=1 if wrong. Plists must keep ZEUS_FORECAST_LIVE_OWNER=forecast_live.
+ZEUS_USE_LEGACY_DATA_COLLECTION=1 if wrong [DELETED R3 2026-07-08 — no rollback flag exists
+anymore; a bad registry build now fails the boot assert instead]. Plists must keep
+ZEUS_FORECAST_LIVE_OWNER=forecast_live.

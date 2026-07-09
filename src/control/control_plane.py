@@ -393,8 +393,6 @@ def pause_entries(
 def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
     """Operator-callable resume. Clears the entries_paused override regardless
     of who issued it. Mirrors the _apply_command("resume", ...) path.
-
-    Required by RESTART_READINESS_PLAN.md §5 G8.
     """
     if issued_by not in {"control_plane", "operator"}:
         raise ValueError(

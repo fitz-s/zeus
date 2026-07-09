@@ -365,6 +365,39 @@ modules:
       - tests/integration/test_w3_solve_seam_g3.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
+  reconcile:
+    path: src/reconcile
+    scoped_agents: src/reconcile/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional — R2-core (docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+    # §E R2-a/R2-b). Two snapshot contracts (local_truth/chain_truth) + a
+    # diff engine + a certificate-native replay harness, replacing the
+    # 31-pass command_recovery/exchange_reconcile recovery mountain. Inert:
+    # nothing outside tests/the replay harness imports src/reconcile yet --
+    # wiring reconcile() into a live cycle (with replay-evidence-gated
+    # promotion) is R2-c, the 31-pass migration wave.
+    maturity: provisional
+    zone: source
+    authority_role: reconciliation_diff_engine
+    high_risk_files:
+      - src/reconcile/diff_engine.py
+    public_entry_files:
+      - src/reconcile/local_truth.py
+      - src/reconcile/chain_truth.py
+      - src/reconcile/diff_engine.py
+      - src/reconcile/replay.py
+    law_dependencies:
+      - docs/rebuild/EXECUTION_MASTER_2026-07-07.md
+      - docs/rebuild/whole_system_first_principles_2026-07-07.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/reconcile/test_local_truth.py
+      - tests/reconcile/test_chain_truth.py
+      - tests/reconcile/test_diff_engine.py
+      - tests/reconcile/test_replay_harness.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md
@@ -474,6 +507,8 @@ modules:
       - src/ingest/polymarket_user_channel.py
       - src/control/ws_gap_guard.py
       - src/state/venue_command_repo.py
+      - src/ingest/contract.py
+      - src/ingest/scheduler.py
     public_entry_files:
       - src/ingest/forecast_live_daemon.py
       - src/ingest/polymarket_user_channel.py
@@ -487,6 +522,7 @@ modules:
       - tests/test_forecast_live_daemon.py
       - tests/test_user_channel_ingest.py
       - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
+      - tests/test_ingest_source_contract_scheduler.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   signal:
@@ -565,7 +601,6 @@ modules:
     authority_role: strategy_identity
     high_risk_files:
       - src/strategy/market_analysis.py
-      - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
@@ -574,10 +609,8 @@ modules:
       - src/strategy/live_inference/source_clock_city_weights.py
     public_entry_files:
       - src/strategy/market_analysis.py
-      - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/benchmark_suite.py
-      - src/strategy/data_lake.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
