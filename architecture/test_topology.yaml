@@ -534,6 +534,7 @@ test_trust_policy:
     tests/test_pr_create_loc_accumulation_hook.py: {created: "2026-05-09", last_used: "2026-05-09"}
     # PR #128 — dispatch runtime-fire antibody (boot ≠ runtime blindspot, 2026-05-17 incident).
     tests/test_dispatch_runtime_fire.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    tests/test_no_edge_rule1_guard.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Stop-hook advisory guard antibody: Chinese and paraphrased 'no edge' conclusions must trigger RULE 1 while legitimate evidence-backed edge conclusions pass."}
     tests/test_citation_grep_gate.py: {created: "2026-05-18", last_used: "2026-05-18"}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -1417,6 +1418,7 @@ categories:
     - tests/test_pscb_hook.py
     - tests/test_pr_create_loc_accumulation_hook.py
     - tests/test_dispatch_runtime_fire.py
+    - tests/test_no_edge_rule1_guard.py
     - tests/test_citation_grep_gate.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection

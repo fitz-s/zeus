@@ -1699,6 +1699,14 @@ _NO_EDGE_PHRASES = (
     "genuinely lack", "market is efficient", "market efficient",
     "markets are efficient", "efficient market", "honest no-edge",
     "honestly no edge", "honest no edge",
+    # Chinese equivalents — the operator's language law (converse in Chinese)
+    # means most conclusions land in Chinese; an English-only list never fires.
+    "无边", "没有边", "无真实边", "无可交易边", "无边可动", "边不存在",
+    "市场有效", "有效市场", "诚实无边",
+    # Structural paraphrases seen in practice: assistant avoids the literal
+    # "no edge" string while still concluding the substance of RULE 1.
+    "edge=0", "edge = 0", "0 过边闸", "0 可提交", "无 settled-ev 可动",
+    "无fill可能", "无 fill 可能", "边今日几乎不供给",
 )
 
 
