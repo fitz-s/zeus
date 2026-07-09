@@ -921,7 +921,7 @@ def _terminal_entry_command_conflict_empty() -> dict:
     return {
         "status": "skipped_no_connection",
         "authority": "derived_operator_visibility",
-        "source": "venue_commands+position_current+venue_order_facts",
+        "source": "venue_commands+position_current+venue_order_facts+venue_command_events",
         "description": (
             "entry commands locally terminal while latest stored venue fact "
             "is still nonterminal"
