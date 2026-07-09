@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-04-28; last_reviewed=2026-06-18; last_reused=2026-07-09
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -10574,6 +10574,72 @@ def test_monitoring_phase_pre_chain_refresh_skips_exit_preflight(monkeypatch):
     assert summary["monitors"] == 1
     assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.61)
     assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.17)
+
+
+def test_monitoring_phase_continues_when_pending_exit_preflight_fails(monkeypatch):
+    """RELATIONSHIP: one malformed pending exit must not starve held monitoring."""
+
+    pos = _position(trade_id="monitor-survives-preflight-error", state="holding")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="exit_monitor", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    refresh_calls = []
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("illegal lifecycle phase fold: 'pending_exit' -> 'quarantined'")
+        ),
+    )
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refresh_calls.append(refreshed_pos.trade_id)
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_market_price = 0.44
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.43
+        refreshed_pos.last_monitor_best_ask = 0.45
+        return types.SimpleNamespace(
+            p_market=np.array([0.44]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.18,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, ctx: ExitDecision(
+            False,
+            "NO_EXIT",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        ),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 3, 31, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["pending_exit_preflight_failed"] == 1
+    assert "pending_exit' -> 'quarantined" in summary["pending_exit_preflight_error"]
+    assert summary["pending_exits_filled"] == 0
+    assert summary["pending_exits_retried"] == 0
+    assert refresh_calls == ["monitor-survives-preflight-error"]
+    assert summary["monitors"] == 1
+    assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.62)
+    assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.18)
 
 
 def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypatch):

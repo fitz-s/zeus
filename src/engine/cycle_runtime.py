@@ -4808,7 +4808,21 @@ def execute_monitoring_phase(
             conn=conn,
         )
 
-        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+        try:
+            exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+        except Exception as exc:  # noqa: BLE001 - one pending-exit fault must not blind held monitoring.
+            logger = getattr(deps, "logger", None)
+            if logger is not None:
+                logger.error(
+                    "pending-exit preflight failed; continuing held-position monitor: %s",
+                    exc,
+                    exc_info=True,
+                )
+            summary["pending_exit_preflight_failed"] = (
+                summary.get("pending_exit_preflight_failed", 0) + 1
+            )
+            summary["pending_exit_preflight_error"] = str(exc)
+            exit_stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
         if exit_stats["filled"] or exit_stats["retried"]:
             portfolio_dirty = True
 
