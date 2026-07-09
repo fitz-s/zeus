@@ -596,6 +596,26 @@ scripts:
     required_helpers: [src.state.ledger.append_many_and_project, src.state.projection.upsert_position_current]
     required_tests: [tests/test_repair_dust_exit_projection.py, tests/test_check_live_restart_preflight.py]
     reason: "Eliminates restart reload risk where chain dust already reached backoff_exhausted but position_current.order_status still says filled."
+  repair_active_entry_q_versions.py:
+    # Created: 2026-07-09
+    # Last reused or audited: 2026-07-09
+    # Authority basis: AGENTS.md probability/execution proof gate; scripts/AGENTS.md repair contract
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_probability_provenance_repair
+    canonical_command: "python3 scripts/repair_active_entry_q_versions.py --json"
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: false
+    promotion_barrier: "Repairs only empty active ENTRY venue_commands.q_version cells from existing FinalIntentCertificate evidence; cannot submit/cancel orders, alter shares/phase/state, copy DBs, or authorize live trading."
+    required_helpers: [src.control.live_health._entry_q_version_reconstruction_sample]
+    required_tests: [tests/test_repair_active_entry_q_versions.py, tests/test_run_mode_failure_surfaces.py]
+    reason: "Restores decision probability provenance for legacy active exposure opened before live ENTRY q_version stamping was enforced."
   repair_terminal_order_fact_sequence.py:
     # Created: 2026-07-04
     # Last reused or audited: 2026-07-04

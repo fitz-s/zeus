@@ -77,6 +77,7 @@ test_trust_policy:
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
     tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
     tests/test_forecast_manifest_repin.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Forecast posterior blackout antibody: a present artifact rewritten by benign trailing-newline serialization drift no longer leaves stale byte_size/sha manifest truth that aborts materialization; repin preserves metadata, missing artifacts still fail closed."}
+    tests/test_repair_active_entry_q_versions.py: {created: "2026-07-09", last_used: "2026-07-09", note: "Active ENTRY q_version repair antibody: dry-run reconstructs missing active exposure q_version from existing FinalIntentCertificate evidence, apply writes only empty venue_commands.q_version cells, and ambiguous certificates refuse writes; no venue action or DB copy."}
     tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
     tests/test_repair_terminal_order_fact_sequence.py: {created: "2026-07-04", last_used: "2026-07-04", note: "Terminal ENTRY order-fact sequence repair antibody: dry-run candidate detection and append-only OPERATOR fact repair when a stale PARTIALLY_MATCHED row follows existing terminal no-resting proof; no venue action, row update/delete, or DB copy."}
     tests/test_reconcile_chain_mirror.py: {created: "2026-07-04", last_used: "2026-07-04", note: "Chain-mirror reconciliation antibody (docs/rebuild/chain_mirror_state_model_2026-07-04.md): pure classification of the market-rule state model (absent+resolved winner/loser, size mismatch, redeemable-still-held, foreign/missing-local-row/open-but-absent report-only classes), end-to-end DB apply via append_many_and_project (settlement close + size correction), dry-run writes nothing, second run is idempotent (no duplicate position_events), and position_events append-only trigger enforcement."}
@@ -1344,6 +1345,7 @@ categories:
     - tests/test_promote_calibration_attach_path.py
     - tests/test_promote_entry_forecast_cli.py
     - tests/test_promote_platt.py
+    - tests/test_repair_active_entry_q_versions.py
     - tests/test_rebuild_live_sentinel.py
     - tests/test_redeem_cascade_liveness.py
     - tests/test_rejection_stage_contract.py
@@ -2989,6 +2991,27 @@ test_metadata:
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_repair_active_entry_q_versions.py:
+    modules: [scripts, control, state]
+    category: useful_regression
+    kind: antibody
+    profile: live_entry_q_version_repair
+    blocks_commit: true
+    source_under_test:
+      - scripts/repair_active_entry_q_versions.py
+      - src/control/live_health.py
+    law_dependencies:
+      - AGENTS.md probability/execution proof gates
+      - scripts/AGENTS.md repair contract
+    notes: >
+      Repair-script antibody for active ENTRY q_version provenance gaps. Proves
+      dry-run reconstructs missing active exposure q_version from existing
+      FinalIntentCertificate evidence without writing, apply writes only empty
+      venue_commands.q_version cells, and ambiguous certificates refuse writes.
+      No venue action or DB backup is allowed.
+    created: 2026-07-09
+    last_reused_or_audited: 2026-07-09
 
   tests/test_live_order_ack_durability.py:
     modules: [execution]
