@@ -38,6 +38,8 @@ CORRECTED_FROM_REGISTRY: frozenset[str] = frozenset({
 CANONICAL_OWNER: dict[str, Domain] = {
     '_migrations_applied': Domain.TRADE,
     'availability_fact': Domain.WORLD,
+    'backtest_outcome_comparison': Domain.BACKTEST,
+    'backtest_runs': Domain.BACKTEST,
     'book_hash_transitions': Domain.TRADE,
     'calibration_decision_group': Domain.WORLD,
     'calibration_pairs': Domain.FORECASTS,
