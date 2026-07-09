@@ -696,8 +696,8 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     to mutate acted_state and emit EDLI_REDECISION_PENDING.
     """
 
-    screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
-    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
+    confirm_src = inspect.getsource(reactor._edli_refresh_continuous_money_path_families)
 
     assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
     assert "acted_state=probe_acted_state" in screen_src
@@ -730,7 +730,7 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     trade-DB coordinator lease around each snapshot persist+commit.
     """
 
-    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    confirm_src = inspect.getsource(reactor._edli_refresh_continuous_money_path_families)
     observer_warm_src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
     observer_discovery_src = inspect.getsource(substrate_observer._market_discovery_cycle)
 
@@ -834,7 +834,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
 
     monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
     monkeypatch.setattr(substrate_observer_module, "refresh_money_path_substrate_now", _refresh_now)
-    monkeypatch.setattr(main_module, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
+    monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
 
     refresher = reactor._edli_decision_family_snapshot_refresher(None)
     assert refresher(
@@ -961,7 +961,7 @@ def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     rest = SimpleNamespace(family_id="family-1", condition_id="cond-rest")
     unrelated = SimpleNamespace(family_id="family-2", condition_id="cond-other")
 
-    assert main_module._edli_open_rest_condition_scope([rest, unrelated], [belief]) == {
+    assert reactor._edli_open_rest_condition_scope([rest, unrelated], [belief]) == {
         ("Singapore", "2026-06-27", "high"): {"cond-rest"}
     }
 
@@ -1072,7 +1072,7 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
     monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
     monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("no retry sleeps")))
 
-    result = main_module._edli_refresh_continuous_money_path_families(
+    result = reactor._edli_refresh_continuous_money_path_families(
         {("Paris", "2026-06-20", "low")},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1", "cond-2"},
@@ -1119,7 +1119,7 @@ def test_continuous_redecision_confirm_refresh_uses_matching_sidecar_receipt(mon
     monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
     monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")))
 
-    result = main_module._edli_refresh_continuous_money_path_families(
+    result = reactor._edli_refresh_continuous_money_path_families(
         {("Paris", "2026-06-20", "low")},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1"},
@@ -1165,7 +1165,7 @@ def test_continuous_redecision_confirm_refresh_accepts_superseding_scope_receipt
         lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")),
     )
 
-    result = main_module._edli_refresh_continuous_money_path_families(
+    result = reactor._edli_refresh_continuous_money_path_families(
         {family},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1"},
@@ -1209,7 +1209,7 @@ def test_continuous_redecision_confirm_refresh_rejects_stale_scope_receipt(monke
     monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
     monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
 
-    result = main_module._edli_refresh_continuous_money_path_families(
+    result = reactor._edli_refresh_continuous_money_path_families(
         {family},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1"},
@@ -1262,7 +1262,7 @@ def test_continuous_redecision_confirm_refresh_rejects_partial_scope_receipt(
     monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
     monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
 
-    result = main_module._edli_refresh_continuous_money_path_families(
+    result = reactor._edli_refresh_continuous_money_path_families(
         {family},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1"},
@@ -1279,7 +1279,7 @@ def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypa
     family_a = ("Paris", "2026-06-20", "low")
     family_b = ("Shanghai", "2026-06-20", "high")
 
-    condition_ids = main_module._edli_confirm_priority_condition_ids(
+    condition_ids = reactor._edli_confirm_priority_condition_ids(
         rest_condition_scope={family_b: {"rest-2", "rest-1"}},
         held_condition_scope={family_a: {"held-1"}},
         entry_condition_scope={family_a: {"entry-1"}},
@@ -1298,7 +1298,7 @@ def test_redecision_priority_defaults_service_live_money_frontier(monkeypatch):
         raising=False,
     )
 
-    assert main_module._edli_redecision_priority_condition_limit() == 32
+    assert reactor._edli_redecision_priority_condition_limit() == 32
     assert market_scanner._priority_direct_clob_prefetch_condition_limit() == 32
 
 
@@ -1312,18 +1312,18 @@ def test_empty_held_reemit_scope_does_not_expand_to_all_held_positions(monkeypat
     """
 
     monkeypatch.setattr(
-        main_module,
+        reactor,
         "_edli_current_held_position_condition_scope",
         lambda: (_ for _ in ()).throw(AssertionError("empty explicit scope must not read all held")),
     )
 
-    assert main_module._edli_current_held_position_family_condition_scope(set()) == {}
+    assert reactor._edli_current_held_position_family_condition_scope(set()) == {}
 
 
 def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_process_lock():
     """Sidecar ownership is asynchronous; main only marks priority and filters reads."""
 
-    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    confirm_src = inspect.getsource(reactor._edli_refresh_continuous_money_path_families)
     assert "src.data.dual_run_lock" not in confirm_src
     assert "acquire_lock(\"market_substrate_refresh\")" not in confirm_src
     assert "get_world_connection" not in confirm_src
@@ -1339,43 +1339,43 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     scoped condition freshness proof instead of freezing every current family.
     """
 
-    assert main_module._edli_confirmation_refresh_unavailable(
+    assert reactor._edli_confirmation_refresh_unavailable(
         {
             "status": "skipped_lock_busy",
             "executable_substrate_coverage_status": "FULL",
             "failure_samples": [{"error": "database is locked"}],
         }
     )
-    assert main_module._edli_confirmation_refresh_unavailable(
+    assert reactor._edli_confirmation_refresh_unavailable(
         {"status": "error_refresh_failed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert not main_module._edli_confirmation_refresh_unavailable(
+    assert not reactor._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert not main_module._edli_confirmation_refresh_unavailable(
+    assert not reactor._edli_confirmation_refresh_unavailable(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",
             "failure_samples": [{"error": "database is locked"}],
         }
     )
-    assert not main_module._edli_confirmation_refresh_unavailable(
+    assert not reactor._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
     )
-    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
+    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
     )
-    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
+    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
+    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",
             "failure_samples": [{"error": "database is locked"}],
         }
     )
-    assert not main_module._edli_confirmation_refresh_unavailable(
+    assert not reactor._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
     )
 
@@ -1456,7 +1456,7 @@ def test_continuous_redecision_partial_refresh_filters_to_scoped_conditions(monk
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade)
     monkeypatch.setattr(main_module, "_condition_buy_sides_fresh", _fresh)
 
-    admitted = main_module._edli_families_with_fresh_scoped_executable_substrate(
+    admitted = reactor._edli_families_with_fresh_scoped_executable_substrate(
         {
             ("Paris", "2026-06-20", "low"): {"fresh-rest"},
             ("Tokyo", "2026-06-20", "high"): {"fresh-entry", "stale-scoped"},
@@ -1480,7 +1480,7 @@ def test_redecision_condition_scope_uses_screened_bin_condition_id():
     )
     redecision = SimpleNamespace(family_id="fam-1", bin_label="19C", direction="buy_no")
 
-    scope = main_module._edli_redecision_condition_scope([redecision], [belief])
+    scope = reactor._edli_redecision_condition_scope([redecision], [belief])
 
     assert scope == {("Paris", "2026-06-20", "low"): {"cond-19"}}
 
@@ -2509,7 +2509,7 @@ def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
 def test_money_path_targeted_refresh_marks_substrate_priority():
     cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
     refresh_src = inspect.getsource(reactor._edli_decision_family_snapshot_refresher)
-    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    confirm_src = inspect.getsource(reactor._edli_refresh_continuous_money_path_families)
     producer_src = inspect.getsource(substrate_observer.refresh_money_path_substrate_now)
 
     assert 'reason="edli_event_reactor_cycle"' not in cycle_src
@@ -3775,7 +3775,7 @@ def test_held_condition_scope_does_not_treat_gamma_active_as_tradeability():
         """
     )
 
-    assert main_module._edli_condition_latest_snapshot_executable(conn, "cond-1")
+    assert reactor._edli_condition_latest_snapshot_executable(conn, "cond-1")
 
 
 def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditions():

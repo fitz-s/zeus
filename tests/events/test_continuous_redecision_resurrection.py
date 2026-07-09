@@ -1373,7 +1373,7 @@ def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
 
 
 def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
-    import src.main as main
+    from src.events import reactor
 
     world = _mem_world()
     trade = _mem_trade()
@@ -1414,7 +1414,7 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
     trade.commit()
 
-    rests = main._edli_open_maker_rests_for_screen(trade, world)
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
 
     assert len(rests) == 1
     assert rests[0].side == "buy_no"
@@ -1426,7 +1426,7 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
 
 
 def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():
-    import src.main as main
+    from src.events import reactor
 
     world = _mem_world()
     trade = _mem_trade()
@@ -1477,7 +1477,7 @@ def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_appe
     trade.commit()
     captured_trade = _SqlCaptureConn(trade)
 
-    rests = main._edli_open_maker_rests_for_screen(captured_trade, world)
+    rests = reactor._edli_open_maker_rests_for_screen(captured_trade, world)
 
     assert len(rests) == 1
     assert rests[0].side == "buy_no"
@@ -1487,7 +1487,7 @@ def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_appe
 
 
 def test_open_maker_rests_avoids_full_order_fact_window_scan():
-    import src.main as main
+    from src.events import reactor
 
     world = _mem_world()
     trade = _mem_trade()
@@ -1539,7 +1539,7 @@ def test_open_maker_rests_avoids_full_order_fact_window_scan():
 
     captured = _SqlCaptureConn(trade)
 
-    rests = main._edli_open_maker_rests_for_screen(captured, world)
+    rests = reactor._edli_open_maker_rests_for_screen(captured, world)
 
     assert len(rests) == 1
     statements = "\n".join(captured.statements).upper()
@@ -1549,7 +1549,7 @@ def test_open_maker_rests_avoids_full_order_fact_window_scan():
 
 
 def test_open_maker_rests_skip_unresolved_orders_from_redecision_screen():
-    import src.main as main
+    from src.events import reactor
 
     world = _mem_world()
     trade = _mem_trade()
@@ -1579,7 +1579,7 @@ def test_open_maker_rests_skip_unresolved_orders_from_redecision_screen():
     trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-unresolved", "LIVE", 1))
     trade.commit()
 
-    rests = main._edli_open_maker_rests_for_screen(trade, world)
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
 
     assert rests == []
 

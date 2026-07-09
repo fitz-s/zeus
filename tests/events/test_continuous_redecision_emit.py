@@ -583,7 +583,7 @@ def test_fsr_scan_suppresses_recent_redecision_same_evidence_no_value_refutation
 
 
 def test_redecision_pending_family_keys_parse_only_valid_families():
-    assert main._edli_redecision_family_keys_from_entity_keys(
+    assert reactor._edli_redecision_family_keys_from_entity_keys(
         {
             "Tokyo|2026-06-18|low|run-rd",
             "Shenzhen|2026-06-19|high|run-rd",
@@ -599,7 +599,7 @@ def test_redecision_pending_family_keys_parse_only_valid_families():
 def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     """Already-pending admitted families must not trigger an expensive no-op re-emit scan."""
 
-    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
     assert "pending_families = _edli_redecision_family_keys_from_entity_keys(pending)" in screen_src
     assert "emit_families = set(all_families) - pending_families" in screen_src
     assert "if emit_families:" in screen_src
@@ -613,7 +613,7 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
 def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
     """Refresh summary is not live authority; scoped condition freshness is."""
 
-    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
     assert "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate" in screen_src
     assert "confirmation_refresh_verified" in screen_src
@@ -692,7 +692,7 @@ def test_unadmitted_redecision_pending_is_expired():
     for event in (stale, admitted, fsr):
         store.insert_or_ignore(event)
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         {("Tokyo", "2026-06-18", "low")},
         decision_time="2026-06-17T16:00:00+00:00",
@@ -741,7 +741,7 @@ def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
     )
     store.insert_or_ignore(fresh)
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         set(),
         decision_time="2026-06-17T16:00:00+00:00",
@@ -793,14 +793,14 @@ def test_stale_admitted_redecision_pending_is_superseded_for_fresh_screen():
     store.insert_or_ignore(stale)
 
     admitted = {("Shenzhen", "2026-06-27", "high")}
-    preserved = main._edli_expire_unadmitted_redecision_pending(
+    preserved = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         admitted,
         decision_time="2026-06-26T10:06:00+00:00",
     )
     assert preserved == 0
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         admitted,
         decision_time="2026-06-26T10:06:00+00:00",
@@ -851,7 +851,7 @@ def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
     store.insert_or_ignore(stale)
 
     admitted = {("Istanbul", "2026-06-29", "high")}
-    too_soon = main._edli_expire_unadmitted_redecision_pending(
+    too_soon = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         admitted,
         decision_time="2026-06-28T10:01:14+00:00",
@@ -859,7 +859,7 @@ def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
     )
     assert too_soon == 0
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         admitted,
         decision_time="2026-06-28T10:01:16+00:00",
@@ -914,7 +914,7 @@ def test_fresh_screen_supersedes_stale_processing_redecision_after_short_grace()
         claimed_at=(decision_time - timedelta(seconds=76)).isoformat(),
     )
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         {("Istanbul", "2026-06-29", "high")},
         decision_time=decision_time.isoformat(),
@@ -967,7 +967,7 @@ def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
     )
     store.insert_or_ignore(rest_pull)
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         set(),
         decision_time="2026-06-17T16:00:00+00:00",
@@ -1034,7 +1034,7 @@ def test_rest_pull_supersedes_generic_pending_redecision_blocker():
     store.insert_or_ignore(generic)
     store.insert_or_ignore(rest_pull)
 
-    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+    expired = reactor._edli_supersede_pending_redecisions_for_rest_pull_families(
         world,
         {("Ankara", "2026-06-29", "high")},
         decision_time="2026-06-28T04:22:00+00:00",
@@ -1099,7 +1099,7 @@ def test_rest_pull_supersede_leaves_processing_redecision_alone():
         (event.event_id,),
     )
 
-    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+    expired = reactor._edli_supersede_pending_redecisions_for_rest_pull_families(
         world,
         {("Ankara", "2026-06-29", "high")},
         decision_time="2026-06-28T04:22:00+00:00",
@@ -1148,7 +1148,7 @@ def test_old_rest_pull_redecision_still_expires_without_current_edge():
     )
     store.insert_or_ignore(old_rest_pull)
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         set(),
         decision_time="2026-06-17T16:00:00+00:00",
@@ -1223,7 +1223,7 @@ def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
         claimed_at=(decision_time - timedelta(seconds=299)).isoformat(),
     )
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         set(),
         decision_time=decision_time.isoformat(),
@@ -1249,7 +1249,7 @@ def test_redecision_admission_is_screen_job_only():
     """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
 
     reactor_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
-    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
     assert "event_type=REDECISION_EVENT_TYPE" not in reactor_src
     assert "event_type=REDECISION_EVENT_TYPE" in screen_src
@@ -1309,7 +1309,7 @@ def test_held_position_families_are_monitor_inputs_for_entry_suppression(monkeyp
         ),
     )
 
-    assert main._edli_current_held_position_family_keys() == {
+    assert reactor._edli_current_held_position_family_keys() == {
         ("Tokyo", "2026-06-04", "high")
     }
 
@@ -1327,7 +1327,7 @@ def test_held_position_families_reemit_when_forecast_phase_admits(monkeypatch):
         _fake_market_phase_admits,
     )
 
-    assert main._edli_reemittable_held_position_family_keys(
+    assert reactor._edli_reemittable_held_position_family_keys(
         {
             ("Tokyo", "2026-06-18", "low"),
             ("Shenzhen", "2026-06-19", "high"),
@@ -1349,7 +1349,7 @@ def test_entry_redecision_families_use_forecast_phase_gate(monkeypatch):
         _fake_market_phase_admits,
     )
 
-    assert main._edli_reemittable_forecast_family_keys(
+    assert reactor._edli_reemittable_forecast_family_keys(
         {
             ("Wellington", "2026-06-18", "high"),
             ("Shenzhen", "2026-06-19", "high"),
@@ -1362,7 +1362,7 @@ def test_entry_redecision_families_use_forecast_phase_gate(monkeypatch):
 def test_redecision_screen_separates_entry_from_held_reemit():
     """Held families use a separate full-redecision admission path from new entry."""
 
-    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
     assert "raw_entry_family_keys = screened_family_keys" in screen_src
     assert "family_keys = _edli_entry_redecision_family_keys" in screen_src
@@ -1371,7 +1371,7 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     assert "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d" in screen_src
     assert "suppressed_existing_pending=%d" in screen_src
     assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
-        main._edli_expire_unadmitted_redecision_pending
+        reactor._edli_expire_unadmitted_redecision_pending
     )
 
 
@@ -1404,7 +1404,7 @@ def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
         detail=0.02,
     )
 
-    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+    assert reactor._edli_rest_pull_condition_scope([(rest, decision)], []) == {
         ("Paris", "2026-06-20", "low"): {"cond-rest"}
     }
 
@@ -1441,19 +1441,19 @@ def test_rest_pull_condition_scope_includes_family_optimum_replacement_condition
         replacement_side="buy_yes",
     )
 
-    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+    assert reactor._edli_rest_pull_condition_scope([(rest, decision)], []) == {
         ("Shanghai", "2026-06-20", "high"): {"cond-old", "cond-new"}
     }
 
 
 def test_entry_redecision_excludes_current_held_families(monkeypatch):
     monkeypatch.setattr(
-        main,
+        reactor,
         "_edli_reemittable_forecast_family_keys",
         lambda families, *, decision_time, log_context: set(families),
     )
 
-    admitted = main._edli_entry_redecision_family_keys(
+    admitted = reactor._edli_entry_redecision_family_keys(
         {
             ("Paris", "2026-06-19", "low"),
             ("Shanghai", "2026-06-19", "low"),
@@ -1490,7 +1490,7 @@ def test_unvalued_pending_redecision_is_kept_for_admitted_held_reemit_family():
     )
     store.insert_or_ignore(held_only)
 
-    expired = main._edli_expire_unadmitted_redecision_pending(
+    expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         {("Tokyo", "2026-06-18", "low")},
         decision_time="2026-06-17T16:00:00+00:00",
@@ -1851,7 +1851,7 @@ def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
     )
     monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
 
-    assert main._edli_current_held_position_condition_scope() == {
+    assert reactor._edli_current_held_position_condition_scope() == {
         ("Hong Kong", "2026-06-26", "low"): {"live-cond"},
         ("Singapore", "2026-06-26", "high"): {"exit-cond"},
         ("Lucknow", "2026-06-28", "high"): {"entry-authority-cond"},
@@ -1903,7 +1903,7 @@ def test_held_condition_scope_excludes_latest_non_executable_snapshot(monkeypatc
     )
     monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
 
-    assert main._edli_current_held_position_condition_scope() == {
+    assert reactor._edli_current_held_position_condition_scope() == {
         ("Manila", "2026-06-29", "high"): {"open-cond"},
     }
 
@@ -1954,7 +1954,7 @@ def test_held_family_condition_scope_refreshes_siblings_for_shift_selection(monk
     monkeypatch.setattr("src.state.db.get_forecasts_connection_read_only", lambda: forecasts)
     monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade)
 
-    assert main._edli_current_held_position_family_condition_scope(
+    assert reactor._edli_current_held_position_family_condition_scope(
         {("Munich", "2026-06-30", "high")}
     ) == {
         ("Munich", "2026-06-30", "high"): {"cond-28", "cond-29"},
@@ -1971,7 +1971,7 @@ def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
 def test_redecision_screen_opens_pending_snapshot_after_expiry_commit():
     """The screen must not snapshot pending keys from a connection opened before expiry."""
 
-    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
     assert src.index("world_prune.commit()") < src.index(
         "world_scan_ro = get_world_connection_read_only()"
     )
@@ -2015,7 +2015,7 @@ def test_false_forecast_emit_limit_resolves_to_bounded_default_not_unbounded():
 def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pending():
     """Rest-pull and held-position redecision must retry quickly instead of blocking."""
 
-    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
     assert "_edli_acquire_mutex(prune_mutex" in src
     assert "_edli_acquire_mutex(emit_mutex" in src
     emit_block = src[src.rindex("world = get_world_connection()") : src.index(
@@ -2131,7 +2131,7 @@ def test_day0_emit_is_reactor_budgeted():
 def test_redecision_screen_belief_read_filters_forecast_only_inadmissible_families():
     """Continuous entry refresh must not spend money-path refresh on stale target-day beliefs."""
 
-    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
     assert "forecast_only_admissible=True" in src
     assert "_all_latest_beliefs(world_ro)" not in src
 

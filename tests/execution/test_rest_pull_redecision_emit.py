@@ -222,12 +222,12 @@ def test_open_rest_screen_ignores_terminal_local_commands_even_if_venue_fact_is_
     creating an infinite false rest-pull loop instead of a clean reprice flow.
     """
 
-    import src.main as m
+    from src.events import reactor
 
     trade = _trade_conn_with_rest_screen_rows(command_state="CANCELLED")
     world = sqlite3.connect(":memory:")
 
-    assert m._edli_open_maker_rests_for_screen(
+    assert reactor._edli_open_maker_rests_for_screen(
         trade,
         world,
         beliefs=[_belief_for_rest_screen()],
@@ -235,12 +235,12 @@ def test_open_rest_screen_ignores_terminal_local_commands_even_if_venue_fact_is_
 
 
 def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
-    import src.main as m
+    from src.events import reactor
 
     trade = _trade_conn_with_rest_screen_rows(command_state="ACKED")
     world = sqlite3.connect(":memory:")
 
-    rests = m._edli_open_maker_rests_for_screen(
+    rests = reactor._edli_open_maker_rests_for_screen(
         trade,
         world,
         beliefs=[_belief_for_rest_screen()],
@@ -254,9 +254,9 @@ def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
 def test_redecision_screen_manages_open_rests_outside_entry_fair_batch():
     """Entry fair-batching must not starve already-submitted maker-rest management."""
 
-    import src.main as m
+    from src.events import reactor
 
-    source = inspect.getsource(m._edli_continuous_redecision_screen_cycle)
+    source = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
     assert source.count("beliefs=all_beliefs") >= 2
     assert "_edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)" not in source
