@@ -503,6 +503,104 @@ def test_build_committed_snapshot_events_does_not_write_world_rows():
     assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
 
 
+def test_build_committed_snapshot_events_filters_pending_before_fairness_window():
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    members = "[" + ",".join(str(i) for i in range(1, 52)) + "]"
+
+    def _insert_family(idx: int) -> None:
+        city = f"City{idx:02d}"
+        city_id = city.lower()
+        run_id = f"run-{idx}"
+        forecasts_conn.execute(
+            """
+            INSERT INTO source_run (
+                source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+                source_cycle_time, source_available_at, captured_at, target_local_date,
+                city_id, city_timezone, temperature_metric, dataset_id,
+                expected_members, observed_members, expected_steps_json, observed_steps_json,
+                completeness_status, status
+            ) VALUES (?, 'ecmwf-open-data', 'ens', '2026-05-24T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+                '2026-05-24T00:00:00+00:00', '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00',
+                '2026-05-25', ?, 'UTC', 'high', 'v1',
+                51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS')
+            """,
+            (run_id, city_id),
+        )
+        forecasts_conn.execute(
+            """
+            INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+                city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+                observation_field, data_version, expected_members, observed_members, expected_steps_json,
+                observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+                completeness_status, readiness_status, computed_at, expires_at
+            ) VALUES (?, ?, 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-05-24T00', 'ens',
+                ?, ?, 'UTC', '2026-05-25', 'high', 'temperature',
+                'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', ?,
+                '2026-05-25T00:00:00+00:00', '2026-05-26T00:00:00+00:00',
+                'COMPLETE', 'LIVE_ELIGIBLE', '2026-05-24T04:16:00+00:00',
+                '2026-05-25T04:16:00+00:00')
+            """,
+            (f"cov-{idx}", run_id, city_id, city, f"[{idx}]"),
+        )
+        forecasts_conn.execute(
+            """
+            INSERT INTO ensemble_snapshots (
+                snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+                issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+                model_version, dataset_id, source_id, source_transport, source_run_id,
+                release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+                authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+                forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+                members_unit, raw_orderbook_hash_transition_delta_ms
+            ) VALUES (?, ?, '2026-05-25', 'high', 'temperature', 'high_temp',
+                '2026-05-24T00:00:00+00:00', '2026-05-25T06:00:00+00:00',
+                '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00', 30, ?,
+                'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', ?,
+                '2026-05-24T00', '2026-05-24T00:00:00+00:00', '2026-05-24T03:00:00+00:00',
+                '2026-05-24T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+                'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-05-25T00:00:00+00:00', 30, 'F', 0)
+            """,
+            (idx, city, members, run_id),
+        )
+
+    for idx in (1, 2, 3):
+        _insert_family(idx)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        limit=2,
+        source="cycle-test-0",
+        already_pending_keys={
+            "City03|2026-05-25|high|run-3",
+            "City02|2026-05-25|high|run-2",
+        },
+        phase_filter_exempt_families={
+            ("City01", "2026-05-25", "high"),
+            ("City02", "2026-05-25", "high"),
+            ("City03", "2026-05-25", "high"),
+        },
+    )
+
+    assert len(events) == 1
+    payload = json.loads(events[0].payload_json)
+    assert payload["city"] == "City01"
+    assert events[0].entity_key == "City01|2026-05-25|high|run-1"
+
+
 def _seed_committed_chicago_2026_05_24(forecasts_conn) -> None:
     """Insert a COMPLETE/LIVE_ELIGIBLE Chicago high coverage for target 2026-05-24
     (the same shape as test_scan_committed_snapshots_emits_from_source_run_coverage)."""

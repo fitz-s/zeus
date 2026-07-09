@@ -240,6 +240,58 @@ def _row_family_key(row: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _entity_key_from_join_row(row: dict[str, Any]) -> str:
+    return "|".join(
+        (
+            str(row.get("snapshot_city") or row.get("city") or ""),
+            str(row.get("snapshot_target_date") or row.get("target_local_date") or ""),
+            str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or ""),
+            str(row.get("source_run_id") or ""),
+        )
+    )
+
+
+def _row_passes_emit_time_filters(
+    row: dict[str, Any],
+    *,
+    decision_time: datetime,
+    intake_phase_filter_on: bool,
+    phase_filter_exempt_families: set[tuple[str, str, str]] | None,
+) -> bool:
+    coverage = _coverage_from_join(row)
+    snapshot = _snapshot_from_join(row)
+    city = str(snapshot.get("city") or coverage.get("city") or "")
+    target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
+    metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
+
+    city_timezone = str(coverage.get("city_timezone") or "")
+    if city_timezone and target_date:
+        try:
+            parsed_target = date.fromisoformat(target_date)
+        except ValueError:
+            parsed_target = None
+        if parsed_target is not None and _target_local_day_strictly_past(
+            city_timezone=city_timezone,
+            target_local_date=parsed_target,
+            decision_time=decision_time,
+        ):
+            return False
+
+    if intake_phase_filter_on:
+        family_key = (city, target_date, metric)
+        if family_key in (phase_filter_exempt_families or set()):
+            return True
+        if not market_phase_admits(
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            market_row={},
+        ):
+            return False
+    return True
+
+
 def _filter_rows_to_restricted_families(
     rows: list[dict[str, Any]],
     restrict_to_families: set[tuple[str, str, str]] | None,
@@ -958,6 +1010,25 @@ class ForecastSnapshotReadyTrigger:
                 ),
             )
         rows = _filter_rows_to_restricted_families(rows, restrict_to_families)
+        pending_skip = already_pending_keys or set()
+        if pending_skip and rows:
+            rows = [
+                row for row in rows
+                if _entity_key_from_join_row(row) not in pending_skip
+            ]
+        _intake_phase_filter_on = bool(
+            source is not None or _intake_phase_filter_enabled()
+        )
+        if rows:
+            rows = [
+                row for row in rows
+                if _row_passes_emit_time_filters(
+                    row,
+                    decision_time=decision_time,
+                    intake_phase_filter_on=_intake_phase_filter_on,
+                    phase_filter_exempt_families=phase_filter_exempt_families,
+                )
+            ]
         if rows:
             # ``limit=None`` means no cap on the number of city families, not
             # "emit every historical source_run for each family."  Fairness owns
@@ -986,22 +1057,13 @@ class ForecastSnapshotReadyTrigger:
         # F1 12:00-UTC anchor — identical to the reactor's selected_market_row
         # path. FAIL-OPEN on the flag being absent/OFF; the reactor backstop
         # remains the authority either way.
-        _intake_phase_filter_on = bool(
-            source is not None or _intake_phase_filter_enabled()
-        )
-        pending_skip = already_pending_keys or set()
         results: list[OpportunityEvent] = []
         for row in reversed(rows):
             source_run = _source_run_from_join(row)
             coverage = _coverage_from_join(row)
             snapshot = _snapshot_from_join(row)
             if pending_skip:
-                city = str(snapshot.get("city") or coverage.get("city") or "")
-                target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
-                metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
-                source_run_id = str(source_run.get("source_run_id") or coverage.get("source_run_id") or "")
-                entity_key = "|".join((city, target_date, metric, source_run_id))
-                if entity_key in pending_skip:
+                if _entity_key_from_join_row(row) in pending_skip:
                     continue
             # CONTINUOUS RE-DECISION P2 (2026-06-12): when the caller restricts to a screened set of
             # families (the cheap-screen edge fired for them), emit ONLY those — never the whole
