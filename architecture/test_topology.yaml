@@ -346,7 +346,7 @@ test_trust_policy:
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-05-09"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-09"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -458,7 +458,7 @@ test_trust_policy:
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-05-18"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-06-29", note: "RiskGuard strategy policy authority antibody: trade-main legacy control_overrides ghosts are ignored when world is attached; attached world.control_overrides remains the only live manual strategy policy authority."}
     tests/test_riskguard_auxiliary_write_lock_no_degrade.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root Blocker 1 (docs/evidence/no_order_root_2026-06-13/diagnosis.md): RELATIONSHIP test — a concurrent writer holding the zeus_trades WAL write lock must NOT flip RiskGuard's computed level to DATA_DEGRADED when the risk-level READS succeed; the risk_actions/strategy_health writes are AUXILIARY bookkeeping (lock absorbed -> skipped_dependency_lock, level computed from reads). RED-on-revert control proves the unwrapped INSERT raises 'database is locked'; non-lock OperationalError still propagates (fail-loud). The dependency-lock storm / no-conn-across-IO class (9f70e9c581)."}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-08"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-09"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-07-09", note: "V2 schema coexistence plus day0_metric_fact natural-key writer upsert contract against the world-owned table."}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}

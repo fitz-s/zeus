@@ -1416,6 +1416,7 @@ def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
         ("day0_window", "settled"),
         ("pending_exit", "pending_exit"),
         ("pending_exit", "settled"),
+        ("pending_exit", "quarantined"),
         ("economically_closed", "economically_closed"),
         ("economically_closed", "settled"),
         ("settled", "settled"),

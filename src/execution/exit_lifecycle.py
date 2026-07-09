@@ -4623,6 +4623,8 @@ def check_pending_exits(
         if pos.exit_state == "exit_intent":
             if not pos.last_exit_error:
                 pos.exit_state = ""
+                if str(getattr(pos, "order_status", "") or "") == "exit_intent":
+                    pos.order_status = "filled"
                 _release_pending_exit(pos)
                 stats["unchanged"] += 1
                 continue

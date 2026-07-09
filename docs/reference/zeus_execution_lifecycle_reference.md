@@ -30,8 +30,10 @@ class LifecyclePhase(str, Enum):
     UNKNOWN             = "unknown"
 ```
 
-Terminal phases: `SETTLED`, `VOIDED`, `QUARANTINED`, `ADMIN_CLOSED`.
-Each maps to `frozenset({itself})` in `LEGAL_LIFECYCLE_FOLDS` — no exit.
+Terminal phases: `SETTLED`, `VOIDED`, `ADMIN_CLOSED`.
+`QUARANTINED` is an investigation/review phase, not a market terminal; it can
+fold to `SETTLED` or `VOIDED`, and a no-order pending-exit recovery may restore
+it from `PENDING_EXIT`.
 
 ### 1.2 Legal transitions (from `LEGAL_LIFECYCLE_FOLDS`)
 
@@ -41,8 +43,9 @@ pending_entry    → {pending_entry, active, day0_window, voided}
 active           → {active, day0_window, pending_exit, settled, voided}
 day0_window      → {day0_window, pending_exit, settled, voided}
 pending_exit     → {pending_exit, active, day0_window, economically_closed,
-                    settled, admin_closed, voided}
+                    settled, quarantined, admin_closed, voided}
 economically_closed → {economically_closed, settled, voided}
+quarantined      → {quarantined, settled, voided}
 unknown          → {unknown, quarantined, voided}
 ```
 
